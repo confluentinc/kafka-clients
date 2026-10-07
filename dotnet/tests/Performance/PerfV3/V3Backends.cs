@@ -62,14 +62,14 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
     {
         // The Send call hands the record to the producer synchronously (preserving send order). Its first
         // stage is usually complete when it returns, so the common path builds no state machine for it.
-        ValueTask<Task<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
         return send.IsCompletedSuccessfully
-            ? new ValueTask<Task<PerfRecordMetadata>>(Deliver(send.Result))
+            ? new ValueTask<Task<PerfRecordMetadata>>(Deliver(send.Result.Get()))
             : AwaitAccepted(send);
     }
 
-    private static async ValueTask<Task<PerfRecordMetadata>> AwaitAccepted(ValueTask<Task<RecordMetadata>> send) =>
-        Deliver(await send.ConfigureAwait(false));
+    private static async ValueTask<Task<PerfRecordMetadata>> AwaitAccepted(ValueTask<AsyncKafkaFuture<RecordMetadata>> send) =>
+        Deliver((await send.ConfigureAwait(false)).Get());
 
     private static async Task<PerfRecordMetadata> Deliver(Task<RecordMetadata> delivery)
     {

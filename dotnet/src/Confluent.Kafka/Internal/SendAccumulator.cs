@@ -365,8 +365,9 @@ internal sealed class SendAccumulator
     /// <b>The steady-state path allocates nothing here</b> (DoD §10). <see cref="Submit"/>'s append
     /// reuses the node chain, <see cref="SemaphoreSlim.Wait(int)"/> with a zero timeout builds no
     /// registration, and the completed first stage is a <see cref="ValueTask{TResult}"/> struct over
-    /// the delivery task. Only a saturated send allocates: its wait and the continuation that
-    /// completes the first stage — plus, when the caller passed a cancelable token, one
+    /// an <see cref="AsyncKafkaFuture{T}"/> struct over the delivery task. Only a saturated send
+    /// allocates: its wait and the continuation that completes the first stage — plus, when the caller
+    /// passed a cancelable token, one
     /// <see cref="CancellableFirstStage"/> with its stage task and token registration.
     /// </para>
     /// </remarks>
@@ -380,15 +381,16 @@ internal sealed class SendAccumulator
     /// </param>
     /// <returns>
     /// The send's first stage: completed if a permit was free, otherwise pending until one is (or
-    /// until teardown, which also completes it successfully). Its result is the record's delivery
-    /// task, <paramref name="completion"/>'s <see cref="TaskCompletionSource{TResult}.Task"/>. It ends
+    /// until teardown, which also completes it successfully). Its result is the record's
+    /// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is
+    /// <paramref name="completion"/>'s <see cref="TaskCompletionSource{TResult}.Task"/>. It ends
     /// <see cref="TaskStatus.Canceled"/> only when <paramref name="cancellationToken"/> fires while it
     /// is pending — and then the record is still sent.
     /// </returns>
     /// <exception cref="ObjectDisposedException">
     /// The producer is closing — nothing was appended.
     /// </exception>
-    internal ValueTask<Task<RecordMetadata>> SubmitAdmitted(
+    internal ValueTask<AsyncKafkaFuture<RecordMetadata>> SubmitAdmitted(
         in SerializedProducerRecord record,
         TaskCompletionSource<RecordMetadata> completion,
         DeliveryRegistration? delivery,
@@ -402,11 +404,12 @@ internal sealed class SendAccumulator
 
         // WAIT AFTER — the record is committed, so from here on nothing may throw, and nothing
         // inside the producer may fail the first stage. The fast path takes a free permit without
-        // waiting and allocates nothing: the ValueTask is a struct over the delivery task.
+        // waiting and allocates nothing: the ValueTask is a struct over the AsyncKafkaFuture struct
+        // over the delivery task.
         Task<RecordMetadata> deliveryTask = completion.Task;
         if (_admission.Wait(0))
         {
-            return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(deliveryTask));
         }
 
         try
@@ -422,7 +425,7 @@ internal sealed class SendAccumulator
             {
                 // A permit came back, or teardown had already cancelled the gate, between the two
                 // calls. Either way the record is accepted.
-                return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+                return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(deliveryTask));
             }
 
             if (!cancellationToken.CanBeCanceled)
@@ -431,8 +434,10 @@ internal sealed class SendAccumulator
                 // ExecuteSynchronously: the continuation is queued to the thread pool, so neither it
                 // nor the caller's await ever runs on the batch thread that released the permit. It
                 // runs whatever the wait's outcome, and a cancelled wait is "accepted" too (above).
-                return new ValueTask<Task<RecordMetadata>>(wait.ContinueWith(
-                    static (_, state) => (Task<RecordMetadata>)state!,
+                // The state is the delivery TASK (a reference), never the AsyncKafkaFuture struct:
+                // passing the struct as the object state would box it, a per-send allocation.
+                return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(wait.ContinueWith(
+                    static (_, state) => new AsyncKafkaFuture<RecordMetadata>((Task<RecordMetadata>)state!),
                     deliveryTask,
                     CancellationToken.None,
                     TaskContinuationOptions.None,
@@ -441,7 +446,7 @@ internal sealed class SendAccumulator
 
             // Saturated AND cancelable: the token may end this caller's first stage (D2 (c)), the
             // wait runs on regardless. See CancellableFirstStage.
-            return new ValueTask<Task<RecordMetadata>>(
+            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
                 CancellableFirstStage.Start(wait, deliveryTask, cancellationToken));
         }
         catch (Exception)
@@ -455,7 +460,7 @@ internal sealed class SendAccumulator
             // never queued (an allocation failure inside WaitAsync) this leaves one permit of
             // surplus — +1 drift on OOM only, the same drift as a teardown-cancelled wait. When the
             // wait WAS queued it still takes its permit, so the other failures cost no drift.
-            return new ValueTask<Task<RecordMetadata>>(deliveryTask);
+            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(deliveryTask));
         }
     }
 
@@ -472,8 +477,8 @@ internal sealed class SendAccumulator
     /// the caller's token fires → <see cref="TaskCompletionSource{TResult}.TrySetCanceled(CancellationToken)"/>
     /// WITH that token (so <c>OperationCanceledException.CancellationToken</c> matches it); or the
     /// wait completes — a permit, or the teardown gate, both "accepted" (decision D3) →
-    /// <c>TrySetResult</c> with the delivery task. Either way the record is sent: it was appended
-    /// before this object existed.
+    /// <c>TrySetResult</c> with the record's <see cref="AsyncKafkaFuture{T}"/>. Either way the record is
+    /// sent: it was appended before this object existed.
     /// </para>
     /// <para>
     /// <b>The stage's task is built with <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/></b>
@@ -491,10 +496,11 @@ internal sealed class SendAccumulator
     /// </remarks>
     private sealed class CancellableFirstStage
     {
-        private readonly TaskCompletionSource<Task<RecordMetadata>> _stage =
-            new TaskCompletionSource<Task<RecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<AsyncKafkaFuture<RecordMetadata>> _stage =
+            new TaskCompletionSource<AsyncKafkaFuture<RecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        private readonly Task<RecordMetadata> _delivery;
+        // The stage's result, built once here: a typed field, so the struct is never boxed.
+        private readonly AsyncKafkaFuture<RecordMetadata> _future;
 
         private readonly CancellationToken _callerToken;
 
@@ -503,7 +509,7 @@ internal sealed class SendAccumulator
 
         private CancellableFirstStage(Task<RecordMetadata> delivery, CancellationToken callerToken)
         {
-            _delivery = delivery;
+            _future = new AsyncKafkaFuture<RecordMetadata>(delivery);
             _callerToken = callerToken;
         }
 
@@ -511,7 +517,7 @@ internal sealed class SendAccumulator
         /// Builds the stage over a <paramref name="wait"/> that has not completed yet and returns
         /// the caller's first-stage task.
         /// </summary>
-        internal static Task<Task<RecordMetadata>> Start(
+        internal static Task<AsyncKafkaFuture<RecordMetadata>> Start(
             Task wait,
             Task<RecordMetadata> delivery,
             CancellationToken callerToken)
@@ -545,7 +551,7 @@ internal sealed class SendAccumulator
                     static (_, state) =>
                     {
                         CancellableFirstStage self = (CancellableFirstStage)state!;
-                        self._stage.TrySetResult(self._delivery);
+                        self._stage.TrySetResult(self._future);
                         self._registration.Dispose();
                     },
                     stage,

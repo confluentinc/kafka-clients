@@ -191,7 +191,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
                 Serdes.ByteArray,
                 valueSerializer ?? Serdes.ByteArray);
 
-    private static ValueTask<Task<RecordMetadata>> Send(
+    private static ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         IAsyncProducer<byte[], byte[]> producer,
         string overload,
         ProducerRecord<byte[], byte[]> record,

@@ -631,10 +631,11 @@ public sealed class PublicProducerDeliveryCallbackTests
         Assert.NotNull(method);
 
         // M11/P3.5 decision D1 (= C): the two-stage shape — the outer ValueTask is the "accepted"
-        // stage, its result the record's delivery Task. Pinned by reflection: a statement
+        // stage, its result the record's AsyncKafkaFuture (M11/P3.6), whose Get() is the delivery
+        // Task. Pinned by reflection: a statement
         // `await producer.Send(r);` compiles against either shape, so behavioural tests alone do not
         // fix the declared type.
-        Assert.Equal(typeof(ValueTask<Task<RecordMetadata>>), method!.ReturnType);
+        Assert.Equal(typeof(ValueTask<AsyncKafkaFuture<RecordMetadata>>), method!.ReturnType);
 
         // The CancellationToken keeps its default, so `Send(record, callback)` compiles on the
         // async surface too.
@@ -655,7 +656,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             typeof(CancellationToken));
 
         Assert.NotNull(method);
-        Assert.Equal(typeof(ValueTask<Task<RecordMetadata>>), method!.ReturnType);
+        Assert.Equal(typeof(ValueTask<AsyncKafkaFuture<RecordMetadata>>), method!.ReturnType);
         Assert.True(method.GetParameters()[1].HasDefaultValue);
     }
 

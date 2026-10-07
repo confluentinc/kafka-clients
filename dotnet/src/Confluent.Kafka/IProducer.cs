@@ -54,7 +54,8 @@ namespace Confluent.Kafka;
 /// synchronously as a <see cref="SerializationException"/>. .NET has only one future type
 /// (<see cref="System.Threading.Tasks.Task{TResult}"/>), which the async
 /// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>
-/// already yields from its first stage (a <see cref="System.Threading.Tasks.ValueTask{TResult}"/> that
+/// already exposes as the <see cref="AsyncKafkaFuture{T}.Get"/> of the <see cref="AsyncKafkaFuture{T}"/>
+/// its first stage yields (a <see cref="System.Threading.Tasks.ValueTask{TResult}"/> that
 /// completes once the record is accepted); a <see cref="System.Threading.Tasks.Task"/>
 /// here would clone the async surface and erase the sync/async split. Callers who want pipelined,
 /// future-returning sends use <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from
@@ -136,8 +137,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base — the producer has no
     /// <c>IProducerCommon</c> and the two signatures differ anyway (the async one takes a
     /// <see cref="System.Threading.CancellationToken"/> and returns a
-    /// <see cref="System.Threading.Tasks.ValueTask{TResult}"/> whose result is the delivery
-    /// <see cref="System.Threading.Tasks.Task{TResult}"/>). Same precedent as
+    /// <see cref="System.Threading.Tasks.ValueTask{TResult}"/> whose result is the record's
+    /// <see cref="AsyncKafkaFuture{T}"/>). Same precedent as
     /// <see cref="Metrics"/> (M11/P8 decision D-6).
     /// </para>
     /// <para>

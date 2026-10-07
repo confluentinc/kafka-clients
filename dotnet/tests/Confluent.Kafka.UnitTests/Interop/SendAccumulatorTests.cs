@@ -742,7 +742,7 @@ public sealed class SendAccumulatorTests
 
         // The fifth send's first stage WAITS. A settle window, not a poll: the assertion is that
         // something must NOT have happened, so it needs time in which to have happened.
-        Task<Task<RecordMetadata>> admission =
+        Task<AsyncKafkaFuture<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0xF1, CancellationToken.None);
         await Task.Delay(TimeSpan.FromMilliseconds(250));
         Assert.False(
@@ -763,7 +763,7 @@ public sealed class SendAccumulatorTests
 
         await TestTimeout.Run(() => admission, s_deadline);
         Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
-        Task<RecordMetadata> parked = await admission;
+        Task<RecordMetadata> parked = (await admission).Get();
 
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
         await TestTimeout.Run(() => parked, s_deadline);
@@ -790,20 +790,20 @@ public sealed class SendAccumulatorTests
             maxAdmittedRecords: 2));
 
         // A send that finds a permit is accepted inside the call.
-        ValueTask<Task<RecordMetadata>> first =
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> first =
             harness.AppendStaged(0xC0, callback: null, CancellationToken.None, out _);
         Assert.True(first.IsCompletedSuccessfully, "a send that found a free permit was not accepted inside the call");
-        Task<RecordMetadata> firstDelivery = await first;
+        Task<RecordMetadata> firstDelivery = (await first).Get();
 
         Task<RecordMetadata> second = harness.AppendOne(0xC1);
         Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
 
-        Task<Task<Task<RecordMetadata>>> call = Task.Factory.StartNew(
+        Task<Task<AsyncKafkaFuture<RecordMetadata>>> call = Task.Factory.StartNew(
             () => harness.AppendStaged(0xC2, callback: null, CancellationToken.None, out _).AsTask(),
             CancellationToken.None,
             TaskCreationOptions.DenyChildAttach,
             TaskScheduler.Default);
-        Task<Task<RecordMetadata>> accepted = await TestTimeout.Run(() => call, s_deadline);
+        Task<AsyncKafkaFuture<RecordMetadata>> accepted = await TestTimeout.Run(() => call, s_deadline);
 
         // A settle window, not a poll: the first stage must NOT complete while the bound is full.
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -815,7 +815,7 @@ public sealed class SendAccumulatorTests
 
         harness.DrainNow();
 
-        Task<RecordMetadata> result = await TestTimeout.Run(() => accepted, s_deadline);
+        Task<RecordMetadata> result = (await TestTimeout.Run(() => accepted, s_deadline)).Get();
         RecordMetadata metadata = await TestTimeout.Run(() => result, s_deadline);
         Assert.Equal(Topic, metadata.Topic);
         await TestTimeout.Run(() => Task.WhenAll(firstDelivery, second), s_deadline);
@@ -836,7 +836,7 @@ public sealed class SendAccumulatorTests
             maxAdmittedRecords: 1));
 
         Task<RecordMetadata> filled = harness.AppendOne(0xD0);
-        Task<Task<RecordMetadata>> accepted =
+        Task<AsyncKafkaFuture<RecordMetadata>> accepted =
             harness.AppendStaged(0xD1, callback: null, CancellationToken.None, out _).AsTask();
         Assert.False(accepted.IsCompleted, "the first stage completed although the bound was full");
 
@@ -854,7 +854,7 @@ public sealed class SendAccumulatorTests
 
         async Task ObserveAsync()
         {
-            Task<RecordMetadata> result = await accepted.ConfigureAwait(false);
+            Task<RecordMetadata> result = (await accepted.ConfigureAwait(false)).Get();
             resumedOn = Thread.CurrentThread.Name;
             resumed = true;
             await result.ConfigureAwait(false);
@@ -1027,9 +1027,9 @@ public sealed class SendAccumulatorTests
                                 // Production's own entry point, awaited the way a throttled caller
                                 // awaits it (DoD §12 — the fixture holds no copy of the rule).
                                 int index = (sender * PerSender) + i;
-                                sends[index] = await harness
+                                sends[index] = (await harness
                                     .AppendAccepted((byte)index, callback: null, CancellationToken.None)
-                                    .ConfigureAwait(false);
+                                    .ConfigureAwait(false)).Get();
                             }
                         },
                         CancellationToken.None);
@@ -1082,7 +1082,7 @@ public sealed class SendAccumulatorTests
         Task<RecordMetadata>[] filled = harness.Append(2);
 
         using CancellationTokenSource cancellation = new CancellationTokenSource();
-        Task<Task<RecordMetadata>> firstStage = harness
+        Task<AsyncKafkaFuture<RecordMetadata>> firstStage = harness
             .AppendStaged(0xF5, callback: null, cancellation.Token, out TaskCompletionSource<RecordMetadata> completion)
             .AsTask();
 
@@ -1145,7 +1145,7 @@ public sealed class SendAccumulatorTests
         Task<RecordMetadata>[] filled = harness.Append(2);
 
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
-        Task<Task<RecordMetadata>> admission =
+        Task<AsyncKafkaFuture<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0xF4, CancellationToken.None, callback);
 
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -1167,7 +1167,7 @@ public sealed class SendAccumulatorTests
         // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
         // would tell the caller nothing was sent, for a record that is in the chain.
         Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
-        Task<RecordMetadata> parked = await admission;
+        Task<RecordMetadata> parked = (await admission).Get();
 
         // (2) Three records reached the core, not two.
         Assert.Equal(3, harness.Accumulator.SendBatchRecordCount);
@@ -1215,7 +1215,7 @@ public sealed class SendAccumulatorTests
 
         Task<RecordMetadata>? held = null;
         Task<RecordMetadata>[] filled = Array.Empty<Task<RecordMetadata>>();
-        Task<Task<RecordMetadata>>? admission = null;
+        Task<AsyncKafkaFuture<RecordMetadata>>? admission = null;
         try
         {
             harness.CloseCoreProducer();
@@ -1256,7 +1256,7 @@ public sealed class SendAccumulatorTests
         // The abandoned thread finishes its drain and exits on its own (it saw _closed), so every
         // record still settles — faulted, because the core was closed before any of them was sent.
         Assert.NotNull(admission);
-        Task<RecordMetadata> parked = await admission!;
+        Task<RecordMetadata> parked = (await admission!).Get();
         Assert.NotNull(held);
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => held!, s_deadline));
         foreach (Task<RecordMetadata> send in filled)
@@ -1291,7 +1291,7 @@ public sealed class SendAccumulatorTests
             maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
-        Task<Task<RecordMetadata>> admission =
+        Task<AsyncKafkaFuture<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0x82, CancellationToken.None);
 
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -1309,7 +1309,7 @@ public sealed class SendAccumulatorTests
         // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
         // would tell the caller nothing was sent, for a record that is in the chain.
         Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
-        Task<RecordMetadata> parked = await admission;
+        Task<RecordMetadata> parked = (await admission).Get();
 
         // Every record the handler held is settled exactly once, with the batch-thread failure —
         // the parked caller's included, which is what "no stranded awaiter" means here.
@@ -1359,7 +1359,7 @@ public sealed class SendAccumulatorTests
             maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
-        Task<Task<RecordMetadata>> admission =
+        Task<AsyncKafkaFuture<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0x92, CancellationToken.None);
 
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -1384,7 +1384,7 @@ public sealed class SendAccumulatorTests
         // Successfully, not merely completed (D3): a Canceled or Faulted first stage at teardown
         // would tell the caller nothing was sent, for a record that is in the chain.
         Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
-        Task<RecordMetadata> parked = await admission;
+        Task<RecordMetadata> parked = (await admission).Get();
 
         // The gate did the releasing, so the permit accounting is still exactly where the injection
         // left it — the direct witness that no release woke the caller.
@@ -1480,7 +1480,7 @@ public sealed class SendAccumulatorTests
             maxAdmittedRecords: 2));
 
         Task<RecordMetadata>[] filled = harness.Append(2);
-        Task<Task<RecordMetadata>> admission =
+        Task<AsyncKafkaFuture<RecordMetadata>> admission =
             harness.AppendOneFromAnotherThread(0xB0, CancellationToken.None);
 
         await Task.Delay(TimeSpan.FromMilliseconds(250));
@@ -1497,7 +1497,7 @@ public sealed class SendAccumulatorTests
 
         await TestTimeout.Run(() => admission, s_deadline);
         Assert.Equal(TaskStatus.RanToCompletion, admission.Status);
-        Task<RecordMetadata> parked = await admission;
+        Task<RecordMetadata> parked = (await admission).Get();
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
         await TestTimeout.Run(() => parked, s_deadline);
 
@@ -1622,10 +1622,10 @@ public sealed class SendAccumulatorTests
                     for (int i = 0; i < Burst; i++)
                     {
                         int index = i;
-                        sends[i] = await TestTimeout.Run(
+                        sends[i] = (await TestTimeout.Run(
                             () => harness.AppendAccepted(
                                 (byte)index, new OrderRecordingDeliveryCallback(observed, index), CancellationToken.None),
-                            s_deadline);
+                            s_deadline)).Get();
                     }
                 }
                 finally
@@ -1710,12 +1710,12 @@ public sealed class SendAccumulatorTests
                             for (int i = 0; i < PerSender; i++)
                             {
                                 int index = (sender * PerSender) + i;
-                                sends[index] = await harness
+                                sends[index] = (await harness
                                     .AppendAccepted(
                                         (byte)index,
                                         new OrderRecordingDeliveryCallback(observed, index),
                                         CancellationToken.None)
-                                    .ConfigureAwait(false);
+                                    .ConfigureAwait(false)).Get();
                             }
                         },
                         CancellationToken.None);
@@ -2084,7 +2084,7 @@ public sealed class SendAccumulatorTests
         /// it has no timeout, and it ends canceled only when <paramref name="cancellationToken"/>
         /// fires while it is pending (M11/P3.5 D2 (c)) — the record is appended either way.
         /// </remarks>
-        internal ValueTask<Task<RecordMetadata>> AppendStaged(
+        internal ValueTask<AsyncKafkaFuture<RecordMetadata>> AppendStaged(
             byte tag,
             IDeliveryCallback? callback,
             CancellationToken cancellationToken,
@@ -2120,9 +2120,9 @@ public sealed class SendAccumulatorTests
             out TaskCompletionSource<RecordMetadata> completion)
         {
             // The first stage is deliberately dropped: it never faults (it completes successfully, or
-            // ends canceled on a firing caller token, D2 (c)), and it yields the same delivery task
-            // returned here.
-            ValueTask<Task<RecordMetadata>> accepted =
+            // ends canceled on a firing caller token, D2 (c)), and it yields a future over the same
+            // delivery task returned here.
+            ValueTask<AsyncKafkaFuture<RecordMetadata>> accepted =
                 AppendStaged(tag, callback, cancellationToken, out completion);
             if (!accepted.IsCompleted)
             {
@@ -2134,17 +2134,17 @@ public sealed class SendAccumulatorTests
 
         /// <summary>
         /// <see cref="AppendStaged"/> for a caller that awaits the first stage — the throttled
-        /// caller. The <b>outer</b> task is the first stage; the <b>inner</b> one is the record's
-        /// delivery.
+        /// caller. The <b>outer</b> task is the first stage; its result is the record's
+        /// <see cref="AsyncKafkaFuture{T}"/>, whose <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery.
         /// </summary>
-        internal async Task<Task<RecordMetadata>> AppendAccepted(
+        internal async Task<AsyncKafkaFuture<RecordMetadata>> AppendAccepted(
             byte tag,
             IDeliveryCallback? callback,
             CancellationToken cancellationToken)
         {
-            Task<RecordMetadata> delivery =
+            AsyncKafkaFuture<RecordMetadata> future =
                 await AppendStaged(tag, callback, cancellationToken, out _).ConfigureAwait(false);
-            return delivery;
+            return future;
         }
 
         /// <summary>
@@ -2155,13 +2155,15 @@ public sealed class SendAccumulatorTests
         /// </summary>
         /// <remarks>
         /// The <b>outer</b> task is the admission observable: it completes when the first stage
-        /// does. The <b>inner</b> task is the record's own delivery future. The wait has no expiry,
-        /// so the outer task completes only when a take returns permits or teardown cancels the
+        /// does. Its result is the record's own delivery future, an <see cref="AsyncKafkaFuture{T}"/>.
+        /// The wait has no expiry, so the outer task completes only when a take returns permits or
+        /// teardown cancels the
         /// gate, and it carries no failure of its own on either path — only the caller's token,
         /// firing while it waits, ends it canceled (D2 (c)); a test of teardown or cancellation
-        /// awaits the outer one for the release and the inner one for the record's fate.
+        /// awaits the outer one for the release and its future's <see cref="AsyncKafkaFuture{T}.Get"/>
+        /// for the record's fate.
         /// </remarks>
-        internal Task<Task<RecordMetadata>> AppendOneFromAnotherThread(
+        internal Task<AsyncKafkaFuture<RecordMetadata>> AppendOneFromAnotherThread(
             byte tag,
             CancellationToken cancellationToken,
             IDeliveryCallback? callback = null) =>

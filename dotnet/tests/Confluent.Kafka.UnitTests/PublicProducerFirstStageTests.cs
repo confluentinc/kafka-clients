@@ -102,7 +102,7 @@ public sealed class PublicProducerFirstStageTests
         using CancellationTokenSource live = new CancellationTokenSource();
         CountingCallback callback = new CountingCallback();
 
-        Task<Task<RecordMetadata>>[] stages = new Task<Task<RecordMetadata>>[Sends];
+        Task<AsyncKafkaFuture<RecordMetadata>>[] stages = new Task<AsyncKafkaFuture<RecordMetadata>>[Sends];
         int withCallback = 0;
         for (int i = 0; i < Sends; i++)
         {
@@ -110,7 +110,7 @@ public sealed class PublicProducerFirstStageTests
             CancellationToken token = i % 2 == 0 ? live.Token : CancellationToken.None;
             bool hasCallback = i % 4 < 2;
             withCallback += hasCallback ? 1 : 0;
-            ValueTask<Task<RecordMetadata>> send = hasCallback
+            ValueTask<AsyncKafkaFuture<RecordMetadata>> send = hasCallback
                 ? producer.Send(Record(i), callback, token)
                 : producer.Send(Record(i), token);
             stages[i] = send.AsTask();
@@ -129,7 +129,7 @@ public sealed class PublicProducerFirstStageTests
             Assert.True(
                 stages[i].Status == TaskStatus.RanToCompletion,
                 $"first stage {i} ended {stages[i].Status} after Flush");
-            Assert.Same(deliveries[i], await stages[i]);
+            Assert.Same(deliveries[i], (await stages[i]).Get());
         }
 
         RecordMetadata[] metadata = await TestTimeout.Run(() => Task.WhenAll(deliveries), s_prompt);
@@ -183,7 +183,7 @@ public sealed class PublicProducerFirstStageTests
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource live = new CancellationTokenSource();
 
-        (Task<Task<RecordMetadata>>[] stages, Task<RecordMetadata>[] deliveries, CountingCallback?[] callbacks) =
+        (Task<AsyncKafkaFuture<RecordMetadata>>[] stages, Task<RecordMetadata>[] deliveries, CountingCallback?[] callbacks) =
             FloodPastTheBound(producer, live.Token, Bound, Flood);
 
         await TearDown(producer, teardown);
@@ -194,7 +194,7 @@ public sealed class PublicProducerFirstStageTests
             Assert.True(
                 stages[i].Status == TaskStatus.RanToCompletion,
                 $"{teardown}: first stage {i} ended {stages[i].Status} — teardown must complete it successfully (D3)");
-            Assert.Same(deliveries[i], await stages[i]);
+            Assert.Same(deliveries[i], (await stages[i]).Get());
         }
 
         Assert.Equal(Flood, producer.DrainedSendCount);
@@ -258,11 +258,11 @@ public sealed class PublicProducerFirstStageTests
         SendAccumulator accumulator = AccumulatorOf(producer);
         Assert.Equal(0, accumulator.AvailableAdmissions);
 
-        ValueTask<Task<RecordMetadata>> send = withCallback
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> send = withCallback
             ? producer.Send(Record(2), callback, cancellation.Token)
             : producer.Send(Record(2), cancellation.Token);
         Assert.False(send.IsCompleted, "the first stage completed although the bound was full");
-        Task<Task<RecordMetadata>> stage = send.AsTask();
+        Task<AsyncKafkaFuture<RecordMetadata>> stage = send.AsTask();
         Task<RecordMetadata> delivery = DeliveriesOf(producer, 3)[2];
 
         cancellation.Cancel();
@@ -363,7 +363,7 @@ public sealed class PublicProducerFirstStageTests
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource live = new CancellationTokenSource();
 
-        (Task<Task<RecordMetadata>>[] stages, Task<RecordMetadata>[] deliveries, _) =
+        (Task<AsyncKafkaFuture<RecordMetadata>>[] stages, Task<RecordMetadata>[] deliveries, _) =
             FloodPastTheBound(producer, live.Token, bound, flood);
 
         await TearDown(producer, teardown);
@@ -398,15 +398,15 @@ public sealed class PublicProducerFirstStageTests
     /// Returns each send's first stage, its delivery task (read from the pending node, in call order)
     /// and its callback, if it has one.
     /// </summary>
-    private static (Task<Task<RecordMetadata>>[] Stages, Task<RecordMetadata>[] Deliveries, CountingCallback?[] Callbacks)
+    private static (Task<AsyncKafkaFuture<RecordMetadata>>[] Stages, Task<RecordMetadata>[] Deliveries, CountingCallback?[] Callbacks)
         FloodPastTheBound(AsyncMockProducer<byte[], byte[]> producer, CancellationToken live, int bound, int flood)
     {
-        Task<Task<RecordMetadata>>[] stages = new Task<Task<RecordMetadata>>[flood];
+        Task<AsyncKafkaFuture<RecordMetadata>>[] stages = new Task<AsyncKafkaFuture<RecordMetadata>>[flood];
         CountingCallback?[] callbacks = new CountingCallback?[flood];
         for (int i = 0; i < flood; i++)
         {
             CancellationToken token = i % 4 < 2 ? live : CancellationToken.None;
-            ValueTask<Task<RecordMetadata>> send;
+            ValueTask<AsyncKafkaFuture<RecordMetadata>> send;
             if (i % 2 == 0)
             {
                 CountingCallback callback = new CountingCallback();
@@ -448,10 +448,10 @@ public sealed class PublicProducerFirstStageTests
     private static ProducerRecord<byte[], byte[]> Record(int index) =>
         new ProducerRecord<byte[], byte[]>(Topic, new byte[] { (byte)index, 0xAA }, partition: 0);
 
-    private static int CountPending(Task<Task<RecordMetadata>>[] stages)
+    private static int CountPending(Task<AsyncKafkaFuture<RecordMetadata>>[] stages)
     {
         int pending = 0;
-        foreach (Task<Task<RecordMetadata>> stage in stages)
+        foreach (Task<AsyncKafkaFuture<RecordMetadata>> stage in stages)
         {
             pending += stage.IsCompleted ? 0 : 1;
         }

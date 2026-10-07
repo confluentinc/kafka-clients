@@ -393,8 +393,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// Sends a single record on the async surface in two stages (the async send worker; Java
     /// <c>Producer.send(record)</c>, which may block and then returns a <c>Future</c> — M11/P3.5
     /// decision D1): the returned <see cref="ValueTask{TResult}"/> completes when the record is
-    /// admitted, and yields the record's delivery <see cref="Task{TResult}"/>. Named <c>SendViaPump</c>, <b>not</b>
-    /// <c>SendWithCallback</c> like the peripherals: there is no native <c>Producer_send_async</c>
+    /// admitted, and yields the record's <see cref="AsyncKafkaFuture{T}"/>, whose
+    /// <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery <see cref="Task{TResult}"/>. Named
+    /// <c>SendViaPump</c>, <b>not</b> <c>SendWithCallback</c> like the peripherals: there is no native
+    /// <c>Producer_send_async</c>
     /// callback — completion arrives via the pump's batched <c>get_all</c> (ffi §A7's pull surface),
     /// so a <c>WithCallback</c> suffix would misdescribe the mechanism (M11/P3 PLAN §6.2). The
     /// <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
@@ -442,8 +444,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </para>
     /// <para>
     /// <b>M11/P3.5 — the two stages.</b> The outer <see cref="ValueTask{TResult}"/> is the "accepted"
-    /// stage and its result is the delivery <see cref="Task{TResult}"/>. With a permit free it is
-    /// already complete on return — a struct over <c>completion.Task</c>, so the send path allocates
+    /// stage and its result is the record's <see cref="AsyncKafkaFuture{T}"/>, whose
+    /// <see cref="AsyncKafkaFuture{T}.Get"/> is the delivery <see cref="Task{TResult}"/>. With a permit
+    /// free it is already complete on return — a struct over an <see cref="AsyncKafkaFuture{T}"/>
+    /// struct over <c>completion.Task</c>, so the send path allocates
     /// nothing for it (DoD §10); with the bound saturated it is pending
     /// (<see cref="SendAccumulator.SubmitAdmitted"/>).
     /// </para>
@@ -501,7 +505,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="OperationCanceledException">
     /// <paramref name="cancellationToken"/> was already canceled when this method was called.
     /// </exception>
-    internal ValueTask<Task<RecordMetadata>> SendViaPump(
+    internal ValueTask<AsyncKafkaFuture<RecordMetadata>> SendViaPump(
         SerializedProducerRecord record,
         DeliveryRegistration? delivery,
         CancellationToken cancellationToken = default)
@@ -576,8 +580,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // (raised above this carrier, before the call) and the precondition throws above — the
         // already-canceled token, the disposed producer — still surface synchronously rather than
         // as a faulted ValueTask — the reason AsyncKafkaProducer.SendValidated is deliberately not
-        // `async` either. An `async` ValueTask<Task<RecordMetadata>> method would capture every one
-        // of those throws into the returned ValueTask, so a caller that never awaits it would never
+        // `async` either. An `async` ValueTask<AsyncKafkaFuture<RecordMetadata>> method would capture
+        // every one of those throws into the returned ValueTask, so a caller that never awaits it would never
         // see them, and an already-canceled token would no longer be distinguishable from one that
         // fired after the append (pinned by the strict synchronous-throw guards in
         // PublicProducerSendSynchronousThrowTests). The admission wait does not need `async` either:

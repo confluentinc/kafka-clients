@@ -94,7 +94,7 @@ public sealed class SendAccumulatorFirstStageTests
             Assert.Equal(0, harness.Accumulator.AvailableAdmissions);
 
             CancellationTokenSource[] cancellations = new CancellationTokenSource[TokenWaiters];
-            Task<Task<RecordMetadata>>[] tokenStages = new Task<Task<RecordMetadata>>[TokenWaiters];
+            Task<AsyncKafkaFuture<RecordMetadata>>[] tokenStages = new Task<AsyncKafkaFuture<RecordMetadata>>[TokenWaiters];
             for (int i = 0; i < TokenWaiters; i++)
             {
                 cancellations[i] = new CancellationTokenSource();
@@ -104,7 +104,7 @@ public sealed class SendAccumulatorFirstStageTests
                 deliveries.Add(completion.Task);
             }
 
-            Task<Task<RecordMetadata>>[] plainStages = new Task<Task<RecordMetadata>>[PlainWaiters];
+            Task<AsyncKafkaFuture<RecordMetadata>>[] plainStages = new Task<AsyncKafkaFuture<RecordMetadata>>[PlainWaiters];
             for (int i = 0; i < PlainWaiters; i++)
             {
                 plainStages[i] = harness
@@ -113,12 +113,12 @@ public sealed class SendAccumulatorFirstStageTests
                 deliveries.Add(completion.Task);
             }
 
-            foreach (Task<Task<RecordMetadata>> stage in tokenStages)
+            foreach (Task<AsyncKafkaFuture<RecordMetadata>> stage in tokenStages)
             {
                 Assert.False(stage.IsCompleted, $"round {round}: a first stage completed although the bound was full");
             }
 
-            foreach (Task<Task<RecordMetadata>> stage in plainStages)
+            foreach (Task<AsyncKafkaFuture<RecordMetadata>> stage in plainStages)
             {
                 Assert.False(stage.IsCompleted, $"round {round}: a first stage completed although the bound was full");
             }
@@ -177,7 +177,7 @@ public sealed class SendAccumulatorFirstStageTests
         using Harness harness = new Harness(Settings(Bound));
 
         TaskCompletionSource<RecordMetadata>[] created = new TaskCompletionSource<RecordMetadata>[Burst];
-        Task<Task<RecordMetadata>>[] stages = new Task<Task<RecordMetadata>>[Burst];
+        Task<AsyncKafkaFuture<RecordMetadata>>[] stages = new Task<AsyncKafkaFuture<RecordMetadata>>[Burst];
         for (int i = 0; i < Burst; i++)
         {
             stages[i] = harness
@@ -186,7 +186,7 @@ public sealed class SendAccumulatorFirstStageTests
         }
 
         int pending = 0;
-        foreach (Task<Task<RecordMetadata>> stage in stages)
+        foreach (Task<AsyncKafkaFuture<RecordMetadata>> stage in stages)
         {
             pending += stage.IsCompleted ? 0 : 1;
         }
@@ -212,7 +212,7 @@ public sealed class SendAccumulatorFirstStageTests
         await TestTimeout.Run(() => Task.WhenAll(stages), s_deadline);
         for (int i = 0; i < Burst; i++)
         {
-            Assert.Same(created[i].Task, await stages[i]);
+            Assert.Same(created[i].Task, (await stages[i]).Get());
         }
 
         Assert.Equal(1, harness.Accumulator.SendBatchCallCount);
@@ -239,7 +239,7 @@ public sealed class SendAccumulatorFirstStageTests
 
         Task<RecordMetadata>? held = null;
         Task<RecordMetadata>[] filled = Array.Empty<Task<RecordMetadata>>();
-        Task<Task<RecordMetadata>>? stage = null;
+        Task<AsyncKafkaFuture<RecordMetadata>>? stage = null;
         TaskCompletionSource<RecordMetadata>? completion = null;
         try
         {
@@ -269,7 +269,7 @@ public sealed class SendAccumulatorFirstStageTests
             Task settled = await Task.WhenAny(stage, Task.Delay(s_prompt));
             Assert.Same(stage, settled);
             Assert.Equal(TaskStatus.RanToCompletion, stage.Status);
-            Assert.Same(appended.Task, await stage);
+            Assert.Same(appended.Task, (await stage).Get());
             Assert.False(live.IsCancellationRequested);
         }
         finally
@@ -414,7 +414,7 @@ public sealed class SendAccumulatorFirstStageTests
                 using CancellationTokenSource cancellation = new CancellationTokenSource();
 
                 Task<RecordMetadata> filled = harness.AppendOne(0x60);
-                Task<Task<RecordMetadata>> stage = harness
+                Task<AsyncKafkaFuture<RecordMetadata>> stage = harness
                     .AppendStaged(0x61, callback: null, cancellation.Token, out TaskCompletionSource<RecordMetadata> completion)
                     .AsTask();
                 Assert.False(stage.IsCompleted, $"rep {rep}: the first stage completed although the bound was full");
@@ -465,7 +465,7 @@ public sealed class SendAccumulatorFirstStageTests
                 {
                     Assert.Equal(TaskStatus.RanToCompletion, stage.Status);
                     slotWins++;
-                    Assert.Same(completion.Task, await stage);
+                    Assert.Same(completion.Task, (await stage).Get());
                 }
 
                 // And the record is sent whichever side won, and the gate is back at rest.
@@ -513,7 +513,7 @@ public sealed class SendAccumulatorFirstStageTests
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
         Task<RecordMetadata> filled = harness.AppendOne(0x70);
-        Task<Task<RecordMetadata>> stage = harness
+        Task<AsyncKafkaFuture<RecordMetadata>> stage = harness
             .AppendStaged(0x71, callback: null, cancellation.Token, out TaskCompletionSource<RecordMetadata> completion)
             .AsTask();
         Assert.False(stage.IsCompleted, "the first stage completed although the bound was full");
@@ -760,17 +760,17 @@ public sealed class SendAccumulatorFirstStageTests
         // grow it — otherwise the window would be charged the amortized growth), and one call down the
         // measured path to warm it and the warm token's registration table.
         Task<RecordMetadata>[] filled = harness.Append(PrefilledRecords);
-        Task<Task<RecordMetadata>> warm = harness.AppendStaged(0x81, callback: null, token, out _).AsTask();
-        ValueTask<Task<RecordMetadata>>[] stages = new ValueTask<Task<RecordMetadata>>[AllocationSendCount];
+        Task<AsyncKafkaFuture<RecordMetadata>> warm = harness.AppendStaged(0x81, callback: null, token, out _).AsTask();
+        ValueTask<AsyncKafkaFuture<RecordMetadata>>[] stages = new ValueTask<AsyncKafkaFuture<RecordMetadata>>[AllocationSendCount];
 
         long bytes = MeasureAppends(harness, token, measuredTokens, stages);
 
         harness.DrainNow();
         await TestTimeout.Run(() => Task.WhenAll(filled), s_deadline);
         await TestTimeout.Run(() => warm, s_deadline);
-        foreach (ValueTask<Task<RecordMetadata>> stage in stages)
+        foreach (ValueTask<AsyncKafkaFuture<RecordMetadata>> stage in stages)
         {
-            Task<RecordMetadata> delivery = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
+            Task<RecordMetadata> delivery = (await TestTimeout.Run(() => stage.AsTask(), s_deadline)).Get();
             await TestTimeout.Run(() => delivery, s_deadline);
         }
 
@@ -778,7 +778,7 @@ public sealed class SendAccumulatorFirstStageTests
     }
 
     private static long MeasureAppends(
-        Harness harness, CancellationToken token, CancellationToken[]? measuredTokens, ValueTask<Task<RecordMetadata>>[] stages)
+        Harness harness, CancellationToken token, CancellationToken[]? measuredTokens, ValueTask<AsyncKafkaFuture<RecordMetadata>>[] stages)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -821,7 +821,7 @@ public sealed class SendAccumulatorFirstStageTests
     private static WeakReference StartObservedStage(
         Harness harness, CancellationToken token, TaskCompletionSource<TaskStatus> observed)
     {
-        Task<Task<RecordMetadata>> stage = harness.AppendStaged(0x51, callback: null, token, out _).AsTask();
+        Task<AsyncKafkaFuture<RecordMetadata>> stage = harness.AppendStaged(0x51, callback: null, token, out _).AsTask();
         _ = stage.ContinueWith(
             static (completed, state) => ((TaskCompletionSource<TaskStatus>)state!).TrySetResult(completed.Status),
             observed,
@@ -853,7 +853,7 @@ public sealed class SendAccumulatorFirstStageTests
         }
     }
 
-    private static async Task<Thread> ResumeThreadOf(Task<Task<RecordMetadata>> stage)
+    private static async Task<Thread> ResumeThreadOf(Task<AsyncKafkaFuture<RecordMetadata>> stage)
     {
         try
         {

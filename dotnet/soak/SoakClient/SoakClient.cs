@@ -897,8 +897,8 @@ internal sealed class SoakClient : IDisposable
                 // (Java's send() blocking on a full buffer), so a loop that took only the
                 // delivery task without awaiting acceptance would offer records unthrottled. A
                 // failure to accept lands in the catch below as one send attempt; the delivery
-                // is the task the first stage yields.
-                task = await _producer.Send(producerRecord, CancellationToken.None).ConfigureAwait(false);
+                // is the Get() task of the future the first stage yields.
+                task = (await _producer.Send(producerRecord, CancellationToken.None).ConfigureAwait(false)).Get();
             }
             catch (Exception ex)
             {

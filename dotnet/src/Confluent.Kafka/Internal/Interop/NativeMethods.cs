@@ -2267,9 +2267,9 @@ internal static partial class NativeMethods
     //   * ASYNC path (IAsyncProducer / AsyncKafkaProducer / AsyncMockProducer) — Option A
     //     (Python-style pull; the anchor is python/_confluentkafka.c's send path,
     //     Producer_send_thread at :523). Send pins the record's buffers, appends to a
-    //     binding-side accumulator and yields the record's delivery Task from its ValueTask
-    //     first stage; a dedicated batch thread drains N records into a blittable
-    //     ProducerRecord_t[] and calls the already-exported kafka_producer_Producer_send_batch.
+    //     binding-side accumulator and yields the record's AsyncKafkaFuture (whose Get() is the
+    //     delivery Task) from its ValueTask first stage; a dedicated batch thread drains N records
+    //     into a blittable ProducerRecord_t[] and calls the already-exported kafka_producer_Producer_send_batch.
     //     The pin is DEFERRED — held from Send until send_batch RETURNS, never across the
     //     record's delivery Task, because send_batch copies
     //     synchronously too (verified rust/src/ffi/producer.rs:1557 — producer_send(&guard, record)

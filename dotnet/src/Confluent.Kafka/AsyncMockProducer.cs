@@ -67,9 +67,10 @@ namespace Confluent.Kafka;
 /// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
 /// <para>
-/// ⚠ <b>Do not mutate a record's key / value buffers until
-/// its delivery task completes without being canceled</b> (M11/P3.1 decision D6). The async send is
-/// deferred — the binding borrows the serialized bytes until a background batch thread hands the
+/// ⚠ <b>Do not mutate a record's key / value buffers until its delivery <see cref="Task{TResult}"/>
+/// (<see cref="AsyncKafkaFuture{T}.Get"/>) completes without being canceled</b> (M11/P3.1 decision
+/// D6). The async send is deferred — the binding borrows the serialized bytes until a background batch
+/// thread hands the
 /// record to the core — so a mutation in that window is visible on the wire. A cancellation does
 /// not end the borrow; see <see cref="IAsyncProducer{TKey, TValue}"/>'s <c>Send</c> for the full
 /// note. The <b>synchronous</b> producer has no such window.
@@ -122,7 +123,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     }
 
     /// <inheritdoc/>
-    public ValueTask<Task<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
+    public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
         // Serialize above the bytes core (identical to the real client — Java-faithful, PLAN §7):
         // null-record precondition first (ffi §A5).
@@ -135,7 +136,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     }
 
     /// <inheritdoc/>
-    public ValueTask<Task<RecordMetadata>> Send(
+    public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback callback,
         CancellationToken cancellationToken = default)
@@ -167,7 +168,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
     /// synchronous rather than faulting the returned <see cref="ValueTask{TResult}"/>.
     /// </summary>
-    private ValueTask<Task<RecordMetadata>> SendValidated(
+    private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback? callback,
         CancellationToken cancellationToken)

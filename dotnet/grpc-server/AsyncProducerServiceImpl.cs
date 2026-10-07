@@ -213,11 +213,11 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    // Both stages of a send: the accepted stage, then the delivery task it yields.
-    private static async Task<RecordMetadata> Delivered(ValueTask<Task<RecordMetadata>> send)
+    // Both stages of a send: the accepted stage, then the delivery task (Get()) of the future it yields.
+    private static async Task<RecordMetadata> Delivered(ValueTask<AsyncKafkaFuture<RecordMetadata>> send)
     {
-        Task<RecordMetadata> delivery = await send.ConfigureAwait(false);
-        return await delivery.ConfigureAwait(false);
+        AsyncKafkaFuture<RecordMetadata> future = await send.ConfigureAwait(false);
+        return await future.Get().ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
