@@ -587,6 +587,9 @@ impl KafkaAdminClient {
                 wakeup: Arc::clone(&wakeup),
                 shutdown: Arc::clone(&shutdown),
                 metadata_manager: metadata_manager.clone(),
+                max_retries: config.retries(),
+                time: Arc::clone(&time),
+                log_context: log_context.clone(),
             },
             wakeup,
             shutdown,
@@ -900,14 +903,21 @@ struct CallSender {
     wakeup: Arc<Notify>,
     shutdown: Arc<ShutdownSignal>,
     metadata_manager: AdminMetadataManager,
+    /// The `retries` config: `AdminClientRunnable`'s `maxRetries`, read by
+    /// `enqueue`'s first check.
+    max_retries: i32,
+    /// `KafkaAdminClient.time`, which `enqueue` reads for `handleTimeoutFailure`.
+    time: Arc<dyn Time>,
+    log_context: LogContext,
 }
 
 impl CallSender {
     /// Hands a call to the background task, or fails it at once. Translated
     /// from `AdminClientRunnable.call(Call, long)` and the `enqueue` it
     /// forwards to (`KafkaAdminClient.java:1668-1717`), in Java's order:
-    /// hard shutdown → `bootstrap.controllers` endpoint check → permanent
-    /// bootstrap failure (KIP-909) → the task has exited.
+    /// hard shutdown → `bootstrap.controllers` endpoint check → (`enqueue`)
+    /// retry budget → permanent bootstrap failure (KIP-909) → the task has
+    /// exited.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#call")]
     fn call(&self, call: Call) {
         // Java's `call` rejects a call here only once `close()` set a hard-shutdown
@@ -951,6 +961,17 @@ impl CallSender {
             )));
             return;
         }
+        // Java's `enqueue` begins with the retry budget
+        // (`KafkaAdminClient.java:1669-1674`). A call reaches it already tried
+        // when the `AdminApiDriver` re-issues a request spec, which carries its
+        // `tries` into the new call (`new_driver_call`).
+        if call.tries > self.max_retries {
+            let mut call = call;
+            kafka_debug!(self.log_context, "Max retries {} for {} reached", self.max_retries, call);
+            let message = format!("Exceeded maxRetries after {} tries.", call.tries);
+            call.handle_timeout_failure(self.time.milliseconds(), Error::timeout(message));
+            return;
+        }
         // Java's `enqueue`: a permanent bootstrap failure (KIP-909) fails the
         // call with that error instead of accepting it. The I/O task has exited
         // by then (`AdminClientRunnable::process_requests`), so without this
@@ -985,6 +1006,10 @@ impl CallSender {
             wakeup: Arc::new(Notify::new()),
             shutdown: Arc::new(ShutdownSignal::new()),
             metadata_manager: AdminMetadataManager::new(100, 300_000, false, LogContext::empty()),
+            // `AdminClientConfig`'s `retries` default, `Integer.MAX_VALUE`.
+            max_retries: i32::MAX,
+            time: Arc::new(SystemTime),
+            log_context: LogContext::empty(),
         }
     }
 }
@@ -7309,6 +7334,96 @@ mod tests {
         let error = failure.lock().unwrap().take().expect("failed");
         assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
         assert_eq!(error.message(), "The AdminClient thread has exited.");
+    }
+
+    /// Java's `enqueue` starts with the retry budget
+    /// (`KafkaAdminClient.java:1669-1674`): a call whose `tries` already exceed
+    /// `maxRetries` is failed through `handleTimeoutFailure` with
+    /// `TimeoutException("Exceeded maxRetries after N tries.")` — passed through
+    /// unwrapped, being a timeout — and never handed to the task. `tries ==
+    /// maxRetries` is still accepted. The check precedes the bootstrap-failure
+    /// check (`:1680`), so an exhausted call reports the retry budget even after
+    /// a bootstrap failure.
+    #[test]
+    fn test_call_sender_fails_a_call_past_its_retry_budget() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sender = CallSender::for_test(tx);
+        sender.max_retries = 2;
+
+        let (mut call, failure) = recording_call("atTheBudget");
+        call.tries = 2;
+        sender.call(call);
+        assert!(rx.try_recv().is_ok(), "tries == maxRetries is accepted");
+        assert!(failure.lock().unwrap().is_none());
+
+        let (mut call, failure) = recording_call("pastTheBudget");
+        call.tries = 3;
+        sender.call(call);
+        assert!(rx.try_recv().is_err(), "never handed to the task");
+        let error = failure.lock().unwrap().take().expect("failed");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(error.message(), "Exceeded maxRetries after 3 tries.");
+        assert!(std::error::Error::source(&error).is_none(), "the timeout is not wrapped");
+
+        // Java's order: `enqueue`'s budget check runs before its bootstrap check.
+        let mut updater = sender.metadata_manager.updater();
+        updater.bootstrap_failed(Error::BootstrapResolution(
+            crate::common::errors::BootstrapResolutionError::new("dns"),
+        ));
+        let (mut call, failure) = recording_call("pastTheBudgetAfterBootstrapFailure");
+        call.tries = 3;
+        sender.call(call);
+        assert_eq!(
+            failure.lock().unwrap().take().expect("failed").message(),
+            "Exceeded maxRetries after 3 tries."
+        );
+
+        // ... but after `call()`'s own hard-shutdown check.
+        sender.shutdown.hard_shutdown_deadline_ms.store(0, atomic::Ordering::Release);
+        let (mut call, failure) = recording_call("pastTheBudgetWhileClosing");
+        call.tries = 3;
+        sender.call(call);
+        assert_eq!(
+            failure.lock().unwrap().take().expect("failed").message(),
+            "Cannot accept new calls when AdminClient is closing."
+        );
+    }
+
+    /// End to end through a driver: `deleteRecords` with `retries=0` on a
+    /// retriable partition error. The driver re-issues the spec with `tries = 1`,
+    /// and `enqueue` fails it with the retry-budget timeout rather than letting it
+    /// spin until the deadline.
+    #[tokio::test]
+    async fn test_driver_reissued_call_past_its_retry_budget_times_out() {
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retries", "0")]);
+        let tp0 = TopicPartition::new("foo", 0);
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
+        runnable.client_mut().prepare_response_from(
+            delete_records_resp("foo", vec![delete_records_partition(0, Errors::NotLeaderOrFollower, -1)]),
+            &nodes[0],
+        );
+        let mut records = HashMap::new();
+        records.insert(tp0.clone(), RecordsToDelete::before_offset_with_offset(10));
+        let result = admin.delete_records_with_options(&records, DeleteRecordsOptions::new());
+        for _ in 0..40 {
+            if result.low_watermarks()[&tp0].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(50);
+        }
+        // Without the budget check the re-issued call retries until the 60 s
+        // deadline, far past this loop; fail fast rather than hang on `get`.
+        assert!(result.low_watermarks()[&tp0].is_done(), "the exhausted call was not failed");
+        let error = result.low_watermarks()[&tp0].get().await.unwrap_err();
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert!(
+            error.message().starts_with("Exceeded maxRetries after"),
+            "got {:?}",
+            error.message()
+        );
     }
 
     /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
