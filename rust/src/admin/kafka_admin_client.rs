@@ -1140,6 +1140,22 @@ where
     let hnu_keys = keys.clone();
     let hnu_log = ctx.log_context.clone();
     call.set_handle_node_unavailable_fn(Box::new(move |mm: &AdminMetadataManager, now: i64| {
+        // Don't intervene while the client is shutting down (cb2f143b0d).
+        // Re-running the lookup enqueues new calls via `CallSender::call`, which
+        // are rejected during close ("Cannot accept new calls when AdminClient is
+        // closing."). Leaving the call in pending calls preserves the normal
+        // `close(timeout)` handling, so it can still be retried (or assigned,
+        // should the broker reappear) within the shutdown grace period instead of
+        // failing immediately. Java tests `hardShutdownTimeMs`, not `closing`.
+        if hnu_ctx
+            .sender
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .load(std::sync::atomic::Ordering::Acquire)
+            != KafkaAdminClient::NO_HARD_SHUTDOWN
+        {
+            return false;
+        }
         if let Some(broker_id) = hnu_scope.destination_broker_id()
             && mm.is_ready().unwrap_or(false)
             && mm.node_by_id(broker_id).is_none()
@@ -11129,6 +11145,71 @@ mod tests {
             "second listOffsets did not recover after the cached leader left the cluster"
         );
         assert_eq!(second.all().get().await.unwrap()[&tp0].offset(), 200);
+    }
+
+    /// KAFKA-20673 follow-up (cb2f143b0d), which Java ships without a test: once
+    /// `close(timeout)` has set a hard-shutdown time, a fulfillment call whose
+    /// cached leader left the cluster is NOT sent back to the lookup stage.
+    /// Re-running the lookup would enqueue through `CallSender::call`, which
+    /// rejects every call during close, so the request would fail at once with
+    /// "Cannot accept new calls when AdminClient is closing." instead of staying
+    /// pending for the grace period. Same precondition as
+    /// [`test_list_offsets_retries_lookup_when_cached_leader_leaves_cluster`].
+    #[tokio::test]
+    async fn test_list_offsets_skips_stale_leader_lookup_retry_while_closing() {
+        let (admin, mut runnable, time, nodes) =
+            env_with_props(&[("metadata.max.age.ms", "300000"), ("retry.backoff.ms", "300000")]);
+        let node0 = nodes[0].clone();
+        let node1 = nodes[1].clone();
+        let tp0 = TopicPartition::new("foo", 0);
+
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 1)])]));
+        runnable
+            .client_mut()
+            .prepare_response_from(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 100, 5)]), &node1);
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        let first = admin.list_offsets_with_options(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| first.all().is_done()).await;
+        assert_eq!(first.all().get().await.unwrap()[&tp0].offset(), 100);
+
+        let shrunk = Cluster::with_invalid_topics_controller_topic_ids(
+            Some("mock-cluster".to_string()),
+            vec![node0.clone()],
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Some(node0.clone()),
+            HashMap::new(),
+        );
+        admin.shared.metadata_manager.update(shrunk, admin.shared.time.milliseconds());
+
+        // Submit the second call, then begin closing with a long grace period
+        // (the hard-shutdown time `close(timeout)` publishes first).
+        let second = admin.list_offsets_with_options(&partitions, ListOffsetsOptions::new());
+        let grace_deadline = admin.shared.time.milliseconds() + 60_000;
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(grace_deadline, std::sync::atomic::Ordering::Release);
+        admin.shared.shutdown.closing.store(true, std::sync::atomic::Ordering::Release);
+
+        for _ in 0..20 {
+            runnable.run_once().await;
+            time.sleep(20);
+        }
+        assert!(
+            !second.all().is_done(),
+            "the stale-leader call must stay pending during the grace period, got {:?}",
+            second.all().get().await
+        );
+        // Nothing is in flight: no re-lookup request was sent for the departed
+        // leader.
+        assert_eq!(runnable.client_mut().request_count(), 0);
     }
 
     // Skipped `KafkaAdminClientTest` listOffsets slices (with rationale):
