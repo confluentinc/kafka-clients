@@ -269,6 +269,15 @@ impl FetchBuffer {
         self.notify.notify_waiters();
     }
 
+    /// Whether a wakeup is pending, i.e. the next [`Self::await_wakeup`]
+    /// would return at once. Read without clearing, so a test can assert
+    /// that a code path did (or did not) wake the buffer by value instead of
+    /// by timing a wait.
+    #[cfg(test)]
+    pub(crate) fn is_woken_up_for_test(&self) -> bool {
+        self.wokenup.load(Ordering::SeqCst)
+    }
+
     /// Drops every buffered fetch whose partition is not in the retain set.
     ///
     /// Translates `void retainAll(Set<TopicPartition>)`.
