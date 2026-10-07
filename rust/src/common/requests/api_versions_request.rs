@@ -304,4 +304,81 @@ mod tests {
         assert!(!r.data().api_keys.is_empty());
         assert_eq!(r.data().api_keys[0].api_key, ApiKeys::API_VERSIONS.id());
     }
+
+    /// The v5 request (KIP-1242, KAFKA-20246) with `ClusterId` / `NodeId` at
+    /// their defaults (`null` / -1), as the client sends it until it knows the
+    /// cluster it is talking to. v3+ is flexible, so strings are compact
+    /// (unsigned-varint length + 1):
+    ///   client_software_name "a": 0x02 0x61
+    ///   client_software_version "1": 0x02 0x31
+    ///   cluster_id null (compact nullable string): 0x00
+    ///   node_id -1: 0xff 0xff 0xff 0xff
+    ///   top-level tagged fields: 0x00
+    #[test]
+    fn test_serialize_known_byte_vector_v5_defaults() {
+        let mut data = ApiVersionsRequestData::new();
+        data.set_client_software_name("a".to_string())
+            .set_client_software_version("1".to_string());
+        let mut request = AbstractRequest::ApiVersions(ApiVersionsRequest::new(data, 5));
+        let expected: &[u8] = &[
+            0x02, 0x61, // client_software_name "a"
+            0x02, 0x31, // client_software_version "1"
+            0x00, // cluster_id null
+            0xff, 0xff, 0xff, 0xff, // node_id -1
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(request.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
+    /// The v5 request carrying both `ClusterId` and `NodeId`:
+    ///   cluster_id "c": 0x02 0x63
+    ///   node_id 7: 0x00 0x00 0x00 0x07
+    #[test]
+    fn test_serialize_known_byte_vector_v5_cluster_and_node_id() {
+        let mut data = ApiVersionsRequestData::new();
+        data.set_client_software_name("a".to_string())
+            .set_client_software_version("1".to_string())
+            .set_cluster_id(Some("c".to_string()))
+            .set_node_id(7);
+        let mut request = AbstractRequest::ApiVersions(ApiVersionsRequest::new(data, 5));
+        let expected: &[u8] = &[
+            0x02, 0x61, // client_software_name "a"
+            0x02, 0x31, // client_software_version "1"
+            0x02, 0x63, // cluster_id "c"
+            0x00, 0x00, 0x00, 0x07, // node_id 7
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(request.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
+    /// Below v5 both fields are absent from the wire. They are `ignorable`, so a
+    /// non-default value is dropped silently rather than rejected (Java's
+    /// generator emits the version-gate check only for non-ignorable fields).
+    #[test]
+    fn test_serialize_known_byte_vector_v4_drops_cluster_and_node_id() {
+        let mut data = ApiVersionsRequestData::new();
+        data.set_client_software_name("a".to_string())
+            .set_client_software_version("1".to_string())
+            .set_cluster_id(Some("c".to_string()))
+            .set_node_id(7);
+        let mut request = AbstractRequest::ApiVersions(ApiVersionsRequest::new(data, 4));
+        let expected: &[u8] = &[
+            0x02, 0x61, // client_software_name "a"
+            0x02, 0x31, // client_software_version "1"
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(request.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
+    /// The v5 bytes parse back to the same `ClusterId` / `NodeId`.
+    #[test]
+    fn test_parse_v5_cluster_and_node_id() {
+        let bytes = vec![0x02, 0x61, 0x02, 0x31, 0x02, 0x63, 0x00, 0x00, 0x00, 0x07, 0x00];
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
+        let request = ApiVersionsRequest::parse(&mut readable, 5).unwrap();
+        assert_eq!(request.data().client_software_name, "a");
+        assert_eq!(request.data().client_software_version, "1");
+        assert_eq!(request.data().cluster_id.as_deref(), Some("c"));
+        assert_eq!(request.data().node_id, 7);
+    }
 }

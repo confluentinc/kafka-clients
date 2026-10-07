@@ -252,4 +252,24 @@ mod tests {
             other => panic!("expected DeleteGroups response, got {}", other.api_key().name()),
         }
     }
+
+    /// DeleteGroups v3 only adds the per-group `ErrorMessage` to the *response*;
+    /// the request body is unchanged (`DeleteGroupsRequest.json`), so v3 encodes
+    /// exactly like v2:
+    ///   groups_names: compact array len 1 -> 0x02
+    ///     "g": compact string len 1 -> 0x02, then 0x67
+    ///   top-level tagged fields: 0x00
+    #[test]
+    fn serialize_known_byte_vector_v3_same_body_as_v2() {
+        let mut data = DeleteGroupsRequestData::new();
+        data.set_groups_names(vec!["g".to_string()]);
+        let mut builder = Builder::new(data);
+        let mut req = builder.build_version(3).unwrap();
+        let expected: &[u8] = &[
+            0x02, // groups_names compact array len 1 (=n+1)
+            0x02, 0x67, // "g"
+            0x00, // top-level tagged fields
+        ];
+        assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
 }
