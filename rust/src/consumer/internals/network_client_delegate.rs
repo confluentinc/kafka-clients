@@ -955,6 +955,59 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     }
 }
 
+/// The fixture of the 4.4 `...DoesNotSpinDuringRealBootstrapDnsResolution`
+/// tests (`CommitRequestManagerTest`, `ConsumerHeartbeatRequestManagerTest`):
+/// a real `NetworkClient` over a `MockSelector` whose bootstrap servers
+/// resolve asynchronously (KIP-909) with `bootstrap_resolve_timeout_ms`, and a
+/// `NetworkClientDelegate` around it. Java's arguments:
+/// `new NetworkClient(selector, metadata, "test-client", Integer.MAX_VALUE, 50,
+/// 1000, 64 * 1024, 64 * 1024, 1000, 5000, 30000, time, false, new
+/// ApiVersions(), logContext, MetadataRecoveryStrategy.NONE,
+/// bootstrapConfiguration, false)`, then
+/// `new NetworkClientDelegate(time, config, logContext, networkClient,
+/// metadata, mock(BackgroundEventHandler.class), false, ...)`.
+#[cfg(test)]
+pub(crate) fn bootstrapping_network_client_delegate_for_test(
+    config: &ConsumerConfig,
+    metadata: Arc<Metadata>,
+    bootstrap_servers: &[String],
+    bootstrap_resolve_timeout_ms: i64,
+) -> NetworkClientDelegate<crate::NetworkClient<crate::common::network::MockSelector, crate::DefaultHostResolver>> {
+    let mut client = crate::NetworkClient::with_metadata_rebootstrap_trigger_ms(
+        crate::common::network::MockSelector::new(),
+        Arc::clone(&metadata),
+        "test-client",
+        usize::MAX,
+        50,
+        1000,
+        64 * 1024,
+        64 * 1024,
+        1000,
+        5000,
+        30000,
+        false,
+        Arc::new(crate::ApiVersions::new()),
+        crate::DefaultHostResolver,
+        i64::MAX,
+        crate::MetadataRecoveryStrategy::None,
+        crate::common::utils::internals::LogContext::empty(),
+    );
+    // The client's clock is the `now` each poll is given (Java's `MockTime`),
+    // so the bootstrap timer runs on the test's model time.
+    client.set_mock_time();
+    client.set_bootstrap_configuration(
+        crate::BootstrapConfiguration::enabled(
+            bootstrap_servers,
+            crate::ClientDnsLookup::UseAllDnsIps,
+            bootstrap_resolve_timeout_ms,
+            config.retry_backoff_ms(),
+        )
+        .expect("valid bootstrap servers"),
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    NetworkClientDelegate::new(config, client, metadata, Arc::new(BackgroundEventHandler::new(tx)), false)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::common::utils::{MockTime, Time};

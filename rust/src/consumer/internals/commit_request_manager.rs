@@ -176,6 +176,14 @@ impl AutoCommitState {
         (self.expiration_ms - current_time_ms).max(0)
     }
 
+    /// Java: `autoCommitIntervalMs()` (KAFKA-20970).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#autoCommitIntervalMs"
+    )]
+    fn auto_commit_interval_ms(&self) -> i64 {
+        self.auto_commit_interval_ms
+    }
+
     /// Java: `setInflightCommitStatus(boolean)`.
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager$AutoCommitState#setInflightCommitStatus"
@@ -1680,13 +1688,30 @@ impl RequestManager for CommitRequestManager {
         PollResult::empty()
     }
 
+    /// Java: `maximumTimeToWait(long)`.
+    ///
+    /// `coordinatorRequestManager.coordinator()` is read through the handle
+    /// [`CommitRequestManager::set_coordinator`] wires (Java's constructor
+    /// argument); an unwired handle reads as an unknown coordinator, as
+    /// `poll_with_coordinator` has no coordinator to send to either.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#maximumTimeToWait")]
     fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
+        // Read before taking the state lock, so the coordinator's locks are
+        // never acquired while it is held.
+        let coordinator_unknown = self.inner.coordinator_node().is_none();
         let guard = self.inner.state.lock().expect("commit manager state poisoned");
-        guard
-            .auto_commit
-            .as_ref()
-            .map(|ac| ac.remaining_ms(current_time_ms))
-            .unwrap_or(i64::MAX)
+        let Some(auto_commit) = guard.auto_commit.as_ref() else {
+            return i64::MAX;
+        };
+        // An auto-commit is only sent when the coordinator is known; poll() returns EMPTY otherwise.
+        // If the coordinator is unavailable (e.g. bootstrap DNS resolution is still in progress),
+        // falling through to the timer-based remainingMs() would return 0 once the auto-commit interval
+        // elapses, since the auto-commit timer remains permanently expired. This would cause both the
+        // application and network threads to busy-spin.
+        if coordinator_unknown {
+            return auto_commit.auto_commit_interval_ms();
+        }
+        auto_commit.remaining_ms(current_time_ms)
     }
 
     fn signal_close(&mut self) {
@@ -3110,6 +3135,8 @@ mod tests {
     #[test]
     fn maximum_time_to_wait_reflects_auto_commit_state() {
         let mut manager = make_manager(0, true);
+        // A known coordinator (KAFKA-20970: with none, the interval is returned).
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
         // With auto-commit interval = 1000ms and `now = 0`, remaining = 1000.
         assert_eq!(manager.maximum_time_to_wait(0), 1_000);
         assert_eq!(manager.maximum_time_to_wait(500), 500);
@@ -3120,6 +3147,110 @@ mod tests {
         // Signal close — does not change `maximum_time_to_wait`.
         manager.signal_close();
         assert_eq!(manager.maximum_time_to_wait(0), 1_000);
+    }
+
+    /// Translated from `CommitRequestManagerTest.testMaximumTimeToWaitWhenCoordinatorUnknownDoesNotSpin`
+    /// (KAFKA-20970): with the coordinator unknown, poll() cannot send the
+    /// auto-commit, so an expired auto-commit timer must not bound the wait to
+    /// 0.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest#testMaximumTimeToWaitWhenCoordinatorUnknownDoesNotSpin"
+    )]
+    fn test_maximum_time_to_wait_when_coordinator_unknown_does_not_spin() {
+        let (manager, _subs) = make_manager_with_subs_interval(0, true, 100);
+        manager.set_coordinator(Arc::new(CoordinatorRequestManager::new(100, 1_000, GROUP_ID)));
+
+        let result = manager.maximum_time_to_wait(100);
+
+        assert!(
+            result > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown to avoid a busy-spin; got {result}"
+        );
+        assert_eq!(100, result);
+    }
+
+    /// Translated from
+    /// `CommitRequestManagerTest.testMaximumTimeToWaitDoesNotSpinDuringRealBootstrapDnsResolution`
+    /// (KAFKA-20970): a real `NetworkClient` resolving an unresolvable
+    /// bootstrap host asynchronously (KIP-909), a real coordinator manager that
+    /// never learns a coordinator, and an auto-commit interval (100 ms) much
+    /// shorter than the 1000 ms resolution timeout, so the auto-commit timer
+    /// expires several times while the coordinator is unknown.
+    /// `maximum_time_to_wait` stays positive at every step, until the
+    /// `BootstrapResolutionError` surfaces.
+    ///
+    /// Java's clock is a `MockTime`; the Rust `NetworkClient` takes the
+    /// poll's `now`, so the loop advances `now` by the 50 ms poll timeout per
+    /// step, which bounds the test by the 4000 ms budget of model time.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest#testMaximumTimeToWaitDoesNotSpinDuringRealBootstrapDnsResolution"
+    )]
+    async fn test_maximum_time_to_wait_does_not_spin_during_real_bootstrap_dns_resolution() {
+        let bootstrap_resolve_timeout_ms = 1_000;
+        let bootstrap_servers = vec!["unresolvable.invalid:9092".to_string()];
+        let mut config = test_config(true);
+        config.bootstrap_servers = bootstrap_servers.clone();
+        config.group_id = Some(GROUP_ID.to_string());
+        // Much shorter than bootstrapResolveTimeoutMs, so the auto-commit timer
+        // expires several times while the coordinator is still (and will
+        // remain, since DNS never resolves) unknown.
+        config.auto_commit_interval_ms = 100;
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::with_config(
+            &config,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        let mut network_client_delegate =
+            crate::consumer::internals::network_client_delegate::bootstrapping_network_client_delegate_for_test(
+                &config,
+                metadata.metadata_arc(),
+                &bootstrap_servers,
+                bootstrap_resolve_timeout_ms,
+            );
+        let real_coordinator_request_manager = Arc::new(CoordinatorRequestManager::new(100, 1_000, GROUP_ID));
+        let time: Arc<dyn Time> = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
+        let real_commit_request_manager =
+            CommitRequestManager::new(&config, Arc::clone(&metadata), Arc::clone(&subs), GROUP_ID, None, time, 0);
+        real_commit_request_manager.set_coordinator(Arc::clone(&real_coordinator_request_manager));
+
+        let deadline = bootstrap_resolve_timeout_ms + 3_000;
+        let mut now = 0;
+        let mut saw_bootstrap_error = false;
+        while now < deadline {
+            // Drives the real NetworkClient's ensureBootstrapped()/async DNS
+            // resolution forward; the coordinator never becomes known since
+            // there is no real broker to respond.
+            network_client_delegate.poll_default(50, now).await;
+
+            let wait_ms = real_commit_request_manager.maximum_time_to_wait(now);
+            assert!(
+                wait_ms > 0,
+                "maximumTimeToWait must be > 0 while real bootstrap DNS resolution is pending; got {wait_ms}"
+            );
+
+            if let Some(error) = network_client_delegate.get_and_clear_metadata_error() {
+                assert!(
+                    matches!(error, Error::BootstrapResolution(_)),
+                    "unexpected metadata error: {error:?}"
+                );
+                saw_bootstrap_error = true;
+                break;
+            }
+            now += 50;
+        }
+        assert!(
+            saw_bootstrap_error,
+            "Expected a real BootstrapResolutionException within {}ms",
+            bootstrap_resolve_timeout_ms + 3_000
+        );
     }
 
     /// KAFKA-20253 (`AutoCommitState.remainingMs`; Java adds no test of its
@@ -3162,6 +3293,7 @@ mod tests {
     #[test]
     fn reset_auto_commit_timer_resets_expiration() {
         let manager = make_manager(0, true);
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
         manager.reset_auto_commit_timer(500);
         // After resetting at now=500, remaining at now=500 = 1000.
         assert_eq!(manager.maximum_time_to_wait(500), 1_000);
@@ -3327,6 +3459,7 @@ mod tests {
         // Advance past the auto-commit interval (1000ms — configured in
         // `test_config`) and call the hook.
         let after_expiry_ms = 2_000;
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
         manager.update_timer_and_maybe_commit(after_expiry_ms);
         // (a) Timer reset to a fresh interval.
         assert_eq!(manager.maximum_time_to_wait(after_expiry_ms), 1_000);
@@ -3399,6 +3532,7 @@ mod tests {
     #[test]
     fn update_timer_and_maybe_commit_resets_timer_when_no_consumed_offsets() {
         let (manager, _subs) = make_manager_with_subs(0, true);
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
         let after_expiry_ms = 2_000;
         manager.update_timer_and_maybe_commit(after_expiry_ms);
         // Timer reset (Java does this unconditionally in `maybeAutoCommitAsync`).
@@ -5981,7 +6115,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_on_interval_skipped_if_previous_one_in_flight() {
         let (manager, subs) = make_manager_with_subs(0, true);
-        let coordinator = coordinator_with_node();
+        let coordinator = Arc::new(coordinator_with_node());
+        manager.set_coordinator(Arc::clone(&coordinator));
         let tp = topic_partition("topic1", 0);
         {
             let mut s = subs.lock().unwrap();
