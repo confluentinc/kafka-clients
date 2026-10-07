@@ -26,7 +26,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 9c7fad3397 | Broker | O |  | 2026-06-17 | Require expected issuer and audience for the SASL/OAUTHBEARER broker validator | 89+/12- / 306+/8- |
 | 9c943129eb | Broker | O |  | 2026-08-07 | KAFKA-20816: Add support for CIDR into Authorizer.authorizeByResourceType (#22883) | 66+/1- / 112+/0- |
 | ae03a1e456 | Broker | O |  | 2026-05-10 | MINOR: Fix outdated Javadoc link in AuthorizableRequestContext (#22230) | 6+/3- / +/- |
-| b69c07c816 | Broker | O |  | 2026-09-13 | Bound decompressed record size (#23447) | 157+/34- / 310+/22- |
+| b69c07c816 | Consumer | P | partial | 2026-09-13 | Bound decompressed record size (#23447) — in scope partially (Phase 10): the consumer-side `DefaultRecord.readFrom` / `readPartiallyFrom` checks only; the broker-side `maxRecordBodySize` iterators stay out of scope. Reclassified from Broker/O after the Phase 1 review (COMMENTS.91 Q2) | 157+/34- / 310+/22- |
 | cd5ce52240 | Broker | O |  | 2026-06-19 | KAFKA-20664: Clarify docs on max compaction lag, segment.ms, and segment.bytes for active segment rolling (#22489) | 14+/3- / +/- |
 | ed9898d7d3 | Broker | O |  | 2026-07-30 | KAFKA-20831: Cache SASL principal per authentication (#22880) | 10+/2- / 47+/0- |
 | edcada2a48 | Broker | O |  | 2026-05-22 | KAFKA-19893: Reduce tiered storage redundancy with delayed upload (KIP-1241)  (#20913) | 16+/0- / +/- |

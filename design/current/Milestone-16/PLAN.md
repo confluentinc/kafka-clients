@@ -21,10 +21,10 @@ and moves the `kafka/` submodule and the docs' source-reference line to 4.4.
 
 - 848 unique commits overall. **190 touch `clients/src`** (168 touch main code). On the M13 metric
   (`-- clients/src/main/java/org/apache/kafka/clients`) there are 116 commits, against 81 for 4.2.0 → 4.3.1.
-- **67 commits to port**: 54 behaviour/API/wire (P) and 13 test-only (T). One more, the trunk-only
+- **68 commits to port**: 55 behaviour/API/wire (P) and 13 test-only (T). One more, the trunk-only
   KAFKA-20864, is added by decision D3.
 - The rest:
-  - **57 out of scope:** Streams 24, broker/server 14, Share 11, Classic 5, untranslated areas 3.
+  - **56 out of scope:** Streams 24, broker/server 13, Share 11, Classic 5, untranslated areas 3.
   - **37 no-op for Rust.**
   - **21 doc/log-only.**
   - **6 reverted inside the range:** KAFKA-20385/20684 RebalanceListener (it returns in 4.5), and 2PC.
@@ -620,6 +620,11 @@ Phase 1 completion notes (agent 91):
 - KAFKA-20570 (f7dbf0bf3b): `ConsumerProtocol` deserialization errors become `SchemaError` / `KafkaError`.
 - KAFKA-20575 (2768948823): `MockConsumer::lose_partitions` (public), plus the FFI
   `kafka_consumer_MockConsumer_lose_partitions` and the Python mock binding.
+- b69c07c816 ("Bound decompressed record size"), **partial**: consumer-side `DefaultRecord.readFrom` checks
+  only (the new "Invalid record size: N is negative." message and the `SOFT_MAX_ARRAY_LENGTH` upper bound;
+  Rust already rejects a negative size with different text, `default_record.rs`); the broker-side
+  `maxRecordBodySize` iterators stay out of scope. Reclassified from Broker/O by the Manager after the
+  Phase 1 review (COMMENTS.91 Q2).
 - Test-only commits:
   - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
     hunks);
@@ -755,18 +760,19 @@ The summary by component:
 
 | Component | Total | Port (P) | Test-only (T) | Doc | No-op | Out of scope (O) / reverted (R) / already in 4.3.1 (A) |
 |---|---|---|---|---|---|---|
-| Consumer | 49 | 18 | 11 | 6 | 7 | R 5, A 2 |
+| Consumer | 50 | 19 | 11 | 6 | 7 | R 5, A 2 |
 | Common | 33 | 3 | 1 | 6 | 21 | O 2 |
 | Streams | 24 | – | – | – | – | O 24 |
 | Wire | 16 | 12 | – | 1 | 3 | – |
 | Producer | 14 | 9 | 1 | 1 | 2 | R 1 |
-| Broker | 13 | – | – | – | – | O 13 |
+| Broker | 12 | – | – | – | – | O 12 |
 | Network | 12 | 8 | – | 3 | 1 | – |
 | Share | 11 | – | – | – | – | O 11 |
 | Admin | 11 | 4 | – | 4 | 2 | O 1 (Raft voter) |
 | Classic | 5 | – | – | – | – | O 5 |
 | Security | 2 | – | – | – | 1 | O 1 |
-| **Total** | **190** | **54** | **13** | **21** | **37** | **O 57, R 6, A 2** |
+| **Total** | **190** | **55** | **13** | **21** | **37** | **O 56, R 6, A 2** |
 
-Phase → P/T commit counts (sum 67): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
-P7+P8 1 (+1 trunk commit for D3), P9 7, P10 17, P11 2, P12 4.
+Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
+P7+P8 1 (+1 trunk commit for D3), P9 7, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
+Phase 1 review.)
