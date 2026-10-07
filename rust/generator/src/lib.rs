@@ -2373,12 +2373,17 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    if length == 0 {{", indent)?;
                         writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
+                        write_string_length_guard(
+                            file,
+                            &format!("{}                        ", indent),
+                            "(length - 1)",
+                            &field.camel_case_name(),
+                        )?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((length - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                        result.{} = Some(String::from_utf8(bytes)",
@@ -2394,12 +2399,17 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    if length == 0 {{", indent)?;
                         writeln!(file, "{}                        result.{} = String::new();", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
+                        write_string_length_guard(
+                            file,
+                            &format!("{}                        ", indent),
+                            "(length - 1)",
+                            &field.camel_case_name(),
+                        )?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((length - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                        result.{} = String::from_utf8(bytes)",
@@ -2552,14 +2562,15 @@ fn generate_tagged_field_read(
                                 indent, push_target
                             )?;
                             writeln!(file, "{}                            }} else {{", indent)?;
-                            writeln!(
+                            write_string_length_guard(
                                 file,
-                                "{}                                let mut bytes = vec![0u8; (len - 1) as usize];",
-                                indent
+                                &format!("{}                                ", indent),
+                                "(len - 1)",
+                                &format!("{} element", field.camel_case_name()),
                             )?;
                             writeln!(
                                 file,
-                                "{}                                readable.read_bytes(&mut bytes)?;",
+                                "{}                                let bytes = readable.read_array((len - 1) as usize)?;",
                                 indent
                             )?;
                             writeln!(
@@ -2667,10 +2678,9 @@ fn generate_tagged_field_read(
                         // For non-nullable structs, read the bytes and parse the struct
                         writeln!(
                             file,
-                            "{}                    let mut struct_bytes = vec![0u8; size as usize];",
+                            "{}                    let struct_bytes = readable.read_array(size as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
                         writeln!(
                             file,
                             "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::new(struct_bytes);",
@@ -2704,20 +2714,18 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((len - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(file, "{}                        result.{} = Some(bytes);", indent, field_name)?;
                         writeln!(file, "{}                    }}", indent)?;
                     } else {
                         writeln!(file, "{}                    if len > 0 {{", indent)?;
                         writeln!(
                             file,
-                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            "{}                        let bytes = readable.read_array((len - 1) as usize)?;",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
                         writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
@@ -2728,10 +2736,9 @@ fn generate_tagged_field_read(
                     // Skip unknown/unhandled types
                     writeln!(
                         file,
-                        "{}                    let mut skip_bytes = vec![0u8; size as usize];",
+                        "{}                    let skip_bytes = readable.read_array(size as usize)?;",
                         indent
                     )?;
-                    writeln!(file, "{}                    readable.read_bytes(&mut skip_bytes)?;", indent)?;
                 },
             }
 
@@ -3602,7 +3609,7 @@ fn generate_field_read(
             writeln!(file, "{}result.{} = readable.read_double()?;", indent, field_name)?;
         },
         FieldType::String => {
-            generate_string_read(file, &field_name, flexible_versions, indent, nullable)?;
+            generate_string_read(file, &field_name, &field.camel_case_name(), flexible_versions, indent, nullable)?;
         },
         FieldType::Bytes => {
             generate_bytes_read(file, &field_name, flexible_versions, indent, nullable)?;
@@ -3611,7 +3618,15 @@ fn generate_field_read(
             generate_records_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Array(element_type) => {
-            generate_array_read(file, &field_name, element_type, flexible_versions, indent, nullable)?;
+            generate_array_read(
+                file,
+                &field_name,
+                &field.camel_case_name(),
+                element_type,
+                flexible_versions,
+                indent,
+                nullable,
+            )?;
         },
         FieldType::Struct(struct_name) => {
             if nullable {
@@ -3668,10 +3683,31 @@ fn generate_field_read(
     Ok(())
 }
 
+/// Emits Java's string-length guard (`MessageDataGenerator.generateVariableLengthReader`,
+/// `MessageDataGenerator.java:653-657`): a declared string length above `0x7fff` is
+/// rejected with "string field <name> had invalid length <length>". Only the compact
+/// (varint) encodings need it; a non-compact length is an `int16` and cannot exceed it.
+fn write_string_length_guard(
+    file: &mut fs::File,
+    ind: &str,
+    length_expr: &str,
+    java_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{ind}if {length_expr} > 0x7fff {{")?;
+    writeln!(file, "{ind}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,")?;
+    writeln!(
+        file,
+        "{ind}        format!(\"string field {java_name} had invalid length {{}}\", {length_expr})));"
+    )?;
+    writeln!(file, "{ind}}}")?;
+    Ok(())
+}
+
 /// Generate string field read code, handling nullable fields.
 fn generate_string_read(
     file: &mut fs::File,
     field_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
     indent: &str,
     nullable: bool,
@@ -3697,8 +3733,8 @@ fn generate_string_read(
             writeln!(file, "{}    {}", indent, null_action)?;
             writeln!(file, "{}}} else {{", indent)?;
             writeln!(file, "{}    let length = len - 1;", indent)?;
-            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            write_string_length_guard(file, &format!("{}    ", indent), "length", java_name)?;
+            writeln!(file, "{}    let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3728,8 +3764,8 @@ fn generate_string_read(
             writeln!(file, "{}        {}", indent, null_action)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            write_string_length_guard(file, &format!("{}        ", indent), "length", java_name)?;
+            writeln!(file, "{}        let bytes = readable.read_array(length as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3746,8 +3782,7 @@ fn generate_string_read(
             writeln!(file, "{}    if len < 0 {{", indent)?;
             writeln!(file, "{}        {}", indent, neg_action)?;
             writeln!(file, "{}    }} else {{", indent)?;
-            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        let bytes = readable.read_array(len as usize)?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3767,8 +3802,7 @@ fn generate_string_read(
         writeln!(file, "{}if len < 0 {{", indent)?;
         writeln!(file, "{}    {}", indent, neg_action)?;
         writeln!(file, "{}}} else {{", indent)?;
-        writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-        writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+        writeln!(file, "{}    let bytes = readable.read_array(len as usize)?;", indent)?;
         writeln!(
             file,
             "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3937,6 +3971,7 @@ fn generate_records_read(
 fn generate_array_read(
     file: &mut fs::File,
     field_name: &str,
+    java_name: &str,
     element_type: &FieldType,
     flexible_versions: Versions,
     indent: &str,
@@ -3978,7 +4013,7 @@ fn generate_array_read(
             )?;
             // We need a temporary field_name for element reads
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read_to_vec(file, element_type, "_arr", flexible_versions)?;
+            generate_array_element_read_to_vec(file, element_type, "_arr", java_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
             writeln!(file, "{}result.{} = Some(_arr);", ind, fn_name)?;
         } else {
@@ -3988,7 +4023,7 @@ fn generate_array_read(
                 ind, fn_name, PREALLOCATED_CAPACITY_EXPR
             )?;
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read(file, element_type, fn_name, flexible_versions)?;
+            generate_array_element_read(file, element_type, fn_name, java_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
         }
         Ok(())
@@ -4052,20 +4087,25 @@ fn generate_array_element_read_to_vec(
     file: &mut fs::File,
     element_type: &FieldType,
     vec_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the same logic but with a different prefix (no "result." prefix)
-    generate_array_element_read_with_prefix(file, element_type, vec_name, "", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, vec_name, "", java_name, flexible_versions)
 }
 
+/// `java_name` is the array field's Java `camelCaseName()`; an element string's
+/// length-guard message names it `"<name> element"`, as Java's does.
 fn generate_array_element_read_with_prefix(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
     prefix: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = format!("{}{}", prefix, array_name);
+    let element_name = format!("{java_name} element");
     match element_type {
         FieldType::Bool => {
             writeln!(file, "                {}.push(readable.read_byte()? != 0);", target)?;
@@ -4102,8 +4142,11 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                if str_len == 0 {{")?;
                     writeln!(file, "                    {}.push(String::new());", target)?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    write_string_length_guard(file, "                    ", "(str_len - 1)", &element_name)?;
+                    writeln!(
+                        file,
+                        "                    let bytes = readable.read_array((str_len - 1) as usize)?;"
+                    )?;
                     writeln!(
                         file,
                         "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4126,11 +4169,11 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                    if str_len == 0 {{")?;
                     writeln!(file, "                        {}.push(String::new());", target)?;
                     writeln!(file, "                    }} else {{")?;
+                    write_string_length_guard(file, "                        ", "(str_len - 1)", &element_name)?;
                     writeln!(
                         file,
-                        "                        let mut bytes = vec![0u8; (str_len - 1) as usize];"
+                        "                        let bytes = readable.read_array((str_len - 1) as usize)?;"
                     )?;
-                    writeln!(file, "                        readable.read_bytes(&mut bytes)?;")?;
                     writeln!(
                         file,
                         "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4139,8 +4182,7 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
                     writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; str_len];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                    let bytes = readable.read_array(str_len)?;")?;
                     writeln!(
                         file,
                         "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4151,8 +4193,7 @@ fn generate_array_element_read_with_prefix(
             } else {
                 // No flexible versions: always use standard encoding
                 writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
-                writeln!(file, "                let mut bytes = vec![0u8; str_len];")?;
-                writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
+                writeln!(file, "                let bytes = readable.read_array(str_len)?;")?;
                 writeln!(
                     file,
                     "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
@@ -4178,9 +4219,10 @@ fn generate_array_element_read(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
+    java_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", java_name, flexible_versions)
 }
 
 fn generate_field_write(
@@ -5564,5 +5606,44 @@ mod tests {
                 "Expected string to contain '{expected}', but it was {source}"
             );
         }
+    }
+
+    /// The string readers carry Java's `0x7fff` guard with Java's message (the field's
+    /// `camelCaseName()`, plus " element" inside an array), and no reader allocates a
+    /// declared length before the remaining-bytes check: every variable-length read goes
+    /// through `read_array`.
+    #[test]
+    fn test_string_and_tagged_reads_are_bounded() {
+        let source = emit_message(
+            r#"{
+              "type": "request", "name": "StringBoundTest", "validVersions": "0-1", "flexibleVersions": "0+",
+              "fields": [
+                { "name": "Foo", "type": "string", "versions": "0+" },
+                { "name": "Bars", "type": "[]string", "versions": "0+" },
+                { "name": "Tagged", "type": "string", "versions": "1+", "taggedVersions": "1+", "tag": 0 },
+                { "name": "TaggedStruct", "type": "Baz", "versions": "1+", "taggedVersions": "1+", "tag": 1,
+                  "fields": [ { "name": "Qux", "type": "int32", "versions": "1+" } ] }
+              ]
+            }"#,
+            "strings",
+        );
+        for expected in [
+            "string field foo had invalid length {}",
+            "string field bars element had invalid length {}",
+            "string field tagged had invalid length {}",
+        ] {
+            assert!(
+                source.contains(expected),
+                "Expected string to contain '{expected}', but it was {source}"
+            );
+        }
+        assert!(
+            !source.contains("vec![0u8"),
+            "a reader allocates a declared length up front:\n{source}"
+        );
+        assert!(
+            source.contains("let struct_bytes = readable.read_array(size as usize)?;"),
+            "{source}"
+        );
     }
 }

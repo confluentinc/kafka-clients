@@ -465,6 +465,41 @@ fn test_tagged_field_count_rejected_when_exceeding_hard_cap() {
     );
 }
 
+/// Java's string reader rejects a declared length above `0x7fff` before reading
+/// (`MessageDataGenerator.java:653-657`, "string field X had invalid length N"). The
+/// buffer really holds the declared bytes, so only that guard can reject it.
+#[test]
+fn test_tagged_string_longer_than_0x7fff_is_rejected() {
+    let version: i16 = 1;
+    let length: u32 = 0x8000;
+    let mut string_bytes = Vec::new();
+    ByteUtils::write_unsigned_varint(length + 1, &mut string_bytes).unwrap();
+    string_bytes.resize(string_bytes.len() + length as usize, b'a');
+    // One tagged field: `myString` (tag 4), whose payload is the compact string.
+    let mut section = raw_tagged_fields_section(1, &[4, string_bytes.len() as u32]);
+    section.extend_from_slice(&string_bytes);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert_eq!("string field myString had invalid length 32768", e.to_string());
+}
+
+/// A tagged struct's declared size is checked against the remaining bytes before
+/// anything is allocated for it, as Java reads it in place from the buffer.
+#[test]
+fn test_tagged_struct_size_beyond_remaining_bytes_is_rejected() {
+    let version: i16 = 2;
+    // One tagged field: `myTaggedStruct` (tag 8), declaring 1 GB with nothing after it.
+    let section = raw_tagged_fields_section(1, &[8, 1_000_000_000]);
+    let mut buf = message_with_tagged_fields_section(version, &section);
+    let mut message = SimpleExampleMessageData::new();
+    let e = Message::read(&mut message, &mut buf, version).unwrap_err();
+    assert_eq!(
+        "Error reading byte array of 1000000000 byte(s): only 0 byte(s) available",
+        e.to_string()
+    );
+}
+
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.MessageTest#testLongTaggedString")]
 fn test_long_tagged_string() {
