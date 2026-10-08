@@ -51,6 +51,10 @@ impl GroupCoordinatorNode {
     /// [`Error::LocalIllegalArgument`] if `id` is negative, where Java's
     /// `validateId` throws `IllegalArgumentException`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.GroupCoordinatorNode#GroupCoordinatorNode")]
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "Java's subclass constructor builds a Node; the Rust type has no instances (see the type docs)"
+    )]
     pub(crate) fn new(id: i32, host: String, port: i32) -> Result<Node, Error> {
         let id = Self::validate_id(id)?;
         Ok(Node::with_rack_is_fenced_id_string(
