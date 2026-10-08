@@ -244,18 +244,18 @@ only**, one send-batch thread (§A7's send-batching tweak, taken in M11/P3.1) �
 a per-send thread and never a poll loop.
 
 ```
-   .NET (managed)                    │ C ABI │       Rust core (native, per producer)
-   ─────────────                     │       │       ─────────────────────────────────
-   caller thread(s):                 │       │   tokio multi-thread runtime (worker POOL)
-     SYNC  Send → Producer_send, enqueue ─│──────►│     RecordAccumulator (enqueue, returns fast)
-     ASYNC Send → pin + append to  │       │   Sender task (spawned once in _new):
-             the send accumulator   │       │     NetworkClient + ONE async Selector
-   send-batch thread (1 bg, async): │       │       ↕ multiplexes ALL brokers (event-driven)
-     _send_batch(records[]) ───────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
-     unpin, hand futures to the pump │     │
+   .NET (managed)                             │ C ABI │       Rust core (native, per producer)
+   ─────────────                              │       │       ─────────────────────────────────
+   caller thread(s):                          │       │   tokio multi-thread runtime (worker POOL)
+     SYNC  Send → Producer_send, enqueue ─────│──────►│     RecordAccumulator (enqueue, returns fast)
+     ASYNC Send → pin + append to             │       │   Sender task (spawned once in _new):
+             the send accumulator             │       │     NetworkClient + ONE async Selector
+   send-batch thread (1 bg, async):           │       │       ↕ multiplexes ALL brokers (event-driven)
+     _send_batch(records[]) ──────────────────│──────►│   (created in KafkaProducer_new, dropped on _destroy)
+     unpin, hand futures to the pump          │       │
    completion pump (1 bg thread, both paths): │       │
-      get_all / get(sync) ─block_on─►│──────►│
-     ◄── per-message metadata/err ───│◄──────│
+      get_all / get(sync) ─block_on──────────►│──────►│
+     ◄── per-message metadata/err ────────────│◄──────│
    Dispose: drain accumulator → join pump → flush/close
 ```
 

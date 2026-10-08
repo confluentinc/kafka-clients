@@ -186,8 +186,8 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 }
 
 // The sync `IProducer<TKey,TValue>` (sync mirror) is **shipped** (M11/P4), generic-only (M11/P5):
-// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns on acceptance (blocks only on
-// buffer.memory, ≤ max.block.ms); future.Get() = Java send(record).get() (M11/P4.2);
+// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns on acceptance (blocks only while
+// the core waits for metadata or for buffer.memory, ≤ max.block.ms); future.Get() = Java send(record).get() (M11/P4.2);
 // KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, IDeliveryCallback) — Java's second send
 // signature, the callback fired on the send-completion pump thread before Get() returns (M11/P4.2); void Flush() /
 // Close(); IReadOnlyList<PartitionInfo> PartitionsFor(string); IReadOnlyDictionary<MetricName, IMetric>
@@ -558,7 +558,7 @@ divergence, M5/P7; see **Stays sync** below.)
 | Java signal | C# |
 |---|---|
 | **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>` on the async interface, `CancellationToken`; name mirrors Java (no `Async` suffix) |
-| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix). Exception: the producer's `send` yields `AsyncKafkaFuture<RecordMetadata>` (a struct over the `Task<T>`) from its admission `ValueTask` — M11/P3.6, §3 idiom map The sync `IProducer.Send` returns `KafkaFuture<RecordMetadata>` (a blocking `Get()`) — M11/P4.2. |
+| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix). Exception: the producer's `send` yields `AsyncKafkaFuture<RecordMetadata>` (a struct over the `Task<T>`) from its admission `ValueTask` — M11/P3.6, §3 idiom map. The sync `IProducer.Send` returns `KafkaFuture<RecordMetadata>` (a blocking `Get()`) — M11/P4.2. |
 | **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface. The `Task` **replaces** the callback **only when the two carry the same information, at the same point, with the same arity**; where they do not, the callback-taking overload is kept **in addition** to the `Task`. **The test — does the callback deliver payload, ordering, or a signature the `Task` cannot?** If yes, keep both and record the reasoning at the site. Two carve-outs are in force: **(1) `commitAsync(OffsetCommitCallback)`** — the callback delivers the **offsets the commit applied to**, which a `Task` returning `void` cannot express, and `commitAsync` is one half of a Java sync/async **pair** whose other half (`commitSync`) already owns the `Task` mapping (`Commit`, M5/P6) → see the §4 **commit-callback divergence** (M9/P7). **(2) `send(record, Callback)`** — Java's **second** `send` overload *still returns the `Future`* (`Producer.java:86`), so the callback is an **additional** parameter, not an alternative; dropping it removes one of Java's two `send` signatures outright. It also fires at a point no `Task` continuation can occupy: **before** the future's waiters are released (`ProducerBatch.java:303-323`), and with a **-1 placeholder metadata** rather than the fault the `Task` carries (`Callback.java:28-33`) → see the §4 **delivery-callback divergence** (M14/P1). Note this row governs **one-shot** completions only; a **multi-shot registration** (a rebalance listener) is never expressible as a `Task` and is out of its scope entirely. |
 | Non-blocking **getter** | sync **property** |
 | Non-blocking **action**, no completion signal | sync plain **method** |
