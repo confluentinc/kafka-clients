@@ -890,3 +890,44 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
   - "blocks only while `buffer.memory` is full" becomes "blocks only while the core waits for metadata or for `buffer.memory`, up to `max.block.ms`", at every copy.
 
   These are the S6 Actor's first commits, as `fixup!`s of the commits that introduced each text.
+- **Step A, the wording rulings** (fixups, comments and docs only):
+  - `ff064529` (of S1 `742b1911`): `KafkaFuture.cs`.
+  - `c24d2c8f` (of S5a `507ff98e`): `IProducer.cs` (two sites) and `IDeliveryCallback.cs`.
+  - `32a1be52` (of S5b `aab3b7fd`): the F1 diagram re-padded so its borders sit at columns 46/54; the E5 period; and the `dotnet/CLAUDE.md:189-190` copy of the metadata wording.
+  - The re-grep finds no other copy.
+- **S6** `4f643f4f` `perf(dotnet): pipelined sync producer benchmark, ported from Python's main() (M11/P4.2 S6)` (7 files, +603/−101):
+  - `PerfSendHandle` is a struct with `Get()`.
+  - `RunSync` ports Python's `main()`:
+    - a `BlockingCollection` bounded at 2 GiB / message size;
+    - an in-order recorder that counts failures, then drains and joins;
+    - an inline warm-up with a 0.1 s sleep.
+  - `V2SyncProducerBackend` ports `CompatibleProducer`.
+  - The D5 remarks are removed, and the docs define "V2 sync". There is no D14 knob, and `RunAsync` is unchanged.
+  - New `ProducerSyncPipelineTests.cs`: P1, P2 (4 rows), P3, P4, and a send-throws test. In the Actor's 10-mutant sweep, every mutant was caught.
+  - Deviations from Python, each commented at its site:
+    - (a) `CompleteAdding` replaces the loop flag + `get(timeout=1)`;
+    - (b) a send that throws is queued as a failed handle and counted;
+    - (c) the queue's `Add` takes the token;
+    - (d) PerfV2 cancels a send abandoned at termination;
+    - (e) PerfV2's `Close` still flushes;
+    - (f) PerfV3 boxes the `KafkaFuture` into the handle (24 B per send);
+    - (g) the warm-up checks the token.
+  - Gates:
+    - build 0W/0E; unit 3010/TFM, soak 165/TFM, format clean;
+    - perf-unit **47/TFM** (39 + 8);
+    - Release builds of grpc-server, PerfV3 and PerfV2 0W/0E, with format clean on 5 projects;
+    - gRPC `169 passed`, arms 124 / 45, producer 31 + 31 (= S0);
+    - perf integration net10.0 **49** passed / 2 skipped / 0 failed (41 + the 8 new tests, because the target runs the project unfiltered); `Producer_Smoke_Sync` and `Producer_Smoke_Async` passed in a named rerun;
+    - Mode A unchanged.
+- **Critic 93 pass 4** (one spawn; no code modified):
+  - The three wording fixups are exact and minimal.
+  - Every item of the S6 row is present, and timing and counting match Python's `main()`.
+  - Deviations (a)–(g) are all justified.
+  - P1–P4 are non-vacuous and bounded.
+  - `Producer_Smoke_Sync` is still meaningful: it checks the exit code, as Python's smoke does.
+  - **One finding, C93-9 [low]:** `PerfV2/ProducerMain.cs:26-27` and `PerfV3/ProducerMain.cs:25` still said "sync (serial)".
+  - Noted, not filed: (c)'s comment is narrower than the behaviour. `Add` on a cancelled token throws even when the queue has room, so a Ctrl-C during `Send` also leaves the handle in hand uncounted. That is at most one record, and only on a terminated run.
+- **Fix cycle 6:** `7ab8c01a` `fixup! perf(dotnet): pipelined sync producer benchmark, ported from Python's main() (M11/P4.2 S6)`. Both summaries now say "sync (Python `main`) or async (Python `async_main`)". Gates: PerfV2 and PerfV3 Release builds 0W/0E, format clean; 12 comment lines changed.
+- **C93-9 fixup verification:** no findings. Noted, not filed (pre-existing since `0204437a`): the PerfV3 summary lists two start-up steps in a different order from the code.
+- **Pass 4 closed; `COMMENTS.93.md` has 0 open items** (C93-1 to C93-9 are in `COMMENTS.DONE.93.md`).
+- **Loop paused for the user's perf P-2** (§11). Before (serial) = `32a1be52`, S6's parent; after (pipelined) = the main tree, whose code is `7ab8c01a`. Resume after P-2: record the new sync baselines here, then close out.
