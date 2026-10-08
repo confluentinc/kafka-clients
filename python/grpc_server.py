@@ -56,6 +56,9 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
+import chaos_service_pb2_grpc as chpb_grpc  # noqa: E402  (generated)
+# ChaosWorkloadService: chaos-harness workloads run inside this server.
+from grpc_chaos import ChaosWorkloadService  # noqa: E402
 # Error codes generated from kafka_common_ErrorCode_t
 # (python tools/generate_error_code.py). Private plumbing: the servicers stamp the
 # real code on errors of their own making, so the Rust client can tell those
@@ -1508,13 +1511,19 @@ def main():
     # image sets GRPC_HOST=0.0.0.0 so it is reachable from outside the
     # container. GRPC_PORT=0 binds an ephemeral port.
     host = os.environ.get("GRPC_HOST", "127.0.0.1")
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
+    # A chaos workload's RunProducer / RunConsumer stream holds a worker for the
+    # whole run, so the pool must leave room for those plus the unary calls
+    # (StopWorkload among them) that arrive meanwhile. The chaos config rejects
+    # runs whose streams would leave too few free (PYTHON_SERVER_WORKERS in
+    # rust/tests/chaos/config.rs; keep the two equal).
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=64))
     # One store, shared: a producer takes the group metadata its consumers
     # handed out.
     group_metadata = GroupMetadataStore()
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
+    chpb_grpc.add_ChaosWorkloadServiceServicer_to_server(ChaosWorkloadService(), server)
     bound_port = server.add_insecure_port(f"{host}:{port}")
     server.start()
     # The Rust BackendPool waits for "listening" on stderr and parses the
