@@ -1702,6 +1702,44 @@ notes commit.
     the native tests, 2 ignored. All 381 failures were `__grpc_*` multilanguage variants, which cannot
     run on this macOS host (Linux-artifact images).
 
+#### Merge of milestone branch at 75be908e (agent 98)
+
+- **Merge `78378d6a`** (`--no-ff`, exactly `75be908e`). It brings in Phase 3, the `origin/master`
+  `a4b3311e` merge and the admin-track merge.
+  - There was one conflict, in `rules-errata.md`. Both sides had appended independent draft notes:
+    the Phase 5/8 producer notes on this side, the Phase 12 `admin-client.md` §11 note on the other.
+    I kept both, producer notes first.
+  - Everything else auto-merged, including `selector.rs`, `produce_request.rs`, the record files and
+    `PLAN.md`.
+  - The producer structures are intact: `build_accumulator`, the chunked dispatch in
+    `do_send_bytes`, and the F1 layout (cold first-append helper, `#[inline]` hints, 40 B
+    `RecordAppendResult`). None of those files changed in the merge.
+  - §5.1 still has the 11 rows, with the Phase 5 and Phase 7/8 rows still cleared.
+- **Gates.**
+  - `cargo test`: 4508 passed, 3 ignored (lib), plus 36, 8 and 5 (7 ignored).
+  - `format-check` is clean.
+  - `lint --keep-going`: clippy is clean, and lint shows exactly the 11 rows.
+- **Broker runs** (under the lock):
+  - Producer tests in both strategies plus `transactions_bounce_test`, `admin_transactions_test`
+    and `bootstrap_resolution_test`, on 4.2.0: 116 of 117 passed.
+    - All 11 incremental-strategy tests passed.
+    - The failure, `test_transaction_after_transaction_id_expires_but_producer_id_remains`, is
+      sensitive to transactional-id expiry timing under load. It passed when re-run alone.
+  - `producer_transactions_test`, `transactions_bounce_test` and `admin_transactions_test` on
+    `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`: 52 of 52 passed.
+  - Lib `integration_tests::`: 32 of 32 passed.
+- **Throughput re-check** (the Critic 98 harness, 8 interleaved runs, best of 9).
+  - The merged tree measured +4 to +5 % at `do_send_bytes` against both `3957e76f` and the
+    pre-merge head `676ccb05`.
+  - The producer hot path is identical across the merge: the same functions and the same call sets
+    in the disassembly. The difference is the merged test-only `TrackingAllocator`
+    (`test_alloc_tracker.rs`, `#[cfg(test)]`): its new `MAX_ALLOC_SIZE` bookkeeping is inlined into
+    every allocation site of the test binary that hosts the bench.
+  - With the pre-merge tracker swapped into the merged export (`max_allocation` stubbed), the merged
+    tree is +1.2 % (explicit) and +1.9 % (keyed) over `676ccb05` at `do_send_bytes`. That is within
+    the harness's noise at load 4-5.
+  - Production builds do not include the tracker, so the F1 fix is not regressed.
+
 ### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
 
 - ~~KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
