@@ -99,7 +99,12 @@ async fn send_and_receive(
         );
     }
     let receives = selector.completed_receives();
-    let payload = receives.first().expect("No response received from broker").payload().unwrap().to_vec();
+    let payload = receives
+        .first()
+        .expect("No response received from broker")
+        .payload()
+        .unwrap()
+        .to_vec();
     ConcreteResponse::parse_response(&mut ByteBufferAccessor::new(payload), &header).expect("Failed to parse response")
 }
 
@@ -124,11 +129,8 @@ async fn broker_info(ctx: &TestContext) -> BrokerInfo {
         .max_version()
         .min(ApiKeys::METADATA.latest_version());
 
-    let mut builder = metadata_request::Builder::with_topics_allow_auto_topic_creation_version(
-        Some(&[]),
-        false,
-        metadata_version,
-    );
+    let mut builder =
+        metadata_request::Builder::with_topics_allow_auto_topic_creation_version(Some(&[]), false, metadata_version);
     let ConcreteResponse::Metadata(metadata) = send_and_receive(&mut selector, &mut builder, metadata_version, 2).await
     else {
         panic!("Expected Metadata response");
