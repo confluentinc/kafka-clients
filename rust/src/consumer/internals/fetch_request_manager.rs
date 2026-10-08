@@ -2228,6 +2228,46 @@ mod round_trip {
         let _ = topic_id;
     }
 
+    /// Translated from `FetchRequestManagerTest.testFetchResponseWithUnexpectedPartitionIsIgnored`
+    /// (KAFKA-20733, 7c010c7583, as 624ca392ef extended it): only tp0 is
+    /// assigned, and the response also carries tp1, which is not part of the
+    /// fetch session. `FetchSessionHandler` rejects the whole response, so the
+    /// tp0 records are not returned either. The in-flight count is checked
+    /// before and after so the test cannot pass merely because no request was
+    /// ever in flight.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchResponseWithUnexpectedPartitionIsIgnored"
+    )]
+    fn test_fetch_response_with_unexpected_partition_is_ignored() {
+        let (topic_id, ids) = single_topic_id();
+        let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        // Only tp0 is assigned and seeked; tp1 is not part of this fetch session.
+        rt.assign_and_seek(&[tp(0)]);
+
+        let (built, prepared) = rt.build_fetch_requests(0);
+        assert_eq!(1, built.len());
+        assert_eq!(1, rt.mgr.abstract_fetch().nodes_with_pending_fetch_requests.len());
+        assert!(!rt.has_completed_fetches());
+
+        // Respond to the in-flight request with a response that includes an
+        // unexpected partition (tp1) that is not part of the fetch session.
+        let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
+        let response = FullFetchResponse::new()
+            .session_id(FetchMetadata::INVALID_SESSION_ID)
+            .partition(TOPIC, topic_id, 0, Some(build_records(0, 3, 1)), Errors::None, 100, 0)
+            .partition(TOPIC, topic_id, 1, Some(build_records(0, 3, 1)), Errors::None, 100, 0)
+            .build();
+        rt.deliver(*node_id, request_data, response, built[node_id].version());
+
+        // The in-flight request has completed, but FetchSessionHandler rejected
+        // the whole response because of the unexpected partition (tp1), so
+        // nothing is buffered or returned to the consumer.
+        assert!(rt.mgr.abstract_fetch().nodes_with_pending_fetch_requests.is_empty());
+        assert!(!rt.has_completed_fetches());
+        assert!(rt.collect_records().is_empty());
+    }
+
     /// Translated from
     /// `FetchRequestManagerTest.testFetchForgetTopicIdWhenUnassigned`: after a
     /// partition is unassigned and a different one assigned, the next

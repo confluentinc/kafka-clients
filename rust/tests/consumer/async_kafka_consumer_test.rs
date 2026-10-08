@@ -116,3 +116,47 @@ async fn new_consumer_rejects_classic_group_protocol() {
         err
     );
 }
+
+/// Translated from `KafkaConsumerTest.testPauseFlagPreservedForRetainedPartitionOnManualAssignmentChange`
+/// (36aab4fddd), CONSUMER arm (the CLASSIC arm is out of scope,
+/// consumer-threading.md §20): changing a manual assignment keeps the pause
+/// state of a partition that stays assigned, and a re-added partition starts
+/// unpaused. No broker is needed: `assign` / `pause` are applied by the
+/// background task locally.
+#[tokio::test(flavor = "multi_thread")]
+#[doc(
+    alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testPauseFlagPreservedForRetainedPartitionOnManualAssignmentChange"
+)]
+async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_change() {
+    use confluent_kafka::common::TopicPartition;
+    use std::collections::HashSet;
+
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        make_smoke_config(),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("KafkaConsumer::new");
+    let tp0 = TopicPartition::new("test", 0);
+    let tp1 = TopicPartition::new("test", 1);
+
+    // Manually assign two partitions and pause one of them.
+    consumer.assign(vec![tp0.clone(), tp1.clone()]).await.unwrap();
+    consumer.pause(std::slice::from_ref(&tp0)).await.unwrap();
+    assert_eq!(HashSet::from([tp0.clone()]), consumer.paused());
+
+    // Change the assignment while keeping tp0 assigned.
+    consumer.assign(vec![tp0.clone()]).await.unwrap();
+    assert_eq!(HashSet::from([tp0.clone()]), consumer.assignment());
+    assert_eq!(
+        HashSet::from([tp0.clone()]),
+        consumer.paused(),
+        "The pause state of the partition that remains assigned must be preserved"
+    );
+
+    // A partition that is (re)added to the assignment starts unpaused.
+    consumer.assign(vec![tp0.clone(), tp1]).await.unwrap();
+    assert_eq!(HashSet::from([tp0]), consumer.paused());
+
+    consumer.close().await.expect("close");
+}

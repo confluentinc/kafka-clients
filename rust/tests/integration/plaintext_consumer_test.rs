@@ -1557,3 +1557,46 @@ async fn poll_count(consumer: &mut BytesConsumer, at_least: usize, budget: Durat
     }
     count
 }
+
+/// Translates Java's `testAsyncConsumerUnsubscribeDoesNotCommitOffsetsWithAutoCommitEnabled`
+/// (KAFKA-20119, 40e9fcd742). The `testClassicConsumer...` twin is out of scope
+/// (classic protocol, consumer-threading.md §20).
+///
+/// `unsubscribe()` does not commit offsets even with `enable.auto.commit`
+/// enabled: a second consumer in the same group sees no committed offset after
+/// the first one consumed records and unsubscribed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commit_enabled() {
+    let num_records = 10;
+    let mut ctx = TestContext::new(cluster_config_kip848()).await;
+    let topic = ctx.topic("topic");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let group_id = ctx.group_id("unsubscribe-no-commit-test");
+    let overrides = [("enable.auto.commit", "true")];
+
+    let producer = build_producer(&ctx);
+    // Consumer 1: subscribe, consume records, then unsubscribe (without an
+    // explicit commit).
+    let mut consumer1 = make_consumer(&ctx, &group_id, &overrides);
+    create_topic(consumer1.as_mut(), &topic, 1).await;
+    send_records(&producer, &tp, num_records, current_time_ms()).await;
+    producer.close().await.expect("producer close");
+
+    consumer1.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+    consume_records(consumer1.as_mut(), num_records).await;
+    // Unsubscribe - this should NOT commit offsets even though auto-commit is
+    // enabled.
+    consumer1.unsubscribe().await.expect("unsubscribe");
+    consumer1.close().await.expect("consumer1 close");
+
+    // Consumer 2: use the same group id to check the committed offsets.
+    let mut consumer2 = make_consumer(&ctx, &group_id, &overrides);
+    consumer2.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+    let committed = consumer2.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    assert_eq!(
+        None,
+        committed.get(&tp),
+        "unsubscribe() should not commit offsets even when auto-commit is enabled"
+    );
+    consumer2.close().await.expect("consumer2 close");
+}

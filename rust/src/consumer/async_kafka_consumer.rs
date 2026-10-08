@@ -7445,6 +7445,137 @@ mod tests {
         }
     }
 
+    /// A stand-in background task for the 4.4 tests below: it applies the
+    /// subscription, unsubscribe and pause events to the shared
+    /// `SubscriptionState` and completes them, as Java's
+    /// `complete*EventSuccessfully` mock answers do, and records the name of
+    /// every event it sees.
+    fn apply_and_complete_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+    ) -> (tokio::task::JoinHandle<()>, Arc<Mutex<Vec<&'static str>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_task = Arc::clone(&seen);
+        let task = tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                seen_in_task.lock().unwrap().push(env.event.type_name());
+                match &env.event {
+                    ApplicationEvent::TopicSubscriptionChange { topics, listener, .. } => {
+                        subscriptions
+                            .lock()
+                            .unwrap()
+                            .subscribe_with_topics(topics.clone(), listener.clone())
+                            .unwrap();
+                    },
+                    ApplicationEvent::Unsubscribe { .. } => subscriptions.lock().unwrap().unsubscribe(),
+                    ApplicationEvent::PausePartitions { partitions, .. } => {
+                        let mut subs = subscriptions.lock().unwrap();
+                        for tp in partitions {
+                            subs.pause(tp).unwrap();
+                        }
+                    },
+                    _ => {},
+                }
+                complete_event(&env);
+            }
+        });
+        (task, seen)
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPauseFlagPreservedForRetainedPartitionAcrossRebalance`
+    /// (36aab4fddd): a paused partition stays paused across a reconciliation
+    /// that keeps it assigned, and a newly added one starts unpaused.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testPauseFlagPreservedForRetainedPartitionAcrossRebalance"
+    )]
+    async fn test_pause_flag_preserved_for_retained_partition_across_rebalance() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let subscriptions = Arc::clone(&handles.subscriptions);
+        let (drainer, _seen) = apply_and_complete_events(handles.app_event_rx, Arc::clone(&subscriptions));
+        let tp0 = TopicPartition::new("topic1", 0);
+        let tp1 = TopicPartition::new("topic1", 1);
+        let tp2 = TopicPartition::new("topic1", 2);
+
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+        consumer
+            .subscribe_with_topics_listener(vec!["topic1".to_string()], Arc::new(NoopListener))
+            .await
+            .unwrap();
+
+        // Simulate a rebalance that reconciled a new assignment of tp0 and tp1.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_subscribed_awaiting_callback(&[tp0.clone(), tp1.clone()], &[tp0.clone(), tp1.clone()])
+            .unwrap();
+        assert_eq!(HashSet::from([tp0.clone(), tp1.clone()]), consumer.assignment());
+
+        // Pause tp0, the partition that will be retained across the rebalance.
+        consumer.pause(std::slice::from_ref(&tp0)).await.unwrap();
+        assert_eq!(HashSet::from([tp0.clone()]), consumer.paused());
+
+        // Reconcile a new assignment that retains tp0, revokes tp1, and adds tp2.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_subscribed_awaiting_callback(&[tp0.clone(), tp2.clone()], std::slice::from_ref(&tp2))
+            .unwrap();
+
+        // tp0 is retained across the rebalance, so its pause state must be
+        // preserved. The newly added tp2 starts unpaused.
+        assert_eq!(HashSet::from([tp0.clone(), tp2]), consumer.assignment());
+        assert_eq!(
+            HashSet::from([tp0]),
+            consumer.paused(),
+            "Partition that remain assigned should keep the pause state"
+        );
+        drainer.abort();
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testUnsubscribeDoesNotCommitOffsetsEvenWithAutoCommitEnabled`
+    /// (KAFKA-20119, 40e9fcd742; a5137f7c38 only stubs Java's close-time
+    /// commit, which this fixture's drainer completes anyway): with
+    /// `enable.auto.commit` on, `unsubscribe()` sends an `Unsubscribe` event and
+    /// no commit event of any kind.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testUnsubscribeDoesNotCommitOffsetsEvenWithAutoCommitEnabled"
+    )]
+    async fn test_unsubscribe_does_not_commit_offsets_even_with_auto_commit_enabled() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        assert!(
+            consumer.auto_commit_enabled,
+            "the fixture's enable.auto.commit is Java's default, true"
+        );
+        let (drainer, seen) = apply_and_complete_events(handles.app_event_rx, Arc::clone(&handles.subscriptions));
+
+        // Subscribe to a topic.
+        consumer.subscribe_with_topics(vec!["topic".to_string()]).await.unwrap();
+        // Focus on the unsubscribe behavior.
+        seen.lock().unwrap().clear();
+
+        // This should NOT commit offsets even though auto-commit is enabled.
+        consumer.unsubscribe().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert!(events.contains(&"Unsubscribe"), "UnsubscribeEvent was sent: {events:?}");
+        for commit in ["CommitSync", "CommitAsync", "CommitOnClose"] {
+            assert!(!events.contains(&commit), "no {commit} event despite auto-commit: {events:?}");
+        }
+        assert!(consumer.subscription().is_empty());
+        drainer.abort();
+    }
+
     /// Java: `testSubscribeGeneratesEvent`.
     #[tokio::test]
     async fn subscribe_generates_topic_subscription_change_event() {

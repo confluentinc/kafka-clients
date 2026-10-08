@@ -252,7 +252,24 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assign")]
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error>;
 
-    /// Translates Java's `void unsubscribe()`.
+    /// Unsubscribe from topics currently subscribed with
+    /// [`Self::subscribe_with_topics`] or [`Self::subscribe_with_pattern`].
+    /// This also clears any partitions directly assigned through
+    /// [`Self::assign`].
+    ///
+    /// **Note:** Unlike [`Self::close`], this method does not commit the
+    /// pending offsets before unsubscribing, even if `enable.auto.commit` is
+    /// enabled. To avoid duplicate processing upon re-joining, it is
+    /// recommended to explicitly call [`Self::commit_sync`] before invoking this
+    /// method.
+    ///
+    /// Translates Java's `void unsubscribe()` (javadoc from `KafkaConsumer`,
+    /// KAFKA-20119).
+    ///
+    /// # Errors
+    ///
+    /// Returns a Kafka error for any other unrecoverable errors (e.g. rebalance
+    /// callback errors).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#unsubscribe")]
     async fn unsubscribe(&mut self) -> Result<(), Error>;
 
@@ -476,11 +493,38 @@ where
 
     // ── Pause / resume (async — Java: addAndGet on PausePartitions / ResumePartitions) ──
 
-    /// Translates Java's `void pause(Collection<TopicPartition>)`.
+    /// Suspend fetching from the requested partitions. Future calls to
+    /// [`Self::poll`] will not return any records from these partitions until
+    /// they have been resumed using [`Self::resume`]. Note that this method
+    /// does not affect partition subscription. In particular, it does not cause
+    /// a group rebalance when automatic assignment is used.
     ///
-    /// Async because Java's pause calls
+    /// The pause state is preserved across a rebalance for partitions that
+    /// remain assigned to this consumer, but it is lost for partitions that are
+    /// revoked. Which partitions are revoked depends on the group protocol in
+    /// use (see [`ConsumerConfig::GROUP_PROTOCOL_CONFIG`]):
+    ///
+    /// - Classic group protocol: the behavior depends on the assignor
+    ///   configured in `partition.assignment.strategy`: eager assignors (e.g.
+    ///   `RangeAssignor`, `RoundRobinAssignor`) revoke all partitions on every
+    ///   rebalance (pause state is not preserved); cooperative assignors (e.g.
+    ///   `CooperativeStickyAssignor`) only revoke the partitions that are
+    ///   reassigned to another consumer (pause state preserved for partitions
+    ///   that remain assigned). This client does not implement the classic
+    ///   protocol yet.
+    /// - Consumer group protocol (KIP-848): only revokes partitions that are
+    ///   reassigned to another consumer (pause state preserved for partitions
+    ///   that remain assigned).
+    ///
+    /// Translates Java's `void pause(Collection<TopicPartition>)` (javadoc
+    /// from `KafkaConsumer`, 36aab4fddd). Async because Java's pause calls
     /// `applicationEventHandler.addAndGet(new PausePartitionsEvent(...))`
-    /// which blocks (`AsyncKafkaConsumer.java:1279`).
+    /// which blocks (`AsyncKafkaConsumer.java:1380`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an illegal-state error if any of the provided partitions are not
+    /// currently assigned to this consumer.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#pause")]
     async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
