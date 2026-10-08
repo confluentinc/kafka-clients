@@ -1230,12 +1230,16 @@ impl CommitRequestManager {
         // buffers while its completion callbacks run (removal from the buffer is itself one of those
         // callbacks). Chaining onto it would complete the new request immediately with the stale outcome
         // instead of sending it (e.g. re-failing the retry of a STALE_MEMBER_EPOCH error in a tight loop).
-        // (KAFKA-20765.) In Rust the forwarder completes the request's sender
-        // and only then takes the state lock to remove it from
-        // `inflight_offset_fetches`, so a completed request is visible here in
-        // that window; chaining onto it would hand this caller's sender to a
-        // driver that may already have fanned its result out, and the dropped
-        // sender would fail this caller instead of sending its request.
+        // (KAFKA-20765.) The filter is Java's, kept for faithfulness. In Rust
+        // the case is not reachable today: the response forwarder completes the
+        // request's sender and removes it from `inflight_offset_fetches` with no
+        // `.await` in between, and the forwarder, the retry driver and every
+        // production `fetch_offsets` caller run on the consumer's single-threaded
+        // bg runtime, so no `fetch_offsets` can observe a completed request in a
+        // buffer. Should either of those change, chaining onto a completed
+        // request would hand this caller's sender to a driver that may already
+        // have fanned its result out, and the dropped sender would fail the
+        // caller; the filter keeps the dedup correct then.
         let chained_public_senders = {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             let existing = guard
@@ -6100,9 +6104,11 @@ mod tests {
     }
 
     /// KAFKA-20765's dedup guard on its own: a request whose future already
-    /// completed but that is still in `inflight_offset_fetches` (the window
-    /// between the forwarder completing it and removing it) is not a
-    /// duplicate. A new fetch for the same partitions is enqueued as its own
+    /// completed but that is still in `inflight_offset_fetches` is not a
+    /// duplicate. Production cannot reach that state today (the forwarder
+    /// completes and removes the request with no `.await` in between, on the
+    /// single-threaded bg runtime), so the test builds it by hand to pin
+    /// Java's filter. A new fetch for the same partitions is enqueued as its own
     /// request rather than chained onto the completed one, whose driver may
     /// already have fanned its result out (Java's `!r.future.isDone()` filter,
     /// `CommitRequestManager.java:1431-1434`).

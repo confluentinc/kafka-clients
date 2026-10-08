@@ -1227,9 +1227,10 @@ Phase 4 completion notes (agent 94):
   - The `onHeartbeatSuccess` IllegalArgument message names the error the way Java's `%s` does
     (`UNKNOWN_MEMBER_ID`), not the Rust Debug name.
   - KAFKA-20765 in Rust. The retry driver re-enqueues its retry directly, so Java's spin cannot happen.
-    But the same window exists: the forwarder completes the sender before it removes the request from
-    `inflight_offset_fetches`, and a `fetch_offsets` arriving in between chained onto a driver that might
-    already have fanned its result out. The `!is_done()` filter closes it.
+    The `!is_done()` filter is ported for faithfulness and is defensive: a completed request cannot be
+    seen in a buffer today, because the forwarder completes and removes it with no `.await` in between,
+    on the single-threaded bg runtime that also runs every `fetch_offsets` caller. (Corrected after
+    Critic 99 L1; the first wording claimed the window was reachable.)
   - Heartbeat wake: the forwarder pokes `event_notify` (the application-event `Notify`, never
     `WakeupTrigger`) after it queues a completion. Before, while a request was in flight, a response
     could wait up to the heartbeat interval to be drained.
