@@ -40,8 +40,8 @@ use confluent_kafka::admin::{
     LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
     PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UnregisterControllerOptions,
+    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
@@ -624,6 +624,16 @@ pub trait AdminBackend {
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
+    ) -> Result<(), Error>;
+
+    /// Unregister the controller `controller_id` (KAFKA-20395).
+    ///
+    /// Same single-void-future shape as [`AdminBackend::abort_transaction`]:
+    /// `UnregisterControllerResult` exposes only `all()`.
+    async fn unregister_controller(
+        &self,
+        controller_id: i32,
+        options: UnregisterControllerOptions,
     ) -> Result<(), Error>;
 
     /// List the cluster's transactions, keyed by the broker that reported them.
@@ -1753,6 +1763,18 @@ impl AdminBackend for RustNativeAdmin {
         self.admin
             .force_terminate_transaction_with_options(transactional_id, options)
             .result()
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
+    }
+
+    async fn unregister_controller(
+        &self,
+        controller_id: i32,
+        options: UnregisterControllerOptions,
+    ) -> Result<(), Error> {
+        self.admin
+            .unregister_controller_with_options(controller_id, options)
+            .all()
             .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }

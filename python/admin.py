@@ -2988,6 +2988,14 @@ class _AdminBase:
                     int(spec.producer_epoch), int(spec.coordinator_epoch), ms, cb),
                 self._resolve_void, self._free_void)
 
+    def _unregister_controller_spec(self, controller_id, timeout):
+        # No result handle: Java's UnregisterControllerResult exposes only
+        # all() -> KafkaFuture<Void>, so success is a null error.
+        ms = _ms(timeout)
+        return (lambda cb: _lib.Admin_unregister_controller_async(
+                    self._h, int(controller_id), ms, cb),
+                self._resolve_void, self._free_void)
+
     def _force_terminate_transaction_spec(self, transactional_id, timeout):
         # No result handle either: TerminateTransactionResult exposes only
         # result() -> KafkaFuture<Void>.
@@ -3004,6 +3012,18 @@ class _MockAdminClientMixin:
         """Make the next ``number_of_requests`` RPCs fail with a timeout
         (Java ``MockAdminClient.timeoutNextRequest``)."""
         e = _lib.MockAdminClient_timeout_next_request(self._h, number_of_requests)
+        if e:
+            raise KafkaError._from_c(e)
+
+    def set_using_raft_controller(self, using_raft_controller):
+        """Set whether the mock runs a KRaft (Raft) controller quorum, which
+        decides whether ``unregister_controller`` succeeds (``True``) or raises
+        an ``UNSUPPORTED_VERSION`` error (``False``, the default).
+
+        Mirrors ``MockAdminClient.Builder.usingRaftController``, which Java
+        takes at construction time.
+        """
+        e = _lib.MockAdminClient_set_using_raft_controller(self._h, bool(using_raft_controller))
         if e:
             raise KafkaError._from_c(e)
 
@@ -3586,6 +3606,22 @@ class Admin(_AdminBase):
         self._check_closed()
         return self._run_sync(*self._abort_transaction_spec(spec, timeout))
 
+    def unregister_controller(self, controller_id, timeout=None):
+        """Unregister the controller ``controller_id`` (Java
+        ``Admin.unregisterController``, KAFKA-20395, unstable). Returns
+        ``None``.
+
+        Java's ``UnregisterControllerResult`` exposes only
+        ``all() -> KafkaFuture<Void>``, so there is nothing to return and a
+        failure raises: ``REQUEST_TIMED_OUT`` if the operation did not finish
+        in time, ``UNSUPPORTED_VERSION`` if the cluster is too old,
+        ``CONTROLLER_ID_NOT_REGISTERED`` if the id is not registered,
+        ``NOT_CONTROLLER`` if the request missed the active controller, and
+        ``INVALID_REQUEST`` for the active controller's own id.
+        """
+        self._check_closed()
+        return self._run_sync(*self._unregister_controller_spec(controller_id, timeout))
+
     def force_terminate_transaction(self, transactional_id, timeout=None):
         """Forcefully terminate the ongoing transaction of ``transactional_id``,
         which Java implements by fencing the producer. Returns ``None``.
@@ -3887,6 +3923,10 @@ class AsyncAdmin(_AdminBase):
     async def abort_transaction(self, spec, timeout=None):
         self._check_closed()
         return await self._run_async(*self._abort_transaction_spec(spec, timeout))
+
+    async def unregister_controller(self, controller_id, timeout=None):
+        self._check_closed()
+        return await self._run_async(*self._unregister_controller_spec(controller_id, timeout))
 
     async def force_terminate_transaction(self, transactional_id, timeout=None):
         self._check_closed()

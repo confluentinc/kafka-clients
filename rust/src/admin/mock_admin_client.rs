@@ -57,7 +57,8 @@ use crate::admin::{
     NewPartitions, NewTopic, OffsetSpec, OpType, PartitionReassignment, RecordsToDelete,
     RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions,
     RenewDelegationTokenResult, ReplicaInfo, ReplicaLogDirInfo, SupportedVersionRange, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, UpdateFeaturesOptions, UpdateFeaturesResult, UpgradeType,
+    TopicMetadataAndConfig, UnregisterControllerOptions, UnregisterControllerResult, UpdateFeaturesOptions,
+    UpdateFeaturesResult, UpgradeType,
 };
 use crate::admin::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
@@ -153,6 +154,10 @@ struct State {
     // Maximum supported feature levels, keyed by feature name (mirrors Java's
     // `maxSupportedFeatureLevels`).
     max_supported_feature_levels: HashMap<String, i16>,
+    // Whether the mocked cluster runs a KRaft (Raft) controller quorum (mirrors
+    // Java's `usingRaftController`, `false` unless the builder sets it). Read by
+    // `unregister_controller`.
+    using_raft_controller: bool,
 }
 
 /// An in-memory [`Admin`] implementation for tests.
@@ -242,6 +247,7 @@ impl MockAdminClient {
                 feature_levels: HashMap::new(),
                 min_supported_feature_levels: HashMap::new(),
                 max_supported_feature_levels: HashMap::new(),
+                using_raft_controller: false,
             }),
         })
     }
@@ -262,6 +268,16 @@ impl MockAdminClient {
         state.feature_levels = feature_levels;
         state.min_supported_feature_levels = min_supported_feature_levels;
         state.max_supported_feature_levels = max_supported_feature_levels;
+    }
+
+    /// Sets whether the mocked cluster runs a KRaft (Raft) controller quorum,
+    /// which decides whether `unregister_controller` succeeds.
+    ///
+    /// Mirrors Java's `MockAdminClient.Builder.usingRaftController` (default
+    /// `false`). Like [`set_feature_levels`](Self::set_feature_levels), a Java
+    /// builder option becomes a setter on the constructed mock.
+    pub fn set_using_raft_controller(&self, using_raft_controller: bool) {
+        self.state.lock().unwrap().using_raft_controller = using_raft_controller;
     }
 
     // --- seeding mutators ---------------------------------------------------
@@ -988,6 +1004,23 @@ impl Admin for MockAdminClient {
             result.insert(topic_partition.clone(), handle.future());
         }
         DescribeProducersResult::new(result)
+    }
+
+    fn unregister_controller_with_options(
+        &self,
+        _controller_id: i32,
+        _options: UnregisterControllerOptions,
+    ) -> UnregisterControllerResult {
+        // Java's `MockAdminClient.unregisterController` (KAFKA-20395): a Raft
+        // controller quorum succeeds at once; otherwise the future fails with
+        // `new UnsupportedVersionException("")` — an empty message, kept verbatim.
+        let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+        if self.state.lock().unwrap().using_raft_controller {
+            handle.complete(());
+        } else {
+            handle.complete_with_error(Error::unsupported_version(""));
+        }
+        UnregisterControllerResult::new(handle.future())
     }
 
     fn abort_transaction_with_options(
@@ -2086,6 +2119,31 @@ mod tests {
         result.values()["feature"].get().await
     }
 
+    /// Java's `MockAdminClient.unregisterController` without a Raft controller
+    /// (the builder default): `new UnsupportedVersionException("")`.
+    #[tokio::test]
+    async fn mock_unregister_controller_without_raft_controller_is_unsupported() {
+        let mock = admin();
+        let err = mock.unregister_controller(1).all().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert_eq!(err.message(), "");
+    }
+
+    /// With `usingRaftController(true)` the future is already completed.
+    #[tokio::test]
+    async fn mock_unregister_controller_with_raft_controller_succeeds() {
+        let mock = admin();
+        mock.set_using_raft_controller(true);
+        let result = mock.unregister_controller_with_options(1, UnregisterControllerOptions::new());
+        assert!(result.all().is_done());
+        result.all().get().await.unwrap();
+        // Flipping it back restores the unsupported answer.
+        mock.set_using_raft_controller(false);
+        assert_eq!(
+            mock.unregister_controller(1).all().get().await.unwrap_err().error(),
+            Errors::UnsupportedVersion
+        );
+    }
     #[tokio::test]
     async fn mock_describe_features_returns_seeded_ranges() {
         let mock = admin_with_features();

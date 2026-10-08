@@ -260,6 +260,7 @@ using confluent::kafka::test::FenceProducersEntry;
 using confluent::kafka::test::FenceProducersRequest;
 using confluent::kafka::test::FenceProducersResponse;
 using confluent::kafka::test::ForceTerminateTransactionRequest;
+using confluent::kafka::test::UnregisterControllerRequest;
 using confluent::kafka::test::ListTransactionsEntry;
 using confluent::kafka::test::ListTransactionsRequest;
 using confluent::kafka::test::ListTransactionsResponse;
@@ -4151,6 +4152,24 @@ class AdminServiceImpl final : public AdminService::Service {
     const std::string id = req->transactional_id();
     kafka_common_Error_t* err = kafka_admin_AdminClient_force_terminate_transaction(
         admin, id.c_str(), timeout_ms(*req));
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  // -- Controller registration (Milestone 16, KAFKA-20395) ---------------------
+  //
+  // unregister_controller has no result handle either: UnregisterControllerResult
+  // exposes only all(), so success is a null return onto the shared StatusResponse.
+
+  grpc::Status UnregisterController(grpc::ServerContext*, const UnregisterControllerRequest* req,
+                                    StatusResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_common_Error_t* err = kafka_admin_AdminClient_unregister_controller(
+        admin, req->controller_id(), timeout_ms(*req));
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
