@@ -159,7 +159,7 @@ pub(crate) struct MembershipInner {
     /// (`transition_to_stale`) is in flight. Mirrors the lifetime of
     /// Java's `staleMemberAssignmentRelease` `CompletableFuture` between
     /// its creation in `transitionToStale()` and its `whenComplete`
-    /// firing (`AbstractMembershipManager.java:791-806`). While this is
+    /// firing (`AbstractMembershipManager.java:839-854`). While this is
     /// `true`, `maybe_rejoin_stale_member` must NOT transition STALE →
     /// JOINING — it records the intent in
     /// [`Self::stale_rejoin_requested`] and the release-completion path
@@ -733,7 +733,7 @@ impl AbstractMembershipManager {
             // earlier Rust form gated the clear on `state == Unsubscribed`,
             // which leaked the flag when polling while in-group (observable
             // via `subscription_updated()` staying true) — diverging from
-            // Java. (`AbstractMembershipManager.java:491`).
+            // Java. (`AbstractMembershipManager.java:552`).
             let was_updated = guard.subscription_updated;
             guard.subscription_updated = false;
             was_updated && guard.state == MemberState::Unsubscribed
@@ -847,7 +847,7 @@ impl AbstractMembershipManager {
                 if guard.is_poll_timer_expired {
                     // Java transitions to STALE here via `transitionToStale()`,
                     // which also schedules the onPartitionsLost assignment
-                    // release (`AbstractMembershipManager.java:791-806`). The
+                    // release (`AbstractMembershipManager.java:839-854`). The
                     // release is async (it awaits the §31 listener) and cannot
                     // run inside this sync method; the concrete
                     // `ConsumerMembershipManager::transition_to_stale` performs
@@ -869,7 +869,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `maybeRejoinStaleMember()`
-    /// (`AbstractMembershipManager.java:776-783`). Resets the
+    /// (`AbstractMembershipManager.java:823-830`). Resets the
     /// `isPollTimerExpired` flag; if the member is currently STALE,
     /// transitions it to JOINING so the next heartbeat re-joins the
     /// group with `memberEpoch=0`.
@@ -903,7 +903,7 @@ impl AbstractMembershipManager {
                 // `transition_to_stale` has not completed yet. Java chains
                 // `transitionToJoining` onto the in-flight
                 // `staleMemberAssignmentRelease` future
-                // (`AbstractMembershipManager.java:781`); we record the
+                // (`AbstractMembershipManager.java:828`); we record the
                 // intent and let the release-completion path perform the
                 // transition once the callback returns. The member stays
                 // STALE in the meantime (it must not clear its assignment
@@ -971,7 +971,7 @@ impl AbstractMembershipManager {
     ///    completed future without enqueueing anything. Without this
     ///    guard the bg task would hang forever awaiting an ack that no
     ///    one will send (Phase 10's app-side drain only invokes the
-    ///    listener when one exists). See `ConsumerMembershipManager.java:352-383`.
+    ///    listener when one exists). See `ConsumerMembershipManager.java:320-352`.
     /// 2. Create a fresh `oneshot::channel`.
     /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
     ///    carrying the sender half.

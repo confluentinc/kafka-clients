@@ -56,7 +56,7 @@ use super::{PollResult, UnsentRequest};
 ///
 /// Mirrors the Java `AbstractHeartbeatRequestManager.makeHeartbeatRequest`
 /// `whenComplete((response, exception) -> { onResponse / onFailure })`
-/// dispatch (`AbstractHeartbeatRequestManager.java:292-310`), but
+/// dispatch (`AbstractHeartbeatRequestManager.java:315-329`), but
 /// defers the state-update to the next bg-task `poll()` cycle. The
 /// rationale (per Phase 12.5 PLAN §"2. consumer_heartbeat_request_manager"
 /// "Structural decision"): the success path calls
@@ -76,7 +76,7 @@ pub(crate) enum PendingHeartbeatCompletion {
         /// metrics sensor (`recordRequestLatency`) when the drain applies it.
         /// Java records this in the `whenComplete` lambda whenever a response
         /// arrives, regardless of the response's error code
-        /// (`AbstractHeartbeatRequestManager.java:299`).
+        /// (`AbstractHeartbeatRequestManager.java:323`).
         request_latency_ms: i64,
     },
     /// Transport-level failure (network error, in-flight cancellation,
@@ -404,9 +404,9 @@ impl ConsumerHeartbeatRequestManager {
     /// [`PendingHeartbeatCompletion`] channel — mirroring Java's
     /// `AbstractHeartbeatRequestManager.makeHeartbeatRequest`'s
     /// `whenComplete((response, exception) -> ...)` lambda
-    /// (`AbstractHeartbeatRequestManager.java:295-304`).
+    /// (`AbstractHeartbeatRequestManager.java:320-328`).
     ///
-    /// If `ignore_response` is true (Java parity at line 309 — the
+    /// If `ignore_response` is true (Java parity at line 317 — the
     /// LEAVING / poll-timer-expired path), the forwarder drops the
     /// completion silently instead of enqueueing it. Java's
     /// `logResponse(request)` path also drops the response side-effect
@@ -421,7 +421,7 @@ impl ConsumerHeartbeatRequestManager {
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let tx = self.pending_completion_tx.clone();
         // For the `logResponse`/ignore path, latency must still be recorded
-        // (Java `AbstractHeartbeatRequestManager.java:311`). The normal path
+        // (Java `AbstractHeartbeatRequestManager.java:335`). The normal path
         // records it via the drained envelope, so the metrics manager is only
         // cloned for the ignore path.
         let ignore_path_metrics = if ignore_response {
@@ -466,7 +466,7 @@ impl ConsumerHeartbeatRequestManager {
                 },
             };
             // `ignore_response` mirrors Java's `logResponse(request)`
-            // path (`AbstractHeartbeatRequestManager.java:307-319`):
+            // path (`AbstractHeartbeatRequestManager.java:332-345`):
             // log the outcome but do NOT drive the consumer state
             // machinery. We drop the envelope outright; the response
             // future itself was already resolved (the forwarder
@@ -474,7 +474,7 @@ impl ConsumerHeartbeatRequestManager {
             // already been unblocked.
             if ignore_response {
                 // Java `logResponse`: record latency for the arrived response
-                // (`AbstractHeartbeatRequestManager.java:311`), then drop the
+                // (`AbstractHeartbeatRequestManager.java:335`), then drop the
                 // state-driving side-effect.
                 if let (Some(metrics_manager), PendingHeartbeatCompletion::Response { request_latency_ms, .. }) =
                     (ignore_path_metrics.as_ref(), &completion)
@@ -521,7 +521,7 @@ impl ConsumerHeartbeatRequestManager {
             match completion {
                 PendingHeartbeatCompletion::Response { response, completion_time_ms, request_latency_ms } => {
                     // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
-                    // before `onResponse` (`AbstractHeartbeatRequestManager.java:299-300`).
+                    // before `onResponse` (`AbstractHeartbeatRequestManager.java:323-324`).
                     if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
                         metrics_manager.record_request_latency(request_latency_ms);
                     }
@@ -536,7 +536,7 @@ impl ConsumerHeartbeatRequestManager {
 
     /// Dispatch a `ConsumerGroupHeartbeatResponse` body to the
     /// success or error path. Mirrors Java's `onResponse(R response,
-    /// long currentTimeMs)` (`AbstractHeartbeatRequestManager.java:340-348`).
+    /// long currentTimeMs)` (`AbstractHeartbeatRequestManager.java:365-380`).
     fn on_response(&mut self, response: &ConsumerGroupHeartbeatResponse, completion_time_ms: i64) {
         let error = response.error();
         if error == Errors::None {
@@ -562,7 +562,7 @@ impl ConsumerHeartbeatRequestManager {
         // that Java would re-send. The broker would then assume the
         // consumer is still using stale subscription state.
         //
-        // Java reference: `AbstractHeartbeatRequestManager.java:356`
+        // Java reference: `AbstractHeartbeatRequestManager.java:387`
         // (`resetHeartbeatState();` runs at the top of `onErrorResponse`,
         // before `heartbeatRequestState.onFailedAttempt(currentTimeMs)`
         // and the per-error switch).
@@ -571,9 +571,9 @@ impl ConsumerHeartbeatRequestManager {
         // the consumer-specific extras.
         //
         // Java: `String errorMessage = errorMessageForResponse(response);`
-        // (`AbstractHeartbeatRequestManager.java:353`), whose consumer
+        // (`AbstractHeartbeatRequestManager.java:384`), whose consumer
         // implementation is `return response.data().errorMessage();`
-        // (`ConsumerHeartbeatRequestManager.java:195-197`). It is the
+        // (`ConsumerHeartbeatRequestManager.java:197-199`). It is the
         // BROKER-supplied diagnostic and is nullable — for several codes
         // (`UNSUPPORTED_ASSIGNOR`, `INVALID_REGULAR_EXPRESSION`, and every
         // unknown code) it is the only information available about what the
@@ -588,7 +588,7 @@ impl ConsumerHeartbeatRequestManager {
             HeartbeatErrorAction::DelegateToSpecific => self
                 .handle_specific_error_in_response(error, error_message, completion_time_ms)
                 .unwrap_or_else(|| {
-                    // Java: `AbstractHeartbeatRequestManager.java:435-441` —
+                    // Java: `AbstractHeartbeatRequestManager.java:481-487` —
                     // the `default:` arm of `onErrorResponse`'s switch
                     // calls `handleSpecificExceptionInResponse(...)`; if
                     // that returns false (no consumer-specific handler
@@ -606,7 +606,7 @@ impl ConsumerHeartbeatRequestManager {
                     // Java: `handleFatalFailure(error.exception(errorMessage))`
                     // — `Errors.exception(String)` falls back to the code's own
                     // default message when the broker sent none
-                    // (`Errors.java:462-469`).
+                    // (`Errors.java:468-475`).
                     HeartbeatErrorAction::Fatal(match error_message {
                         Some(message) => Error::with_message(error, message),
                         None => Error::new(error),
@@ -618,13 +618,13 @@ impl ConsumerHeartbeatRequestManager {
             HeartbeatErrorAction::Handled => {},
             HeartbeatErrorAction::Fenced => {
                 // Java: `membershipManager().transitionToFenced()`
-                // (`AbstractHeartbeatRequestManager.java:411-427` —
+                // (`AbstractHeartbeatRequestManager.java:442-458` —
                 // FENCED_MEMBER_EPOCH and UNKNOWN_MEMBER_ID arms).
                 // The fence is treated as an INTERNAL state-machine
                 // event: Java does NOT call
                 // `backgroundEventHandler.add(new ErrorEvent(...))`
                 // here (compare with `handleFatalFailure` at
-                // `:455-458` which does emit an ErrorEvent). The
+                // `:501-504` which does emit an ErrorEvent). The
                 // member transitions through FENCED → JOINING and
                 // re-joins silently; the user never sees the fence
                 // from `poll()`. Emitting a `BackgroundEvent::Error`
@@ -647,7 +647,7 @@ impl ConsumerHeartbeatRequestManager {
             },
             HeartbeatErrorAction::Fatal(err) => {
                 // Java: `handleFatalFailure(error.exception(...))`
-                // (`AbstractHeartbeatRequestManager.java:455-458`) —
+                // (`AbstractHeartbeatRequestManager.java:501-504`) —
                 // emits an `ErrorEvent` AND calls
                 // `membershipManager().transitionToFatal()`, in that
                 // order.
@@ -679,7 +679,7 @@ impl ConsumerHeartbeatRequestManager {
 
     /// Transport-level / non-response failure handler. Mirrors Java's
     /// `onFailure(Throwable, long)`
-    /// (`AbstractHeartbeatRequestManager.java:321-338`).
+    /// (`AbstractHeartbeatRequestManager.java:347-363`).
     fn on_failure(&mut self, error: &Error, completion_time_ms: i64) {
         // Java: `resetHeartbeatState()` at the top of `onFailure`.
         self.reset_heartbeat_state();
@@ -693,7 +693,7 @@ impl ConsumerHeartbeatRequestManager {
             if !specific_handled {
                 log::error!("ConsumerGroupHeartbeatRequest failed due to fatal error: {}", error);
                 // Java: `handleFatalFailure(exception)`
-                // (`AbstractHeartbeatRequestManager.java:455-458`) —
+                // (`AbstractHeartbeatRequestManager.java:501-504`) —
                 // emits an `ErrorEvent` AND calls
                 // `membershipManager().transitionToFatal()`, in that
                 // order. Both are mirrored here.
@@ -789,7 +789,7 @@ impl ConsumerHeartbeatRequestManager {
                     error_message.unwrap_or_default()
                 );
                 // Java: `handleFatalFailure(error.exception(errorMessage))`
-                // (`ConsumerHeartbeatRequestManager.java:136-139`).
+                // (`ConsumerHeartbeatRequestManager.java:137-142`).
                 Some(HeartbeatErrorAction::Fatal(match error_message {
                     Some(message) => Error::with_message(error, message),
                     None => Error::new(error),
@@ -801,7 +801,7 @@ impl ConsumerHeartbeatRequestManager {
                     error_message.unwrap_or_default()
                 );
                 // Java: `handleFatalFailure(error.exception(errorMessage))`
-                // (`ConsumerHeartbeatRequestManager.java:130-135`).
+                // (`ConsumerHeartbeatRequestManager.java:144-151`).
                 Some(HeartbeatErrorAction::Fatal(match error_message {
                     Some(message) => Error::with_message(error, message),
                     None => Error::new(error),
@@ -841,7 +841,7 @@ impl ConsumerHeartbeatRequestManager {
                 // The broker returns `GROUP_ID_NOT_FOUND` from
                 // `getOrMaybeCreateConsumerGroup(...,
                 // createIfNotExists = memberEpoch == 0, ...)`
-                // (`GroupMetadataManager.java:2326-2327`) only when
+                // (`GroupMetadataManager.java:2561-2562`) only when
                 // both:
                 //
                 //   1. The group does not exist on the broker
@@ -851,7 +851,7 @@ impl ConsumerHeartbeatRequestManager {
                 //      when `memberEpoch != 0`.
                 //
                 // Java treats this as fatal
-                // (`AbstractHeartbeatRequestManager.java:435-441`'s
+                // (`AbstractHeartbeatRequestManager.java:481-487`'s
                 // default arm); we deviate here to keep the consumer
                 // recoverable. Behavior depends on the membership
                 // manager's current epoch:
@@ -981,10 +981,10 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
                 return PollResult::empty();
             }
             // Build leave heartbeat (ignoreResponse=true) per Java's
-            // `AbstractHeartbeatRequestManager.java:309`.
+            // `AbstractHeartbeatRequestManager.java:179`.
             let request = self.build_heartbeat_request(true);
             // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` records
-            // the heartbeat-sent time (`AbstractHeartbeatRequestManager.java:285`)
+            // the heartbeat-sent time (`AbstractHeartbeatRequestManager.java:309`)
             // for every send, including this poll-timer-expired leave path.
             // The normal path records it inside `make_heartbeat_poll_result`
             // below; this branch builds its own `PollResult`, so record here.
@@ -1056,7 +1056,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             // Java parity: `pollOnClose` routes its leave heartbeat through
             // `makeHeartbeatRequest(currentTimeMs, true)`
             // (`AbstractHeartbeatRequestManager.java:233`), which records the
-            // heartbeat-sent time (`:285`). This is the third of Java's three
+            // heartbeat-sent time (`:309`). This is the third of Java's three
             // heartbeat send sites; record here so `last-heartbeat-seconds-ago`
             // reflects the close-path leave heartbeat, matching the poll-timer
             // leave path above and the normal path in `make_heartbeat_poll_result`.
@@ -1075,10 +1075,10 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         // allowing the application thread to block for the full user-specified
         // poll timeout rather than spinning in a busy loop.
         //
-        // Deviation note (Critic 64, Observation 1): Java 4.3.1
-        // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:255) calls
-        // `pollTimer.update(currentTimeMs)` FIRST, before the UNSUBSCRIBED
-        // short-circuit at :256. That `update` advances the Java `Timer`'s
+        // Deviation note (Critic 64, Observation 1): Java
+        // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:254 at 4.4)
+        // calls `pollTimer.update(currentTimeMs)` FIRST, before the
+        // UNSUBSCRIBED || FATAL short-circuit at :259. That `update` advances the Java `Timer`'s
         // *internal* clock so its no-arg `isExpired()` / `remainingMs()`
         // queries later in the method observe `currentTimeMs`. The Rust poll
         // timer holds only an absolute `poll_timer_expires_at_ms` and every
@@ -1835,7 +1835,7 @@ mod tests {
         let fatal = mgr.handle_specific_failure(&err, 12_345);
         assert!(fatal, "UnsupportedVersion must be classified as fatal");
 
-        // Java (`ConsumerHeartbeatRequestManager.java:109`) routes this
+        // Java (`ConsumerHeartbeatRequestManager.java:111`) routes this
         // through `handleFatalFailure`, so BOTH halves must happen: the
         // ErrorEvent and the fatal transition.
         let mut events = Vec::new();
@@ -2029,7 +2029,7 @@ mod tests {
     /// Phase 12.5 round-2 regression for Issue 3: on the **error**
     /// branch of `on_response` (broker returns a non-NONE error code in
     /// the response body), the per-request `SentFields` tracker MUST be
-    /// reset, mirroring Java's `AbstractHeartbeatRequestManager.java:356`
+    /// reset, mirroring Java's `AbstractHeartbeatRequestManager.java:387`
     /// (`resetHeartbeatState();` at the top of `onErrorResponse`).
     ///
     /// Without this, the next heartbeat's `build_request_data()` would
@@ -2304,7 +2304,7 @@ mod tests {
     ///
     /// When the broker returns a `FENCED_MEMBER_EPOCH` error in the
     /// heartbeat response body, Java
-    /// (`AbstractHeartbeatRequestManager.java:411-418`) calls
+    /// (`AbstractHeartbeatRequestManager.java:442-449`) calls
     /// `membershipManager().transitionToFenced()` synchronously inside
     /// the `whenComplete` lambda; Rust applies it inline in the same
     /// response handler.
@@ -2321,7 +2321,7 @@ mod tests {
     /// 3. Assert NO `BackgroundEvent::Error` envelope was emitted —
     ///    Java treats the fence as an INTERNAL state-machine event
     ///    and does NOT call `backgroundEventHandler.add(...)` on the
-    ///    fence path (`AbstractHeartbeatRequestManager.java:411-427`).
+    ///    fence path (`AbstractHeartbeatRequestManager.java:442-458`).
     #[tokio::test]
     async fn issue4_fenced_member_epoch_drives_transition_to_fenced() {
         let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
@@ -2333,7 +2333,7 @@ mod tests {
         // state alone cannot witness that the fence happened.
         // `transition_to_fenced` resets the epoch (Java's `resetEpoch()`
         // right after `transitionTo(FENCED)`,
-        // `AbstractMembershipManager.java:416-417`), so the epoch can. This
+        // `AbstractMembershipManager.java:476-477`), so the epoch can. This
         // has to happen after the injection, whose `make_joining` resets it.
         force_member(&mm, "member-1", 42);
         assert_ne!(mm.member_epoch(), mm.join_group_epoch(), "epoch seeded for the fence to reset");
@@ -2358,12 +2358,12 @@ mod tests {
             "the fence must reset the member epoch (Java `resetEpoch()`)"
         );
 
-        // Java reference: `AbstractHeartbeatRequestManager.java:411-427`
+        // Java reference: `AbstractHeartbeatRequestManager.java:442-458`
         // — the FENCED_MEMBER_EPOCH / UNKNOWN_MEMBER_ID arms call
         // ONLY `membershipManager().transitionToFenced()` +
         // `heartbeatRequestState.reset()`. They do NOT invoke
         // `backgroundEventHandler.add(new ErrorEvent(...))` — that is
-        // reserved for `handleFatalFailure` (`:455-458`). The fence
+        // reserved for `handleFatalFailure` (`:501-504`). The fence
         // is internal: Java's consumer rejoins transparently and the
         // user observes `ConsumerRecords::empty()` from `poll()`, not
         // an error. Rust must match: NO `BackgroundEvent::Error`
@@ -2383,8 +2383,8 @@ mod tests {
     ///
     /// When the broker returns a fatal-class error in the heartbeat
     /// response body (here `GROUP_AUTHORIZATION_FAILED`), Java's
-    /// `AbstractHeartbeatRequestManager.java:388-394` calls
-    /// `handleFatalFailure(error.exception(...))`, which (`:455-458`)
+    /// `AbstractHeartbeatRequestManager.java:419-425` calls
+    /// `handleFatalFailure(error.exception(...))`, which (`:501-504`)
     /// emits an `ErrorEvent` AND calls
     /// `membershipManager().transitionToFatal()`.
     ///
@@ -2447,10 +2447,10 @@ mod tests {
     ///
     /// Java applies `membershipManager().transitionToFatal()`
     /// synchronously inside `handleFatalFailure`
-    /// (`AbstractHeartbeatRequestManager.java:455-458`), so the classifying
+    /// (`AbstractHeartbeatRequestManager.java:501-504`), so the classifying
     /// `poll()` leaves the member FATAL and every later one takes the
     /// skip-heartbeat short-circuit
-    /// (`AbstractMembershipManager.java:754-760`). Exactly one `ErrorEvent`
+    /// (`AbstractMembershipManager.java:801-807`). Exactly one `ErrorEvent`
     /// reaches the application.
     ///
     /// This pins that end-to-end, because deferring the transition breaks
@@ -2516,7 +2516,7 @@ mod tests {
     /// Phase 12.5 round-3 regression for Issue 5 — unknown error
     /// codes must fall through to the `Fatal` arm, not `Handled`.
     ///
-    /// Java reference: `AbstractHeartbeatRequestManager.java:435-441`
+    /// Java reference: `AbstractHeartbeatRequestManager.java:481-487`
     /// — the `default:` arm of `onErrorResponse`'s switch calls
     /// `handleSpecificExceptionInResponse(...)`; if that returns
     /// false (no consumer-specific handler matched), Java falls back
@@ -2562,10 +2562,10 @@ mod tests {
             mm.state(),
             MemberState::Fatal,
             "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (Java \
-             `AbstractHeartbeatRequestManager.java:435-441` `default:` arm)"
+             `AbstractHeartbeatRequestManager.java:481-487` `default:` arm)"
         );
 
-        // Java `handleFatalFailure` (`:455-458`) emits an ErrorEvent
+        // Java `handleFatalFailure` (`:501-504`) emits an ErrorEvent
         // alongside the fatal transition so the user observes the
         // failure from `poll()`. The Rust Fatal arm must do the same.
         assert_eq!(
@@ -3090,7 +3090,7 @@ mod tests {
     /// Java parity: `pollOnClose` routes its leave heartbeat through
     /// `makeHeartbeatRequest(currentTimeMs, true)`
     /// (`AbstractHeartbeatRequestManager.java:233`), which records the
-    /// heartbeat-sent time (`:285`). The close-path leave heartbeat must update
+    /// heartbeat-sent time (`:309`). The close-path leave heartbeat must update
     /// `last-heartbeat-seconds-ago` like the other two send sites do.
     #[tokio::test]
     async fn poll_on_close_records_heartbeat_sent_ms() {
@@ -3240,7 +3240,7 @@ mod tests {
     ///
     /// Java threads `errorMessageForResponse(response)` —
     /// `response.data().errorMessage()`
-    /// (`ConsumerHeartbeatRequestManager.java:195-197`) — through the whole
+    /// (`ConsumerHeartbeatRequestManager.java:197-199`) — through the whole
     /// error switch. Substituting the Rust `Errors` enum's own name destroys
     /// the only actionable part of the diagnostic: here, why the regex failed
     /// to compile.

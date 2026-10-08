@@ -147,12 +147,12 @@ enum PendingReconcile {
     /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
     /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
     /// mirroring Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:889-909`).
+    /// (`AbstractMembershipManager.java:953-973`).
     ///
     /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
     /// continuation when the commit resolves while the `ConsumerNetworkThread`
     /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
-    /// fired (`ApplicationEventProcessor.java:761-765`). The pre-fix Rust
+    /// fired (`ApplicationEventProcessor.java:732-736`). The pre-fix Rust
     /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
     /// only marked `reconciliation_check_complete` after the commit resolved,
     /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
@@ -601,7 +601,7 @@ impl ConsumerMembershipManager {
     /// already requested it) rejoin.
     ///
     /// Java: the async tail of `AbstractMembershipManager.transitionToStale()`
-    /// (`AbstractMembershipManager.java:791-806`):
+    /// (`AbstractMembershipManager.java:839-854`):
     ///
     /// ```java
     /// CompletableFuture<Void> callbackResult = signalPartitionsLost(subscriptions.assignedPartitions());
@@ -689,7 +689,7 @@ impl ConsumerMembershipManager {
     /// `entries()` walk) and `true` from
     /// `ApplicationEventProcessor.process(AsyncPollEvent)` (the
     /// poll-time entry point, before any new fetching starts — see
-    /// Java line 715-718). The poll-time path passes `true` because
+    /// Java line 729-732). The poll-time path passes `true` because
     /// any pending offsets can be safely flushed via the commit
     /// manager's auto-commit-before-rebalance path inside this method.
     /// The Rust translation mirrors this through the bg-task call site
@@ -860,8 +860,8 @@ impl ConsumerMembershipManager {
 
         // 8a. Java `signalReconciliationStarted()` →
         // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
-        // (`ConsumerMembershipManager.java:272-279`,
-        //  `AbstractMembershipManager.java:889-909`).
+        // (`ConsumerMembershipManager.java:236-244`,
+        //  `AbstractMembershipManager.java:953-973`).
         //
         // Commit `subscriptions.allConsumed()` synchronously if auto-commit is
         // enabled. The deadline mirrors Java: the rebalance timeout (configured
@@ -870,7 +870,7 @@ impl ConsumerMembershipManager {
         // runs the continuation (step 8b onward) WHEN the commit resolves, while
         // the `ConsumerNetworkThread` keeps spinning and
         // `markReconciliationCheckCompleted()` has already fired
-        // (`ApplicationEventProcessor.java:761-765`). Awaiting inline here froze
+        // (`ApplicationEventProcessor.java:732-736`). Awaiting inline here froze
         // the AsyncPoll task's reconciliation-check mark behind a slow commit, so
         // `poll()` returned empty even for RETAINED partitions until the commit
         // resolved. Instead we store an `AwaitingCommit` leg (member stays
@@ -882,7 +882,7 @@ impl ConsumerMembershipManager {
         // synchronously (auto-commit disabled or no consumed offsets →
         // `maybeAutoCommitSyncBeforeRebalance` returns a completed future; and
         // the base `signalReconciliationStarted()` at
-        // `AbstractMembershipManager.java:1000` returns a completed future when
+        // `AbstractMembershipManager.java:1064` returns a completed future when
         // there is no commit manager). We reproduce that by `try_recv`ing once:
         // if the result is already available, fall straight through to
         // `continue_after_commit` inline (behavior unchanged from before the
@@ -940,7 +940,7 @@ impl ConsumerMembershipManager {
 
     /// Log the auto-commit-before-rebalance result. Mirrors Java's
     /// `commitResult.whenComplete` success / failure logging
-    /// (`AbstractMembershipManager.java:894-901`). The abort check + revoke
+    /// (`AbstractMembershipManager.java:958-965`). The abort check + revoke
     /// enqueue in [`Self::continue_after_commit`] run on BOTH the success and
     /// failure branches, which is why the logging is separated from them —
     /// exactly as Java's `whenComplete` logs, then unconditionally runs
@@ -964,7 +964,7 @@ impl ConsumerMembershipManager {
     /// Steps 8b-9 of `reconcile`, run after the auto-commit-before-rebalance
     /// has resolved (or was a no-op / had no commit manager). Mirrors the body
     /// of Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:906-909`):
+    /// (`AbstractMembershipManager.java:967-969`):
     ///
     /// ```java
     /// if (!maybeAbortReconciliation()) {
@@ -987,7 +987,7 @@ impl ConsumerMembershipManager {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-        // (`AbstractMembershipManager.java:906`) — the guard runs on BOTH the
+        // (`AbstractMembershipManager.java:967`) — the guard runs on BOTH the
         // success and failure paths of the commit.
         //
         // Since the divergence fix (PR #176) the commit receiver IS stored as
@@ -1055,7 +1055,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java's `reconciliationResult.whenComplete` error arm
-    /// (`AbstractMembershipManager.java:958-965`):
+    /// (`AbstractMembershipManager.java:1015-1022`):
     ///
     /// ```java
     /// reconciliationResult.whenComplete((__, error) -> {
@@ -2502,9 +2502,10 @@ mod tests {
 
     /// Regression for COMMENTS R2-2: `reconcile(now, can_commit=false)`
     /// is a no-op when auto-commit is enabled AND a commit manager is
-    /// present, mirroring Java's
-    /// `if (autoCommitEnabled && !canCommit) return;` at
-    /// `AbstractMembershipManager.java:854`.
+    /// present, mirroring the auto-commit half of Java's gate
+    /// `if (!canCommit && (autoCommitEnabled || !revokedPartitions.isEmpty())) return;`
+    /// (`AbstractMembershipManager.java:929`; KAFKA-20106 added the
+    /// revocation half).
     ///
     /// Path: state is `Reconciling` with a real target assignment that
     /// would otherwise emit an `OnPartitionsAssigned` background event;
@@ -3569,7 +3570,7 @@ mod tests {
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`
-    /// (`ConsumerMembershipManagerTest.java:1579`).
+    /// (`ConsumerMembershipManagerTest.java:1727`).
     /// Even if the auto-commit before rebalance fails EXCEPTIONALLY, the
     /// revocation still completes (Java's "proceed with reconciliation
     /// anyway"). Java arranges a commit future and
@@ -3655,7 +3656,7 @@ mod tests {
     // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and the
     // AsyncPoll task marks reconciliation-check-complete, letting `poll()`
     // return RETAINED-partition records) WHILE the commit is still in flight,
-    // matching Java `ApplicationEventProcessor.java:761-765`. ───────────────
+    // matching Java `ApplicationEventProcessor.java:732-736`. ───────────────
 
     /// (a) With auto-commit enabled and the commit response withheld, a single
     /// `reconcile()` call parks on the `AwaitingCommit` leg: it returns without
@@ -4500,7 +4501,7 @@ mod tests {
     ///
     /// Java funnels every failure in the revocation+assignment chain through
     /// one arm that logs and calls `markReconciliationCompleted()`
-    /// (`AbstractMembershipManager.java:958-965`). Rust replaced the
+    /// (`AbstractMembershipManager.java:1015-1022`). Rust replaced the
     /// `CompletableFuture` chain with explicit steps and `?`, which returns
     /// *past* the clearing — so the flag stayed set and every later
     /// `reconcile()` short-circuited on "Another reconciliation is already in
@@ -4597,7 +4598,7 @@ mod tests {
     ///
     /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
     /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-    /// (`AbstractMembershipManager.java:906`).
+    /// (`AbstractMembershipManager.java:967`).
     ///
     /// Failure without the guard: the listener is told its partition was LOST
     /// (by the fence) and then REVOKED (by the stale reconcile), and the
@@ -4867,7 +4868,7 @@ mod tests {
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`
-    /// (`ConsumerMembershipManagerTest.java:566`).
+    /// (`ConsumerMembershipManagerTest.java:632`).
     /// A member is stuck reconciling assignment A, parked on the REVOCATION
     /// COMMIT future (Java's `mockNewAssignmentAndRevocationStuckOnCommit`,
     /// test:576). While parked on the commit it gets fenced and rejoins;
@@ -5237,7 +5238,7 @@ mod tests {
     /// kinds, mirroring Java's three error types.
     #[tokio::test]
     async fn listener_callbacks_throws_error_on_partitions_revoked() {
-        // Java's three, class for class (`ConsumerMembershipManagerTest.java:1957-1959`):
+        // Java's three, class for class (`ConsumerMembershipManagerTest.java:2000-2002`):
         // `WakeupException`, `InterruptException`, `IllegalArgumentException`.
         // `Interrupt` is not interchangeable with any other class here: together
         // with `Wakeup` it is one of the two that

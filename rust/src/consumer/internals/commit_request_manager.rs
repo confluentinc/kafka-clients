@@ -548,7 +548,7 @@ struct CommitRequestManagerInner {
     /// `Arc<CoordinatorRequestManager>` set via [`CommitRequestManager::set_coordinator`]
     /// at consumer construction time. Java holds this as a direct
     /// field on `CommitRequestManager`
-    /// (`CommitRequestManager.java:148` — `coordinatorRequestManager`).
+    /// (`CommitRequestManager.java:83` — `coordinatorRequestManager`).
     ///
     /// Read-paths (response handlers, retry drivers) call
     /// [`CoordinatorRequestManager::mark_coordinator_unknown`] on
@@ -556,7 +556,7 @@ struct CommitRequestManagerInner {
     /// bg-task `poll(now)` re-issues `FindCoordinator`. Mirrors Java's
     /// `OffsetFetchRequestState.onFailure` / `OffsetCommitRequestState.onResponse`
     /// `coordinatorRequestManager.markCoordinatorUnknown(...)` calls
-    /// (`CommitRequestManager.java:804,1092`).
+    /// (`CommitRequestManager.java:901,1254`).
     ///
     /// Set asynchronously after construction because both managers
     /// reference each other (Java does so in the same constructor by
@@ -567,7 +567,7 @@ struct CommitRequestManagerInner {
     /// auto-commit success path can enqueue an interceptor `on_commit`
     /// invocation. Mirrors Java's `offsetCommitCallbackInvoker` field on
     /// `CommitRequestManager`, used by `autoCommitCallback` (Java
-    /// `CommitRequestManager.java:380`). Type-erased because the Rust
+    /// `CommitRequestManager.java:393`). Type-erased because the Rust
     /// commit manager is not generic over `<K, V>` (see
     /// [`AutoCommitInterceptorHook`]). Wired post-construction via
     /// [`CommitRequestManager::set_auto_commit_interceptor_hook`].
@@ -586,7 +586,7 @@ struct CommitRequestManagerInner {
     /// loop has already computed its poll timeout, so without this wake the
     /// retry sits unsent until the network poll times out on its own (up to
     /// ~5s), past the `committed()` deadline — turning Java's partial result
-    /// (KAFKA-20165, `CommitRequestManager.java:629`) into a `TimeoutError`,
+    /// (KAFKA-20165, `CommitRequestManager.java:646`) into a `TimeoutError`,
     /// and delaying each `OffsetCommit` retry (including the pre-revocation
     /// auto-commit on the reconcile path) by a full poll timeout instead of
     /// its backoff.
@@ -598,7 +598,7 @@ struct CommitRequestManagerInner {
     /// Java constructs `new OffsetCommitMetricsManager(metrics)` in the
     /// `CommitRequestManager` constructor (`CommitRequestManager.java:172`)
     /// and records `recordRequestLatency(response.requestLatencyMs())` at the
-    /// top of the commit `onResponse` (`:767`). In Rust the manager registers
+    /// top of the commit `onResponse` (`:864`). In Rust the manager registers
     /// against the consumer's shared `Arc<Metrics>` and is wired
     /// post-construction (like `coordinator`); `None` for tests that don't
     /// exercise metrics (recording is then a no-op, value-neutral).
@@ -1509,7 +1509,7 @@ impl CommitRequestManager {
                 // Refresh the request's member id/epoch from the manager's
                 // CURRENT member info at SEND time. In Java the request holds a
                 // reference to the manager's mutable `MemberInfo`
-                // (`CommitRequestManager.java:889`), so an `onMemberEpochUpdated`
+                // (`CommitRequestManager.java:986`), so an `onMemberEpochUpdated`
                 // that fires between enqueue and send is reflected in the
                 // built request. The Rust request stored a clone at enqueue, so
                 // we re-sync it here before building (and write
@@ -1645,7 +1645,7 @@ impl CommitRequestManager {
                 Ok(Ok(_committed)) => {
                     // Java `autoCommitCallback`: on success, enqueue the
                     // interceptor `on_commit` invocation with the committed
-                    // offsets (`CommitRequestManager.java:380`). The snapshot
+                    // offsets (`CommitRequestManager.java:393`). The snapshot
                     // is `Some` only when an interceptor is wired (the
                     // no-interceptor path clones nothing).
                     if let Some(offsets) = offsets_for_interceptor {
@@ -1750,7 +1750,7 @@ impl RequestManager for CommitRequestManager {
 ///
 /// `on_group_assignment_updated` is left to the trait's default no-op
 /// because Java does not override it on `CommitRequestManager`
-/// (`CommitRequestManager.java:597-606` only implements
+/// (`CommitRequestManager.java:693-703` only implements
 /// `onMemberEpochUpdated`).
 impl MemberStateListener for CommitRequestManager {
     fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str) {
@@ -1828,7 +1828,7 @@ fn build_offset_commit_unsent_request(
         match response_rx.await {
             Ok(Ok(mut client_response)) => {
                 // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
-                // at the top of `onResponse` (`CommitRequestManager.java:767`),
+                // at the top of `onResponse` (`CommitRequestManager.java:864`),
                 // success path only. Capture before `take_response_body`.
                 let request_latency_ms = client_response.request_latency_ms();
                 handle_offset_commit_response(
@@ -1842,7 +1842,7 @@ fn build_offset_commit_unsent_request(
                 // Transport-level failure (e.g. disconnect). Java's shared
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
-                // (CommitRequestManager.java:947).
+                // (CommitRequestManager.java:1044).
                 inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 request.complete_err(err);
             },
@@ -1927,7 +1927,7 @@ fn build_offset_fetch_unsent_request(
                 // Transport-level failure (e.g. disconnect). Java's shared
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
-                // (CommitRequestManager.java:947).
+                // (CommitRequestManager.java:1044).
                 inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
                     let _ = tx.send(Err(err));
@@ -1973,7 +1973,7 @@ fn handle_offset_commit_response(
 ) {
     // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
     // at the top of `OffsetCommitRequestState.onResponse`
-    // (`CommitRequestManager.java:767`). No-op when no metrics manager was
+    // (`CommitRequestManager.java:864`). No-op when no metrics manager was
     // wired (tests that don't exercise metrics).
     if let Some(metrics_manager) = inner
         .offset_commit_metrics_manager
@@ -2015,7 +2015,7 @@ fn classify_and_complete_commit(
                     return;
                 },
                 Errors::CoordinatorNotAvailable | Errors::NotCoordinator | Errors::RequestTimedOut => {
-                    // Java line 801-806: mark coordinator unknown before
+                    // Java line 898-903: mark coordinator unknown before
                     // surfacing the error so the retry driver's next
                     // commit attempt re-discovers the coordinator.
                     inner.mark_coordinator_unknown(error.message(), inner.time.milliseconds());
@@ -2087,7 +2087,7 @@ fn handle_offset_fetch_response(
     };
     let group_error = Errors::for_code(group_response.error_code);
     if group_error != Errors::None {
-        // Java line 1090-1092: on NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE,
+        // Java line 1252-1255: on NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE,
         // refresh the coordinator before completing the future
         // exceptionally so the retry driver's next OffsetFetch goes to
         // a freshly discovered coordinator.
@@ -2238,7 +2238,7 @@ impl CommitRequestManagerInner {
     /// `coordinatorRequestManager.markCoordinatorUnknown(error.message(), currentTimeMs)`
     /// calls scattered through `OffsetFetchRequestState.onFailure` and
     /// `OffsetCommitRequestState.onResponse`
-    /// (`CommitRequestManager.java:804,1092`).
+    /// (`CommitRequestManager.java:901,1254`).
     fn mark_coordinator_unknown(&self, cause: &str, current_time_ms: i64) {
         let coord = {
             let guard = self.coordinator.lock().expect("commit manager coordinator slot poisoned");
@@ -2254,7 +2254,7 @@ impl CommitRequestManagerInner {
     /// `OffsetCommitCallbackInvoker`) if one is set. No-op when the hook
     /// is not wired (Phase 9 unit tests) or the interceptor chain is empty.
     /// Mirrors Java's `autoCommitCallback` success arm
-    /// (`CommitRequestManager.java:380`).
+    /// (`CommitRequestManager.java:393`).
     /// Whether a wired auto-commit interceptor hook has at least one
     /// interceptor registered. Used to gate the committed-offsets clone on
     /// the auto-commit success path so the common (no-interceptor) case
@@ -2292,7 +2292,7 @@ impl CommitRequestManagerInner {
     /// the next `FindCoordinator`). Mirrors Java's
     /// `coordinatorRequestManager.handleCoordinatorDisconnect(error, ...)`
     /// call in the shared `RequestState.handleClientResponse` error arm
-    /// (`CommitRequestManager.java:947`), which runs for BOTH commit and
+    /// (`CommitRequestManager.java:1044`), which runs for BOTH commit and
     /// fetch requests on a transport error. No-op when no coordinator handle
     /// is wired (Phase 9 unit tests).
     fn handle_coordinator_disconnect(&self, error: &Error, current_time_ms: i64) {
@@ -2406,7 +2406,7 @@ async fn commit_sync_with_retries(
 /// Drives [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`].
 ///
 /// Mirrors Java's `autoCommitSyncBeforeRebalanceWithRetries`
-/// (`CommitRequestManager.java:342`). On retriable errors:
+/// (`CommitRequestManager.java:355`). On retriable errors:
 /// - if deadline expired → surface as [`Error::timeout`] (Java's
 ///   `maybeWrapAsTimeoutException`);
 /// - if [`Errors::UnknownTopicOrPartition`] → fatal (early-exit retries
@@ -2437,7 +2437,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     let mut last_offsets = initial_offsets;
     // Java re-reads `memberInfo` on every attempt: `isStaleEpochErrorAnd
     // ValidEpochAvailable` checks the CURRENT `memberInfo.memberEpoch`
-    // (`CommitRequestManager.java:573-575`) and `createOffsetCommitRequest`
+    // (`CommitRequestManager.java:670-672`) and `createOffsetCommitRequest`
     // builds each retry with the latest id/epoch. The member epoch can change
     // mid-flight (the membership manager calls `onMemberEpochUpdated` after a
     // reconciliation), so a retry on STALE_MEMBER_EPOCH must pick up the new
@@ -2451,7 +2451,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
             Ok(Ok(_committed)) => {
                 // Java `autoCommitCallback`: on success, enqueue the
                 // interceptor `on_commit` invocation with the offsets that
-                // were committed (`CommitRequestManager.java:380`). Pass by
+                // were committed (`CommitRequestManager.java:393`). Pass by
                 // reference — `enqueue_interceptor_invocation` clones only
                 // when an interceptor is actually wired (no-interceptor path
                 // clones nothing).
@@ -2467,7 +2467,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                     guard.member_info.clone()
                 };
                 let has_valid_member_epoch = member_info.member_epoch.is_some();
-                // Java line 349: enter the retry gate only when the error
+                // Java line 362: enter the retry gate only when the error
                 // is a RetriableException OR the stale-epoch case AND a
                 // valid member epoch is currently known.
                 let is_stale_epoch_with_valid_epoch = err.error() == Errors::StaleMemberEpoch && has_valid_member_epoch;
@@ -2481,7 +2481,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                     log::debug!("Auto-commit sync before rebalance failed with non-retriable error: {err}");
                     break Err(err);
                 }
-                // Java order (`CommitRequestManager.java:350-368`):
+                // Java order (`CommitRequestManager.java:363-381`):
                 //   1. `requestAttempt.isExpired()` → wrap as TimeoutException
                 //   2. else if UnknownTopicOrPartitionException → fatal,
                 //      surface the original error
@@ -2501,7 +2501,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                     )));
                 }
                 // Java treats UNKNOWN_TOPIC_OR_PARTITION as fatal here
-                // (`CommitRequestManager.java:353-355`) even though it's
+                // (`CommitRequestManager.java:366-368`) even though it's
                 // otherwise retriable. Checked AFTER expiry per Java's
                 // order: when both conditions hold, Java's
                 // TimeoutException wins.
@@ -2606,7 +2606,7 @@ fn wake_background_task(inner: &CommitRequestManagerInner) {
 /// `RequestState.num_attempts` (driving the `ExponentialBackoff`) ramps
 /// up across retries.
 ///
-/// Retry-eligibility predicate (Java line 559):
+/// Retry-eligibility predicate (Java line 611-612):
 ///   * `error.is_retriable_error()` — any retriable error (NotCoordinator,
 ///     CoordinatorNotAvailable, CoordinatorLoadInProgress, etc.); OR
 ///   * `StaleMemberEpoch` AND the consumer has a valid member epoch
@@ -2677,7 +2677,7 @@ async fn fetch_offsets_with_retries(
                     retry_request.seed_failed_attempts(attempts, current_time_ms);
                     retry_request.chained_public_senders = Arc::clone(&chained_public_senders);
                     // Java `handleRetriablePartitionErrors`
-                    // (CommitRequestManager.java:629): return partial results
+                    // (CommitRequestManager.java:646): return partial results
                     // when `fetchRequest.isExpired() ||
                     //   fetchRequest.remainingMs() <= fetchRequest.remainingBackoffMs(currentTimeMs)`.
                     // `remainingBackoffMs(now)` is the request's EXPONENTIAL
@@ -2726,7 +2726,7 @@ async fn fetch_offsets_with_retries(
                 break Ok(value);
             },
             Ok(Err(err)) => {
-                // Java line 573-575: `isStaleEpochErrorAndValidEpochAvailable`
+                // Java line 670-672: `isStaleEpochErrorAndValidEpochAvailable`
                 // requires the consumer to currently hold a member epoch.
                 let has_valid_member_epoch = {
                     let guard = inner.state.lock().expect("commit manager state poisoned");
@@ -2738,7 +2738,7 @@ async fn fetch_offsets_with_retries(
                 // broker has finished creating the consumer group (the
                 // group is created on first heartbeat). Java's
                 // production semantics do not retry `GROUP_ID_NOT_FOUND`
-                // explicitly (`CommitRequestManager.java:1099-1101`
+                // explicitly (`CommitRequestManager.java:1260-1263`
                 // catches it in the final `else` and wraps as
                 // non-retriable). However, on KIP-848 brokers we
                 // observe it as a transient during the join window and
@@ -3784,7 +3784,7 @@ mod tests {
 
     /// Phase 10 (commit 2.5/N): the trait default for
     /// `on_group_assignment_updated` is a no-op on `CommitRequestManager`
-    /// because Java does not override it (`CommitRequestManager.java:597`
+    /// because Java does not override it (`CommitRequestManager.java:693`
     /// implements only `onMemberEpochUpdated`).
     #[test]
     fn member_state_listener_on_group_assignment_updated_is_noop() {
@@ -3995,7 +3995,7 @@ mod tests {
 
     /// Phase 10 fixup (COMMENTS.1.md #3): when BOTH the request deadline
     /// is past AND the error is `UnknownTopicOrPartition`, Java's order
-    /// (`CommitRequestManager.java:350-368`) checks `isExpired` first and
+    /// (`CommitRequestManager.java:363-381`) checks `isExpired` first and
     /// surfaces a wrapped `TimeoutException` (not the UTOP error). The
     /// Rust driver previously checked UTOP first, surfacing the raw
     /// error.
@@ -4020,7 +4020,7 @@ mod tests {
         // MockTime) at response-handling time. Advance the mock clock to the
         // deadline so the single UnknownTopicOrPartition retriable failure is
         // seen as expired — exercising Java's order where `isExpired` wins
-        // over the UTOP branch (`CommitRequestManager.java:350-368`).
+        // over the UTOP branch (`CommitRequestManager.java:363-381`).
         let deadline_ms: i64 = 1;
         let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
         mock_time.sleep(deadline_ms);
@@ -4070,10 +4070,10 @@ mod tests {
         TopicAuthorization,
         CommitFailed,
         /// OffsetFetch maps UNKNOWN_MEMBER_ID to its specific
-        /// `UnknownMemberIdException` (CommitRequestManagerTest.java:1499).
+        /// `UnknownMemberIdException` (CommitRequestManagerTest.java:1651).
         UnknownMemberId,
         /// OffsetFetch maps STALE_MEMBER_EPOCH to its specific
-        /// `StaleMemberEpochException` (CommitRequestManagerTest.java:1502).
+        /// `StaleMemberEpochException` (CommitRequestManagerTest.java:1654).
         StaleMemberEpoch,
         KafkaError,
     }
@@ -5302,7 +5302,7 @@ mod tests {
             },
             ExpectedClass::UnknownMemberId => {
                 // Java pins UnknownMemberIdException.class
-                // (CommitRequestManagerTest.java:1499). Assert the exact error
+                // (CommitRequestManagerTest.java:1651). Assert the exact error
                 // code — a mutation remapping it to UnknownServerError must FAIL.
                 assert_eq!(
                     err.error(),
@@ -5312,7 +5312,7 @@ mod tests {
             },
             ExpectedClass::StaleMemberEpoch => {
                 // Java pins StaleMemberEpochException.class
-                // (CommitRequestManagerTest.java:1502). Assert the exact error
+                // (CommitRequestManagerTest.java:1654). Assert the exact error
                 // code — a mutation remapping it to UnknownServerError must FAIL.
                 assert_eq!(
                     err.error(),
@@ -5457,7 +5457,7 @@ mod tests {
     /// MUST wake the bg task's network poll — otherwise the retry sits unsent
     /// until the poll times out on its own, past the `committed()` deadline,
     /// and the event reaper fails the call with a timeout instead of the
-    /// partial result Java returns (`CommitRequestManager.java:629`). Java's
+    /// partial result Java returns (`CommitRequestManager.java:646`). Java's
     /// retry is enqueued on the network thread itself, so it needs no wake.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_retry_on_retriable_partition_error_wakes_background_task() {
@@ -5672,7 +5672,7 @@ mod tests {
 
     /// Regression for the partition-error headroom check (Critic 67, Issue 1).
     ///
-    /// Java (`CommitRequestManager.java:629`) returns partial results when
+    /// Java (`CommitRequestManager.java:646`) returns partial results when
     /// `fetchRequest.remainingMs() <= fetchRequest.remainingBackoffMs(now)`,
     /// where `remainingBackoffMs` is the request's EXPONENTIAL backoff for its
     /// accumulated attempt count — ramping from `retry.backoff.ms` toward

@@ -49,7 +49,7 @@ use super::HeartbeatMetricsManager;
 use super::HeartbeatRequestState;
 use super::{PollResult, UnsentRequest};
 
-/// Java's `Errors.exception(String message)` (`Errors.java:462-469`): a null
+/// Java's `Errors.exception(String message)` (`Errors.java:468-475`): a null
 /// broker-supplied message yields the code's own default message, a non-null
 /// one replaces it.
 ///
@@ -95,8 +95,8 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// (`recordHeartbeatSentMs`) and per-heartbeat-response latency
     /// (`recordRequestLatency`). Java passes it into the constructor
     /// (`AbstractHeartbeatRequestManager.java:110`) and records in
-    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:285`) and the
-    /// `whenComplete` lambda (`:299,311`). In Rust it shares the consumer's
+    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:309`) and the
+    /// `whenComplete` lambda (`:323,335`). In Rust it shares the consumer's
     /// `Arc<Metrics>` registry and is wired post-construction (like the
     /// commit manager's metrics manager); `None` for tests that don't
     /// exercise metrics (recording is then a no-op, value-neutral).
@@ -155,7 +155,7 @@ impl AbstractHeartbeatRequestManager {
     ) -> PollResult {
         state.heartbeat_request_state.on_send_attempt(current_time_ms);
         // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
-        // (`AbstractHeartbeatRequestManager.java:285`).
+        // (`AbstractHeartbeatRequestManager.java:309`).
         if let Some(metrics_manager) = state.metrics_manager.as_ref() {
             metrics_manager.record_heartbeat_sent_ms(current_time_ms);
         }
@@ -288,7 +288,7 @@ impl AbstractHeartbeatRequestManager {
     /// **Phase 10 carry-over**: Java's `resetPollTimer(pollMs)` also
     /// checks `pollTimer.isExpired()` and calls
     /// `membershipManager().maybeRejoinStaleMember()` when expired (see
-    /// `AbstractHeartbeatRequestManager.java:265-274`). The abstract
+    /// `AbstractHeartbeatRequestManager.java:289-298`). The abstract
     /// layer here lacks a back-reference to the membership manager, so
     /// the expiry-then-rejoin step must be performed by Phase 10's
     /// `consumer.poll()` epilogue after invoking `reset_poll_timer`:
@@ -344,7 +344,7 @@ impl AbstractHeartbeatRequestManager {
     /// `response.data().errorMessage()`), and is `None` when the broker left it
     /// null. Java threads that nullable string through the switch and passes it
     /// to `Errors.exception(String)`, which falls back to the code's own
-    /// default message when it is null (`Errors.java:462-469`) —
+    /// default message when it is null (`Errors.java:468-475`) —
     /// [`Error::with_message`] / [`Error::new`] are the two halves of that.
     ///
     /// `group_id` is Java's `membershipManager().groupId()`, needed by the
@@ -388,7 +388,7 @@ impl AbstractHeartbeatRequestManager {
                 // Java does NOT pass the broker's `errorMessage` here: it
                 // builds `GroupAuthorizationException.forGroupId(groupId)` and
                 // hands *that* message to `error.exception(...)`
-                // (`AbstractHeartbeatRequestManager.java:388-393`), so the
+                // (`AbstractHeartbeatRequestManager.java:419-425`), so the
                 // application sees "Not authorized to access group: <groupId>".
                 // The resulting class carries no group id of its own, because
                 // Java rebuilds it through `Errors.GROUP_AUTHORIZATION_FAILED
@@ -411,7 +411,7 @@ impl AbstractHeartbeatRequestManager {
                 // are added.
                 //
                 // Java calls `error.exception()` with NO argument here
-                // (`AbstractHeartbeatRequestManager.java:401`) — the code's
+                // (`AbstractHeartbeatRequestManager.java:432`) — the code's
                 // default "Topic authorization failed." — even though
                 // `errorMessage` is in scope and is used in the log line
                 // immediately above. That asymmetry with the arms below is
@@ -449,7 +449,7 @@ impl AbstractHeartbeatRequestManager {
                     error_message.unwrap_or_default()
                 );
                 // Java concatenates the broker text onto its own prefix
-                // (`AbstractHeartbeatRequestManager.java:428-432`), so the
+                // (`AbstractHeartbeatRequestManager.java:460-464`), so the
                 // message is never null here and `exception(String)` never
                 // falls back. A null broker message concatenates as "null" in
                 // Java; Rust renders the empty string, which is the same
@@ -693,7 +693,7 @@ mod tests {
 
     /// `GROUP_AUTHORIZATION_FAILED` ignores the broker's `ErrorMessage` and
     /// uses `GroupAuthorizationException.forGroupId(groupId)`'s text
-    /// (`AbstractHeartbeatRequestManager.java:388-393`), so the application
+    /// (`AbstractHeartbeatRequestManager.java:419-425`), so the application
     /// learns WHICH group it lacks access to.
     #[test]
     fn group_authorization_failed_uses_for_group_id_message() {
@@ -714,7 +714,7 @@ mod tests {
     }
 
     /// `TOPIC_AUTHORIZATION_FAILED` calls `error.exception()` with NO argument
-    /// (`AbstractHeartbeatRequestManager.java:401`), i.e. the code's default
+    /// (`AbstractHeartbeatRequestManager.java:432`), i.e. the code's default
     /// message — even though `errorMessage` is in scope. The asymmetry with the
     /// `INVALID_REQUEST` family below is deliberate in Java.
     #[test]
@@ -739,7 +739,7 @@ mod tests {
 
     /// `INVALID_REQUEST` / `GROUP_MAX_SIZE_REACHED` / `UNSUPPORTED_ASSIGNOR`
     /// DO carry the broker's `ErrorMessage`
-    /// (`AbstractHeartbeatRequestManager.java:404-408`,
+    /// (`AbstractHeartbeatRequestManager.java:435-440`,
     /// `error.exception(errorMessage)`). For `UNSUPPORTED_ASSIGNOR` it is the
     /// only way to learn which assignor the broker rejected.
     #[test]
@@ -763,7 +763,7 @@ mod tests {
 
     /// A NULL broker `ErrorMessage` falls back to the code's own default
     /// message, mirroring `Errors.exception(String)`
-    /// (`Errors.java:462-469`) — not to the literal text `"None"`.
+    /// (`Errors.java:468-475`) — not to the literal text `"None"`.
     #[test]
     fn invalid_request_family_falls_back_to_the_default_message() {
         let mut mgr = make_state(0);
@@ -778,7 +778,7 @@ mod tests {
     }
 
     /// `INVALID_REGULAR_EXPRESSION` concatenates the broker's text onto Java's
-    /// own prefix (`AbstractHeartbeatRequestManager.java:428-432`). The broker
+    /// own prefix (`AbstractHeartbeatRequestManager.java:460-464`). The broker
     /// text is the only actionable part — it says why the regex did not
     /// compile.
     #[test]
@@ -804,7 +804,7 @@ mod tests {
 
     /// `NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` pass the broker's text
     /// to `markCoordinatorUnknown(errorMessage, ...)`
-    /// (`AbstractHeartbeatRequestManager.java:365`, `:375`), which logs it as
+    /// (`AbstractHeartbeatRequestManager.java:397`, `:407`), which logs it as
     /// the rediscovery cause. A null message must not become the literal
     /// `"None"`.
     #[test]
