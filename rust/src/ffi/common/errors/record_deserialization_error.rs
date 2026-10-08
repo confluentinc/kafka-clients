@@ -51,8 +51,8 @@ pub struct kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
-    key,
-    value,
+    kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY,
+    kafka_common_RecordDeserializationError_DeserializationErrorOrigin_VALUE,
 }
 
 /// One static instance per value, indexed by
@@ -65,9 +65,9 @@ fn origin_enum_of(
     origin: DeserializationErrorOrigin,
 ) -> kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
     match origin {
-        DeserializationErrorOrigin::Key => kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::key,
+        DeserializationErrorOrigin::Key => kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY,
         DeserializationErrorOrigin::Value => {
-            kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::value
+            kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::kafka_common_RecordDeserializationError_DeserializationErrorOrigin_VALUE
         },
     }
 }

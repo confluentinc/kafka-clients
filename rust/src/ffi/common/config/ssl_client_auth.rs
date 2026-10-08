@@ -34,11 +34,11 @@ pub struct kafka_common_config_SslClientAuth_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_config_SslClientAuth_e {
     /// `SslClientAuth::Required`: Java's `REQUIRED`.
-    required,
+    kafka_common_config_SslClientAuth_REQUIRED,
     /// `SslClientAuth::Requested`: Java's `REQUESTED`.
-    requested,
+    kafka_common_config_SslClientAuth_REQUESTED,
     /// `SslClientAuth::None`: Java's `NONE`.
-    none,
+    kafka_common_config_SslClientAuth_NONE,
 }
 
 /// One static instance per value, indexed by [`kafka_common_config_SslClientAuth_e`].
@@ -48,9 +48,9 @@ static VARIANTS: [SslClientAuth; 3] = [SslClientAuth::Required, SslClientAuth::R
 /// enumerator and singleton.
 fn enum_of(value: SslClientAuth) -> kafka_common_config_SslClientAuth_e {
     match value {
-        SslClientAuth::Required => kafka_common_config_SslClientAuth_e::required,
-        SslClientAuth::Requested => kafka_common_config_SslClientAuth_e::requested,
-        SslClientAuth::None => kafka_common_config_SslClientAuth_e::none,
+        SslClientAuth::Required => kafka_common_config_SslClientAuth_e::kafka_common_config_SslClientAuth_REQUIRED,
+        SslClientAuth::Requested => kafka_common_config_SslClientAuth_e::kafka_common_config_SslClientAuth_REQUESTED,
+        SslClientAuth::None => kafka_common_config_SslClientAuth_e::kafka_common_config_SslClientAuth_NONE,
     }
 }
 

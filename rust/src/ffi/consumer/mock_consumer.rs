@@ -400,8 +400,8 @@ mod tests {
         kafka_consumer_ConsumerRecords_records_with_partition,
     };
     use crate::ffi::consumer::{
-        kafka_consumer_Consumer_assign, kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_execute_callbacks,
-        kafka_consumer_Consumer_poll, kafka_consumer_Consumer_set_callback_result,
+        kafka_consumer_Consumer__set_callback_result, kafka_consumer_Consumer_assign,
+        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_execute_callbacks, kafka_consumer_Consumer_poll,
         kafka_consumer_Consumer_set_callbacks_notify, kafka_consumer_Consumer_subscribe_with_topics_listener,
     };
     use crate::ffi::util::{
@@ -435,7 +435,7 @@ mod tests {
 
     /// The `self` of a C listener: counts the partitions each method saw,
     /// records the invoking thread and either reports at once through
-    /// `set_callback_result` or leaves the `callback_id` for the test.
+    /// `__set_callback_result` or leaves the `callback_id` for the test.
     struct ListenerProbe {
         report: bool,
         thread: Mutex<Option<ThreadId>>,
@@ -467,7 +467,7 @@ mod tests {
             *self.thread.lock().unwrap() = Some(thread::current().id());
             counter.fetch_add(unsafe { kafka_List_size(partitions) }, SeqCst);
             if self.report {
-                unsafe { kafka_consumer_Consumer_set_callback_result(ptr::null(), callback_id, ptr::null_mut()) };
+                unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), callback_id, ptr::null_mut()) };
             } else {
                 self.pending_id.store(callback_id, SeqCst);
             }
@@ -571,9 +571,11 @@ mod tests {
 
         // Reported later, from another thread.
         let id = probe.pending_id.load(SeqCst);
-        thread::spawn(move || unsafe { kafka_consumer_Consumer_set_callback_result(ptr::null(), id, ptr::null_mut()) })
-            .join()
-            .unwrap();
+        thread::spawn(move || unsafe {
+            kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut())
+        })
+        .join()
+        .unwrap();
         wait_until("the completion to be queued", || notifies.load(SeqCst) >= 2);
         assert_eq!(unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) }, 1);
         assert_eq!(completed.load(SeqCst), 1);
@@ -700,7 +702,7 @@ mod tests {
             probe.pending_id.load(SeqCst) != 0
         });
         let id = probe.pending_id.load(SeqCst);
-        unsafe { kafka_consumer_Consumer_set_callback_result(ptr::null(), id, ptr::null_mut()) };
+        unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut()) };
         wait_until("the completion to run", || {
             unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) };
             completed.load(SeqCst) == 1

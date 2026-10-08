@@ -40,10 +40,10 @@ pub struct kafka_admin_AlterConfigOp_OpType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_AlterConfigOp_OpType_e {
-    set,
-    delete,
-    append,
-    subtract,
+    kafka_admin_AlterConfigOp_OpType_SET,
+    kafka_admin_AlterConfigOp_OpType_DELETE,
+    kafka_admin_AlterConfigOp_OpType_APPEND,
+    kafka_admin_AlterConfigOp_OpType_SUBTRACT,
 }
 
 /// One static instance per value, indexed by
@@ -54,10 +54,10 @@ static VARIANTS: [OpType; 4] = [OpType::Set, OpType::Delete, OpType::Append, OpT
 /// enumerator and singleton.
 fn enum_of(op_type: OpType) -> kafka_admin_AlterConfigOp_OpType_e {
     match op_type {
-        OpType::Set => kafka_admin_AlterConfigOp_OpType_e::set,
-        OpType::Delete => kafka_admin_AlterConfigOp_OpType_e::delete,
-        OpType::Append => kafka_admin_AlterConfigOp_OpType_e::append,
-        OpType::Subtract => kafka_admin_AlterConfigOp_OpType_e::subtract,
+        OpType::Set => kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_SET,
+        OpType::Delete => kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_DELETE,
+        OpType::Append => kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_APPEND,
+        OpType::Subtract => kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_SUBTRACT,
     }
 }
 

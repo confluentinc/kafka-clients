@@ -44,9 +44,9 @@ pub struct kafka_common_quota_ClientQuotaMatch_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_quota_ClientQuotaMatch_e {
-    default,
-    any,
-    exact,
+    kafka_common_quota_ClientQuotaMatch_DEFAULT,
+    kafka_common_quota_ClientQuotaMatch_ANY,
+    kafka_common_quota_ClientQuotaMatch_EXACT,
 }
 
 static DEFAULT: ClientQuotaMatch = ClientQuotaMatch::Default;
@@ -85,9 +85,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
     self_: *const kafka_common_quota_ClientQuotaMatch_t,
 ) -> kafka_common_quota_ClientQuotaMatch_e {
     match unsafe { client_quota_match_ref(self_) } {
-        ClientQuotaMatch::Default => kafka_common_quota_ClientQuotaMatch_e::default,
-        ClientQuotaMatch::Any => kafka_common_quota_ClientQuotaMatch_e::any,
-        ClientQuotaMatch::Exact(_) => kafka_common_quota_ClientQuotaMatch_e::exact,
+        ClientQuotaMatch::Default => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT,
+        ClientQuotaMatch::Any => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_ANY,
+        ClientQuotaMatch::Exact(_) => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT,
     }
 }
 
@@ -156,11 +156,11 @@ mod tests {
             );
             assert_eq!(
                 kafka_common_quota_ClientQuotaMatch__enum(kafka_common_quota_ClientQuotaMatch_default()),
-                kafka_common_quota_ClientQuotaMatch_e::default
+                kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT
             );
             assert_eq!(
                 kafka_common_quota_ClientQuotaMatch__enum(kafka_common_quota_ClientQuotaMatch_any()),
-                kafka_common_quota_ClientQuotaMatch_e::any
+                kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_ANY
             );
             // A borrowed data-less value resolves to the singleton.
             assert_eq!(
@@ -177,7 +177,7 @@ mod tests {
             let exact = kafka_common_quota_ClientQuotaMatch_exact(name.as_ptr());
             assert_eq!(
                 kafka_common_quota_ClientQuotaMatch__enum(exact),
-                kafka_common_quota_ClientQuotaMatch_e::exact
+                kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT
             );
             assert_eq!(*client_quota_match_ref(exact), ClientQuotaMatch::Exact("alice".to_string()));
             // A borrowed `Exact` is the value itself, not a singleton.

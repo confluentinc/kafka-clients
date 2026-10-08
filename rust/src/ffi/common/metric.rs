@@ -55,13 +55,13 @@ pub struct kafka_common_MetricValue_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_MetricValue_e {
     /// `MetricValue::Double`: a measurable or double gauge reading.
-    double,
+    kafka_common_MetricValue_DOUBLE,
     /// `MetricValue::String`: a string gauge reading.
-    string,
+    kafka_common_MetricValue_STRING,
     /// `MetricValue::Long`: a long gauge reading.
-    long,
+    kafka_common_MetricValue_LONG,
     /// `MetricValue::Int`: an int gauge reading.
-    int,
+    kafka_common_MetricValue_INT,
 }
 
 /// What a [`kafka_common_MetricValue_t`] points at: the value plus the
@@ -176,10 +176,10 @@ pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     self_: *const kafka_common_MetricValue_t,
 ) -> kafka_common_MetricValue_e {
     match unsafe { metric_value_ref(self_) }.value {
-        MetricValue::Double(_) => kafka_common_MetricValue_e::double,
-        MetricValue::String(_) => kafka_common_MetricValue_e::string,
-        MetricValue::Long(_) => kafka_common_MetricValue_e::long,
-        MetricValue::Int(_) => kafka_common_MetricValue_e::int,
+        MetricValue::Double(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_DOUBLE,
+        MetricValue::String(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_STRING,
+        MetricValue::Long(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_LONG,
+        MetricValue::Int(_) => kafka_common_MetricValue_e::kafka_common_MetricValue_INT,
     }
 }
 
@@ -324,22 +324,22 @@ mod tests {
             let cases: [(*mut kafka_common_MetricValue_t, kafka_common_MetricValue_e, MetricValue); 4] = [
                 (
                     kafka_common_MetricValue_double(1.5),
-                    kafka_common_MetricValue_e::double,
+                    kafka_common_MetricValue_e::kafka_common_MetricValue_DOUBLE,
                     MetricValue::Double(1.5),
                 ),
                 (
                     kafka_common_MetricValue_string(c"up".as_ptr()),
-                    kafka_common_MetricValue_e::string,
+                    kafka_common_MetricValue_e::kafka_common_MetricValue_STRING,
                     MetricValue::String("up".to_string()),
                 ),
                 (
                     kafka_common_MetricValue_long(7),
-                    kafka_common_MetricValue_e::long,
+                    kafka_common_MetricValue_e::kafka_common_MetricValue_LONG,
                     MetricValue::Long(7),
                 ),
                 (
                     kafka_common_MetricValue_int(-3),
-                    kafka_common_MetricValue_e::int,
+                    kafka_common_MetricValue_e::kafka_common_MetricValue_INT,
                     MetricValue::Int(-3),
                 ),
             ];

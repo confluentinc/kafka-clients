@@ -17,7 +17,7 @@
 //!
 //! The three methods are `async fn`s in Rust, so their C counterparts return
 //! `void`, take a trailing `int64_t callback_id` and report through
-//! `kafka_consumer_Consumer_set_callback_result`, from inside the method or
+//! `kafka_consumer_Consumer__set_callback_result`, from inside the method or
 //! later from any thread. How a consumer reaches the implementation depends
 //! on the entry point that triggered the rebalance (module docs of
 //! `ffi::consumer`): directly on the calling thread for a blocking one,
@@ -52,7 +52,7 @@ pub struct kafka_consumer_ConsumerRebalanceListener_t {
 /// `partitions` is a list of `kafka_common_TopicPartition_t *`, sorted by
 /// topic and partition and borrowed for the call. The method is `async` in
 /// Rust (CLAUDE.md §4 rule 3): it reports its result with
-/// `kafka_consumer_Consumer_set_callback_result(consumer, callback_id, result)`,
+/// `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, result)`,
 /// `NULL` for success or an owned `kafka_common_Error_t *` for failure.
 pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_fn_t =
     unsafe extern "C" fn(self_: *mut c_void, partitions: *const kafka_List_t, callback_id: i64);
@@ -237,7 +237,7 @@ unsafe fn invoke_cb(
 
 /// Invokes the implementation's `onPartitionsRevoked` on the calling thread
 /// with a list of `kafka_common_TopicPartition_t *` (copied) and waits for
-/// its `set_callback_result` report; returns the reported error, or `NULL`.
+/// its `__set_callback_result` report; returns the reported error, or `NULL`.
 ///
 /// # Safety
 ///
@@ -477,7 +477,7 @@ mod tests {
         let id = imp.deferred.lock().unwrap().take().unwrap();
         let error = box_error(Error::timeout("late"));
         unsafe {
-            crate::ffi::consumer::kafka_consumer_Consumer_set_callback_result(
+            crate::ffi::consumer::kafka_consumer_Consumer__set_callback_result(
                 std::ptr::null(),
                 id,
                 error as *mut c_void,

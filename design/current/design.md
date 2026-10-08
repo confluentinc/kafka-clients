@@ -1054,7 +1054,7 @@ by-design gaps, all closures or tuples that have no C shape):
 - **Traits** C implements are interfaces: `<Interface>_new(void *self, <method>_fn_t ...)`
   with the caller owning `self`; a method that is `async fn` in Rust returns
   `void`, takes an `int64_t callback_id` and reports through
-  `kafka_consumer_Consumer_set_callback_result`. A Rust class implementing a
+  `kafka_consumer_Consumer__set_callback_result`. A Rust class implementing a
   trait exposes a borrowed `<Class>__as_<Interface>()` view (48 of them: the
   three mocks, `KafkaProducer`, the built-in serdes and partitioner, the
   metrics stats).

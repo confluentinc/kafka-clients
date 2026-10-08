@@ -785,7 +785,7 @@ class _ConsumerBase:
         """Deliver a deferred listener outcome to the client (``None`` =
         success). A consumer destroyed meanwhile has no one to report to."""
         if self._h is not None:
-            _lib.Consumer_set_callback_result(self._h, callback_id, message)
+            _lib.Consumer__set_callback_result(self._h, callback_id, message)
 
     def _listener_adapter(self, listener):
         if listener is None:

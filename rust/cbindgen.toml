@@ -20,7 +20,10 @@ prefix = ""
 args = "Vertical"
 
 [enum]
-# Global default; kafka_common_ErrorCode_e overrides it locally with a
-# `cbindgen:prefix-with-name=false` annotation, because prefixing with the
-# export name would push the `_t` suffix into all 162 enumerators.
-prefix_with_name = true
+# Off for every C enum: CLAUDE.md §4 ("Enums") names an enumerator
+# `<prefix>_<VALUE>` (the enum's prefix without its `_e` suffix, the key in
+# constant case), while cbindgen would prefix with the export name and put the
+# `_e` into every enumerator. The Rust variants are spelled out in full
+# instead, so the Rust identifier is the C name (checked by
+# `cargo xtask lint-custom check-ffi-translation`).
+prefix_with_name = false

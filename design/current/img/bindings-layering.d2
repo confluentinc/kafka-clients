@@ -12,7 +12,7 @@
 
 direction: down
 
-py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / AdminClient (sync: blocking entry points, GIL released)\nAsync* twins (asyncio: _cb entry points + set_callbacks_notify -> call_soon_threadsafe(execute_callbacks))" {
+py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / AdminClient (sync: _cb entry points, sliced wait in Python via SyncWaiter)\nAsync* twins (asyncio: _cb entry points + set_callbacks_notify -> call_soon_threadsafe(execute_callbacks))" {
   style.fill: "#eef6ff"
 }
 pyext: "_confluentkafka.c — hand-written CPython extension"
@@ -27,7 +27,7 @@ ffi: "rust/src/ffi/ — one file per Java class under common/, producer/, consum
 
   sync: "blocking entry point (one per Rust method)\nruntime.block_on(api(...)) for an async fn\nfallible: returns *mut kafka_common_Error_t (NULL = ok),\nvalue through trailing out_<name>"
   cb: "_cb twin (only for an async Rust fn)\nspawn on the client's runtime;\ncompletion -> CallbackQueue -> <Client>_execute_callbacks()\n-> <fn>_cb_t(value, error, opaque) on the pumping thread"
-  iface: "interfaces (traits C implements)\n<Interface>_new(void *self, <method>_fn_t ...)\nasync method -> callback_id + set_callback_result\nclass handles bridge with <Class>__as_<Interface>()"
+  iface: "interfaces (traits C implements)\n<Interface>_new(void *self, <method>_fn_t ...)\nasync method -> callback_id + <Client>__set_callback_result\nclass handles bridge with <Class>__as_<Interface>()"
 }
 
 core: "Rust public API — Producer / Consumer / Admin\n(async fn, sync fn, KafkaFuture<T> -> kafka_common_KafkaFuture_t)" {

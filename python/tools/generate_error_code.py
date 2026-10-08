@@ -68,7 +68,7 @@ error classes, so the code alone identifies the class.
 
 '''
 
-_ENUMERATOR = re.compile(r"^kafka_common_ErrorCode_e_(\w+) = (-?\d+),?$")
+_ENUMERATOR = re.compile(r"^kafka_common_ErrorCode_(\w+) = (-?\d+),?$")
 
 
 def parse_error_codes(source=None):

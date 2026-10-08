@@ -36,14 +36,14 @@ pub struct kafka_admin_OffsetSpec_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_OffsetSpec_e {
-    earliest,
-    latest,
-    max_timestamp,
-    earliest_local,
-    latest_tiered,
-    earliest_pending_upload,
+    kafka_admin_OffsetSpec_EARLIEST,
+    kafka_admin_OffsetSpec_LATEST,
+    kafka_admin_OffsetSpec_MAX_TIMESTAMP,
+    kafka_admin_OffsetSpec_EARLIEST_LOCAL,
+    kafka_admin_OffsetSpec_LATEST_TIERED,
+    kafka_admin_OffsetSpec_EARLIEST_PENDING_UPLOAD,
     /// `OffsetSpec.TimestampSpec`: the one kind carrying data.
-    timestamp,
+    kafka_admin_OffsetSpec_TIMESTAMP,
 }
 
 /// One static instance per kind without data, indexed by
@@ -61,13 +61,13 @@ static VARIANTS: [OffsetSpec; 6] = [
 /// enumerator and singleton.
 fn enum_of(spec: OffsetSpec) -> kafka_admin_OffsetSpec_e {
     match spec {
-        OffsetSpec::Earliest => kafka_admin_OffsetSpec_e::earliest,
-        OffsetSpec::Latest => kafka_admin_OffsetSpec_e::latest,
-        OffsetSpec::MaxTimestamp => kafka_admin_OffsetSpec_e::max_timestamp,
-        OffsetSpec::EarliestLocal => kafka_admin_OffsetSpec_e::earliest_local,
-        OffsetSpec::LatestTiered => kafka_admin_OffsetSpec_e::latest_tiered,
-        OffsetSpec::EarliestPendingUpload => kafka_admin_OffsetSpec_e::earliest_pending_upload,
-        OffsetSpec::Timestamp(_) => kafka_admin_OffsetSpec_e::timestamp,
+        OffsetSpec::Earliest => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST,
+        OffsetSpec::Latest => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST,
+        OffsetSpec::MaxTimestamp => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_MAX_TIMESTAMP,
+        OffsetSpec::EarliestLocal => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_LOCAL,
+        OffsetSpec::LatestTiered => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST_TIERED,
+        OffsetSpec::EarliestPendingUpload => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_PENDING_UPLOAD,
+        OffsetSpec::Timestamp(_) => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_TIMESTAMP,
     }
 }
 
@@ -106,37 +106,37 @@ pub(crate) unsafe fn offset_spec_value_of(spec: *const kafka_admin_OffsetSpec_t)
 /// `OffsetSpec.earliest()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::earliest)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST)
 }
 
 /// `OffsetSpec.latest()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::latest)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST)
 }
 
 /// `OffsetSpec.maxTimestamp()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_max_timestamp() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::max_timestamp)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_MAX_TIMESTAMP)
 }
 
 /// `OffsetSpec.earliestLocal()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_local() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::earliest_local)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_LOCAL)
 }
 
 /// `OffsetSpec.latestTiered()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest_tiered() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::latest_tiered)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST_TIERED)
 }
 
 /// `OffsetSpec.earliestPendingUpload()`: a borrowed singleton.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_pending_upload() -> *const kafka_admin_OffsetSpec_t {
-    singleton(kafka_admin_OffsetSpec_e::earliest_pending_upload)
+    singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_PENDING_UPLOAD)
 }
 
 /// `OffsetSpec.forTimestamp(long timestamp)`: an owned `TimestampSpec`
@@ -227,7 +227,10 @@ mod tests {
         unsafe {
             assert_eq!(offset_spec_value_of(handle), OffsetSpec::Timestamp(42));
             assert_eq!(offset_spec_value_of(other), OffsetSpec::for_timestamp(42));
-            assert_eq!(kafka_admin_OffsetSpec__enum(handle), kafka_admin_OffsetSpec_e::timestamp);
+            assert_eq!(
+                kafka_admin_OffsetSpec__enum(handle),
+                kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_TIMESTAMP
+            );
             kafka_admin_OffsetSpec_destroy(handle);
             kafka_admin_OffsetSpec_destroy(other);
             kafka_admin_OffsetSpec_destroy(ptr::null_mut());

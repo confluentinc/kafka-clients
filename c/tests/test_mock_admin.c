@@ -506,12 +506,12 @@ static void test_mock_admin_create_topics_partial_failure(void) {
     kafka_Map_t *values = kafka_admin_CreateTopicsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, "existing"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_TOPIC_ALREADY_EXISTS, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_topic_exists_error(err));
     assert_error_message(err, "Topic existing exists already.");
     TEST_ASSERT_NULL(get_ok(future_for(values, "fresh")));
     kafka_Map_destroy(values);
-    expect_fails_with_code(kafka_admin_CreateTopicsResult_all(result), kafka_common_ErrorCode_e_TOPIC_ALREADY_EXISTS);
+    expect_fails_with_code(kafka_admin_CreateTopicsResult_all(result), kafka_common_ErrorCode_TOPIC_ALREADY_EXISTS);
     kafka_admin_CreateTopicsResult_destroy(result);
     kafka_List_destroy(topics);
     kafka_admin_NewTopic_destroy(existing);
@@ -626,7 +626,7 @@ static void test_mock_admin_create_topics_broker_defaults(void) {
     kafka_Map_t *values = kafka_admin_CreateTopicsResult_values(result);
     TEST_ASSERT_NULL(get_ok(future_for(values, "defaults")));
     kafka_common_Error_t *err = get_err(future_for(values, "too-many"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_REPLICATION_FACTOR, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_invalid_replication_factor_error(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
@@ -637,7 +637,7 @@ static void test_mock_admin_create_topics_broker_defaults(void) {
     TEST_ASSERT_EQUAL_INT32(3, *(const int32_t *)get_ok(rf));
     kafka_common_KafkaFuture_destroy(rf);
     expect_fails_with_code(kafka_admin_CreateTopicsResult_replication_factor(result, "too-many"),
-                           kafka_common_ErrorCode_e_INVALID_REPLICATION_FACTOR);
+                           kafka_common_ErrorCode_INVALID_REPLICATION_FACTOR);
     kafka_admin_CreateTopicsResult_destroy(result);
     kafka_List_destroy(topics);
     kafka_admin_NewTopic_destroy(defaults);
@@ -907,13 +907,13 @@ static void test_mock_admin_describe_topics_by_names(void) {
         kafka_admin_Admin_describe_topics_with_topic_names_options(f.admin, names, options);
     kafka_admin_DescribeTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_e_by_topic_name, kafka_admin_DescribeTopicsResult__enum(result));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_id_values(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
 
     kafka_common_Error_t *err = get_err(future_for(values, "missing"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_unknown_topic_or_partition_error(err));
     assert_error_message(err, "Topic missing not found.");
 
@@ -968,7 +968,7 @@ static void test_mock_admin_describe_topics_by_names(void) {
 
     /* `allTopicNames()` fails because one topic failed. */
     expect_fails_with_code(kafka_admin_DescribeTopicsResult_all_topic_names(result),
-                           kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION);
+                           kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION);
     kafka_admin_DescribeTopicsResult_destroy(result);
     kafka_List_destroy(names);
     fixture_destroy(&f);
@@ -996,18 +996,18 @@ static void test_mock_admin_describe_topics_by_ids(void) {
     TEST_ASSERT_NOT_NULL(collection);
     kafka_admin_DescribeTopicsResult_t *result = kafka_admin_Admin_describe_topics_with_topics(f.admin, collection);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_e_by_topic_id, kafka_admin_DescribeTopicsResult__enum(result));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_DescribeTopicsResult_BY_TOPIC_ID, kafka_admin_DescribeTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DescribeTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DescribeTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     const kafka_admin_TopicDescription_t *d = (const kafka_admin_TopicDescription_t *)get_ok(future_for(values, id));
     TEST_ASSERT_EQUAL_STRING("by-id", kafka_admin_TopicDescription_name(d));
     kafka_common_Error_t *err = get_err(future_for(values, unknown));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_ID, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_ID, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_unknown_topic_id_error(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
-    expect_fails_with_code(kafka_admin_DescribeTopicsResult_all_topic_ids(result), kafka_common_ErrorCode_e_UNKNOWN_TOPIC_ID);
+    expect_fails_with_code(kafka_admin_DescribeTopicsResult_all_topic_ids(result), kafka_common_ErrorCode_UNKNOWN_TOPIC_ID);
     kafka_admin_DescribeTopicsResult_destroy(result);
     kafka_common_TopicCollection_destroy(collection);
     kafka_List_destroy(ids);
@@ -1068,17 +1068,17 @@ static void test_mock_admin_delete_topics_by_names(void) {
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_options(f.admin, collection, options);
     kafka_admin_DeleteTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_e_by_topic_name, kafka_admin_DeleteTopicsResult__enum(result));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     TEST_ASSERT_EQUAL_STRING("del-a", (const char *)kafka_Map_key(values, 0));
     TEST_ASSERT_NULL(get_ok(future_for(values, "del-a")));
     kafka_common_Error_t *err = get_err(future_for(values, "never-existed"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
     assert_error_message(err, "Topic never-existed does not exist.");
     kafka_Map_destroy(values);
-    expect_fails_with_code(kafka_admin_DeleteTopicsResult_all(result), kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION);
+    expect_fails_with_code(kafka_admin_DeleteTopicsResult_all(result), kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION);
     kafka_admin_DeleteTopicsResult_destroy(result);
     kafka_admin_DeleteTopicsResult_destroy(NULL);
     kafka_common_TopicCollection_destroy(collection);
@@ -1110,7 +1110,7 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
     kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_e_by_topic_id, kafka_admin_DeleteTopicsResult__enum(result));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_DeleteTopicsResult_BY_TOPIC_ID, kafka_admin_DeleteTopicsResult__enum(result));
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
@@ -1204,7 +1204,7 @@ static void test_mock_admin_create_partitions_reports_unsupported_per_topic(void
     kafka_Map_t *values = kafka_admin_CreatePartitionsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, "grow"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
     assert_error_message(err, "Not implemented yet");
     kafka_Map_destroy(values);
@@ -1351,7 +1351,7 @@ static void test_mock_admin_delete_records_reports_unsupported_per_partition(voi
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartition_partition(k2));
     for (int32_t i = 0; i < 3; i++) {
         kafka_common_Error_t *err = get_err((const kafka_common_KafkaFuture_t *)kafka_Map_value(watermarks, i));
-        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
         assert_error_message(err, "Not implemented yet");
     }
     /* Lookup by a C-built key compares by value. */
@@ -1474,7 +1474,7 @@ static void test_mock_admin_describe_cluster_call_error(void) {
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *cluster_id = kafka_admin_DescribeClusterResult_cluster_id(result);
     kafka_common_Error_t *err = get_err(cluster_id);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
     assert_error_message(err, "The mock timed out the request.");
     kafka_common_KafkaFuture_destroy(cluster_id);
@@ -1525,7 +1525,7 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
     kafka_common_config_ConfigResource_t *logger =
         kafka_common_config_ConfigResource_new(kafka_common_config_ConfigResource_Type_broker_logger(), "0");
     TEST_ASSERT_EQUAL_STRING("0", kafka_common_config_ConfigResource_name(broker));
-    TEST_ASSERT_EQUAL_INT(kafka_common_config_ConfigResource_Type_e_broker,
+    TEST_ASSERT_EQUAL_INT(kafka_common_config_ConfigResource_Type_BROKER,
                           kafka_common_config_ConfigResource_Type__enum(kafka_common_config_ConfigResource_type(broker)));
     kafka_List_t *resources = kafka_List_new();
     kafka_List_add(resources, logger);
@@ -1561,9 +1561,9 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
     TEST_ASSERT_EQUAL_STRING("retention.ms", kafka_admin_ConfigEntry_name(entry));
     TEST_ASSERT_EQUAL_STRING("60000", kafka_admin_ConfigEntry_value(entry));
     TEST_ASSERT_TRUE(kafka_admin_ConfigEntry_source(entry) == kafka_admin_ConfigEntry_ConfigSource_unknown());
-    TEST_ASSERT_EQUAL_INT(kafka_admin_ConfigEntry_ConfigSource_e_unknown,
+    TEST_ASSERT_EQUAL_INT(kafka_admin_ConfigEntry_ConfigSource_UNKNOWN,
                           kafka_admin_ConfigEntry_ConfigSource__enum(kafka_admin_ConfigEntry_source(entry)));
-    TEST_ASSERT_EQUAL_INT(kafka_admin_ConfigEntry_ConfigType_e_unknown,
+    TEST_ASSERT_EQUAL_INT(kafka_admin_ConfigEntry_ConfigType_UNKNOWN,
                           kafka_admin_ConfigEntry_ConfigType__enum(kafka_admin_ConfigEntry_type(entry)));
     TEST_ASSERT_FALSE(kafka_admin_ConfigEntry_is_default(entry));
     TEST_ASSERT_FALSE(kafka_admin_ConfigEntry_is_sensitive(entry));
@@ -1578,7 +1578,7 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
     TEST_ASSERT_NULL(kafka_admin_Config_get(config, "no.such.config"));
     /* 2. unknown topic -> UNKNOWN_TOPIC_OR_PARTITION. */
     kafka_common_Error_t *err = get_err(future_for(values, missing));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     /* 3. broker 0 carries the seeded default.replication.factor. */
     config = (const kafka_admin_Config_t *)get_ok(future_for(values, broker));
@@ -1587,7 +1587,7 @@ static void test_mock_admin_describe_configs_partial_failure(void) {
     TEST_ASSERT_EQUAL_STRING("1", kafka_admin_ConfigEntry_value(entry));
     /* 4. BROKER_LOGGER. */
     err = get_err(future_for(values, logger));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
     /* `all()` surfaces one of the per-key failures; which one follows the
@@ -1751,11 +1751,11 @@ static void test_mock_admin_incremental_alter_configs_partial_failure(void) {
     kafka_Map_t *values = kafka_admin_AlterConfigsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, ok));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_REQUEST, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_invalid_request_error(err));
     kafka_common_Error_destroy(err);
     err = get_err(future_for(values, missing));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
     kafka_admin_AlterConfigsResult_destroy(result);
@@ -1775,13 +1775,13 @@ static void test_mock_admin_incremental_alter_configs_partial_failure(void) {
  * ids; an unknown id is NULL (Java returns null too). */
 static void test_mock_admin_alter_config_op_type_for_id(void) {
     const kafka_admin_AlterConfigOp_OpType_t *set = kafka_admin_AlterConfigOp_OpType_set();
-    TEST_ASSERT_EQUAL_INT(kafka_admin_AlterConfigOp_OpType_e_set, kafka_admin_AlterConfigOp_OpType__enum(set));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_AlterConfigOp_OpType_SET, kafka_admin_AlterConfigOp_OpType__enum(set));
     TEST_ASSERT_EQUAL_INT8(0, kafka_admin_AlterConfigOp_OpType_id(set));
     TEST_ASSERT_TRUE(kafka_admin_AlterConfigOp_OpType_for_id(0) == set);
     TEST_ASSERT_TRUE(kafka_admin_AlterConfigOp_OpType_for_id(1) == kafka_admin_AlterConfigOp_OpType_delete());
     TEST_ASSERT_TRUE(kafka_admin_AlterConfigOp_OpType_for_id(2) == kafka_admin_AlterConfigOp_OpType_append());
     TEST_ASSERT_TRUE(kafka_admin_AlterConfigOp_OpType_for_id(3) == kafka_admin_AlterConfigOp_OpType_subtract());
-    TEST_ASSERT_EQUAL_INT(kafka_admin_AlterConfigOp_OpType_e_subtract,
+    TEST_ASSERT_EQUAL_INT(kafka_admin_AlterConfigOp_OpType_SUBTRACT,
                           kafka_admin_AlterConfigOp_OpType__enum(kafka_admin_AlterConfigOp_OpType_subtract()));
     TEST_ASSERT_NULL(kafka_admin_AlterConfigOp_OpType_for_id(99));
     TEST_ASSERT_NULL(kafka_admin_AlterConfigOp_OpType_for_id(-1));
@@ -2006,15 +2006,15 @@ static void test_mock_admin_alter_replica_log_dirs_partial_failure(void) {
     TEST_ASSERT_EQUAL_INT32(4, kafka_Map_size(values));
     TEST_ASSERT_NULL(get_ok(future_for(values, ok)));
     kafka_common_Error_t *err = get_err(future_for(values, bad_dir));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_KAFKA_STORAGE_ERROR, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_KAFKA_STORAGE_ERROR, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_storage_error(err));
     kafka_common_Error_destroy(err);
     err = get_err(future_for(values, no_topic));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REPLICA_NOT_AVAILABLE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_replica_not_available_error(err));
     kafka_common_Error_destroy(err);
     err = get_err(future_for(values, no_broker));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REPLICA_NOT_AVAILABLE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REPLICA_NOT_AVAILABLE, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
     /* `all()` reports one of the failures; which one is not contractual. */
@@ -2175,11 +2175,11 @@ static void test_mock_admin_election_type_value_of(void) {
     const kafka_common_ElectionType_t *type = NULL;
     TEST_ASSERT_NULL(kafka_common_ElectionType_value_of(0, &type));
     TEST_ASSERT_TRUE(type == kafka_common_ElectionType_preferred());
-    TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_e_preferred, kafka_common_ElectionType__enum(type));
+    TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_PREFERRED, kafka_common_ElectionType__enum(type));
     TEST_ASSERT_EQUAL_INT8(0, kafka_common_ElectionType_value(type));
     TEST_ASSERT_NULL(kafka_common_ElectionType_value_of(1, &type));
     TEST_ASSERT_TRUE(type == kafka_common_ElectionType_unclean());
-    TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_e_unclean, kafka_common_ElectionType__enum(type));
+    TEST_ASSERT_EQUAL_INT(kafka_common_ElectionType_UNCLEAN, kafka_common_ElectionType__enum(type));
     type = NULL;
     kafka_common_Error_t *err = kafka_common_ElectionType_value_of(7, &type);
     TEST_ASSERT_NULL(type);
@@ -2239,10 +2239,10 @@ static void test_mock_admin_alter_partition_reassignments_partial_failure(void) 
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     TEST_ASSERT_NULL(get_ok(future_for(values, ok)));
     kafka_common_Error_t *err = get_err(future_for(values, missing));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_Map_destroy(values);
-    expect_fails_with_code(kafka_admin_AlterPartitionReassignmentsResult_all(result), kafka_common_ErrorCode_e_UNKNOWN_TOPIC_OR_PARTITION);
+    expect_fails_with_code(kafka_admin_AlterPartitionReassignmentsResult_all(result), kafka_common_ErrorCode_UNKNOWN_TOPIC_OR_PARTITION);
     kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
     kafka_admin_AlterPartitionReassignmentsResult_destroy(NULL);
     kafka_Map_destroy(request);
@@ -2479,10 +2479,10 @@ static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
     fixture_init(&f, 1);
     seed_lo_topic(&f);
     kafka_admin_OffsetSpec_t *at = kafka_admin_OffsetSpec_for_timestamp(1234);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_e_timestamp, kafka_admin_OffsetSpec__enum(at));
-    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_e_earliest, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_earliest()));
-    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_e_latest, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_latest()));
-    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_e_max_timestamp, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_max_timestamp()));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_TIMESTAMP, kafka_admin_OffsetSpec__enum(at));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_EARLIEST, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_earliest()));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_LATEST, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_latest()));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_OffsetSpec_MAX_TIMESTAMP, kafka_admin_OffsetSpec__enum(kafka_admin_OffsetSpec_max_timestamp()));
     kafka_common_TopicPartition_t *p0 = tp_new("lo-topic", 0);
     kafka_Map_t *request = kafka_Map_new();
     kafka_Map_put(request, p0, at);
@@ -2490,7 +2490,7 @@ static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
     kafka_common_KafkaFuture_t *future = NULL;
     TEST_ASSERT_NULL(kafka_admin_ListOffsetsResult_partition_result(result, p0, &future));
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32((int32_t)kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, (int32_t)kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32((int32_t)kafka_common_ErrorCode_UNSUPPORTED_VERSION, (int32_t)kafka_common_Error_code(err));
     assert_error_message(err, "Not implement yet");
     kafka_common_KafkaFuture_destroy(future);
     kafka_admin_ListOffsetsResult_destroy(result);
@@ -2507,7 +2507,7 @@ static void test_mock_admin_list_offsets_rejects_bad_inputs(void) {
     const kafka_common_IsolationLevel_t *level = NULL;
     TEST_ASSERT_NULL(kafka_common_IsolationLevel_for_id(0, &level));
     TEST_ASSERT_TRUE(level == kafka_common_IsolationLevel_read_uncommitted());
-    TEST_ASSERT_EQUAL_INT(kafka_common_IsolationLevel_e_read_uncommitted, kafka_common_IsolationLevel__enum(level));
+    TEST_ASSERT_EQUAL_INT(kafka_common_IsolationLevel_READ_UNCOMMITTED, kafka_common_IsolationLevel__enum(level));
     TEST_ASSERT_NULL(kafka_common_IsolationLevel_for_id(1, &level));
     TEST_ASSERT_TRUE(level == kafka_common_IsolationLevel_read_committed());
     TEST_ASSERT_EQUAL_INT8(1, kafka_common_IsolationLevel_id(level));
@@ -2613,13 +2613,13 @@ static void test_mock_admin_list_groups_reports_seeded_groups(void) {
     /* `GroupType.toString()` is "Consumer" (capitalised); the protocol type
      * is the lower-case wire string, and the two are unrelated. */
     TEST_ASSERT_TRUE(kafka_admin_GroupListing_type(listing) == kafka_common_GroupType_consumer());
-    TEST_ASSERT_EQUAL_INT(kafka_common_GroupType_e_consumer, kafka_common_GroupType__enum(kafka_admin_GroupListing_type(listing)));
+    TEST_ASSERT_EQUAL_INT(kafka_common_GroupType_CONSUMER, kafka_common_GroupType__enum(kafka_admin_GroupListing_type(listing)));
     char *type_text = kafka_common_GroupType_to_string(kafka_admin_GroupListing_type(listing));
     TEST_ASSERT_EQUAL_STRING("Consumer", type_text);
     kafka_string_destroy(type_text);
     TEST_ASSERT_EQUAL_STRING("consumer", kafka_admin_GroupListing_protocol(listing));
     TEST_ASSERT_TRUE(kafka_admin_GroupListing_group_state(listing) == kafka_common_GroupState_stable());
-    TEST_ASSERT_EQUAL_INT(kafka_common_GroupState_e_stable, kafka_common_GroupState__enum(kafka_admin_GroupListing_group_state(listing)));
+    TEST_ASSERT_EQUAL_INT(kafka_common_GroupState_STABLE, kafka_common_GroupState__enum(kafka_admin_GroupListing_group_state(listing)));
     char *state_text = kafka_common_GroupState_to_string(kafka_admin_GroupListing_group_state(listing));
     TEST_ASSERT_EQUAL_STRING("Stable", state_text);
     kafka_string_destroy(state_text);
@@ -2691,7 +2691,7 @@ static void test_mock_admin_describe_consumer_groups_reports_unsupported_per_gro
     TEST_ASSERT_EQUAL_STRING("dg-b", (const char *)kafka_Map_key(groups, 1));
     for (int32_t i = 0; i < 2; i++) {
         kafka_common_Error_t *err = get_err((const kafka_common_KafkaFuture_t *)kafka_Map_value(groups, i));
-        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
         assert_error_message(err, "Not implemented yet");
     }
     kafka_Map_destroy(groups);
@@ -2953,7 +2953,7 @@ static void test_mock_admin_alter_consumer_group_offsets_reports_unsupported_per
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *future = kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result, p0);
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implement yet");
     kafka_common_KafkaFuture_destroy(future);
     expect_fails_with(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result, p1), "Not implement yet");
@@ -3054,7 +3054,7 @@ static void test_mock_admin_delete_consumer_group_offsets_reports_unsupported_pe
     kafka_common_KafkaFuture_t *future = NULL;
     TEST_ASSERT_NULL(kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result, p0, &future));
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
     future = NULL;
@@ -3158,7 +3158,7 @@ static void test_mock_admin_remove_members_reports_unsupported_per_member(void) 
     kafka_common_KafkaFuture_t *future = NULL;
     TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, a, &future));
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
     TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result, b, &future));
@@ -3273,13 +3273,13 @@ static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
     kafka_common_resource_ResourcePattern_t *pattern = topic_pattern("acl-topic");
     TEST_ASSERT_EQUAL_STRING("acl-topic", kafka_common_resource_ResourcePattern_name(pattern));
     TEST_ASSERT_TRUE(kafka_common_resource_ResourcePattern_resource_type(pattern) == kafka_common_resource_ResourceType_topic());
-    TEST_ASSERT_EQUAL_INT(kafka_common_resource_PatternType_e_literal,
+    TEST_ASSERT_EQUAL_INT(kafka_common_resource_PatternType_LITERAL,
                           kafka_common_resource_PatternType__enum(kafka_common_resource_ResourcePattern_pattern_type(pattern)));
     kafka_common_acl_AccessControlEntry_t *entry = allow_read_entry("User:alice");
     TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_acl_AccessControlEntry_principal(entry));
     TEST_ASSERT_EQUAL_STRING("*", kafka_common_acl_AccessControlEntry_host(entry));
-    TEST_ASSERT_EQUAL_INT(kafka_common_acl_AclOperation_e_read, kafka_common_acl_AclOperation__enum(kafka_common_acl_AccessControlEntry_operation(entry)));
-    TEST_ASSERT_EQUAL_INT(kafka_common_acl_AclPermissionType_e_allow,
+    TEST_ASSERT_EQUAL_INT(kafka_common_acl_AclOperation_READ, kafka_common_acl_AclOperation__enum(kafka_common_acl_AccessControlEntry_operation(entry)));
+    TEST_ASSERT_EQUAL_INT(kafka_common_acl_AclPermissionType_ALLOW,
                           kafka_common_acl_AclPermissionType__enum(kafka_common_acl_AccessControlEntry_permission_type(entry)));
     kafka_common_acl_AclBinding_t *binding = kafka_common_acl_AclBinding_new(pattern, entry);
     TEST_ASSERT_NOT_NULL(binding);
@@ -3298,7 +3298,7 @@ static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
     kafka_Map_t *values = kafka_admin_CreateAclsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, binding));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_Map_destroy(values);
     expect_fails_with(kafka_admin_CreateAclsResult_all(result), "Not implemented yet");
@@ -3371,13 +3371,13 @@ static void test_mock_admin_describe_acls_reports_unsupported(void) {
     fixture_init(&f, 1);
     kafka_common_acl_AclBindingFilter_t *any = kafka_common_acl_AclBindingFilter_any();
     TEST_ASSERT_NOT_NULL(any);
-    TEST_ASSERT_EQUAL_INT(kafka_common_resource_ResourceType_e_any,
+    TEST_ASSERT_EQUAL_INT(kafka_common_resource_ResourceType_ANY,
                           kafka_common_resource_ResourceType__enum(kafka_common_resource_ResourcePatternFilter_resource_type(
                               kafka_common_acl_AclBindingFilter_pattern_filter(any))));
     kafka_admin_DescribeAclsResult_t *result = kafka_admin_Admin_describe_acls(f.admin, any);
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_Error_t *err = get_err(kafka_admin_DescribeAclsResult_values(result));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_admin_DescribeAclsResult_destroy(result);
     kafka_admin_DescribeAclsResult_destroy(NULL);
@@ -3435,7 +3435,7 @@ static void test_mock_admin_delete_acls_reports_unsupported_per_filter(void) {
     kafka_Map_t *values = kafka_admin_DeleteAclsResult_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, any));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     assert_error_message(get_err(future_for(values, specific)), "Not implemented yet");
     kafka_Map_destroy(values);
@@ -3482,7 +3482,7 @@ static void test_mock_admin_describe_client_quotas_reports_unsupported(void) {
     kafka_admin_DescribeClientQuotasResult_t *result = kafka_admin_Admin_describe_client_quotas(f.admin, all);
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_Error_t *err = get_err(kafka_admin_DescribeClientQuotasResult_entities(result));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implement yet");
     kafka_admin_DescribeClientQuotasResult_destroy(result);
     kafka_admin_DescribeClientQuotasResult_destroy(NULL);
@@ -3493,7 +3493,7 @@ static void test_mock_admin_describe_client_quotas_reports_unsupported(void) {
     kafka_common_quota_ClientQuotaFilterComponent_t *client = kafka_common_quota_ClientQuotaFilterComponent_of_default_entity("client-id");
     kafka_common_quota_ClientQuotaFilterComponent_t *ip = kafka_common_quota_ClientQuotaFilterComponent_of_entity_type("ip");
     TEST_ASSERT_EQUAL_STRING("user", kafka_common_quota_ClientQuotaFilterComponent_entity_type(user));
-    TEST_ASSERT_EQUAL_INT(kafka_common_quota_ClientQuotaMatch_e_exact,
+    TEST_ASSERT_EQUAL_INT(kafka_common_quota_ClientQuotaMatch_EXACT,
                           kafka_common_quota_ClientQuotaMatch__enum(kafka_common_quota_ClientQuotaFilterComponent_match(user)));
     TEST_ASSERT_TRUE(kafka_common_quota_ClientQuotaFilterComponent_match(client) == kafka_common_quota_ClientQuotaMatch_default());
     TEST_ASSERT_TRUE(kafka_common_quota_ClientQuotaFilterComponent_match(ip) == kafka_common_quota_ClientQuotaMatch_any());
@@ -3586,7 +3586,7 @@ static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(v
     kafka_Map_t *values = kafka_admin_AlterClientQuotasResult_values(result);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(values));
     kafka_common_Error_t *err = get_err(future_for(values, user_entity));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implement yet");
     assert_error_message(get_err(future_for(values, ip_entity)), "Not implement yet");
     /* The keys come back as entities; the default name is still NULL. */
@@ -3653,7 +3653,7 @@ static void test_mock_admin_alter_client_quotas_async(void) {
 
 static void test_mock_admin_scram_accessors(void) {
     const kafka_admin_ScramMechanism_t *sha256 = kafka_admin_ScramMechanism_scram_sha256();
-    TEST_ASSERT_EQUAL_INT(kafka_admin_ScramMechanism_e_scram_sha256, kafka_admin_ScramMechanism__enum(sha256));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_ScramMechanism_SCRAM_SHA256, kafka_admin_ScramMechanism__enum(sha256));
     TEST_ASSERT_EQUAL_STRING("SCRAM-SHA-256", kafka_admin_ScramMechanism_mechanism_name(sha256));
     TEST_ASSERT_EQUAL_INT8(1, kafka_admin_ScramMechanism_type(sha256));
     TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_type(2) == kafka_admin_ScramMechanism_scram_sha512());
@@ -3690,8 +3690,8 @@ static void test_mock_admin_scram_accessors(void) {
     TEST_ASSERT_TRUE(kafka_admin_UserScramCredentialDeletion_mechanism(del) == kafka_admin_ScramMechanism_scram_sha512());
     kafka_admin_UserScramCredentialAlteration_t *alt_up = kafka_admin_UserScramCredentialAlteration_upsertion(up);
     kafka_admin_UserScramCredentialAlteration_t *alt_del = kafka_admin_UserScramCredentialAlteration_deletion(del);
-    TEST_ASSERT_EQUAL_INT(kafka_admin_UserScramCredentialAlteration_e_upsertion, kafka_admin_UserScramCredentialAlteration__enum(alt_up));
-    TEST_ASSERT_EQUAL_INT(kafka_admin_UserScramCredentialAlteration_e_deletion, kafka_admin_UserScramCredentialAlteration__enum(alt_del));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_UserScramCredentialAlteration_UPSERTION, kafka_admin_UserScramCredentialAlteration__enum(alt_up));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_UserScramCredentialAlteration_DELETION, kafka_admin_UserScramCredentialAlteration__enum(alt_del));
     TEST_ASSERT_EQUAL_STRING("alice", kafka_admin_UserScramCredentialAlteration_user(alt_up));
     TEST_ASSERT_EQUAL_STRING("carol", kafka_admin_UserScramCredentialAlteration_user(alt_del));
     kafka_admin_UserScramCredentialAlteration_destroy(alt_up);
@@ -3724,7 +3724,7 @@ static void test_mock_admin_alter_user_scram_credentials_reports_unsupported_per
     TEST_ASSERT_EQUAL_STRING("scram-a", (const char *)kafka_Map_key(values, 0));
     TEST_ASSERT_EQUAL_STRING("scram-b", (const char *)kafka_Map_key(values, 1));
     kafka_common_Error_t *err = get_err(future_for(values, "scram-a"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     assert_error_message(get_err(future_for(values, "scram-b")), "Not implemented yet");
     kafka_Map_destroy(values);
@@ -3749,7 +3749,7 @@ static void test_mock_admin_describe_user_scram_credentials_reports_unsupported(
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *all = kafka_admin_DescribeUserScramCredentialsResult_all(result);
     kafka_common_Error_t *err = get_err(all);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(all);
     expect_fails_with(kafka_admin_DescribeUserScramCredentialsResult_users(result), "Not implemented yet");
@@ -3897,12 +3897,12 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     kafka_Bytes_t bogus = {bogus_bytes, 5};
     renewed = kafka_admin_Admin_renew_delegation_token(f.admin, bogus);
     kafka_common_Error_t *err = get_err(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(renewed));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_DELEGATION_TOKEN_NOT_FOUND, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_admin_RenewDelegationTokenResult_destroy(renewed);
     kafka_admin_ExpireDelegationTokenResult_t *expired = kafka_admin_Admin_expire_delegation_token(f.admin, bogus);
     err = get_err(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(expired));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_DELEGATION_TOKEN_NOT_FOUND, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_DELEGATION_TOKEN_NOT_FOUND, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_admin_ExpireDelegationTokenResult_destroy(expired);
 
@@ -3969,7 +3969,7 @@ static void test_mock_admin_create_delegation_token_rejects_bad_input(void) {
     kafka_admin_CreateDelegationTokenResult_t *result = kafka_admin_Admin_create_delegation_token_with_options(f.admin, options);
     kafka_admin_CreateDelegationTokenOptions_destroy(options);
     kafka_common_Error_t *err = get_err(kafka_admin_CreateDelegationTokenResult_delegation_token(result));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_PRINCIPAL_TYPE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_PRINCIPAL_TYPE, kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
     kafka_admin_CreateDelegationTokenResult_destroy(result);
 
@@ -4108,7 +4108,7 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
     kafka_admin_FeatureUpdate_t *update = feature_update(19, kafka_admin_FeatureUpdate_UpgradeType_upgrade());
     TEST_ASSERT_EQUAL_INT16(19, kafka_admin_FeatureUpdate_max_version_level(update));
     TEST_ASSERT_TRUE(kafka_admin_FeatureUpdate_upgrade_type(update) == kafka_admin_FeatureUpdate_UpgradeType_upgrade());
-    TEST_ASSERT_EQUAL_INT(kafka_admin_FeatureUpdate_UpgradeType_e_upgrade,
+    TEST_ASSERT_EQUAL_INT(kafka_admin_FeatureUpdate_UpgradeType_UPGRADE,
                           kafka_admin_FeatureUpdate_UpgradeType__enum(kafka_admin_FeatureUpdate_upgrade_type(update)));
     TEST_ASSERT_EQUAL_INT8(1, kafka_admin_FeatureUpdate_UpgradeType_code(kafka_admin_FeatureUpdate_UpgradeType_upgrade()));
     TEST_ASSERT_TRUE(kafka_admin_FeatureUpdate_UpgradeType_from_code(2) == kafka_admin_FeatureUpdate_UpgradeType_safe_downgrade());
@@ -4256,7 +4256,7 @@ static void test_mock_admin_describe_producers_reports_unsupported_per_partition
     kafka_common_KafkaFuture_t *future = NULL;
     TEST_ASSERT_NULL(kafka_admin_DescribeProducersResult_partition_result(result, p0, &future));
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
     future = NULL;
@@ -4285,7 +4285,7 @@ static void test_mock_admin_describe_transactions_reports_unsupported_per_id(voi
     kafka_common_KafkaFuture_t *future = NULL;
     TEST_ASSERT_NULL(kafka_admin_DescribeTransactionsResult_description(result, "txn-a", &future));
     kafka_common_Error_t *err = get_err(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(future);
     future = NULL;
@@ -4316,7 +4316,7 @@ static void test_mock_admin_fence_producers_reports_unsupported_per_id(void) {
     TEST_ASSERT_EQUAL_STRING("txn-x", (const char *)kafka_Map_key(fenced, 0));
     TEST_ASSERT_EQUAL_STRING("txn-y", (const char *)kafka_Map_key(fenced, 1));
     kafka_common_Error_t *err = get_err(future_for(fenced, "txn-x"));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_Map_destroy(fenced);
     kafka_common_KafkaFuture_t *future = NULL;
@@ -4358,7 +4358,7 @@ static void test_mock_admin_list_transactions_reports_unsupported(void) {
     TEST_ASSERT_NOT_NULL(result);
     kafka_common_KafkaFuture_t *all = kafka_admin_ListTransactionsResult_all(result);
     kafka_common_Error_t *err = get_err(all);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(all);
     expect_fails_with(kafka_admin_ListTransactionsResult_by_broker_id(result), "Not implemented yet");
@@ -4391,7 +4391,7 @@ static void test_mock_admin_abort_and_terminate_transaction_report_unsupported(v
     TEST_ASSERT_NOT_NULL(aborted);
     kafka_common_KafkaFuture_t *all = kafka_admin_AbortTransactionResult_all(aborted);
     kafka_common_Error_t *err = get_err(all);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION, kafka_common_Error_code(err));
     assert_error_message(err, "Not implemented yet");
     kafka_common_KafkaFuture_destroy(all);
     kafka_admin_AbortTransactionResult_destroy(aborted);

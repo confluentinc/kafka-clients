@@ -39,13 +39,13 @@ pub struct kafka_common_metrics_TimeUnit_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_metrics_TimeUnit_e {
-    nanoseconds,
-    microseconds,
-    milliseconds,
-    seconds,
-    minutes,
-    hours,
-    days,
+    kafka_common_metrics_TimeUnit_NANOSECONDS,
+    kafka_common_metrics_TimeUnit_MICROSECONDS,
+    kafka_common_metrics_TimeUnit_MILLISECONDS,
+    kafka_common_metrics_TimeUnit_SECONDS,
+    kafka_common_metrics_TimeUnit_MINUTES,
+    kafka_common_metrics_TimeUnit_HOURS,
+    kafka_common_metrics_TimeUnit_DAYS,
 }
 
 /// One static instance per value, indexed by [`kafka_common_metrics_TimeUnit_e`].
@@ -63,13 +63,13 @@ static VARIANTS: [TimeUnit; 7] = [
 /// enumerator and singleton.
 fn enum_of(unit: TimeUnit) -> kafka_common_metrics_TimeUnit_e {
     match unit {
-        TimeUnit::Nanoseconds => kafka_common_metrics_TimeUnit_e::nanoseconds,
-        TimeUnit::Microseconds => kafka_common_metrics_TimeUnit_e::microseconds,
-        TimeUnit::Milliseconds => kafka_common_metrics_TimeUnit_e::milliseconds,
-        TimeUnit::Seconds => kafka_common_metrics_TimeUnit_e::seconds,
-        TimeUnit::Minutes => kafka_common_metrics_TimeUnit_e::minutes,
-        TimeUnit::Hours => kafka_common_metrics_TimeUnit_e::hours,
-        TimeUnit::Days => kafka_common_metrics_TimeUnit_e::days,
+        TimeUnit::Nanoseconds => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_NANOSECONDS,
+        TimeUnit::Microseconds => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_MICROSECONDS,
+        TimeUnit::Milliseconds => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_MILLISECONDS,
+        TimeUnit::Seconds => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_SECONDS,
+        TimeUnit::Minutes => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_MINUTES,
+        TimeUnit::Hours => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_HOURS,
+        TimeUnit::Days => kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_DAYS,
     }
 }
 

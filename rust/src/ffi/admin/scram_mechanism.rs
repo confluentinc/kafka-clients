@@ -35,9 +35,9 @@ pub struct kafka_admin_ScramMechanism_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_ScramMechanism_e {
-    unknown,
-    scram_sha256,
-    scram_sha512,
+    kafka_admin_ScramMechanism_UNKNOWN,
+    kafka_admin_ScramMechanism_SCRAM_SHA256,
+    kafka_admin_ScramMechanism_SCRAM_SHA512,
 }
 
 /// One static instance per value, indexed by [`kafka_admin_ScramMechanism_e`].
@@ -56,9 +56,9 @@ static MECHANISM_NAMES: LazyLock<Vec<CString>> =
 /// enumerator and singleton.
 fn enum_of(mechanism: ScramMechanism) -> kafka_admin_ScramMechanism_e {
     match mechanism {
-        ScramMechanism::Unknown => kafka_admin_ScramMechanism_e::unknown,
-        ScramMechanism::ScramSha256 => kafka_admin_ScramMechanism_e::scram_sha256,
-        ScramMechanism::ScramSha512 => kafka_admin_ScramMechanism_e::scram_sha512,
+        ScramMechanism::Unknown => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN,
+        ScramMechanism::ScramSha256 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA256,
+        ScramMechanism::ScramSha512 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA512,
     }
 }
 

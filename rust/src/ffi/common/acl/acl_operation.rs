@@ -34,37 +34,37 @@ pub struct kafka_common_acl_AclOperation_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_acl_AclOperation_e {
     /// `AclOperation::Unknown`: Java's `UNKNOWN`.
-    unknown,
+    kafka_common_acl_AclOperation_UNKNOWN,
     /// `AclOperation::Any`: Java's `ANY`.
-    any,
+    kafka_common_acl_AclOperation_ANY,
     /// `AclOperation::All`: Java's `ALL`.
-    all,
+    kafka_common_acl_AclOperation_ALL,
     /// `AclOperation::Read`: Java's `READ`.
-    read,
+    kafka_common_acl_AclOperation_READ,
     /// `AclOperation::Write`: Java's `WRITE`.
-    write,
+    kafka_common_acl_AclOperation_WRITE,
     /// `AclOperation::Create`: Java's `CREATE`.
-    create,
+    kafka_common_acl_AclOperation_CREATE,
     /// `AclOperation::Delete`: Java's `DELETE`.
-    delete,
+    kafka_common_acl_AclOperation_DELETE,
     /// `AclOperation::Alter`: Java's `ALTER`.
-    alter,
+    kafka_common_acl_AclOperation_ALTER,
     /// `AclOperation::Describe`: Java's `DESCRIBE`.
-    describe,
+    kafka_common_acl_AclOperation_DESCRIBE,
     /// `AclOperation::ClusterAction`: Java's `CLUSTER_ACTION`.
-    cluster_action,
+    kafka_common_acl_AclOperation_CLUSTER_ACTION,
     /// `AclOperation::DescribeConfigs`: Java's `DESCRIBE_CONFIGS`.
-    describe_configs,
+    kafka_common_acl_AclOperation_DESCRIBE_CONFIGS,
     /// `AclOperation::AlterConfigs`: Java's `ALTER_CONFIGS`.
-    alter_configs,
+    kafka_common_acl_AclOperation_ALTER_CONFIGS,
     /// `AclOperation::IdempotentWrite`: Java's `IDEMPOTENT_WRITE`.
-    idempotent_write,
+    kafka_common_acl_AclOperation_IDEMPOTENT_WRITE,
     /// `AclOperation::CreateTokens`: Java's `CREATE_TOKENS`.
-    create_tokens,
+    kafka_common_acl_AclOperation_CREATE_TOKENS,
     /// `AclOperation::DescribeTokens`: Java's `DESCRIBE_TOKENS`.
-    describe_tokens,
+    kafka_common_acl_AclOperation_DESCRIBE_TOKENS,
     /// `AclOperation::TwoPhaseCommit`: Java's `TWO_PHASE_COMMIT`.
-    two_phase_commit,
+    kafka_common_acl_AclOperation_TWO_PHASE_COMMIT,
 }
 
 /// One static instance per value, indexed by [`kafka_common_acl_AclOperation_e`].
@@ -91,22 +91,26 @@ static VARIANTS: [AclOperation; 16] = [
 /// enumerator and singleton.
 fn enum_of(value: AclOperation) -> kafka_common_acl_AclOperation_e {
     match value {
-        AclOperation::Unknown => kafka_common_acl_AclOperation_e::unknown,
-        AclOperation::Any => kafka_common_acl_AclOperation_e::any,
-        AclOperation::All => kafka_common_acl_AclOperation_e::all,
-        AclOperation::Read => kafka_common_acl_AclOperation_e::read,
-        AclOperation::Write => kafka_common_acl_AclOperation_e::write,
-        AclOperation::Create => kafka_common_acl_AclOperation_e::create,
-        AclOperation::Delete => kafka_common_acl_AclOperation_e::delete,
-        AclOperation::Alter => kafka_common_acl_AclOperation_e::alter,
-        AclOperation::Describe => kafka_common_acl_AclOperation_e::describe,
-        AclOperation::ClusterAction => kafka_common_acl_AclOperation_e::cluster_action,
-        AclOperation::DescribeConfigs => kafka_common_acl_AclOperation_e::describe_configs,
-        AclOperation::AlterConfigs => kafka_common_acl_AclOperation_e::alter_configs,
-        AclOperation::IdempotentWrite => kafka_common_acl_AclOperation_e::idempotent_write,
-        AclOperation::CreateTokens => kafka_common_acl_AclOperation_e::create_tokens,
-        AclOperation::DescribeTokens => kafka_common_acl_AclOperation_e::describe_tokens,
-        AclOperation::TwoPhaseCommit => kafka_common_acl_AclOperation_e::two_phase_commit,
+        AclOperation::Unknown => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_UNKNOWN,
+        AclOperation::Any => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_ANY,
+        AclOperation::All => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_ALL,
+        AclOperation::Read => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_READ,
+        AclOperation::Write => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_WRITE,
+        AclOperation::Create => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_CREATE,
+        AclOperation::Delete => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_DELETE,
+        AclOperation::Alter => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_ALTER,
+        AclOperation::Describe => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_DESCRIBE,
+        AclOperation::ClusterAction => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_CLUSTER_ACTION,
+        AclOperation::DescribeConfigs => {
+            kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_DESCRIBE_CONFIGS
+        },
+        AclOperation::AlterConfigs => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_ALTER_CONFIGS,
+        AclOperation::IdempotentWrite => {
+            kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_IDEMPOTENT_WRITE
+        },
+        AclOperation::CreateTokens => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_CREATE_TOKENS,
+        AclOperation::DescribeTokens => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_DESCRIBE_TOKENS,
+        AclOperation::TwoPhaseCommit => kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_TWO_PHASE_COMMIT,
     }
 }
 

@@ -34,21 +34,21 @@ pub struct kafka_common_resource_ResourceType_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_resource_ResourceType_e {
     /// `ResourceType::Unknown`: Java's `UNKNOWN`.
-    unknown,
+    kafka_common_resource_ResourceType_UNKNOWN,
     /// `ResourceType::Any`: Java's `ANY`.
-    any,
+    kafka_common_resource_ResourceType_ANY,
     /// `ResourceType::Topic`: Java's `TOPIC`.
-    topic,
+    kafka_common_resource_ResourceType_TOPIC,
     /// `ResourceType::Group`: Java's `GROUP`.
-    group,
+    kafka_common_resource_ResourceType_GROUP,
     /// `ResourceType::Cluster`: Java's `CLUSTER`.
-    cluster,
+    kafka_common_resource_ResourceType_CLUSTER,
     /// `ResourceType::TransactionalId`: Java's `TRANSACTIONAL_ID`.
-    transactional_id,
+    kafka_common_resource_ResourceType_TRANSACTIONAL_ID,
     /// `ResourceType::DelegationToken`: Java's `DELEGATION_TOKEN`.
-    delegation_token,
+    kafka_common_resource_ResourceType_DELEGATION_TOKEN,
     /// `ResourceType::User`: Java's `USER`.
-    user,
+    kafka_common_resource_ResourceType_USER,
 }
 
 /// One static instance per value, indexed by [`kafka_common_resource_ResourceType_e`].
@@ -67,14 +67,18 @@ static VARIANTS: [ResourceType; 8] = [
 /// enumerator and singleton.
 fn enum_of(value: ResourceType) -> kafka_common_resource_ResourceType_e {
     match value {
-        ResourceType::Unknown => kafka_common_resource_ResourceType_e::unknown,
-        ResourceType::Any => kafka_common_resource_ResourceType_e::any,
-        ResourceType::Topic => kafka_common_resource_ResourceType_e::topic,
-        ResourceType::Group => kafka_common_resource_ResourceType_e::group,
-        ResourceType::Cluster => kafka_common_resource_ResourceType_e::cluster,
-        ResourceType::TransactionalId => kafka_common_resource_ResourceType_e::transactional_id,
-        ResourceType::DelegationToken => kafka_common_resource_ResourceType_e::delegation_token,
-        ResourceType::User => kafka_common_resource_ResourceType_e::user,
+        ResourceType::Unknown => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_UNKNOWN,
+        ResourceType::Any => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_ANY,
+        ResourceType::Topic => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_TOPIC,
+        ResourceType::Group => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_GROUP,
+        ResourceType::Cluster => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_CLUSTER,
+        ResourceType::TransactionalId => {
+            kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_TRANSACTIONAL_ID
+        },
+        ResourceType::DelegationToken => {
+            kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_DELEGATION_TOKEN
+        },
+        ResourceType::User => kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_USER,
     }
 }
 

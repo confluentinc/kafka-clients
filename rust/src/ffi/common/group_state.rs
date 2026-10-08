@@ -35,15 +35,15 @@ pub struct kafka_common_GroupState_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_GroupState_e {
-    unknown,
-    preparing_rebalance,
-    completing_rebalance,
-    stable,
-    dead,
-    empty,
-    assigning,
-    reconciling,
-    not_ready,
+    kafka_common_GroupState_UNKNOWN,
+    kafka_common_GroupState_PREPARING_REBALANCE,
+    kafka_common_GroupState_COMPLETING_REBALANCE,
+    kafka_common_GroupState_STABLE,
+    kafka_common_GroupState_DEAD,
+    kafka_common_GroupState_EMPTY,
+    kafka_common_GroupState_ASSIGNING,
+    kafka_common_GroupState_RECONCILING,
+    kafka_common_GroupState_NOT_READY,
 }
 
 /// One static instance per value, indexed by [`kafka_common_GroupState_e`].
@@ -66,15 +66,15 @@ static NAMES: LazyLock<Vec<CString>> = LazyLock::new(|| VARIANTS.iter().map(|s| 
 /// enumerator and singleton.
 fn enum_of(state: GroupState) -> kafka_common_GroupState_e {
     match state {
-        GroupState::Unknown => kafka_common_GroupState_e::unknown,
-        GroupState::PreparingRebalance => kafka_common_GroupState_e::preparing_rebalance,
-        GroupState::CompletingRebalance => kafka_common_GroupState_e::completing_rebalance,
-        GroupState::Stable => kafka_common_GroupState_e::stable,
-        GroupState::Dead => kafka_common_GroupState_e::dead,
-        GroupState::Empty => kafka_common_GroupState_e::empty,
-        GroupState::Assigning => kafka_common_GroupState_e::assigning,
-        GroupState::Reconciling => kafka_common_GroupState_e::reconciling,
-        GroupState::NotReady => kafka_common_GroupState_e::not_ready,
+        GroupState::Unknown => kafka_common_GroupState_e::kafka_common_GroupState_UNKNOWN,
+        GroupState::PreparingRebalance => kafka_common_GroupState_e::kafka_common_GroupState_PREPARING_REBALANCE,
+        GroupState::CompletingRebalance => kafka_common_GroupState_e::kafka_common_GroupState_COMPLETING_REBALANCE,
+        GroupState::Stable => kafka_common_GroupState_e::kafka_common_GroupState_STABLE,
+        GroupState::Dead => kafka_common_GroupState_e::kafka_common_GroupState_DEAD,
+        GroupState::Empty => kafka_common_GroupState_e::kafka_common_GroupState_EMPTY,
+        GroupState::Assigning => kafka_common_GroupState_e::kafka_common_GroupState_ASSIGNING,
+        GroupState::Reconciling => kafka_common_GroupState_e::kafka_common_GroupState_RECONCILING,
+        GroupState::NotReady => kafka_common_GroupState_e::kafka_common_GroupState_NOT_READY,
     }
 }
 

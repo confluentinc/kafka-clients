@@ -130,7 +130,7 @@ static int is_txn_guard_error(const kafka_common_Error_t *err) {
         return 0;
     }
     const char *msg = kafka_common_Error_message(err);
-    return kafka_common_Error_code(err) == kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION
+    return kafka_common_Error_code(err) == kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION
         || (msg != NULL && strstr(msg, "not safe for concurrent access") != NULL);
 }
 
@@ -412,7 +412,7 @@ void test_manual_error(void) {
     TEST_ASSERT_TRUE(kafka_common_KafkaFuture_is_done(future));
 
     kafka_common_Error_t *err = get_error(future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("test error", kafka_common_Error_message(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
 
@@ -474,7 +474,7 @@ void test_send_batch_partial_failure(void) {
     kafka_common_Error_t *err = kafka_producer_ProducerRecordOptionsBuilder_build(builder, &options);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(options);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("ProducerRecordOptionsBuilder::build: mandatory parameter `topic` was not set",
                              kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
@@ -509,7 +509,7 @@ void test_close_then_send(void) {
        `Error::local_illegal_state("MockProducer is already closed.")`; the
        out slot is left untouched. */
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", kafka_common_Error_message(err));
     TEST_ASSERT_NULL(future);
 
@@ -545,7 +545,7 @@ void test_send_async_on_closed_producer_fires_callback(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
     TEST_ASSERT_TRUE(result.had_error);
     TEST_ASSERT_NULL(result.future);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE, result.error_code);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, result.error_code);
     TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", result.message);
 
     fixture_destroy(&f);
@@ -669,7 +669,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(future);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, kafka_common_Error_code(err));
     const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
@@ -776,7 +776,7 @@ void test_error_payload_topic_authorization(void) {
     kafka_common_Error_t *err = trigger_error(&f, kafka_common_Error_topic_authorization(unauthorized), &future);
     kafka_List_destroy(unauthorized);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_TOPIC_AUTHORIZATION_FAILED, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_TOPIC_AUTHORIZATION_FAILED, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_topic_authorization_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_authorization_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_api_error(err));
@@ -807,7 +807,7 @@ void test_error_payload_group_authorization(void) {
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = trigger_error(&f, kafka_common_Error_group_authorization("my-group"), &future);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_GROUP_AUTHORIZATION_FAILED, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_GROUP_AUTHORIZATION_FAILED, kafka_common_Error_code(err));
     const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization_error(err);
     TEST_ASSERT_NOT_NULL(handle);
     /* Borrowed from the handle, like every `&str` getter. */
@@ -830,7 +830,7 @@ void test_error_payload_invalid_topic(void) {
     kafka_common_Error_t *err = trigger_error(&f, kafka_common_Error_invalid_topics(invalid), &future);
     kafka_List_destroy(invalid);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_TOPIC_ERROR, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_TOPIC_ERROR, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_invalid_topic_error(err));
     const kafka_common_InvalidTopicError_t *handle = kafka_common_Error_invalid_topic(err);
     TEST_ASSERT_NOT_NULL(handle);
@@ -854,7 +854,7 @@ void test_error_payload_throttling_quota_exceeded(void) {
     kafka_common_Error_t *err = trigger_error(
         &f, kafka_common_Error_throttling_quota_exceeded(250, "slow down"), &future);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_THROTTLING_QUOTA_EXCEEDED, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("slow down", kafka_common_Error_message(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_throttling_quota_exceeded_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_retriable_error(err));
@@ -876,7 +876,7 @@ void test_error_payload_record_too_large(void) {
     kafka_common_KafkaFuture_t *future = NULL;
     kafka_common_Error_t *err = trigger_error(&f, kafka_common_Error_record_too_large("too big"), &future);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_MESSAGE_TOO_LARGE, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_MESSAGE_TOO_LARGE, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_record_too_large_error(err));
     const kafka_common_RecordTooLargeError_t *handle = kafka_common_Error_record_too_large_error(err);
     TEST_ASSERT_NOT_NULL(handle);
@@ -1559,7 +1559,7 @@ void test_transaction_commit_error_requires_abort(void) {
     kafka_common_Error_t *err = kafka_producer_Producer_commit_transaction(f.producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REQUEST_TIMED_OUT, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("commit timed out", kafka_common_Error_message(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_timeout_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_retriable_error(err));
@@ -1582,7 +1582,7 @@ void test_transaction_commit_error_requires_abort(void) {
         f.mock, kafka_common_Error_transaction_aborted_message("aborted by broker"));
     err = kafka_producer_Producer_commit_transaction(f.producer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_TRANSACTION_ABORTED, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_TRANSACTION_ABORTED, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("aborted by broker", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
 
@@ -1689,7 +1689,7 @@ void test_transaction_fenced_producer(void) {
 
     kafka_common_Error_t *err = kafka_producer_Producer_commit_transaction(f.producer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_PRODUCER_FENCED, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_PRODUCER_FENCED, kafka_common_Error_code(err));
     TEST_ASSERT_EQUAL_STRING("MockProducer is fenced.", kafka_common_Error_message(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_api_error(err));
     kafka_common_Error_destroy(err);
@@ -2010,7 +2010,7 @@ void test_send_with_callback_fires_error_on_error_next(void) {
     TEST_ASSERT_EQUAL_INT64(-1, result.offset);
     TEST_ASSERT_EQUAL_STRING("cb-err-topic", result.topic);
     TEST_ASSERT_TRUE(result.had_error);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_REQUEST_TIMED_OUT, result.error_code);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_REQUEST_TIMED_OUT, result.error_code);
 
     /* The future reports the same failure. */
     kafka_common_Error_t *err = get_error(future);

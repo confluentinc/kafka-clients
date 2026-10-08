@@ -36,9 +36,9 @@ pub struct kafka_common_record_TimestampType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_record_TimestampType_e {
-    no_timestamp_type,
-    create_time,
-    log_append_time,
+    kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE,
+    kafka_common_record_TimestampType_CREATE_TIME,
+    kafka_common_record_TimestampType_LOG_APPEND_TIME,
 }
 
 /// One static instance per value, indexed by
@@ -56,9 +56,13 @@ static NAMES: LazyLock<Vec<CString>> = LazyLock::new(|| VARIANTS.iter().map(|t| 
 /// enumerator and singleton.
 fn enum_of(timestamp_type: TimestampType) -> kafka_common_record_TimestampType_e {
     match timestamp_type {
-        TimestampType::NoTimestampType => kafka_common_record_TimestampType_e::no_timestamp_type,
-        TimestampType::CreateTime => kafka_common_record_TimestampType_e::create_time,
-        TimestampType::LogAppendTime => kafka_common_record_TimestampType_e::log_append_time,
+        TimestampType::NoTimestampType => {
+            kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE
+        },
+        TimestampType::CreateTime => kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_CREATE_TIME,
+        TimestampType::LogAppendTime => {
+            kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_LOG_APPEND_TIME
+        },
     }
 }
 

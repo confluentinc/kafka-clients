@@ -34,13 +34,13 @@ pub struct kafka_common_acl_AclPermissionType_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_acl_AclPermissionType_e {
     /// `AclPermissionType::Unknown`: Java's `UNKNOWN`.
-    unknown,
+    kafka_common_acl_AclPermissionType_UNKNOWN,
     /// `AclPermissionType::Any`: Java's `ANY`.
-    any,
+    kafka_common_acl_AclPermissionType_ANY,
     /// `AclPermissionType::Deny`: Java's `DENY`.
-    deny,
+    kafka_common_acl_AclPermissionType_DENY,
     /// `AclPermissionType::Allow`: Java's `ALLOW`.
-    allow,
+    kafka_common_acl_AclPermissionType_ALLOW,
 }
 
 /// One static instance per value, indexed by [`kafka_common_acl_AclPermissionType_e`].
@@ -55,10 +55,10 @@ static VARIANTS: [AclPermissionType; 4] = [
 /// enumerator and singleton.
 fn enum_of(value: AclPermissionType) -> kafka_common_acl_AclPermissionType_e {
     match value {
-        AclPermissionType::Unknown => kafka_common_acl_AclPermissionType_e::unknown,
-        AclPermissionType::Any => kafka_common_acl_AclPermissionType_e::any,
-        AclPermissionType::Deny => kafka_common_acl_AclPermissionType_e::deny,
-        AclPermissionType::Allow => kafka_common_acl_AclPermissionType_e::allow,
+        AclPermissionType::Unknown => kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_UNKNOWN,
+        AclPermissionType::Any => kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_ANY,
+        AclPermissionType::Deny => kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_DENY,
+        AclPermissionType::Allow => kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_ALLOW,
     }
 }
 

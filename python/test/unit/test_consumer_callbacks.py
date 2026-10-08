@@ -57,7 +57,7 @@ UNKNOWN_SERVER_ERROR = -1
 
 # The access guard rejects a concurrent op with LocalConcurrentModificationError,
 # which has its own dedicated FFI code rather than folding into
-# UnknownServerError -- see kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION
+# UnknownServerError -- see kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION
 # in src/ffi/common.rs.
 LOCAL_CONCURRENT_MODIFICATION = -2
 

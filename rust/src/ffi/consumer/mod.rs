@@ -49,7 +49,7 @@
 //! runs on the pumping thread, and queues its own completion the same way.
 //! Those interface methods are `async` in Rust, so their C functions return
 //! `void`, take a trailing `int64_t callback_id` and report through
-//! [`kafka_consumer_Consumer_set_callback_result`], from inside the
+//! [`kafka_consumer_Consumer__set_callback_result`], from inside the
 //! function or later from any thread; the operation waits for that report
 //! (a C implementation that never reports hangs it, as a Java listener that
 //! never returns would). [`kafka_consumer_Consumer_destroy`] runs the
@@ -417,7 +417,7 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 pub(crate) type ResultSink = Box<dyn FnOnce(Result<(), Error>) + Send>;
 
 static NEXT_CALLBACK_ID: AtomicI64 = AtomicI64::new(1);
-/// The sinks awaiting a `set_callback_result`, by id. A `Vec` because it
+/// The sinks awaiting a `__set_callback_result`, by id. A `Vec` because it
 /// can be built in a `const` context; it holds the in-flight callbacks
 /// only, a handful at most.
 static PENDING: Mutex<Vec<(i64, ResultSink)>> = Mutex::new(Vec::new());
@@ -449,7 +449,10 @@ pub(crate) fn complete_callback_result(id: i64, result: Result<(), Error>) -> bo
 }
 
 /// Reports the result of an async interface method (`ConsumerRebalanceListener`,
-/// `OffsetCommitCallback`) invoked with `callback_id` (CLAUDE.md §4 rule 3):
+/// `OffsetCommitCallback`) invoked with `callback_id` (CLAUDE.md §4): once the
+/// callback finishes, the Rust task that invoked it completes with this value.
+/// The double underscore marks a function derived by convention, with no Java
+/// counterpart.
 /// `result` is `NULL` for success or an owned `kafka_common_Error_t *` for
 /// failure, taken over by Rust. Callable from inside the method or later,
 /// from any thread; the ids are process-unique, so `self_` only names the
@@ -460,7 +463,7 @@ pub(crate) fn complete_callback_result(id: i64, result: Result<(), Error>) -> bo
 ///
 /// `result` must be null or a valid owned error not used afterwards.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_set_callback_result(
+pub unsafe extern "C" fn kafka_consumer_Consumer__set_callback_result(
     self_: *const kafka_consumer_Consumer_t,
     callback_id: i64,
     result: *mut c_void,

@@ -34,8 +34,8 @@ pub struct kafka_common_ElectionType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_ElectionType_e {
-    preferred,
-    unclean,
+    kafka_common_ElectionType_PREFERRED,
+    kafka_common_ElectionType_UNCLEAN,
 }
 
 /// One static instance per value, indexed by [`kafka_common_ElectionType_e`].
@@ -45,8 +45,8 @@ static VARIANTS: [ElectionType; 2] = [ElectionType::Preferred, ElectionType::Unc
 /// enumerator and singleton.
 fn enum_of(election_type: ElectionType) -> kafka_common_ElectionType_e {
     match election_type {
-        ElectionType::Preferred => kafka_common_ElectionType_e::preferred,
-        ElectionType::Unclean => kafka_common_ElectionType_e::unclean,
+        ElectionType::Preferred => kafka_common_ElectionType_e::kafka_common_ElectionType_PREFERRED,
+        ElectionType::Unclean => kafka_common_ElectionType_e::kafka_common_ElectionType_UNCLEAN,
     }
 }
 

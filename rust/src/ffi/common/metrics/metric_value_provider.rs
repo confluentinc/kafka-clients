@@ -42,8 +42,8 @@ pub struct kafka_common_metrics_MetricValueProvider_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_metrics_MetricValueProvider_e {
-    measurable,
-    gauge,
+    kafka_common_metrics_MetricValueProvider_MEASURABLE,
+    kafka_common_metrics_MetricValueProvider_GAUGE,
 }
 
 /// What a [`kafka_common_metrics_MetricValueProvider_t`] points at: the
@@ -124,8 +124,12 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(
     self_: *const kafka_common_metrics_MetricValueProvider_t,
 ) -> kafka_common_metrics_MetricValueProvider_e {
     match unsafe { inner(self_) } {
-        MetricValueProviderInner::Measurable(_) => kafka_common_metrics_MetricValueProvider_e::measurable,
-        MetricValueProviderInner::Gauge(_) => kafka_common_metrics_MetricValueProvider_e::gauge,
+        MetricValueProviderInner::Measurable(_) => {
+            kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE
+        },
+        MetricValueProviderInner::Gauge(_) => {
+            kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_GAUGE
+        },
     }
 }
 
@@ -205,7 +209,7 @@ mod tests {
             ));
             assert_eq!(
                 kafka_common_metrics_MetricValueProvider__enum(measurable),
-                kafka_common_metrics_MetricValueProvider_e::measurable
+                kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE
             );
             let value = kafka_common_metrics_MetricValueProvider_value(measurable, config, 3);
             assert_eq!(kafka_common_MetricValue_as_double(value), 1.5);
@@ -223,7 +227,7 @@ mod tests {
             ));
             assert_eq!(
                 kafka_common_metrics_MetricValueProvider__enum(gauge),
-                kafka_common_metrics_MetricValueProvider_e::gauge
+                kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_GAUGE
             );
             let value = kafka_common_metrics_MetricValueProvider_value(gauge, config, 0);
             assert!(kafka_common_MetricValue_as_double(value).is_nan());

@@ -36,10 +36,10 @@ pub struct kafka_common_security_auth_SecurityProtocol_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_security_auth_SecurityProtocol_e {
-    plaintext,
-    ssl,
-    sasl_plaintext,
-    sasl_ssl,
+    kafka_common_security_auth_SecurityProtocol_PLAINTEXT,
+    kafka_common_security_auth_SecurityProtocol_SSL,
+    kafka_common_security_auth_SecurityProtocol_SASL_PLAINTEXT,
+    kafka_common_security_auth_SecurityProtocol_SASL_SSL,
 }
 
 static VARIANTS: [SecurityProtocol; 4] = [
@@ -56,10 +56,18 @@ static NAMES: [&CStr; 4] = [c"PLAINTEXT", c"SSL", c"SASL_PLAINTEXT", c"SASL_SSL"
 /// enumerator and singleton.
 fn enum_of(value: SecurityProtocol) -> kafka_common_security_auth_SecurityProtocol_e {
     match value {
-        SecurityProtocol::Plaintext => kafka_common_security_auth_SecurityProtocol_e::plaintext,
-        SecurityProtocol::Ssl => kafka_common_security_auth_SecurityProtocol_e::ssl,
-        SecurityProtocol::SaslPlaintext => kafka_common_security_auth_SecurityProtocol_e::sasl_plaintext,
-        SecurityProtocol::SaslSsl => kafka_common_security_auth_SecurityProtocol_e::sasl_ssl,
+        SecurityProtocol::Plaintext => {
+            kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_PLAINTEXT
+        },
+        SecurityProtocol::Ssl => {
+            kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SSL
+        },
+        SecurityProtocol::SaslPlaintext => {
+            kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SASL_PLAINTEXT
+        },
+        SecurityProtocol::SaslSsl => {
+            kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SASL_SSL
+        },
     }
 }
 
@@ -201,25 +209,25 @@ mod tests {
         let all = [
             (
                 kafka_common_security_auth_SecurityProtocol_plaintext(),
-                kafka_common_security_auth_SecurityProtocol_e::plaintext,
+                kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_PLAINTEXT,
                 0,
                 "PLAINTEXT",
             ),
             (
                 kafka_common_security_auth_SecurityProtocol_ssl(),
-                kafka_common_security_auth_SecurityProtocol_e::ssl,
+                kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SSL,
                 1,
                 "SSL",
             ),
             (
                 kafka_common_security_auth_SecurityProtocol_sasl_plaintext(),
-                kafka_common_security_auth_SecurityProtocol_e::sasl_plaintext,
+                kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SASL_PLAINTEXT,
                 2,
                 "SASL_PLAINTEXT",
             ),
             (
                 kafka_common_security_auth_SecurityProtocol_sasl_ssl(),
-                kafka_common_security_auth_SecurityProtocol_e::sasl_ssl,
+                kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_SASL_SSL,
                 3,
                 "SASL_SSL",
             ),

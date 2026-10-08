@@ -41,9 +41,9 @@ pub struct kafka_common_TopicCollection_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_TopicCollection_e {
     /// `TopicCollection::TopicIds`: Java's `TopicIdCollection`.
-    topic_ids,
+    kafka_common_TopicCollection_TOPIC_IDS,
     /// `TopicCollection::TopicNames`: Java's `TopicNameCollection`.
-    topic_names,
+    kafka_common_TopicCollection_TOPIC_NAMES,
 }
 
 /// Which variant `self_` holds.
@@ -56,8 +56,8 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
     self_: *const kafka_common_TopicCollection_t,
 ) -> kafka_common_TopicCollection_e {
     match unsafe { topic_collection_ref(self_) } {
-        TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::topic_ids,
-        TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::topic_names,
+        TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS,
+        TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES,
     }
 }
 
@@ -188,7 +188,7 @@ mod tests {
             kafka_List_destroy(names);
             assert_eq!(
                 kafka_common_TopicCollection__enum(by_name),
-                kafka_common_TopicCollection_e::topic_names
+                kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES
             );
             assert_eq!(
                 *topic_collection_ref(by_name),
@@ -201,7 +201,7 @@ mod tests {
             kafka_List_destroy(ids);
             assert_eq!(
                 kafka_common_TopicCollection__enum(by_id),
-                kafka_common_TopicCollection_e::topic_ids
+                kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS
             );
             assert_eq!(
                 *topic_collection_ref(by_id),

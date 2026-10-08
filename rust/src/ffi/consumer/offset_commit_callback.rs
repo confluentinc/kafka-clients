@@ -17,7 +17,7 @@
 //!
 //! `onComplete` is an `async fn` in Rust, so the C method returns `void`,
 //! takes a trailing `int64_t callback_id` and reports through
-//! `kafka_consumer_Consumer_set_callback_result`. Java's `onComplete` is
+//! `kafka_consumer_Consumer__set_callback_result`. Java's `onComplete` is
 //! `void`: a reported error is ignored (freed), the report only tells the
 //! consumer the callback finished. The consumer invokes it from the
 //! application thread during the next blocking-style call (`poll`,
@@ -53,7 +53,7 @@ pub struct kafka_consumer_OffsetCommitCallback_t {
 /// to `kafka_consumer_OffsetAndMetadata_t *`, sorted and borrowed for the
 /// call; `error` is `NULL` on success, otherwise borrowed for the call. The
 /// method is `async` in Rust (CLAUDE.md §4 rule 3): it reports completion
-/// with `kafka_consumer_Consumer_set_callback_result(consumer, callback_id, NULL)`
+/// with `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, NULL)`
 /// (an error passed there is ignored, `onComplete` being `void` in Java).
 pub type kafka_consumer_OffsetCommitCallback_on_complete_fn_t = unsafe extern "C" fn(
     self_: *mut c_void,
@@ -157,7 +157,7 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 /// Invokes the implementation's `onComplete` on the calling thread with
 /// copies of `offsets` (a map of `kafka_common_TopicPartition_t *` to
 /// `kafka_consumer_OffsetAndMetadata_t *`) and `error` (`NULL` for
-/// success), and waits for its `set_callback_result` report.
+/// success), and waits for its `__set_callback_result` report.
 ///
 /// # Safety
 ///

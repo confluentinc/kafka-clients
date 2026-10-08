@@ -49,16 +49,20 @@ pub struct kafka_admin_DescribeTopicsResult_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_DescribeTopicsResult_e {
-    by_topic_id,
-    by_topic_name,
+    kafka_admin_DescribeTopicsResult_BY_TOPIC_ID,
+    kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME,
 }
 
 /// Exhaustive, so a variant Java adds fails to compile until it has its C
 /// enumerator.
 fn enum_of(result: &DescribeTopicsResult) -> kafka_admin_DescribeTopicsResult_e {
     match result {
-        DescribeTopicsResult::ByTopicId(_) => kafka_admin_DescribeTopicsResult_e::by_topic_id,
-        DescribeTopicsResult::ByTopicName(_) => kafka_admin_DescribeTopicsResult_e::by_topic_name,
+        DescribeTopicsResult::ByTopicId(_) => {
+            kafka_admin_DescribeTopicsResult_e::kafka_admin_DescribeTopicsResult_BY_TOPIC_ID
+        },
+        DescribeTopicsResult::ByTopicName(_) => {
+            kafka_admin_DescribeTopicsResult_e::kafka_admin_DescribeTopicsResult_BY_TOPIC_NAME
+        },
     }
 }
 

@@ -30,10 +30,10 @@ def test_error_code_py_is_up_to_date():
 def test_parse_reads_negative_values_and_stops_at_the_enum_end():
     source = (
         "pub enum kafka_common_ErrorCode_e {\n"
-        "    kafka_common_ErrorCode_e_NONE = 0,\n"
-        "    kafka_common_ErrorCode_e_UNKNOWN_SERVER_ERROR = -1,\n"
+        "    kafka_common_ErrorCode_NONE = 0,\n"
+        "    kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR = -1,\n"
         "}\n"
-        "kafka_common_ErrorCode_e_AFTER = 7,\n"
+        "kafka_common_ErrorCode_AFTER = 7,\n"
     )
     assert parse_error_codes(source) == [
         ("NONE", 0), ("UNKNOWN_SERVER_ERROR", -1)]

@@ -34,15 +34,15 @@ pub struct kafka_common_resource_PatternType_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_resource_PatternType_e {
     /// `PatternType::Unknown`: Java's `UNKNOWN`.
-    unknown,
+    kafka_common_resource_PatternType_UNKNOWN,
     /// `PatternType::Any`: Java's `ANY`.
-    any,
+    kafka_common_resource_PatternType_ANY,
     /// `PatternType::Match`: Java's `MATCH`.
-    r#match,
+    kafka_common_resource_PatternType_MATCH,
     /// `PatternType::Literal`: Java's `LITERAL`.
-    literal,
+    kafka_common_resource_PatternType_LITERAL,
     /// `PatternType::Prefixed`: Java's `PREFIXED`.
-    prefixed,
+    kafka_common_resource_PatternType_PREFIXED,
 }
 
 /// One static instance per value, indexed by [`kafka_common_resource_PatternType_e`].
@@ -58,11 +58,11 @@ static VARIANTS: [PatternType; 5] = [
 /// enumerator and singleton.
 fn enum_of(value: PatternType) -> kafka_common_resource_PatternType_e {
     match value {
-        PatternType::Unknown => kafka_common_resource_PatternType_e::unknown,
-        PatternType::Any => kafka_common_resource_PatternType_e::any,
-        PatternType::Match => kafka_common_resource_PatternType_e::r#match,
-        PatternType::Literal => kafka_common_resource_PatternType_e::literal,
-        PatternType::Prefixed => kafka_common_resource_PatternType_e::prefixed,
+        PatternType::Unknown => kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_UNKNOWN,
+        PatternType::Any => kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_ANY,
+        PatternType::Match => kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_MATCH,
+        PatternType::Literal => kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_LITERAL,
+        PatternType::Prefixed => kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_PREFIXED,
     }
 }
 

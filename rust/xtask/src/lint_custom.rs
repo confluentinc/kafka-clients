@@ -40,6 +40,9 @@ struct Context {
     java: Rc<JavaIndex>,
     /// The `check-ffi-translation` baseline to apply; `None` shows every finding.
     ffi_baseline: Option<PathBuf>,
+    /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
+    /// the C enumerators are spelled; `None` skips that check.
+    cbindgen_config: Option<PathBuf>,
 }
 
 /// One source-level rule run by `lint-custom`.
@@ -97,6 +100,7 @@ pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
     let ctx = Context {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
     if let Some(name) = only.filter(|_| rules.is_empty()) {
@@ -149,7 +153,11 @@ pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
 /// burn it down phase by phase (CLAUDE.md §4).
 pub fn write_ffi_baseline() -> anyhow::Result<()> {
     println!("🔧 Writing the check-ffi-translation baseline...");
-    let ctx = Context { java: Rc::new(JavaIndex::load()), ffi_baseline: None };
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: None,
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
     let rule = ffi_translation::FfiTranslation::new(&ctx);
     if let Some(reason) = rule.skip_reason() {
         anyhow::bail!("cannot run check-ffi-translation: {reason}");

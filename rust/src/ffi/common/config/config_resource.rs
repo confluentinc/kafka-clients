@@ -41,17 +41,17 @@ pub struct kafka_common_config_ConfigResource_Type_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_config_ConfigResource_Type_e {
     /// `Type::Group`: Java's `GROUP`.
-    group,
+    kafka_common_config_ConfigResource_Type_GROUP,
     /// `Type::ClientMetrics`: Java's `CLIENT_METRICS`.
-    client_metrics,
+    kafka_common_config_ConfigResource_Type_CLIENT_METRICS,
     /// `Type::BrokerLogger`: Java's `BROKER_LOGGER`.
-    broker_logger,
+    kafka_common_config_ConfigResource_Type_BROKER_LOGGER,
     /// `Type::Broker`: Java's `BROKER`.
-    broker,
+    kafka_common_config_ConfigResource_Type_BROKER,
     /// `Type::Topic`: Java's `TOPIC`.
-    topic,
+    kafka_common_config_ConfigResource_Type_TOPIC,
     /// `Type::Unknown`: Java's `UNKNOWN`.
-    unknown,
+    kafka_common_config_ConfigResource_Type_UNKNOWN,
 }
 
 /// One static instance per value, indexed by
@@ -69,12 +69,16 @@ static TYPES: [Type; 6] = [
 /// enumerator and singleton.
 fn type_enum_of(value: Type) -> kafka_common_config_ConfigResource_Type_e {
     match value {
-        Type::Group => kafka_common_config_ConfigResource_Type_e::group,
-        Type::ClientMetrics => kafka_common_config_ConfigResource_Type_e::client_metrics,
-        Type::BrokerLogger => kafka_common_config_ConfigResource_Type_e::broker_logger,
-        Type::Broker => kafka_common_config_ConfigResource_Type_e::broker,
-        Type::Topic => kafka_common_config_ConfigResource_Type_e::topic,
-        Type::Unknown => kafka_common_config_ConfigResource_Type_e::unknown,
+        Type::Group => kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_GROUP,
+        Type::ClientMetrics => {
+            kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_CLIENT_METRICS
+        },
+        Type::BrokerLogger => {
+            kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_BROKER_LOGGER
+        },
+        Type::Broker => kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_BROKER,
+        Type::Topic => kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_TOPIC,
+        Type::Unknown => kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_UNKNOWN,
     }
 }
 

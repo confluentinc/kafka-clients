@@ -183,7 +183,7 @@ fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
     let mut codes = Vec::new();
     for line in body.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_e_") else {
+        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") else {
             continue;
         };
         let Some((name, value)) = rest.split_once(" = ") else {
@@ -365,7 +365,7 @@ fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, S
         };
         let name = screaming_snake(&variant);
         if !known.contains(name.as_str()) {
-            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_e_{name}` enumerator");
+            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_{name}` enumerator");
         }
         classes.push((name, inner.to_token_stream().to_string()));
     }

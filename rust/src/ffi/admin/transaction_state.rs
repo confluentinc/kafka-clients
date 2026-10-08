@@ -34,14 +34,14 @@ pub struct kafka_admin_TransactionState_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_TransactionState_e {
-    ongoing,
-    prepare_abort,
-    prepare_commit,
-    complete_abort,
-    complete_commit,
-    empty,
-    prepare_epoch_fence,
-    unknown,
+    kafka_admin_TransactionState_ONGOING,
+    kafka_admin_TransactionState_PREPARE_ABORT,
+    kafka_admin_TransactionState_PREPARE_COMMIT,
+    kafka_admin_TransactionState_COMPLETE_ABORT,
+    kafka_admin_TransactionState_COMPLETE_COMMIT,
+    kafka_admin_TransactionState_EMPTY,
+    kafka_admin_TransactionState_PREPARE_EPOCH_FENCE,
+    kafka_admin_TransactionState_UNKNOWN,
 }
 
 /// One static instance per value, indexed by
@@ -61,14 +61,18 @@ static VARIANTS: [TransactionState; 8] = [
 /// enumerator and singleton.
 fn enum_of(state: TransactionState) -> kafka_admin_TransactionState_e {
     match state {
-        TransactionState::Ongoing => kafka_admin_TransactionState_e::ongoing,
-        TransactionState::PrepareAbort => kafka_admin_TransactionState_e::prepare_abort,
-        TransactionState::PrepareCommit => kafka_admin_TransactionState_e::prepare_commit,
-        TransactionState::CompleteAbort => kafka_admin_TransactionState_e::complete_abort,
-        TransactionState::CompleteCommit => kafka_admin_TransactionState_e::complete_commit,
-        TransactionState::Empty => kafka_admin_TransactionState_e::empty,
-        TransactionState::PrepareEpochFence => kafka_admin_TransactionState_e::prepare_epoch_fence,
-        TransactionState::Unknown => kafka_admin_TransactionState_e::unknown,
+        TransactionState::Ongoing => kafka_admin_TransactionState_e::kafka_admin_TransactionState_ONGOING,
+        TransactionState::PrepareAbort => kafka_admin_TransactionState_e::kafka_admin_TransactionState_PREPARE_ABORT,
+        TransactionState::PrepareCommit => kafka_admin_TransactionState_e::kafka_admin_TransactionState_PREPARE_COMMIT,
+        TransactionState::CompleteAbort => kafka_admin_TransactionState_e::kafka_admin_TransactionState_COMPLETE_ABORT,
+        TransactionState::CompleteCommit => {
+            kafka_admin_TransactionState_e::kafka_admin_TransactionState_COMPLETE_COMMIT
+        },
+        TransactionState::Empty => kafka_admin_TransactionState_e::kafka_admin_TransactionState_EMPTY,
+        TransactionState::PrepareEpochFence => {
+            kafka_admin_TransactionState_e::kafka_admin_TransactionState_PREPARE_EPOCH_FENCE
+        },
+        TransactionState::Unknown => kafka_admin_TransactionState_e::kafka_admin_TransactionState_UNKNOWN,
     }
 }
 

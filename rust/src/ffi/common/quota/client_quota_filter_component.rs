@@ -216,7 +216,7 @@ mod tests {
             let m = kafka_common_quota_ClientQuotaFilterComponent_match(exact);
             assert_eq!(
                 kafka_common_quota_ClientQuotaMatch__enum(m),
-                kafka_common_quota_ClientQuotaMatch_e::exact
+                kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT
             );
             assert_eq!(*client_quota_match_ref(m), ClientQuotaMatch::Exact("alice".to_string()));
             let s = kafka_common_quota_ClientQuotaFilterComponent_to_string(exact);

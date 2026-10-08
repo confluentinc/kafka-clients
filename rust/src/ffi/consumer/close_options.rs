@@ -43,9 +43,9 @@ pub struct kafka_consumer_CloseOptions_GroupMembershipOperation_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_consumer_CloseOptions_GroupMembershipOperation_e {
-    leave_group,
-    remain_in_group,
-    default,
+    kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP,
+    kafka_consumer_CloseOptions_GroupMembershipOperation_REMAIN_IN_GROUP,
+    kafka_consumer_CloseOptions_GroupMembershipOperation_DEFAULT,
 }
 
 /// One static instance per value, indexed by
@@ -60,11 +60,11 @@ static VARIANTS: [GroupMembershipOperation; 3] = [
 /// enumerator and singleton.
 fn enum_of(operation: GroupMembershipOperation) -> kafka_consumer_CloseOptions_GroupMembershipOperation_e {
     match operation {
-        GroupMembershipOperation::LeaveGroup => kafka_consumer_CloseOptions_GroupMembershipOperation_e::leave_group,
+        GroupMembershipOperation::LeaveGroup => kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP,
         GroupMembershipOperation::RemainInGroup => {
-            kafka_consumer_CloseOptions_GroupMembershipOperation_e::remain_in_group
+            kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_REMAIN_IN_GROUP
         },
-        GroupMembershipOperation::Default => kafka_consumer_CloseOptions_GroupMembershipOperation_e::default,
+        GroupMembershipOperation::Default => kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_DEFAULT,
     }
 }
 
@@ -256,7 +256,7 @@ mod tests {
                 kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
                     kafka_consumer_CloseOptions_group_membership_operation(by_op)
                 ),
-                kafka_consumer_CloseOptions_GroupMembershipOperation_e::leave_group
+                kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP
             );
             kafka_consumer_CloseOptions_destroy(by_op);
         }

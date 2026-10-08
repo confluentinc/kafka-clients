@@ -36,8 +36,8 @@ pub struct kafka_consumer_GroupProtocol_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_consumer_GroupProtocol_e {
-    classic,
-    consumer,
+    kafka_consumer_GroupProtocol_CLASSIC,
+    kafka_consumer_GroupProtocol_CONSUMER,
 }
 
 /// One static instance per value, indexed by [`kafka_consumer_GroupProtocol_e`].
@@ -50,8 +50,8 @@ static NAMES: LazyLock<Vec<CString>> = LazyLock::new(|| VARIANTS.iter().map(|p| 
 /// enumerator and singleton.
 fn enum_of(protocol: GroupProtocol) -> kafka_consumer_GroupProtocol_e {
     match protocol {
-        GroupProtocol::Classic => kafka_consumer_GroupProtocol_e::classic,
-        GroupProtocol::Consumer => kafka_consumer_GroupProtocol_e::consumer,
+        GroupProtocol::Classic => kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CLASSIC,
+        GroupProtocol::Consumer => kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CONSUMER,
     }
 }
 
@@ -156,11 +156,11 @@ mod tests {
         unsafe {
             assert_eq!(
                 kafka_consumer_GroupProtocol__enum(classic),
-                kafka_consumer_GroupProtocol_e::classic
+                kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CLASSIC
             );
             assert_eq!(
                 kafka_consumer_GroupProtocol__enum(consumer),
-                kafka_consumer_GroupProtocol_e::consumer
+                kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CONSUMER
             );
             assert_eq!(
                 CStr::from_ptr(kafka_consumer_GroupProtocol_name(consumer)).to_str().unwrap(),

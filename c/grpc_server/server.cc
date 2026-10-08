@@ -303,7 +303,7 @@ namespace {
 // class Java would throw.
 KafkaError make_synthetic_error(
     const std::string& message,
-    kafka_common_ErrorCode_e code = kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE) {
+    kafka_common_ErrorCode_e code = kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE) {
   KafkaError err;
   err.set_code(code);
   err.set_message("c server: " + message);
@@ -408,19 +408,19 @@ void metrics_map_to_proto(kafka_Map_t* map, MetricList* out) {
     // One typed accessor per variant, selected by `__enum` (each accessor
     // returns a sentinel for the other variants, so the switch comes first).
     switch (kafka_common_MetricValue__enum(value)) {
-      case kafka_common_MetricValue_e_string: {
+      case kafka_common_MetricValue_STRING: {
         // Borrowed until the value handle is destroyed below.
         const char* s = kafka_common_MetricValue_as_string(value);
         m->set_string_value(s ? s : "");
         break;
       }
-      case kafka_common_MetricValue_e_long_:
+      case kafka_common_MetricValue_LONG:
         m->set_long_value(kafka_common_MetricValue_as_long(value));
         break;
-      case kafka_common_MetricValue_e_int_:
+      case kafka_common_MetricValue_INT:
         m->set_int_value(kafka_common_MetricValue_as_int(value));
         break;
-      case kafka_common_MetricValue_e_double_:
+      case kafka_common_MetricValue_DOUBLE:
       default:
         m->set_double_value(kafka_common_MetricValue_as_double(value));
         break;
@@ -537,7 +537,7 @@ class CallbackLog {
 struct LogState {
   CallbackLog* log;
   uint64_t client_id;
-  // The consumer's `Consumer` view, for `kafka_consumer_Consumer_set_callback_result`
+  // The consumer's `Consumer` view, for `kafka_consumer_Consumer__set_callback_result`
   // (informational there — the lookup is by callback_id — but named anyway).
   // nullptr for a producer's state.
   const kafka_consumer_Consumer_t* consumer = nullptr;
@@ -548,7 +548,7 @@ struct LogState {
 // BORROWED for the call (a `kafka_List_t` of `kafka_common_TopicPartition_t *`,
 // never destroyed here). The method is `async` in Rust, so it returns void and
 // MUST report its result exactly once through
-// `kafka_consumer_Consumer_set_callback_result`: NULL for success (an owned
+// `kafka_consumer_Consumer__set_callback_result`: NULL for success (an owned
 // `kafka_common_Error_t *` would fail the rebalance, like a throwing Java
 // listener). This server reports synchronously from inside the method, the
 // model for a blocking-entry-point caller: the method runs on the gRPC worker
@@ -571,7 +571,7 @@ void log_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_
     }
   }
   state->log->append(state->client_id, std::move(entry));
-  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
 }
 
 extern "C" void log_partitions_assigned(void* self, const kafka_List_t* partitions,
@@ -635,7 +635,7 @@ extern "C" void log_commit_complete(void* self, const kafka_Map_t* offsets,
   copy_offsets_into(&entry, offsets);
   copy_error_into(&entry, error);
   state->log->append(state->client_id, std::move(entry));
-  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
 }
 
 // Java's commitAsync(offsets, null) is legal, but
@@ -649,7 +649,7 @@ extern "C" void discard_commit_complete(void* self, const kafka_Map_t* /*offsets
                                         const kafka_common_Error_t* /*error*/,
                                         int64_t callback_id) {
   auto* state = static_cast<LogState*>(self);
-  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
+  kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr);
 }
 
 // The `on_completion` of the kafka_producer_Callback_t registered by Send with
@@ -1992,7 +1992,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       *resp->mutable_error() = make_synthetic_error(
           "KafkaConsumer is not safe for multi-threaded access (consumer " +
               std::to_string(req->consumer_id()) + " is busy)",
-          kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION);
+          kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION);
       return grpc::Status::OK;
     }
     ConsumerGroupMetadata* fields = resp->mutable_group_metadata();
@@ -2487,34 +2487,34 @@ void void_futures_to_proto(const kafka_Map_t* map, AddEntry add_entry, SetKey se
 
 const char* config_source_name(const kafka_admin_ConfigEntry_ConfigSource_t* s) {
   switch (kafka_admin_ConfigEntry_ConfigSource__enum(s)) {
-    case kafka_admin_ConfigEntry_ConfigSource_e_default_config: return "DEFAULT_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_config: return "DYNAMIC_BROKER_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_logger_config:
+    case kafka_admin_ConfigEntry_ConfigSource_DEFAULT_CONFIG: return "DEFAULT_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_CONFIG: return "DYNAMIC_BROKER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_LOGGER_CONFIG:
       return "DYNAMIC_BROKER_LOGGER_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_client_metrics_config:
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_CLIENT_METRICS_CONFIG:
       return "DYNAMIC_CLIENT_METRICS_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_default_broker_config:
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_DEFAULT_BROKER_CONFIG:
       return "DYNAMIC_DEFAULT_BROKER_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_group_config: return "DYNAMIC_GROUP_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_topic_config: return "DYNAMIC_TOPIC_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_static_broker_config: return "STATIC_BROKER_CONFIG";
-    case kafka_admin_ConfigEntry_ConfigSource_e_unknown: return "UNKNOWN";
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_GROUP_CONFIG: return "DYNAMIC_GROUP_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_TOPIC_CONFIG: return "DYNAMIC_TOPIC_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_STATIC_BROKER_CONFIG: return "STATIC_BROKER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_UNKNOWN: return "UNKNOWN";
   }
   return "UNKNOWN";
 }
 
 const char* config_type_name(const kafka_admin_ConfigEntry_ConfigType_t* t) {
   switch (kafka_admin_ConfigEntry_ConfigType__enum(t)) {
-    case kafka_admin_ConfigEntry_ConfigType_e_boolean: return "BOOLEAN";
-    case kafka_admin_ConfigEntry_ConfigType_e_class_: return "CLASS";
-    case kafka_admin_ConfigEntry_ConfigType_e_double_: return "DOUBLE";
-    case kafka_admin_ConfigEntry_ConfigType_e_int_: return "INT";
-    case kafka_admin_ConfigEntry_ConfigType_e_list: return "LIST";
-    case kafka_admin_ConfigEntry_ConfigType_e_long_: return "LONG";
-    case kafka_admin_ConfigEntry_ConfigType_e_password: return "PASSWORD";
-    case kafka_admin_ConfigEntry_ConfigType_e_short_: return "SHORT";
-    case kafka_admin_ConfigEntry_ConfigType_e_string: return "STRING";
-    case kafka_admin_ConfigEntry_ConfigType_e_unknown: return "UNKNOWN";
+    case kafka_admin_ConfigEntry_ConfigType_BOOLEAN: return "BOOLEAN";
+    case kafka_admin_ConfigEntry_ConfigType_CLASS: return "CLASS";
+    case kafka_admin_ConfigEntry_ConfigType_DOUBLE: return "DOUBLE";
+    case kafka_admin_ConfigEntry_ConfigType_INT: return "INT";
+    case kafka_admin_ConfigEntry_ConfigType_LIST: return "LIST";
+    case kafka_admin_ConfigEntry_ConfigType_LONG: return "LONG";
+    case kafka_admin_ConfigEntry_ConfigType_PASSWORD: return "PASSWORD";
+    case kafka_admin_ConfigEntry_ConfigType_SHORT: return "SHORT";
+    case kafka_admin_ConfigEntry_ConfigType_STRING: return "STRING";
+    case kafka_admin_ConfigEntry_ConfigType_UNKNOWN: return "UNKNOWN";
   }
   return "UNKNOWN";
 }
@@ -3204,7 +3204,7 @@ class AdminServiceImpl final : public AdminService::Service {
         if (type == nullptr) {
           *resp->mutable_error() =
               make_synthetic_error("unknown AlterConfigOp.OpType id " + std::to_string(op.op_type()),
-                                   kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
+                                   kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
         }
         kafka_admin_ConfigEntry_t* entry = entries.add(
@@ -3532,7 +3532,7 @@ class AdminServiceImpl final : public AdminService::Service {
             "OffsetSpec for " + spec.partition().topic() + "-" +
                 std::to_string(spec.partition().partition()) + " has no usable kind (" +
                 std::to_string(spec.spec().kind()) + ")",
-            kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
       specs.put(tps.add(kafka_common_TopicPartition_new(spec.partition().topic().c_str(),
@@ -4042,7 +4042,7 @@ class AdminServiceImpl final : public AdminService::Service {
           if (!c.has_match_name()) {
             *resp->mutable_error() = make_synthetic_error(
                 "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name",
-                kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
+                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
             return grpc::Status::OK;
           }
           component = kafka_common_quota_ClientQuotaFilterComponent_of_entity(
@@ -4060,7 +4060,7 @@ class AdminServiceImpl final : public AdminService::Service {
           *resp->mutable_error() = make_synthetic_error(
               "ClientQuotaFilterComponent has no match_kind (got " +
                   std::to_string(static_cast<int>(c.match_kind())) + ")",
-              kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
+              kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
       }
       component_list.add(components.add(component));

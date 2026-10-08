@@ -34,11 +34,11 @@ pub struct kafka_common_GroupType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_GroupType_e {
-    unknown,
-    consumer,
-    classic,
-    share,
-    streams,
+    kafka_common_GroupType_UNKNOWN,
+    kafka_common_GroupType_CONSUMER,
+    kafka_common_GroupType_CLASSIC,
+    kafka_common_GroupType_SHARE,
+    kafka_common_GroupType_STREAMS,
 }
 
 /// One static instance per value, indexed by [`kafka_common_GroupType_e`].
@@ -57,11 +57,11 @@ static NAMES: LazyLock<Vec<CString>> = LazyLock::new(|| VARIANTS.iter().map(|t| 
 /// enumerator and singleton.
 fn enum_of(group_type: GroupType) -> kafka_common_GroupType_e {
     match group_type {
-        GroupType::Unknown => kafka_common_GroupType_e::unknown,
-        GroupType::Consumer => kafka_common_GroupType_e::consumer,
-        GroupType::Classic => kafka_common_GroupType_e::classic,
-        GroupType::Share => kafka_common_GroupType_e::share,
-        GroupType::Streams => kafka_common_GroupType_e::streams,
+        GroupType::Unknown => kafka_common_GroupType_e::kafka_common_GroupType_UNKNOWN,
+        GroupType::Consumer => kafka_common_GroupType_e::kafka_common_GroupType_CONSUMER,
+        GroupType::Classic => kafka_common_GroupType_e::kafka_common_GroupType_CLASSIC,
+        GroupType::Share => kafka_common_GroupType_e::kafka_common_GroupType_SHARE,
+        GroupType::Streams => kafka_common_GroupType_e::kafka_common_GroupType_STREAMS,
     }
 }
 

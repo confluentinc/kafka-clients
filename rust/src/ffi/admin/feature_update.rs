@@ -40,10 +40,10 @@ pub struct kafka_admin_FeatureUpdate_UpgradeType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_FeatureUpdate_UpgradeType_e {
-    unknown,
-    upgrade,
-    safe_downgrade,
-    unsafe_downgrade,
+    kafka_admin_FeatureUpdate_UpgradeType_UNKNOWN,
+    kafka_admin_FeatureUpdate_UpgradeType_UPGRADE,
+    kafka_admin_FeatureUpdate_UpgradeType_SAFE_DOWNGRADE,
+    kafka_admin_FeatureUpdate_UpgradeType_UNSAFE_DOWNGRADE,
 }
 
 /// One static instance per value, indexed by
@@ -59,10 +59,14 @@ static VARIANTS: [UpgradeType; 4] = [
 /// enumerator and singleton.
 fn enum_of(upgrade_type: UpgradeType) -> kafka_admin_FeatureUpdate_UpgradeType_e {
     match upgrade_type {
-        UpgradeType::Unknown => kafka_admin_FeatureUpdate_UpgradeType_e::unknown,
-        UpgradeType::Upgrade => kafka_admin_FeatureUpdate_UpgradeType_e::upgrade,
-        UpgradeType::SafeDowngrade => kafka_admin_FeatureUpdate_UpgradeType_e::safe_downgrade,
-        UpgradeType::UnsafeDowngrade => kafka_admin_FeatureUpdate_UpgradeType_e::unsafe_downgrade,
+        UpgradeType::Unknown => kafka_admin_FeatureUpdate_UpgradeType_e::kafka_admin_FeatureUpdate_UpgradeType_UNKNOWN,
+        UpgradeType::Upgrade => kafka_admin_FeatureUpdate_UpgradeType_e::kafka_admin_FeatureUpdate_UpgradeType_UPGRADE,
+        UpgradeType::SafeDowngrade => {
+            kafka_admin_FeatureUpdate_UpgradeType_e::kafka_admin_FeatureUpdate_UpgradeType_SAFE_DOWNGRADE
+        },
+        UpgradeType::UnsafeDowngrade => {
+            kafka_admin_FeatureUpdate_UpgradeType_e::kafka_admin_FeatureUpdate_UpgradeType_UNSAFE_DOWNGRADE
+        },
     }
 }
 

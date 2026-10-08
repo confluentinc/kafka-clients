@@ -35,12 +35,12 @@ pub struct kafka_common_ClassicGroupState_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_ClassicGroupState_e {
-    unknown,
-    preparing_rebalance,
-    completing_rebalance,
-    stable,
-    dead,
-    empty,
+    kafka_common_ClassicGroupState_UNKNOWN,
+    kafka_common_ClassicGroupState_PREPARING_REBALANCE,
+    kafka_common_ClassicGroupState_COMPLETING_REBALANCE,
+    kafka_common_ClassicGroupState_STABLE,
+    kafka_common_ClassicGroupState_DEAD,
+    kafka_common_ClassicGroupState_EMPTY,
 }
 
 /// One static instance per value, indexed by
@@ -61,12 +61,16 @@ static NAMES: LazyLock<Vec<CString>> = LazyLock::new(|| VARIANTS.iter().map(|s| 
 /// enumerator and singleton.
 fn enum_of(state: ClassicGroupState) -> kafka_common_ClassicGroupState_e {
     match state {
-        ClassicGroupState::Unknown => kafka_common_ClassicGroupState_e::unknown,
-        ClassicGroupState::PreparingRebalance => kafka_common_ClassicGroupState_e::preparing_rebalance,
-        ClassicGroupState::CompletingRebalance => kafka_common_ClassicGroupState_e::completing_rebalance,
-        ClassicGroupState::Stable => kafka_common_ClassicGroupState_e::stable,
-        ClassicGroupState::Dead => kafka_common_ClassicGroupState_e::dead,
-        ClassicGroupState::Empty => kafka_common_ClassicGroupState_e::empty,
+        ClassicGroupState::Unknown => kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_UNKNOWN,
+        ClassicGroupState::PreparingRebalance => {
+            kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_PREPARING_REBALANCE
+        },
+        ClassicGroupState::CompletingRebalance => {
+            kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_COMPLETING_REBALANCE
+        },
+        ClassicGroupState::Stable => kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_STABLE,
+        ClassicGroupState::Dead => kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_DEAD,
+        ClassicGroupState::Empty => kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_EMPTY,
     }
 }
 

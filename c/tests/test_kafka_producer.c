@@ -138,7 +138,7 @@ void test_config_invalid_value(void) {
     kafka_Map_destroy(props);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(config);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_CONFIG, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_CONFIG, kafka_common_Error_code(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(err));
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
     const char *msg = kafka_common_Error_message(err);
@@ -327,7 +327,7 @@ static int is_txn_guard_error(const kafka_common_Error_t *err) {
         return 0;
     }
     const char *msg = kafka_common_Error_message(err);
-    return kafka_common_Error_code(err) == kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION
+    return kafka_common_Error_code(err) == kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION
         || (msg != NULL && strstr(msg, "not safe for concurrent access") != NULL);
 }
 

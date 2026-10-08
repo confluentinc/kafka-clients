@@ -24,7 +24,7 @@
 // point queues them on the consumer's callbacks vector, run by whoever calls
 // `kafka_consumer_Consumer_execute_callbacks`; `_destroy` runs what is still
 // queued exactly once. An interface method reports its outcome through
-// `kafka_consumer_Consumer_set_callback_result`, inline or later from any
+// `kafka_consumer_Consumer__set_callback_result`, inline or later from any
 // thread; the operation that invoked it does not complete until it does.
 //
 // Unity's asserts are not thread-safe, so the probes only record what they
@@ -168,7 +168,7 @@ static void on_void_op(kafka_common_Error_t *error, void *opaque) {
 //
 // A C `ConsumerRebalanceListener` implementation whose methods record the
 // thread, the (sorted, borrowed) partition list and the call counts. With
-// `report` set each method reports at once through `set_callback_result`,
+// `report` set each method reports at once through `__set_callback_result`,
 // `assigned_error` (owned) standing in for the success; otherwise it stores
 // the `callback_id` in `pending_id` for the test to report later, which keeps
 // the invoking operation in flight for as long as the test wants.
@@ -212,7 +212,7 @@ static void probe_record(listener_probe_t *p, const kafka_List_t *partitions, in
     snapshot_partitions(partitions, p->last_partitions, sizeof(p->last_partitions));
     p->sequence = atomic_fetch_add(&g_sequence, 1);
     if (p->report) {
-        kafka_consumer_Consumer_set_callback_result(p->consumer, callback_id, result);
+        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, result);
     } else {
         atomic_store(&p->pending_id, callback_id);
     }
@@ -259,7 +259,7 @@ static void probe_on_lost(void *self_, const kafka_List_t *partitions, int64_t c
 static void probe_release(listener_probe_t *p) {
     int64_t id = atomic_exchange(&p->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer_set_callback_result(p->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL);
 }
 
 static kafka_consumer_ConsumerRebalanceListener_t *probe_listener(listener_probe_t *p, int with_lost) {
@@ -332,7 +332,7 @@ static void commit_probe_on_complete(void *self_, const kafka_Map_t *offsets, co
     p->sequence = atomic_fetch_add(&g_sequence, 1);
     atomic_fetch_add(&p->calls, 1);
     if (p->report) {
-        kafka_consumer_Consumer_set_callback_result(p->consumer, callback_id, NULL);
+        kafka_consumer_Consumer__set_callback_result(p->consumer, callback_id, NULL);
     } else {
         atomic_store(&p->pending_id, callback_id);
     }
@@ -341,7 +341,7 @@ static void commit_probe_on_complete(void *self_, const kafka_Map_t *offsets, co
 static void commit_probe_release(commit_probe_t *p) {
     int64_t id = atomic_exchange(&p->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer_set_callback_result(p->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(p->consumer, id, NULL);
 }
 
 static kafka_consumer_OffsetCommitCallback_t *commit_probe_callback(commit_probe_t *p) {
@@ -852,7 +852,7 @@ static void *reporter_thread(void *arg) {
     reporter_t *r = (reporter_t *)arg;
     int64_t id = atomic_exchange(&r->probe->pending_id, 0);
     if (id != 0) {
-        kafka_consumer_Consumer_set_callback_result(r->probe->consumer, id, NULL);
+        kafka_consumer_Consumer__set_callback_result(r->probe->consumer, id, NULL);
     }
     atomic_store(&r->done, id != 0);
     return NULL;

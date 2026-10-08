@@ -238,7 +238,7 @@ static void holding_on_assigned(void *self_, const kafka_List_t *partitions, int
 static void holding_listener_release(holding_listener_t *l) {
     int64_t id = atomic_exchange(&l->pending_id, 0);
     TEST_ASSERT_NOT_EQUAL(0, id);
-    kafka_consumer_Consumer_set_callback_result(l->consumer, id, NULL);
+    kafka_consumer_Consumer__set_callback_result(l->consumer, id, NULL);
 }
 
 /* Subscribes `f` to `topic` with a holding listener; the listener handle is
@@ -991,7 +991,7 @@ static void test_mock_consumer_record_metadata_getters(void) {
     const kafka_common_record_TimestampType_t *tt = kafka_consumer_ConsumerRecord_timestamp_type(rec);
     TEST_ASSERT_NOT_NULL(tt);
     TEST_ASSERT_EQUAL_PTR(kafka_common_record_TimestampType_no_timestamp_type(), tt); /* a singleton */
-    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_e_no_timestamp_type,
+    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE,
                           kafka_common_record_TimestampType__enum(tt));
     TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_leader_epoch(rec));
     TEST_ASSERT_EQUAL_INT16(-1, kafka_consumer_ConsumerRecord_delivery_count(rec));
@@ -1056,7 +1056,7 @@ static void test_consumer_record_with_options(void) {
     TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_partition(rec));
     TEST_ASSERT_EQUAL_INT64(77, kafka_consumer_ConsumerRecord_offset(rec));
     TEST_ASSERT_EQUAL_INT64(123456, kafka_consumer_ConsumerRecord_timestamp(rec));
-    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_e_create_time,
+    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_CREATE_TIME,
                           kafka_common_record_TimestampType__enum(kafka_consumer_ConsumerRecord_timestamp_type(rec)));
     TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_serialized_key_size(rec));
     TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_serialized_value_size(rec));
@@ -1280,7 +1280,7 @@ static void test_mock_consumer_close_with_options(void) {
                           kafka_consumer_CloseOptions_group_membership_operation(options));
     kafka_consumer_CloseOptions_with_group_membership_operation(
         options, kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group());
-    TEST_ASSERT_EQUAL_INT(kafka_consumer_CloseOptions_GroupMembershipOperation_e_leave_group,
+    TEST_ASSERT_EQUAL_INT(kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP,
                           kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
                               kafka_consumer_CloseOptions_group_membership_operation(options)));
 

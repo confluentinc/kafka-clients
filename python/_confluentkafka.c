@@ -1376,17 +1376,17 @@ static PyObject* metrics_map_to_py(kafka_Map_t* map) {
             kafka_common_Metric_metric_value(kafka_common_metrics_KafkaMetric__as_Metric(metric));
         if (mv != NULL) {
             switch (kafka_common_MetricValue__enum(mv)) {
-                case kafka_common_MetricValue_e_string: {
+                case kafka_common_MetricValue_STRING: {
                     kind = 1;
                     const char* s = kafka_common_MetricValue_as_string(mv);
                     value = s ? PyUnicode_FromString(s) : (Py_INCREF(Py_None), Py_None);
                     break;
                 }
-                case kafka_common_MetricValue_e_long_:
+                case kafka_common_MetricValue_LONG:
                     kind = 2;
                     value = PyLong_FromLongLong((long long)kafka_common_MetricValue_as_long(mv));
                     break;
-                case kafka_common_MetricValue_e_int_:
+                case kafka_common_MetricValue_INT:
                     kind = 3;
                     value = PyLong_FromLong((long)kafka_common_MetricValue_as_int(mv));
                     break;
@@ -1438,25 +1438,25 @@ static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
 // their class here; anything else raises ValueError. `message` may be NULL.
 static kafka_common_Error_t* mock_error_from_code(int code, const char* message) {
     switch (code) {
-        case kafka_common_ErrorCode_e_LOCAL_TIMEOUT:
+        case kafka_common_ErrorCode_LOCAL_TIMEOUT:
             return kafka_common_Error_local_timeout(message);
-        case kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE:
+        case kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE:
             return kafka_common_Error_local_illegal_state(message);
-        case kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT:
+        case kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT:
             return kafka_common_Error_local_illegal_argument(message);
-        case kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION:
+        case kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION:
             return kafka_common_Error_local_concurrent_modification(message);
-        case kafka_common_ErrorCode_e_REQUEST_TIMED_OUT:
+        case kafka_common_ErrorCode_REQUEST_TIMED_OUT:
             return kafka_common_Error_timeout(message);
-        case kafka_common_ErrorCode_e_MESSAGE_TOO_LARGE:
+        case kafka_common_ErrorCode_MESSAGE_TOO_LARGE:
             return kafka_common_Error_record_too_large(message);
-        case kafka_common_ErrorCode_e_RECORD_LIST_TOO_LARGE:
+        case kafka_common_ErrorCode_RECORD_LIST_TOO_LARGE:
             return kafka_common_Error_record_batch_too_large(message);
-        case kafka_common_ErrorCode_e_INVALID_GROUP_ID:
+        case kafka_common_ErrorCode_INVALID_GROUP_ID:
             return kafka_common_Error_invalid_group_id(message);
-        case kafka_common_ErrorCode_e_UNSUPPORTED_VERSION:
+        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
             return kafka_common_Error_unsupported_version(message);
-        case kafka_common_ErrorCode_e_THROTTLING_QUOTA_EXCEEDED:
+        case kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED:
             return kafka_common_Error_throttling_quota_exceeded(0, message);
         default:
             PyErr_Format(PyExc_ValueError,
@@ -1602,11 +1602,11 @@ static int error_is_fatal(const kafka_common_Error_t* e) {
     if (kafka_common_Error_is_authentication_error(e)) return 1;
     if (kafka_common_Error_is_authorization_error(e)) return 1;
     switch (kafka_common_Error_code(e)) {
-        case kafka_common_ErrorCode_e_MISMATCHED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_e_SECURITY_DISABLED:
-        case kafka_common_ErrorCode_e_UNSUPPORTED_VERSION:
-        case kafka_common_ErrorCode_e_UNSUPPORTED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_e_UNSUPPORTED_FOR_MESSAGE_FORMAT:
+        case kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_SECURITY_DISABLED:
+        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
+        case kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT:
             return 1;
         default:
             return 0;
@@ -1657,9 +1657,9 @@ static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
 //     notify hook fires once each time the vector goes from empty to non-empty
 //     (it may only schedule the pump, never run callbacks).
 //   * Interface methods carry an `int64_t callback_id` and are reported through
-//     `kafka_consumer_Consumer_set_callback_result`, synchronously by the
+//     `kafka_consumer_Consumer__set_callback_result`, synchronously by the
 //     trampoline when the Python adapter returns, or later from Python
-//     (`Consumer_set_callback_result`) when the adapter deferred (a coroutine).
+//     (`Consumer__set_callback_result`) when the adapter deferred (a coroutine).
 //
 // Ownership (CLAUDE.md §4): `kafka_common_Error_t *` returns are owned (NULL =
 // success) and converted to tuples right away; Rust-returned containers own
@@ -2325,7 +2325,7 @@ static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records) {
 // Java listener registered, so the context survives it too).
 typedef struct {
     PyObject* adapter;
-    kafka_consumer_Consumer_t* consumer;  // reports through set_callback_result
+    kafka_consumer_Consumer_t* consumer;  // reports through __set_callback_result
 } ListenerCtx;
 
 // The `void *self` registered with kafka_consumer_OffsetCommitCallback_new.
@@ -2431,7 +2431,7 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 // list[(topic, partition)] plus the callback id and returns:
 //   * None  -> the listener returned: report success now;
 //   * True  -> the adapter deferred (coroutine scheduled on the loop) and will
-//              report through Consumer_set_callback_result itself;
+//              report through Consumer__set_callback_result itself;
 //   * raise -> report the exception's message as a KafkaException, like a Java
 //              listener throwing out of onPartitions*.
 static void listener_fire(const char* method, void* self_, const kafka_List_t* partitions, int64_t callback_id) {
@@ -2452,7 +2452,7 @@ static void listener_fire(const char* method, void* self_, const kafka_List_t* p
             Py_DECREF(r);
         }
     }
-    if (!deferred) kafka_consumer_Consumer_set_callback_result(ctx->consumer, callback_id, err);
+    if (!deferred) kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, err);
     PyGILState_Release(g);
 }
 
@@ -2504,7 +2504,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
         Py_XDECREF(py_offsets);
         Py_XDECREF(py_err);
     }
-    kafka_consumer_Consumer_set_callback_result(ctx->consumer, callback_id, NULL);
+    kafka_consumer_Consumer__set_callback_result(ctx->consumer, callback_id, NULL);
     if (!ctx->orphaned) commit_ctx_free(ctx);
     PyGILState_Release(g);
 }
@@ -2554,10 +2554,10 @@ static PyObject* py_Consumer_execute_callbacks(PyObject* self, PyObject* args) {
     return PyLong_FromLong((long)n);
 }
 
-// Consumer_set_callback_result(handle, callback_id, message | None): the
+// Consumer__set_callback_result(handle, callback_id, message | None): the
 // deferred report of a listener invocation (None = success, str = the
 // exception message, reported as a KafkaException).
-static PyObject* py_Consumer_set_callback_result(PyObject* self, PyObject* args) {
+static PyObject* py_Consumer__set_callback_result(PyObject* self, PyObject* args) {
     unsigned long long h; long long callback_id; PyObject* message;
     if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &message)) return NULL;
     kafka_common_Error_t* err = NULL;
@@ -2566,7 +2566,7 @@ static PyObject* py_Consumer_set_callback_result(PyObject* self, PyObject* args)
         if (msg == NULL) return NULL;
         err = kafka_common_Error_kafka_message(msg);
     }
-    kafka_consumer_Consumer_set_callback_result(consumer_self(h), (int64_t)callback_id, err);
+    kafka_consumer_Consumer__set_callback_result(consumer_self(h), (int64_t)callback_id, err);
     Py_RETURN_NONE;
 }
 
@@ -4648,15 +4648,15 @@ static PyObject* transaction_state_to_py(const kafka_admin_TransactionState_t* s
 static const char* config_source_name(const kafka_admin_ConfigEntry_ConfigSource_t* s) {
     if (s == NULL) return "UNKNOWN";
     switch (kafka_admin_ConfigEntry_ConfigSource__enum(s)) {
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_topic_config: return "DYNAMIC_TOPIC_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_logger_config: return "DYNAMIC_BROKER_LOGGER_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_config: return "DYNAMIC_BROKER_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_default_broker_config: return "DYNAMIC_DEFAULT_BROKER_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_client_metrics_config: return "DYNAMIC_CLIENT_METRICS_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_group_config: return "DYNAMIC_GROUP_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_static_broker_config: return "STATIC_BROKER_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_default_config: return "DEFAULT_CONFIG";
-        case kafka_admin_ConfigEntry_ConfigSource_e_unknown: return "UNKNOWN";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_TOPIC_CONFIG: return "DYNAMIC_TOPIC_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_LOGGER_CONFIG: return "DYNAMIC_BROKER_LOGGER_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_CONFIG: return "DYNAMIC_BROKER_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_DEFAULT_BROKER_CONFIG: return "DYNAMIC_DEFAULT_BROKER_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_CLIENT_METRICS_CONFIG: return "DYNAMIC_CLIENT_METRICS_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_GROUP_CONFIG: return "DYNAMIC_GROUP_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_STATIC_BROKER_CONFIG: return "STATIC_BROKER_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_DEFAULT_CONFIG: return "DEFAULT_CONFIG";
+        case kafka_admin_ConfigEntry_ConfigSource_UNKNOWN: return "UNKNOWN";
     }
     return "UNKNOWN";
 }
@@ -4664,16 +4664,16 @@ static const char* config_source_name(const kafka_admin_ConfigEntry_ConfigSource
 static const char* config_type_name(const kafka_admin_ConfigEntry_ConfigType_t* t) {
     if (t == NULL) return "UNKNOWN";
     switch (kafka_admin_ConfigEntry_ConfigType__enum(t)) {
-        case kafka_admin_ConfigEntry_ConfigType_e_boolean: return "BOOLEAN";
-        case kafka_admin_ConfigEntry_ConfigType_e_string: return "STRING";
-        case kafka_admin_ConfigEntry_ConfigType_e_int_: return "INT";
-        case kafka_admin_ConfigEntry_ConfigType_e_short_: return "SHORT";
-        case kafka_admin_ConfigEntry_ConfigType_e_long_: return "LONG";
-        case kafka_admin_ConfigEntry_ConfigType_e_double_: return "DOUBLE";
-        case kafka_admin_ConfigEntry_ConfigType_e_list: return "LIST";
-        case kafka_admin_ConfigEntry_ConfigType_e_class_: return "CLASS";
-        case kafka_admin_ConfigEntry_ConfigType_e_password: return "PASSWORD";
-        case kafka_admin_ConfigEntry_ConfigType_e_unknown: return "UNKNOWN";
+        case kafka_admin_ConfigEntry_ConfigType_BOOLEAN: return "BOOLEAN";
+        case kafka_admin_ConfigEntry_ConfigType_STRING: return "STRING";
+        case kafka_admin_ConfigEntry_ConfigType_INT: return "INT";
+        case kafka_admin_ConfigEntry_ConfigType_SHORT: return "SHORT";
+        case kafka_admin_ConfigEntry_ConfigType_LONG: return "LONG";
+        case kafka_admin_ConfigEntry_ConfigType_DOUBLE: return "DOUBLE";
+        case kafka_admin_ConfigEntry_ConfigType_LIST: return "LIST";
+        case kafka_admin_ConfigEntry_ConfigType_CLASS: return "CLASS";
+        case kafka_admin_ConfigEntry_ConfigType_PASSWORD: return "PASSWORD";
+        case kafka_admin_ConfigEntry_ConfigType_UNKNOWN: return "UNKNOWN";
     }
     return "UNKNOWN";
 }
@@ -7920,7 +7920,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_wakeup", py_Consumer_wakeup, METH_VARARGS, "Wake up a blocked operation"},
     {"Consumer_execute_callbacks", py_Consumer_execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
     {"Consumer_set_callbacks_notify", py_Consumer_set_callbacks_notify, METH_VARARGS, "Register the callable fired when callbacks become pending"},
-    {"Consumer_set_callback_result", py_Consumer_set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, message | None)"},
+    {"Consumer__set_callback_result", py_Consumer__set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, message | None)"},
     {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "Current assignment as list[(topic, partition)]"},
     {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "Current subscription as list[str]"},
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},

@@ -43,8 +43,8 @@ pub struct kafka_admin_DeleteTopicsResult_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_DeleteTopicsResult_e {
-    by_topic_id,
-    by_topic_name,
+    kafka_admin_DeleteTopicsResult_BY_TOPIC_ID,
+    kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME,
 }
 
 /// Hands `result` to C, binding the futures it exposes to `ctx`.
@@ -169,8 +169,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult__enum(
     self_: *const kafka_admin_DeleteTopicsResult_t,
 ) -> kafka_admin_DeleteTopicsResult_e {
     match unsafe { handle(self_) }.result {
-        DeleteTopicsResult::ByTopicId(_) => kafka_admin_DeleteTopicsResult_e::by_topic_id,
-        DeleteTopicsResult::ByTopicName(_) => kafka_admin_DeleteTopicsResult_e::by_topic_name,
+        DeleteTopicsResult::ByTopicId(_) => {
+            kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_ID
+        },
+        DeleteTopicsResult::ByTopicName(_) => {
+            kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_NAME
+        },
     }
 }
 

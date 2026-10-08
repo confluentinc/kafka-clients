@@ -38,8 +38,8 @@ pub struct kafka_common_IsolationLevel_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_IsolationLevel_e {
-    read_uncommitted,
-    read_committed,
+    kafka_common_IsolationLevel_READ_UNCOMMITTED,
+    kafka_common_IsolationLevel_READ_COMMITTED,
 }
 
 /// One static instance per value, indexed by [`kafka_common_IsolationLevel_e`].
@@ -49,8 +49,8 @@ static VARIANTS: [IsolationLevel; 2] = [IsolationLevel::ReadUncommitted, Isolati
 /// enumerator and singleton.
 fn enum_of(level: IsolationLevel) -> kafka_common_IsolationLevel_e {
     match level {
-        IsolationLevel::ReadUncommitted => kafka_common_IsolationLevel_e::read_uncommitted,
-        IsolationLevel::ReadCommitted => kafka_common_IsolationLevel_e::read_committed,
+        IsolationLevel::ReadUncommitted => kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED,
+        IsolationLevel::ReadCommitted => kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED,
     }
 }
 

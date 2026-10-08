@@ -46,9 +46,9 @@ pub struct kafka_admin_UserScramCredentialAlteration_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_UserScramCredentialAlteration_e {
     /// A `UserScramCredentialUpsertion`.
-    upsertion,
+    kafka_admin_UserScramCredentialAlteration_UPSERTION,
     /// A `UserScramCredentialDeletion`.
-    deletion,
+    kafka_admin_UserScramCredentialAlteration_DELETION,
 }
 
 /// What a [`kafka_admin_UserScramCredentialAlteration_t`] points at: the
@@ -101,8 +101,12 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> kafka_admin_UserScramCredentialAlteration_e {
     match unsafe { user_scram_credential_alteration_ref(self_) } {
-        UserScramCredentialAlteration::Upsertion(_) => kafka_admin_UserScramCredentialAlteration_e::upsertion,
-        UserScramCredentialAlteration::Deletion(_) => kafka_admin_UserScramCredentialAlteration_e::deletion,
+        UserScramCredentialAlteration::Upsertion(_) => {
+            kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION
+        },
+        UserScramCredentialAlteration::Deletion(_) => {
+            kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_DELETION
+        },
     }
 }
 

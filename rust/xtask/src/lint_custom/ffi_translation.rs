@@ -70,7 +70,9 @@
 //!     and the typedef `<fn>_cb_t = fn(value, error, opaque)`, value and
 //!     error slots present only when the method yields them;
 //!   - an enum with a handle: `<prefix>_e` (a `#[repr(C)]` enum listing
-//!     every variant snake_cased), `<prefix>__enum(const <prefix>_t *)`, one
+//!     one enumerator `<prefix>_<VARIANT>` per variant, the key in constant
+//!     case and no `_e_` infix, spelled out in full in Rust because cbindgen's
+//!     `[enum] prefix_with_name` is off), `<prefix>__enum(const <prefix>_t *)`, one
 //!     `<prefix>_<variant>(void)` returning the borrowed singleton per unit
 //!     variant and one `<prefix>_<variant>(<fields>..)` returning an owned
 //!     handle per data variant (`MetricValue::Double(f64)`); the Java static
@@ -97,8 +99,9 @@
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `_execute_callbacks`,
 //!     `_set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
-//!     `_set_callback_result` when it accepts an interface with an async
-//!     method;
+//!     `__set_callback_result` when it accepts an interface with an async
+//!     method (the double underscore: derived by convention, no Java
+//!     counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
 //!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
@@ -133,7 +136,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use quote::ToTokens;
@@ -181,6 +184,9 @@ const C_ONLY_ERROR_CODE: &[&str] = &["kafka_common_ErrorCode_e", "kafka_common_E
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
+
+/// The cbindgen configuration, relative to the crate root `lint-custom` runs in.
+pub(super) const CBINDGEN_CONFIG: &str = "cbindgen.toml";
 
 /// The scalars no `extern "C"` signature may use.
 const BANNED_SCALARS: &[&str] = &["bool", "usize", "isize", "u8", "u16", "u32", "u64", "f32"];
@@ -1017,6 +1023,7 @@ pub(super) struct FfiTranslation {
     /// (the prefix of a `rust-only` type is its package module).
     package_modules: BTreeSet<Vec<String>>,
     baseline: Option<Baseline>,
+    cbindgen_config: Option<PathBuf>,
 }
 
 impl FfiTranslation {
@@ -1031,6 +1038,7 @@ impl FfiTranslation {
             java: Rc::clone(&ctx.java),
             package_modules,
             baseline: ctx.ffi_baseline.as_deref().map(Baseline::load),
+            cbindgen_config: ctx.cbindgen_config.clone(),
         }
     }
 
@@ -1043,6 +1051,10 @@ impl FfiTranslation {
         let checked = expectations.items.len() + actual.fns.len() + actual.types.len();
         compare(&expectations.items, &actual, &mut findings);
         scalar_ban(&actual, &mut findings);
+        enumerator_names(&actual, &mut findings);
+        if let Some(config) = &self.cbindgen_config {
+            cbindgen_enum_prefixing(config, &mut findings);
+        }
         findings.sort();
         findings.dedup();
         (findings, checked)
@@ -1480,7 +1492,7 @@ impl FfiTranslation {
                     let variants: Vec<String> = unit
                         .iter()
                         .chain(data.iter().map(|v| &v.name))
-                        .map(|v| java::snake_case(v))
+                        .map(|v| enumerator(prefix, v))
                         .collect();
                     out.add(format!("{prefix}_e"), Shape::CEnum(variants), file);
                     out.add(
@@ -1599,7 +1611,7 @@ impl FfiTranslation {
                         .any(|t| t.methods.iter().any(|m| async_output(&m.sig).is_some()));
                     if async_interface {
                         out.add(
-                            format!("{prefix}_set_callback_result"),
+                            format!("{prefix}__set_callback_result"),
                             Shape::Fn(Sig {
                                 params: vec![
                                     Param::new("self", self_ty),
@@ -2047,7 +2059,7 @@ fn expect_interface<'a>(
             continue;
         }
         if is_async {
-            // The result is reported through `_set_callback_result`.
+            // The result is reported through `__set_callback_result`.
             sig.params.push(Param::new("callback_id", "i64".to_string()));
         } else {
             match (&output, &value) {
@@ -2429,6 +2441,103 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
     }
 }
 
+/// The C enumerator of Rust variant `variant` in the enum with prefix
+/// `prefix` (CLAUDE.md §4 "Enums"): the prefix, then the key the per-value
+/// function `<prefix>_<variant>` uses, in constant case —
+/// `IsolationLevel::ReadCommitted` is `kafka_common_IsolationLevel_READ_COMMITTED`
+/// beside `kafka_common_IsolationLevel_read_committed()`.
+fn enumerator(prefix: &str, variant: &str) -> String {
+    format!("{prefix}_{}", java::snake_case(variant).to_uppercase())
+}
+
+/// Whether `key` is in constant case: upper-case letters and digits in
+/// `_`-separated words, none empty.
+fn is_constant_case(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .split('_')
+            .all(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+}
+
+/// Reports every enumerator of a C enum `<prefix>_e` not spelled
+/// `<prefix>_<VALUE>` with the key in constant case (CLAUDE.md §4 "Enums") —
+/// including the enums with no Rust counterpart (`kafka_common_ErrorCode_e`),
+/// which the per-type comparison does not see — and a per-enum
+/// `cbindgen:prefix-with-name=true` annotation, which would make cbindgen
+/// prepend the `_e` export name to every enumerator.
+fn enumerator_names(actual: &CSurface, findings: &mut Vec<Finding>) {
+    for (name, t) in &actual.types {
+        let (Some(prefix), syn::Item::Enum(e)) = (name.strip_suffix("_e"), &t.item) else {
+            continue;
+        };
+        let docs = e
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("doc"))
+            .map(|a| a.meta.to_token_stream().to_string().replace(' ', ""))
+            .collect::<String>();
+        if docs.contains("cbindgen:prefix-with-name=true") {
+            findings.push(Finding {
+                kind: "enumerator",
+                symbol: name.clone(),
+                file: t.file.clone(),
+                detail: "`cbindgen:prefix-with-name=true` would prefix every enumerator with the `_e` export \
+                         name; spell the enumerators `<prefix>_<VALUE>` in full instead"
+                    .to_string(),
+            });
+        }
+        for v in &e.variants {
+            let ident = v.ident.unraw().to_string();
+            let ok = ident
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_prefix('_'))
+                .is_some_and(is_constant_case);
+            if !ok {
+                findings.push(Finding {
+                    kind: "enumerator",
+                    symbol: ident,
+                    file: t.file.clone(),
+                    detail: format!(
+                        "expected `{prefix}_<VALUE>`: the enum's prefix without `_e`, then the key in constant case"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Reports `[enum] prefix_with_name = true` in the cbindgen configuration:
+/// cbindgen would then prepend each enum's `_e` export name to the enumerators
+/// the FFI spells out in full, and the header would no longer carry the names
+/// [`enumerator_names`] checks (CLAUDE.md §4 "Enums"). A missing file or key
+/// is cbindgen's default, `false`.
+fn cbindgen_enum_prefixing(config: &Path, findings: &mut Vec<Finding>) {
+    let Ok(text) = fs::read_to_string(config) else {
+        return;
+    };
+    let mut in_enum = false;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            in_enum = line == "[enum]";
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if in_enum && key.trim() == "prefix_with_name" && value.trim() == "true" {
+            findings.push(Finding {
+                kind: "config",
+                symbol: "prefix_with_name".to_string(),
+                file: config.display().to_string(),
+                detail: "`[enum] prefix_with_name = true` puts the `_e` export name into every C enumerator; \
+                         set it to `false` (CLAUDE.md §4 \"Enums\")"
+                    .to_string(),
+            });
+        }
+    }
+}
+
 /// Reports every `extern "C"` function and function-pointer typedef using a
 /// banned scalar (CLAUDE.md §4 rule 4).
 fn scalar_ban(actual: &CSurface, findings: &mut Vec<Finding>) {
@@ -2508,8 +2617,9 @@ impl Rule for FfiTranslation {
    (CLAUDE.md §4): `<prefix>_t` and `<prefix>_destroy` for a type with
    instances, `<prefix>_<method>(self, params.., out_<value>)` returning
    `*mut kafka_common_Error_t` for a `Result`, a `_cb` twin and `_cb_t` typedef
-   for an async method, `_e` / `__enum` / one `(void)` function per unit
-   variant for an enum, `_new` and `_fn_t`s for a trait C may implement,
+   for an async method, `_e` (enumerators `<prefix>_<VALUE>` in constant case,
+   no `_e_`) / `__enum` / one `(void)` function per unit variant for an enum,
+   `_new` and `_fn_t`s for a trait C may implement,
    `__as_<Trait>` for a struct implementing a trait, no `bool`, `usize`,
    unsigned integer or `f32` in a signature. A finding the refactor has not
    reached yet is listed in xtask/ffi-baseline.txt (`cargo xtask ffi-baseline`
@@ -2585,7 +2695,7 @@ mod tests {
         let lib = format!("{rust}\npub mod ffi {{\n use std::ffi::{{c_char, c_void}};\n{ffi}\n}}\n");
         fs::write(dir.join("lib.rs"), lib).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None };
+        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
         let rule = FfiTranslation::new(&ctx);
         let (findings, _) = rule.findings(&krate);
         fs::remove_dir_all(&dir).unwrap();
@@ -2841,8 +2951,8 @@ mod tests {
 
     const ENUM_FFI: &str = r#"
         #[repr(C)] pub struct kafka_admin_OffsetSpec_t { _p: [u8; 0] }
-        #[repr(C)] pub enum kafka_admin_OffsetSpec_e { earliest, latest, max_timestamp }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(this: *const kafka_admin_OffsetSpec_t) -> kafka_admin_OffsetSpec_e { kafka_admin_OffsetSpec_e::earliest }
+        #[repr(C)] pub enum kafka_admin_OffsetSpec_e { kafka_admin_OffsetSpec_EARLIEST, kafka_admin_OffsetSpec_LATEST, kafka_admin_OffsetSpec_MAX_TIMESTAMP }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(this: *const kafka_admin_OffsetSpec_t) -> kafka_admin_OffsetSpec_e { kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_OffsetSpec_earliest() -> *const kafka_admin_OffsetSpec_t { std::ptr::null() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_OffsetSpec_latest() -> *const kafka_admin_OffsetSpec_t { std::ptr::null() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_OffsetSpec_max_timestamp() -> *const kafka_admin_OffsetSpec_t { std::ptr::null() }
@@ -2877,12 +2987,13 @@ mod tests {
 
     #[test]
     fn test_c_enum_lists_every_variant() {
-        let ffi = ENUM_FFI.replace("{ earliest, latest, max_timestamp }", "{ earliest, latest }");
+        let ffi = ENUM_FFI.replace(", kafka_admin_OffsetSpec_MAX_TIMESTAMP }", " }");
         let findings = run("enum-variants", ENUM_RUST, &ffi);
         assert_eq!(keys(&findings), ["shape kafka_admin_OffsetSpec_e"]);
         assert_eq!(
             detail(&findings, "shape kafka_admin_OffsetSpec_e"),
-            "expected a `#[repr(C)]` enum with variants [earliest, latest, max_timestamp], found [earliest, latest]"
+            "expected a `#[repr(C)]` enum with variants [kafka_admin_OffsetSpec_EARLIEST, kafka_admin_OffsetSpec_LATEST, \
+             kafka_admin_OffsetSpec_MAX_TIMESTAMP], found [kafka_admin_OffsetSpec_EARLIEST, kafka_admin_OffsetSpec_LATEST]"
         );
     }
 
@@ -3058,7 +3169,7 @@ mod tests {
              fn(self: *mut c_void, partitions: *const kafka_List_t, callback_id: i64)`"
         );
         assert_eq!(
-            detail(&findings, "missing kafka_consumer_Consumer_set_callback_result"),
+            detail(&findings, "missing kafka_consumer_Consumer__set_callback_result"),
             "expected `fn(self: *const kafka_consumer_Consumer_t, callback_id: i64, result: *mut c_void)`"
         );
         assert_eq!(
@@ -3195,8 +3306,8 @@ mod tests {
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_value(this: *const kafka_common_metrics_Gauge_t, now: i64) -> f64 { 0.0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_destroy(this: *mut kafka_common_metrics_Gauge_t) {}
         #[repr(C)] pub struct kafka_common_metrics_MetricValueProvider_t { _p: [u8; 0] }
-        #[repr(C)] pub enum kafka_common_metrics_MetricValueProvider_e { measurable, gauge }
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(this: *const kafka_common_metrics_MetricValueProvider_t) -> kafka_common_metrics_MetricValueProvider_e { kafka_common_metrics_MetricValueProvider_e::gauge }
+        #[repr(C)] pub enum kafka_common_metrics_MetricValueProvider_e { kafka_common_metrics_MetricValueProvider_MEASURABLE, kafka_common_metrics_MetricValueProvider_GAUGE }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(this: *const kafka_common_metrics_MetricValueProvider_t) -> kafka_common_metrics_MetricValueProvider_e { kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_GAUGE }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_measurable(value: *mut kafka_common_metrics_Measurable_t) -> *mut kafka_common_metrics_MetricValueProvider_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_gauge(value: *mut kafka_common_metrics_Gauge_t) -> *mut kafka_common_metrics_MetricValueProvider_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_destroy(this: *mut kafka_common_metrics_MetricValueProvider_t) {}
@@ -3682,8 +3793,8 @@ mod tests {
         "#;
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_record_TimestampType_t { _p: [u8; 0] }
-            #[repr(C)] pub enum kafka_common_record_TimestampType_e { create_time, log_append_time }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::create_time }
+            #[repr(C)] pub enum kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_CREATE_TIME, kafka_common_record_TimestampType_LOG_APPEND_TIME }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_CREATE_TIME }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_create_time() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
         "#;
@@ -3732,7 +3843,7 @@ mod tests {
 
     #[test]
     fn test_prefixes_from_markers_nested_errors_and_rust_only() {
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None };
+        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
         let rule = FfiTranslation::new(&ctx);
         let attrs = |alias: &str| -> Vec<syn::Attribute> {
             let item: syn::ItemStruct = syn::parse_str(&format!("#[doc(alias = \"{alias}\")] struct S;")).unwrap();
@@ -3829,8 +3940,8 @@ mod tests {
     fn test_the_numeric_error_code_is_accepted_without_a_rust_item() {
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_Error_t { _private: [u8; 0] }
-            #[repr(C)] pub enum kafka_common_ErrorCode_e { kafka_common_ErrorCode_e_NONE = 0 }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::kafka_common_ErrorCode_e_NONE }
+            #[repr(C)] pub enum kafka_common_ErrorCode_e { kafka_common_ErrorCode_NONE = 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::kafka_common_ErrorCode_NONE }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_codes(error: *const kafka_common_Error_t) -> i32 { 0 }
         "#;
         let findings = run("error-code", "", ffi);
@@ -3840,9 +3951,10 @@ mod tests {
         );
     }
 
-    /// A Rust keyword used as a method name (`ConfigResource::r#type`) or
-    /// as a C enumerator (`PatternType`'s `r#match`) is compared without
-    /// its `r#` prefix, as cbindgen renders it.
+    /// A Rust keyword used as a method name (`ConfigResource::r#type`) is
+    /// compared without its `r#` prefix, as cbindgen renders it; a variant
+    /// named after a keyword (`PatternType::Match`) needs no raw identifier,
+    /// since its enumerator carries the enum's prefix.
     #[test]
     fn test_raw_identifiers_are_compared_without_their_prefix() {
         let rust = r#"
@@ -3858,13 +3970,111 @@ mod tests {
         "#;
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_record_TimestampType_t { _p: [u8; 0] }
-            #[repr(C)] pub enum kafka_common_record_TimestampType_e { r#match, literal }
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::r#match }
+            #[repr(C)] pub enum kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_MATCH, kafka_common_record_TimestampType_LITERAL }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_MATCH }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_match() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_literal() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_type(this: *const kafka_common_record_TimestampType_t) -> i32 { 0 }
         "#;
         let findings = run("raw-identifiers", rust, ffi);
         assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    /// The C enumerators of an enum with a Rust counterpart are
+    /// `<prefix>_<VALUE>`: the bare snake-cased value and the `_e_` spelling
+    /// cbindgen's `prefix_with_name` produced (`..._e_earliest`) are both
+    /// reported, by the per-type comparison and by the enumerator check.
+    #[test]
+    fn test_enumerators_must_be_prefixed_constant_case() {
+        for (variants, bad) in [
+            ("earliest, latest, max_timestamp", ["earliest", "latest", "max_timestamp"]),
+            (
+                "kafka_admin_OffsetSpec_e_earliest, kafka_admin_OffsetSpec_e_latest, kafka_admin_OffsetSpec_e_max_timestamp",
+                [
+                    "kafka_admin_OffsetSpec_e_earliest",
+                    "kafka_admin_OffsetSpec_e_latest",
+                    "kafka_admin_OffsetSpec_e_max_timestamp",
+                ],
+            ),
+        ] {
+            let ffi = ENUM_FFI
+                .replace(
+                    "kafka_admin_OffsetSpec_EARLIEST, kafka_admin_OffsetSpec_LATEST, kafka_admin_OffsetSpec_MAX_TIMESTAMP",
+                    variants,
+                )
+                .replace(
+                    "kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST",
+                    &format!("kafka_admin_OffsetSpec_e::{}", bad[0]),
+                );
+            let findings = run("enumerator-case", ENUM_RUST, &ffi);
+            let mut expected = vec!["shape kafka_admin_OffsetSpec_e".to_string()];
+            expected.extend(bad.iter().map(|b| format!("enumerator {b}")));
+            expected.sort();
+            assert_eq!(keys(&findings), expected.iter().map(String::as_str).collect::<Vec<_>>(), "{variants}");
+            assert_eq!(
+                detail(&findings, &format!("enumerator {}", bad[0])),
+                "expected `kafka_admin_OffsetSpec_<VALUE>`: the enum's prefix without `_e`, then the key in constant case"
+            );
+        }
+    }
+
+    /// A C-only enum (`kafka_common_ErrorCode_e`, no Rust counterpart, so no
+    /// per-type comparison) is still held to the enumerator rule, and a
+    /// `cbindgen:prefix-with-name=true` annotation on any `_e` enum is
+    /// reported.
+    #[test]
+    fn test_c_only_enum_enumerators_and_prefix_annotation() {
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _private: [u8; 0] }
+            /// cbindgen:prefix-with-name=true
+            #[repr(C)] pub enum kafka_common_ErrorCode_e { NONE = 0, kafka_common_ErrorCode_e_UNKNOWN = -1, kafka_common_ErrorCode_offset_out_of_range = 1, kafka_common_ErrorCode_CORRUPT_MESSAGE = 2 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::NONE }
+        "#;
+        let findings = run("c-only-enumerators", "", ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "enumerator NONE",
+                "enumerator kafka_common_ErrorCode_e",
+                "enumerator kafka_common_ErrorCode_e_UNKNOWN",
+                "enumerator kafka_common_ErrorCode_offset_out_of_range",
+                "unexpected kafka_common_Error_t",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "enumerator kafka_common_ErrorCode_e"),
+            "`cbindgen:prefix-with-name=true` would prefix every enumerator with the `_e` export name; \
+             spell the enumerators `<prefix>_<VALUE>` in full instead"
+        );
+    }
+
+    /// `[enum] prefix_with_name = true` in the cbindgen configuration is
+    /// reported; `false`, a commented-out `true`, the same key in another
+    /// section, and a missing file are not.
+    #[test]
+    fn test_cbindgen_enum_prefixing_is_reported() {
+        let dir = std::env::temp_dir().join(format!("xtask-ffi-cbindgen-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("cbindgen.toml");
+        let check = |text: &str| {
+            fs::write(&config, text).unwrap();
+            let mut findings = Vec::new();
+            cbindgen_enum_prefixing(&config, &mut findings);
+            findings
+                .into_iter()
+                .map(|f| format!("{} {}", f.kind, f.symbol))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            check("[enum]\nrename_variants = \"None\"\nprefix_with_name = true\n"),
+            ["config prefix_with_name"]
+        );
+        assert!(check("[enum]\nprefix_with_name = false\n").is_empty());
+        assert!(check("[enum]\n# prefix_with_name = true\n").is_empty());
+        assert!(check("[struct]\nprefix_with_name = true\n[enum]\n").is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+        let mut findings = Vec::new();
+        cbindgen_enum_prefixing(&config, &mut findings);
+        assert!(findings.is_empty());
     }
 }

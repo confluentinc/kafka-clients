@@ -51,9 +51,9 @@ pub struct kafka_common_metrics_Sensor_RecordingLevel_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_metrics_Sensor_RecordingLevel_e {
-    info,
-    debug,
-    trace,
+    kafka_common_metrics_Sensor_RecordingLevel_INFO,
+    kafka_common_metrics_Sensor_RecordingLevel_DEBUG,
+    kafka_common_metrics_Sensor_RecordingLevel_TRACE,
 }
 
 /// One instance per value; the singletons point into this array.
@@ -61,9 +61,15 @@ static VARIANTS: [RecordingLevel; 3] = [RecordingLevel::Info, RecordingLevel::De
 
 fn enum_of(level: RecordingLevel) -> kafka_common_metrics_Sensor_RecordingLevel_e {
     match level {
-        RecordingLevel::Info => kafka_common_metrics_Sensor_RecordingLevel_e::info,
-        RecordingLevel::Debug => kafka_common_metrics_Sensor_RecordingLevel_e::debug,
-        RecordingLevel::Trace => kafka_common_metrics_Sensor_RecordingLevel_e::trace,
+        RecordingLevel::Info => {
+            kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_INFO
+        },
+        RecordingLevel::Debug => {
+            kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_DEBUG
+        },
+        RecordingLevel::Trace => {
+            kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_TRACE
+        },
     }
 }
 

@@ -166,7 +166,10 @@ mod tests {
             assert_eq!(gauge_ref(handle).value(&config, 5), MetricValue::Long(15));
             let config_handle = kafka_common_metrics_MetricConfig_new();
             let value = kafka_common_metrics_Gauge_value(handle, config_handle, 1);
-            assert_eq!(kafka_common_MetricValue__enum(value), kafka_common_MetricValue_e::long);
+            assert_eq!(
+                kafka_common_MetricValue__enum(value),
+                kafka_common_MetricValue_e::kafka_common_MetricValue_LONG
+            );
             kafka_common_MetricValue_destroy(value);
             kafka_common_metrics_MetricConfig_destroy(config_handle);
 

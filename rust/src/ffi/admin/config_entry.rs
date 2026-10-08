@@ -49,15 +49,15 @@ pub struct kafka_admin_ConfigEntry_ConfigSource_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_ConfigEntry_ConfigSource_e {
-    dynamic_topic_config,
-    dynamic_broker_logger_config,
-    dynamic_broker_config,
-    dynamic_default_broker_config,
-    dynamic_client_metrics_config,
-    dynamic_group_config,
-    static_broker_config,
-    default_config,
-    unknown,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_TOPIC_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_LOGGER_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_DEFAULT_BROKER_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_CLIENT_METRICS_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_GROUP_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_STATIC_BROKER_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_DEFAULT_CONFIG,
+    kafka_admin_ConfigEntry_ConfigSource_UNKNOWN,
 }
 
 /// One static instance per value, indexed by
@@ -78,19 +78,31 @@ static SOURCES: [ConfigSource; 9] = [
 /// enumerator and singleton.
 fn source_enum_of(source: ConfigSource) -> kafka_admin_ConfigEntry_ConfigSource_e {
     match source {
-        ConfigSource::DynamicTopicConfig => kafka_admin_ConfigEntry_ConfigSource_e::dynamic_topic_config,
-        ConfigSource::DynamicBrokerLoggerConfig => kafka_admin_ConfigEntry_ConfigSource_e::dynamic_broker_logger_config,
-        ConfigSource::DynamicBrokerConfig => kafka_admin_ConfigEntry_ConfigSource_e::dynamic_broker_config,
+        ConfigSource::DynamicTopicConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_TOPIC_CONFIG
+        },
+        ConfigSource::DynamicBrokerLoggerConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_LOGGER_CONFIG
+        },
+        ConfigSource::DynamicBrokerConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_BROKER_CONFIG
+        },
         ConfigSource::DynamicDefaultBrokerConfig => {
-            kafka_admin_ConfigEntry_ConfigSource_e::dynamic_default_broker_config
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_DEFAULT_BROKER_CONFIG
         },
         ConfigSource::DynamicClientMetricsConfig => {
-            kafka_admin_ConfigEntry_ConfigSource_e::dynamic_client_metrics_config
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_CLIENT_METRICS_CONFIG
         },
-        ConfigSource::DynamicGroupConfig => kafka_admin_ConfigEntry_ConfigSource_e::dynamic_group_config,
-        ConfigSource::StaticBrokerConfig => kafka_admin_ConfigEntry_ConfigSource_e::static_broker_config,
-        ConfigSource::DefaultConfig => kafka_admin_ConfigEntry_ConfigSource_e::default_config,
-        ConfigSource::Unknown => kafka_admin_ConfigEntry_ConfigSource_e::unknown,
+        ConfigSource::DynamicGroupConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DYNAMIC_GROUP_CONFIG
+        },
+        ConfigSource::StaticBrokerConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_STATIC_BROKER_CONFIG
+        },
+        ConfigSource::DefaultConfig => {
+            kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_DEFAULT_CONFIG
+        },
+        ConfigSource::Unknown => kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_UNKNOWN,
     }
 }
 
@@ -196,16 +208,16 @@ pub struct kafka_admin_ConfigEntry_ConfigType_t {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_ConfigEntry_ConfigType_e {
-    unknown,
-    boolean,
-    string,
-    int,
-    short,
-    long,
-    double,
-    list,
-    class,
-    password,
+    kafka_admin_ConfigEntry_ConfigType_UNKNOWN,
+    kafka_admin_ConfigEntry_ConfigType_BOOLEAN,
+    kafka_admin_ConfigEntry_ConfigType_STRING,
+    kafka_admin_ConfigEntry_ConfigType_INT,
+    kafka_admin_ConfigEntry_ConfigType_SHORT,
+    kafka_admin_ConfigEntry_ConfigType_LONG,
+    kafka_admin_ConfigEntry_ConfigType_DOUBLE,
+    kafka_admin_ConfigEntry_ConfigType_LIST,
+    kafka_admin_ConfigEntry_ConfigType_CLASS,
+    kafka_admin_ConfigEntry_ConfigType_PASSWORD,
 }
 
 /// One static instance per value, indexed by
@@ -227,16 +239,16 @@ static TYPES: [ConfigType; 10] = [
 /// enumerator and singleton.
 fn type_enum_of(config_type: ConfigType) -> kafka_admin_ConfigEntry_ConfigType_e {
     match config_type {
-        ConfigType::Unknown => kafka_admin_ConfigEntry_ConfigType_e::unknown,
-        ConfigType::Boolean => kafka_admin_ConfigEntry_ConfigType_e::boolean,
-        ConfigType::String => kafka_admin_ConfigEntry_ConfigType_e::string,
-        ConfigType::Int => kafka_admin_ConfigEntry_ConfigType_e::int,
-        ConfigType::Short => kafka_admin_ConfigEntry_ConfigType_e::short,
-        ConfigType::Long => kafka_admin_ConfigEntry_ConfigType_e::long,
-        ConfigType::Double => kafka_admin_ConfigEntry_ConfigType_e::double,
-        ConfigType::List => kafka_admin_ConfigEntry_ConfigType_e::list,
-        ConfigType::Class => kafka_admin_ConfigEntry_ConfigType_e::class,
-        ConfigType::Password => kafka_admin_ConfigEntry_ConfigType_e::password,
+        ConfigType::Unknown => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_UNKNOWN,
+        ConfigType::Boolean => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_BOOLEAN,
+        ConfigType::String => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_STRING,
+        ConfigType::Int => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_INT,
+        ConfigType::Short => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_SHORT,
+        ConfigType::Long => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_LONG,
+        ConfigType::Double => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_DOUBLE,
+        ConfigType::List => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_LIST,
+        ConfigType::Class => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_CLASS,
+        ConfigType::Password => kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_PASSWORD,
     }
 }
 

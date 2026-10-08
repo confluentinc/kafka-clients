@@ -145,7 +145,7 @@ static void test_kafka_consumer_classic_protocol_rejected(void) {
     const kafka_consumer_GroupProtocol_t *protocol = NULL;
     TEST_ASSERT_NULL(kafka_consumer_GroupProtocol_of("classic", &protocol));
     TEST_ASSERT_EQUAL_PTR(kafka_consumer_GroupProtocol_classic(), protocol);
-    TEST_ASSERT_EQUAL_INT(kafka_consumer_GroupProtocol_e_classic, kafka_consumer_GroupProtocol__enum(protocol));
+    TEST_ASSERT_EQUAL_INT(kafka_consumer_GroupProtocol_CLASSIC, kafka_consumer_GroupProtocol__enum(protocol));
     TEST_ASSERT_NULL(kafka_consumer_GroupProtocol_of("CONSUMER", &protocol)); /* case-insensitive, as Java */
     TEST_ASSERT_EQUAL_PTR(kafka_consumer_GroupProtocol_consumer(), protocol);
     TEST_ASSERT_EQUAL_STRING("CONSUMER", kafka_consumer_GroupProtocol_name(protocol));
