@@ -56,6 +56,7 @@ pub(crate) mod isolation_level;
 pub(crate) mod metric;
 pub(crate) mod metric_name;
 pub(crate) mod metric_name_template;
+pub(crate) mod metrics;
 pub(crate) mod node;
 pub(crate) mod partition_info;
 pub(crate) mod record;

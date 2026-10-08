@@ -20,11 +20,20 @@
 //! reached through the class's `__as_Metric` (`KafkaMetric`); it has no
 //! `_new` because nothing in the public API accepts a caller-supplied
 //! `Metric`.
+//!
+//! `MetricValue` is a Rust enum whose four variants all carry data, so it
+//! follows the enum rule for data variants (CLAUDE.md §4): one constructor
+//! per variant returning an owned handle, plus `kafka_common_MetricValue_e`
+//! and `__enum` for a `switch`.
 
+#![expect(non_camel_case_types)]
+
+use std::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::common::{Metric, MetricValue};
 use crate::ffi::common::metric_name::{MetricNameInner, kafka_common_MetricName_t};
+use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`Metric`] implementation.
 #[repr(C)]
@@ -40,6 +49,35 @@ pub struct kafka_common_MetricValue_t {
     _private: [u8; 0],
 }
 
+/// The variants of [`MetricValue`], for a `switch` over
+/// [`kafka_common_MetricValue__enum`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum kafka_common_MetricValue_e {
+    /// `MetricValue::Double`: a measurable or double gauge reading.
+    double,
+    /// `MetricValue::String`: a string gauge reading.
+    string,
+    /// `MetricValue::Long`: a long gauge reading.
+    long,
+    /// `MetricValue::Int`: an int gauge reading.
+    int,
+}
+
+/// Hands `value` to C as an owned handle.
+pub(crate) fn box_metric_value(value: MetricValue) -> *mut kafka_common_MetricValue_t {
+    Box::into_raw(Box::new(value)) as *mut kafka_common_MetricValue_t
+}
+
+/// Takes an owned metric value back from C.
+///
+/// # Safety
+///
+/// `value` must be an owned metric-value handle not destroyed afterwards.
+pub(crate) unsafe fn take_metric_value(value: *mut kafka_common_MetricValue_t) -> MetricValue {
+    *unsafe { Box::from_raw(value as *mut MetricValue) }
+}
+
 /// What a [`kafka_common_Metric_t`] points at: the implementation, owned by
 /// the class handle that produced this view, plus the metric-name handle the
 /// borrowed getter hands out.
@@ -48,8 +86,6 @@ pub(crate) struct MetricInner {
     name: OnceLock<MetricNameInner>,
 }
 
-// wired by `kafka_common_metrics_KafkaMetric__as_Metric` (slice 1b.3b)
-#[cfg_attr(not(test), expect(dead_code))]
 impl MetricInner {
     /// A view on `metric`, whose owner must outlive the view.
     ///
@@ -104,8 +140,53 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_name(
 pub unsafe extern "C" fn kafka_common_Metric_metric_value(
     self_: *const kafka_common_Metric_t,
 ) -> *mut kafka_common_MetricValue_t {
-    let value = unsafe { &*(self_ as *const MetricInner) }.metric().metric_value();
-    Box::into_raw(Box::new(value)) as *mut kafka_common_MetricValue_t
+    box_metric_value(unsafe { &*(self_ as *const MetricInner) }.metric().metric_value())
+}
+
+/// Which variant `self_` holds.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric-value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_MetricValue__enum(
+    self_: *const kafka_common_MetricValue_t,
+) -> kafka_common_MetricValue_e {
+    match unsafe { &*(self_ as *const MetricValue) } {
+        MetricValue::Double(_) => kafka_common_MetricValue_e::double,
+        MetricValue::String(_) => kafka_common_MetricValue_e::string,
+        MetricValue::Long(_) => kafka_common_MetricValue_e::long,
+        MetricValue::Int(_) => kafka_common_MetricValue_e::int,
+    }
+}
+
+/// `MetricValue::Double(value)`. Owned, freed with
+/// [`kafka_common_MetricValue_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_common_MetricValue_t {
+    box_metric_value(MetricValue::Double(value))
+}
+
+/// `MetricValue::String(value)`: `value` is copied.
+///
+/// # Safety
+///
+/// `value` must be a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -> *mut kafka_common_MetricValue_t {
+    box_metric_value(MetricValue::String(unsafe { c_str_to_string(value) }))
+}
+
+/// `MetricValue::Long(value)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_MetricValue_long(value: i64) -> *mut kafka_common_MetricValue_t {
+    box_metric_value(MetricValue::Long(value))
+}
+
+/// `MetricValue::Int(value)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_MetricValue_t {
+    box_metric_value(MetricValue::Int(value))
 }
 
 /// `as_double()`: the reading when it is a double, `NaN` otherwise (a
@@ -173,6 +254,38 @@ mod tests {
             assert_eq!(kafka_common_MetricValue_as_double(value), 1.5);
             kafka_common_MetricValue_destroy(value);
             kafka_common_MetricValue_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn variant_constructors_round_trip_through_enum_and_take() {
+        unsafe {
+            let cases: [(*mut kafka_common_MetricValue_t, kafka_common_MetricValue_e, MetricValue); 4] = [
+                (
+                    kafka_common_MetricValue_double(1.5),
+                    kafka_common_MetricValue_e::double,
+                    MetricValue::Double(1.5),
+                ),
+                (
+                    kafka_common_MetricValue_string(c"up".as_ptr()),
+                    kafka_common_MetricValue_e::string,
+                    MetricValue::String("up".to_string()),
+                ),
+                (
+                    kafka_common_MetricValue_long(7),
+                    kafka_common_MetricValue_e::long,
+                    MetricValue::Long(7),
+                ),
+                (
+                    kafka_common_MetricValue_int(-3),
+                    kafka_common_MetricValue_e::int,
+                    MetricValue::Int(-3),
+                ),
+            ];
+            for (handle, variant, expected) in cases {
+                assert_eq!(kafka_common_MetricValue__enum(handle), variant);
+                assert_eq!(take_metric_value(handle), expected);
+            }
         }
     }
 
