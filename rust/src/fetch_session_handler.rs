@@ -211,11 +211,8 @@ impl FetchSessionHandler {
                 // Session does not exist on the broker anymore. Recoverable and
                 // self-healing, the client re-sends a full fetch request.
                 debug!(
-                    "Node {} returned a {:?} error; the fetch session {} was likely evicted from the broker's \
-                     fetch session cache. Re-sending a full fetch request to establish a new session.",
-                    self.node,
-                    response.error(),
-                    self.next_metadata.session_id()
+                    "{}",
+                    session_not_found_log(self.node, response.error(), self.next_metadata.session_id())
                 );
                 self.next_metadata = FetchMetadata::INITIAL;
             } else {
@@ -223,13 +220,7 @@ impl FetchSessionHandler {
                 // FETCH_SESSION_TOPIC_ID_ERROR) are also recoverable and
                 // self-healing: the existing session is closed and a new one is
                 // re-established with a full fetch.
-                debug!(
-                    "Node {} was unable to process the fetch request with {}: {:?}. Re-sending a full fetch \
-                     request, which closes the existing session on the broker and establishes a new one.",
-                    self.node,
-                    self.next_metadata,
-                    response.error()
-                );
+                debug!("{}", session_error_log(self.node, &self.next_metadata, response.error()));
                 self.next_metadata = self.next_metadata.next_close_existing_attempt_new();
             }
             return false;
@@ -554,6 +545,27 @@ fn join_partitions(set: &HashSet<TopicPartition>) -> String {
 
 fn join_ids(set: &HashSet<Uuid>) -> String {
     set.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// The DEBUG text `handleResponse` logs when the broker no longer has the
+/// session (`FetchSessionHandler.java:532-534`). The error renders as Java's
+/// `Errors.toString()`, the enum name (`FETCH_SESSION_ID_NOT_FOUND`). A
+/// function so the exact text can be tested; `debug!` evaluates it only when
+/// the level is enabled.
+fn session_not_found_log(node: i32, error: Errors, session_id: i32) -> String {
+    format!(
+        "Node {node} returned a {error} error; the fetch session {session_id} was likely evicted from the broker's \
+         fetch session cache. Re-sending a full fetch request to establish a new session."
+    )
+}
+
+/// The DEBUG text `handleResponse` logs for every other fetch-session error
+/// (`FetchSessionHandler.java:542-544`), with the error as Java's enum name.
+fn session_error_log(node: i32, next_metadata: &FetchMetadata, error: Errors) -> String {
+    format!(
+        "Node {node} was unable to process the fetch request with {next_metadata}: {error}. Re-sending a full fetch \
+         request, which closes the existing session on the broker and establishes a new one."
+    )
 }
 
 #[cfg(test)]
@@ -1377,5 +1389,23 @@ mod tests {
         assert_eq!(2, handler.session_topic_partitions().len());
         assert!(handler.session_topic_partitions().contains(&tp("foo", 0)));
         assert!(handler.session_topic_partitions().contains(&tp("foo", 1)));
+    }
+
+    /// The two KAFKA-20713 (85b0e80272) DEBUG texts, exactly as Java renders
+    /// them (`FetchSessionHandler.java:532-534`, `:542-544`): the error is
+    /// `Errors.toString()`, the enum name, not the Rust variant name.
+    #[test]
+    fn test_fetch_session_error_log_texts() {
+        assert_eq!(
+            session_not_found_log(1, Errors::FetchSessionIdNotFound, 123),
+            "Node 1 returned a FETCH_SESSION_ID_NOT_FOUND error; the fetch session 123 was likely evicted from \
+             the broker's fetch session cache. Re-sending a full fetch request to establish a new session."
+        );
+        assert_eq!(
+            session_error_log(1, &FetchMetadata::INITIAL, Errors::InvalidFetchSessionEpoch),
+            "Node 1 was unable to process the fetch request with (sessionId=INVALID, epoch=INITIAL): \
+             INVALID_FETCH_SESSION_EPOCH. Re-sending a full fetch request, which closes the existing session on \
+             the broker and establishes a new one."
+        );
     }
 }
