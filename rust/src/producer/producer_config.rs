@@ -195,6 +195,12 @@ pub struct ProducerConfig {
     /// Default: 300000 ms (`ProducerConfig.java:555-560`).
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
 
+    /// `metadata.cluster.check.enable` (KIP-1242) - Whether the client sends the
+    /// cluster id and node id it expects in ApiVersions so the broker can detect
+    /// a misrouted connection; ignored when `metadata.recovery.strategy=none`.
+    /// Default: true (`ProducerConfig.java:608-612`).
+    pub(crate) metadata_cluster_check_enable: bool,
+
     // --- Partitioning ---
     /// `partitioner.adaptive.partitioning.enable` - Adapt to broker performance.
     /// Default: true.
@@ -344,6 +350,7 @@ impl Default for ProducerConfig {
             metadata_max_idle_ms: 5 * 60 * 1000,
             metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
             metadata_recovery_rebootstrap_trigger_ms: 300 * 1000,
+            metadata_cluster_check_enable: true,
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
@@ -614,6 +621,10 @@ impl ProducerConfig {
                         return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metadata_recovery_rebootstrap_trigger_ms = v;
+                },
+                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // Java `ProducerConfig` (`:608-612`): `Type.BOOLEAN`, default `true`.
+                    config.metadata_cluster_check_enable = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG => {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
@@ -1110,6 +1121,24 @@ mod tests {
             config_error.message(),
             "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
              Value must be at least 0"
+        );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
+    /// (`ProducerConfig.java:608-612`).
+    #[test]
+    fn test_metadata_cluster_check_enable() {
+        let c = ProducerConfig::new(&base_props()).unwrap();
+        assert!(c.metadata_cluster_check_enable);
+
+        let mut props = base_props();
+        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "false".to_string());
+        assert!(!ProducerConfig::new(&props).unwrap().metadata_cluster_check_enable);
+
+        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "maybe".to_string());
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable"
         );
     }
 

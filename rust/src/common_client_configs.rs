@@ -75,6 +75,21 @@ impl CommonClientConfigs {
     /// shipped `2 * 60 * 1000`).
     pub const DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS: i64 = 0;
 
+    /// Config key: `metadata.cluster.check.enable` (KIP-1242)
+    ///
+    /// Whether the client should send cluster and node information when
+    /// connecting to a broker to enable it to check for a misrouted
+    /// connection. This configuration is ignored if rebootstrapping is
+    /// disabled by setting the configuration `metadata.recovery.strategy=none`.
+    /// If the client is connecting to a broker older than Apache Kafka 4.4, no
+    /// checking is performed and this configuration has no effect.
+    ///
+    /// (Text of Java's `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_DOC`
+    /// (`CommonClientConfigs.java:267-271`), carried as rustdoc for the reason
+    /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`]. The producer, consumer and
+    /// admin configs define it as `Type.BOOLEAN` with default `true`.)
+    pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &str = "metadata.cluster.check.enable";
+
     /// Config key: `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
 

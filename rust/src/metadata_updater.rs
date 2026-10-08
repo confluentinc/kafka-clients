@@ -35,6 +35,14 @@ use crate::common::Error;
 /// This is an internal trait. It is NOT thread-safe.
 #[doc(alias = "org.apache.kafka.clients.MetadataUpdater")]
 pub trait MetadataUpdater: Send {
+    /// Gets the current cluster id without blocking.
+    ///
+    /// Returns the cluster id, or `None` if unknown.
+    #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#clusterId")]
+    fn cluster_id(&self) -> Option<String> {
+        None
+    }
+
     /// Gets the current cluster info without blocking.
     #[doc(alias = "org.apache.kafka.clients.MetadataUpdater#fetchNodes")]
     fn fetch_nodes(&self) -> Vec<Node>;

@@ -45,6 +45,7 @@ pub struct AdminClientConfig {
     connections_max_idle_ms: i64,
     metadata_max_age_ms: i64,
     socket_connection_setup_timeout_ms: i64,
+    metadata_cluster_check_enable: bool,
 
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
@@ -94,6 +95,12 @@ impl AdminClientConfig {
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
+    /// `metadata.cluster.check.enable` (KIP-1242). Java's `AdminClientConfig.java:157`
+    /// declares it as its own public alias of
+    /// [`CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG`], whose doc
+    /// describes it. See [`Self::metadata_cluster_check_enable`].
+    pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &'static str =
+        CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
     /// `sasl.mechanism`
@@ -153,6 +160,10 @@ impl AdminClientConfig {
                 Self::METADATA_MAX_AGE_MS_CONFIG => config.metadata_max_age_ms = parse_i64(key, value)?,
                 Self::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG => {
                     config.socket_connection_setup_timeout_ms = parse_i64(key, value)?;
+                },
+                Self::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // `Type.BOOLEAN`, default `true` (`AdminClientConfig.java:305-309`).
+                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
@@ -282,6 +293,21 @@ impl AdminClientConfig {
         self.socket_connection_setup_timeout_ms
     }
 
+    /// `metadata.cluster.check.enable` (KIP-1242): whether the client sends the
+    /// cluster id and node id it expects in ApiVersions so the broker can detect
+    /// a misrouted connection.
+    ///
+    /// It is passed to the `NetworkClient` as in Java
+    /// (`ClientUtils.createNetworkClient`), but, also as in Java, it has no
+    /// effect on the admin client: the admin's metadata updater does not
+    /// override `MetadataUpdater.clusterId()` (`AdminMetadataManager.java`), so
+    /// the expected cluster id is never known. This client additionally runs
+    /// the admin `NetworkClient` with `metadata.recovery.strategy=none`, under
+    /// which the check is skipped.
+    pub(crate) fn metadata_cluster_check_enable(&self) -> bool {
+        self.metadata_cluster_check_enable
+    }
+
     /// `security.protocol`.
     pub fn security_protocol(&self) -> SecurityProtocol {
         self.security_protocol
@@ -316,6 +342,7 @@ impl Default for AdminClientConfig {
             connections_max_idle_ms: 300_000,
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
+            metadata_cluster_check_enable: true,
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
@@ -329,6 +356,14 @@ fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
     value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(Error::config_name_value(key, value)),
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +401,28 @@ mod tests {
         assert_eq!(
             AdminClientConfig::new(&props).unwrap_err().message(),
             "Invalid value -1 for configuration bootstrap.resolve.timeout.ms: Value must be at least 0"
+        );
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default
+    /// `true` (`AdminClientConfig.java:305-309`).
+    #[test]
+    fn metadata_cluster_check_enable() {
+        assert_eq!(
+            AdminClientConfig::METADATA_CLUSTER_CHECK_ENABLE_CONFIG,
+            "metadata.cluster.check.enable"
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert!(AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
+        props.insert("metadata.cluster.check.enable".to_string(), "false".to_string());
+        assert!(!AdminClientConfig::new(&props).unwrap().metadata_cluster_check_enable());
+
+        props.insert("metadata.cluster.check.enable".to_string(), "maybe".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable"
         );
     }
 

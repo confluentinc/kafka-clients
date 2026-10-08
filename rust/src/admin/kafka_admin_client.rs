@@ -485,6 +485,11 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient` passes `metadata.cluster.check.enable`
+        // to the `NetworkClient` constructor (`ClientUtils.java:309`, KIP-1242).
+        // It has no effect here, as in Java: see
+        // `AdminClientConfig::metadata_cluster_check_enable`.
+        client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable());
         // `ClientUtils.createNetworkClient` passes
         // `bootstrapConfiguration(config, bootstrapAddressesToUse)` to the
         // `NetworkClient` constructor.

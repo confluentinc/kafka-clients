@@ -134,6 +134,11 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     rebootstrap_trigger_ms: i64,
     /// Metadata recovery strategy.
     metadata_recovery_strategy: MetadataRecoveryStrategy,
+    /// Whether to send the cluster ID and node ID on ApiVersions RPC for
+    /// checking by the broker (KIP-1242). Java's `metadataClusterCheckEnable`;
+    /// `false` unless a client wires the config in via
+    /// [`set_metadata_cluster_check_enable`](Self::set_metadata_cluster_check_enable).
+    metadata_cluster_check_enable: bool,
     /// True if we should send an ApiVersionRequest when first connecting to a broker.
     discover_broker_versions: bool,
     /// API versions for each node.
@@ -358,6 +363,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             reconnect_backoff_ms,
             rebootstrap_trigger_ms,
             metadata_recovery_strategy,
+            metadata_cluster_check_enable: false,
             discover_broker_versions,
             api_versions,
             nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
@@ -442,6 +448,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             reconnect_backoff_ms,
             rebootstrap_trigger_ms: i64::MAX,
             metadata_recovery_strategy,
+            metadata_cluster_check_enable: false,
             discover_broker_versions,
             api_versions,
             nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
@@ -488,6 +495,23 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         if !self.bootstrap_configuration.is_disabled() {
             self.start_bootstrap_resolution();
         }
+    }
+
+    /// Wires in `metadata.cluster.check.enable` (KIP-1242), which defaults to
+    /// `false`. Java passes it to the `NetworkClient` constructor
+    /// (`NetworkClient.java:358,391`, from `ClientUtils.createNetworkClient`,
+    /// `ClientUtils.java:309`); it is set after construction here, following
+    /// the [`set_bootstrap_configuration`](Self::set_bootstrap_configuration)
+    /// precedent, so the many constructor call sites that pass `false` in Java
+    /// need no change.
+    ///
+    /// When enabled and the metadata recovery strategy is not
+    /// [`MetadataRecoveryStrategy::None`], the ApiVersions request to a node
+    /// carries the cluster id and node id the client expects, once the cluster
+    /// id is known, so a 4.4+ broker can detect a misrouted connection and
+    /// answer `REBOOTSTRAP_REQUIRED`.
+    pub fn set_metadata_cluster_check_enable(&mut self, metadata_cluster_check_enable: bool) {
+        self.metadata_cluster_check_enable = metadata_cluster_check_enable;
     }
 
     /// Replaces the clock, which defaults to [`SystemTime`]. Java passes the
@@ -962,7 +986,24 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let node = req.destination.clone();
         if api_versions_response.data().error_code != Errors::None.code() {
             let request_version = req.request.as_ref().map(|r| r.version()).unwrap_or(0);
-            if request_version == 0 || api_versions_response.data().error_code != Errors::UnsupportedVersion.code() {
+            if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+                && api_versions_response.data().error_code == Errors::RebootstrapRequired.code()
+            {
+                // KIP-1242 (`NetworkClient.java:1120-1130`): the broker found the
+                // cluster id / node id this client sent do not match its own, so
+                // the connection is misrouted and the cached metadata is stale.
+                // Disconnect from every known node, as `handleRebootstrap` does,
+                // and rebootstrap.
+                kafka_info!(
+                    self.log_context,
+                    "Rebootstrap requested by server due to cluster metadata mismatch for cluster {:?} and node {}.",
+                    self.cluster_id(),
+                    node
+                );
+                self.disconnect_all_and_rebootstrap(responses, now).await;
+            } else if request_version == 0
+                || api_versions_response.data().error_code != Errors::UnsupportedVersion.code()
+            {
                 kafka_warn!(
                     self.log_context,
                     "Received error {:?} from node {} when making an ApiVersionsRequest with correlation id {}. Disconnecting.",
@@ -1064,9 +1105,26 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        for (node, builder) in ready_nodes {
+        for (node, mut builder) in ready_nodes {
             kafka_debug!(self.log_context, "Initiating API versions fetch from node {}.", node);
             self.connection_states.checking_api_versions(&node);
+            // If we know the cluster ID and node ID we are connecting to, we can include
+            // those details in the ApiVersions request for checking in the broker,
+            // provided that the metadata recovery strategy is not NONE. (KIP-1242,
+            // `NetworkClient.java:1214-1224`)
+            if self.metadata_recovery_strategy != MetadataRecoveryStrategy::None && self.metadata_cluster_check_enable {
+                let cluster_id = self.cluster_id();
+                // Java's `Integer.parseInt(node)`. A connection id is always a
+                // node's `idString`, which parses as its integer id, including a
+                // group coordinator's `+<id>` (`GroupCoordinatorNode`). An id that
+                // does not parse cannot name a broker to check, so it sends none.
+                if let (Some(cluster_id), Ok(node_id)) = (cluster_id, node.parse::<i32>())
+                    && node_id >= 0
+                {
+                    builder.set_cluster_id(Some(&cluster_id));
+                    builder.set_node_id(node_id);
+                }
+            }
             let client_request = self.new_client_request(&node, Box::new(builder), now, true);
             self.do_send(client_request, true, now);
             self.nodes_needing_api_versions_fetch.remove(&node);
@@ -1110,27 +1168,35 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleRebootstrap")]
     async fn handle_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap && self.needs_rebootstrap(now) {
-            let nodes = self.fetch_nodes();
-            let node_ids: Vec<String> = nodes.iter().map(|n| n.id_string().to_string()).collect();
-            for node_id in node_ids {
-                self.selector.close_channel(&node_id).await;
-                if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
-                    kafka_info!(
-                        self.log_context,
-                        "Disconnecting from node {} due to client rebootstrap.",
-                        node_id
-                    );
-                    self.process_disconnection(
-                        responses,
-                        &node_id,
-                        now,
-                        ChannelState::new(channel_state::State::LocalClose),
-                        false,
-                    );
-                }
-            }
-            self.rebootstrap(now);
+            self.disconnect_all_and_rebootstrap(responses, now).await;
         }
+    }
+
+    /// Closes and disconnects every node the metadata knows, then rebootstraps.
+    ///
+    /// The shared body of `handleRebootstrap` (`NetworkClient.java:1232-1243`)
+    /// and the `REBOOTSTRAP_REQUIRED` branch of `handleApiVersionsResponse`
+    /// (`NetworkClient.java:1120-1130`), which Java writes out twice.
+    async fn disconnect_all_and_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+        let node_ids: Vec<String> = self.fetch_nodes().iter().map(|n| n.id_string().to_string()).collect();
+        for node_id in node_ids {
+            self.selector.close_channel(&node_id).await;
+            if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
+                kafka_info!(
+                    self.log_context,
+                    "Disconnecting from node {} due to client rebootstrap.",
+                    node_id
+                );
+                self.process_disconnection(
+                    responses,
+                    &node_id,
+                    now,
+                    ChannelState::new(channel_state::State::LocalClose),
+                    false,
+                );
+            }
+        }
+        self.rebootstrap(now);
     }
 
     /// Complete all responses by invoking their callbacks.
@@ -1601,6 +1667,21 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             metadata.bootstrap_fatal_error(error);
         } else if let Some(ref mut updater) = self.external_metadata_updater {
             updater.bootstrap_failed(error);
+        }
+    }
+
+    /// Gets the current cluster id without blocking, `None` if unknown.
+    ///
+    /// Java's `MetadataUpdater.clusterId()`: `DefaultMetadataUpdater` reads the
+    /// metadata's `ClusterResource` (`NetworkClient.java:1426-1433`); an
+    /// external updater answers for itself, `None` by default.
+    fn cluster_id(&self) -> Option<String> {
+        if let Some(ref metadata) = self.metadata {
+            metadata.fetch().cluster_resource().cluster_id().map(str::to_string)
+        } else if let Some(ref updater) = self.external_metadata_updater {
+            updater.cluster_id()
+        } else {
+            None
         }
     }
 
@@ -2267,16 +2348,28 @@ mod tests {
         /// Shared with the test, which cannot reach the updater once it is boxed
         /// into the client (Java's test keeps a direct reference instead).
         failure: Arc<std::sync::Mutex<Option<Error>>>,
+        /// Java's `rebootstrapCount` (0ef4a4c80e), shared for the same reason.
+        rebootstrap_count: Arc<std::sync::atomic::AtomicI32>,
     }
 
     impl TestMetadataUpdater {
         fn new(nodes: Vec<Node>) -> Self {
-            Self { nodes, failure: Arc::new(std::sync::Mutex::new(None)) }
+            Self {
+                nodes,
+                failure: Arc::new(std::sync::Mutex::new(None)),
+                rebootstrap_count: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            }
         }
 
         /// A handle on the recorded failure that outlives boxing the updater.
         fn failure_handle(&self) -> Arc<std::sync::Mutex<Option<Error>>> {
             Arc::clone(&self.failure)
+        }
+
+        /// A handle on the rebootstrap count that outlives boxing the updater;
+        /// reading it is Java's `getRebootstrapCount()`.
+        fn rebootstrap_count_handle(&self) -> Arc<std::sync::atomic::AtomicI32> {
+            Arc::clone(&self.rebootstrap_count)
         }
     }
 
@@ -2309,6 +2402,13 @@ mod tests {
             if let Some(err) = maybe_fatal_error {
                 *self.failure.lock().unwrap() = Some(err);
             }
+        }
+
+        /// Java's `TestMetadataUpdater.rebootstrap` override: count, then
+        /// delegate to `ManualMetadataUpdater.rebootstrap`, which is the
+        /// interface's no-op default.
+        fn rebootstrap(&mut self, _now: i64) {
+            self.rebootstrap_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn handle_successful_response(
@@ -4700,6 +4800,8 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (ApiVersionsRequest)"
         );
+        // Java parses the sent buffer's header: API_VERSIONS at v5 (ede01b871e).
+        assert_eq!(5, last_sent_api_versions(&client, &node).0);
 
         // Prepare UNSUPPORTED_VERSION response with api_keys containing API_VERSIONS max_version=2
         let mut error_data = ApiVersionsResponseData::new();
@@ -4735,6 +4837,7 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (retry ApiVersionsRequest)"
         );
+        assert_eq!(2, last_sent_api_versions(&client, &node).0);
 
         // Prepare a success response for the retry (correlation_id = 1)
         let mut success_response = default_api_versions_response();
@@ -4783,6 +4886,8 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (ApiVersionsRequest)"
         );
+        // Java parses the sent buffer's header: API_VERSIONS at v5 (ede01b871e).
+        assert_eq!(5, last_sent_api_versions(&client, &node).0);
 
         // Prepare UNSUPPORTED_VERSION response WITHOUT api_keys
         let mut error_data = ApiVersionsResponseData::new();
@@ -4814,6 +4919,7 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (retry ApiVersionsRequest)"
         );
+        assert_eq!(0, last_sent_api_versions(&client, &node).0);
 
         // Prepare a success response for the retry (correlation_id = 1)
         let mut success_response = default_api_versions_response();
@@ -4875,6 +4981,266 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
+    /// Translated from `NetworkClientTest.testMetadataClusterCheckFailureCausesRebootstrap`
+    /// (0ef4a4c80e, KIP-1242).
+    ///
+    /// A `REBOOTSTRAP_REQUIRED` ApiVersions error from one node disconnects
+    /// every node the metadata knows, including an already-ready one, and
+    /// rebootstraps once.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testMetadataClusterCheckFailureCausesRebootstrap")]
+    async fn test_metadata_cluster_check_failure_causes_rebootstrap() {
+        // `TestUtils.clusterWith(2).nodes()`.
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+
+        // Send the ApiVersionsRequest to the first node
+        client.ready(&node0, now).await;
+        client.poll(0, now).await;
+        let mut response = default_api_versions_response();
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node0,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut response,
+        );
+        // handle ApiVersionsResponse
+        client.poll(0, now).await;
+        // the ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node0.id_string()));
+        client.selector_mut().clear();
+
+        // Send the ApiVersionsRequest to the second node
+        client.ready(&node1, now).await;
+        assert!(!client.connection_failed(&node0));
+        assert!(!client.connection_failed(&node1));
+        client.poll(0, now).await;
+        // `TestUtils.errorApiVersionsResponse(0, Errors.REBOOTSTRAP_REQUIRED, BROKER)`.
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node1,
+            1,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut error_response,
+        );
+        // handle ApiVersionsResponse
+        client.poll(0, now).await;
+        // the ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(client.connection_failed(&node0));
+        assert!(client.connection_failed(&node1));
+        client.selector_mut().clear();
+        assert_eq!(1, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `REBOOTSTRAP_REQUIRED` rebootstraps only under the `rebootstrap`
+    /// recovery strategy (`NetworkClient.java:1120`). Under `none` it is an
+    /// ordinary ApiVersions error: only the answering node is disconnected and
+    /// there is no rebootstrap. Rust-only: Java's test covers the
+    /// `rebootstrap` branch alone.
+    #[tokio::test]
+    async fn test_rebootstrap_required_without_rebootstrap_strategy_disconnects_only_that_node() {
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+
+        await_ready(&mut client, &node0).await;
+        client.ready(&node1, now).await;
+        client.poll(0, now).await;
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node1,
+            1,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut error_response,
+        );
+        client.poll(0, now).await;
+
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(!client.connection_failed(&node0));
+        assert!(client.is_ready(&node0, now));
+        assert!(client.connection_failed(&node1));
+        assert_eq!(0, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The ApiVersions request last sent to `node`: its header version and its
+    /// `(ClusterId, NodeId)`. The in-flight entry holds the request the
+    /// `NetworkSend` was serialized from.
+    fn last_sent_api_versions(
+        client: &NetworkClient<MockSelector, TestHostResolver>,
+        node: &Node,
+    ) -> (i16, Option<String>, i32) {
+        let in_flight = client.in_flight_requests.last_sent(node.id_string());
+        assert_eq!(*in_flight.header.api_key(), ApiKeys::API_VERSIONS);
+        let Some(crate::common::requests::AbstractRequest::ApiVersions(request)) = &in_flight.request else {
+            panic!("expected an ApiVersions request in flight, got {:?}", in_flight.request);
+        };
+        assert!(request.is_valid());
+        (
+            in_flight.header.api_version(),
+            request.data().cluster_id.clone(),
+            request.data().node_id,
+        )
+    }
+
+    /// A client over a real `Metadata` (Java's `DefaultMetadataUpdater`) that
+    /// already holds `RequestTestUtils.metadataUpdateWith(2, ..)`: cluster id
+    /// `kafka-cluster`, nodes 0 and 1.
+    fn create_network_client_for_cluster_check(
+        strategy: MetadataRecoveryStrategy,
+        metadata_cluster_check_enable: bool,
+        cluster_id_known: bool,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let metadata = Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        if cluster_id_known {
+            let metadata_response =
+                crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
+            metadata.update_with_current_request_version(&metadata_response, false, 0);
+        } else {
+            metadata.bootstrap(vec![(
+                "localhost".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1969)),
+            )]);
+        }
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+            MockSelector::new(),
+            metadata,
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            i64::MAX,
+            strategy,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(metadata_cluster_check_enable);
+        client.set_mock_time();
+        client
+    }
+
+    /// KIP-1242 (`NetworkClient.java:1214-1224`): with the check enabled, the
+    /// `rebootstrap` strategy and a known cluster id, the ApiVersions v5
+    /// request carries the cluster id from the metadata
+    /// (`DefaultMetadataUpdater.clusterId`) and the node's id. Rust-only: Java
+    /// asserts the send side only through the broker integration test.
+    #[tokio::test]
+    async fn test_api_versions_request_carries_cluster_id_and_node_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let node = Node::new(1, "localhost".to_string(), 1970);
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!(
+            (5, Some("kafka-cluster".to_string()), 1),
+            last_sent_api_versions(&client, &node)
+        );
+    }
+
+    /// The check is skipped, leaving the v5 defaults (`null` / -1), when it is
+    /// disabled, when the strategy is `none` (the config's documented "ignored
+    /// if rebootstrapping is disabled"), or while the cluster id is unknown
+    /// (bootstrap metadata). Rust-only, the negative counterpart of
+    /// [`test_api_versions_request_carries_cluster_id_and_node_id`].
+    #[tokio::test]
+    async fn test_api_versions_request_omits_cluster_id_and_node_id_unless_checking() {
+        for (strategy, enable, cluster_id_known) in [
+            (MetadataRecoveryStrategy::Rebootstrap, false, true),
+            (MetadataRecoveryStrategy::None, true, true),
+            (MetadataRecoveryStrategy::Rebootstrap, true, false),
+        ] {
+            let mut client = create_network_client_for_cluster_check(strategy, enable, cluster_id_known);
+            let node = if cluster_id_known {
+                Node::new(1, "localhost".to_string(), 1970)
+            } else {
+                // The bootstrap node: `MetadataSnapshot.bootstrap` numbers them from -1.
+                Node::new(-1, "localhost".to_string(), 1969)
+            };
+            client.ready(&node, 0).await;
+            client.poll(0, 0).await;
+            assert_eq!(
+                (5, None, -1),
+                last_sent_api_versions(&client, &node),
+                "strategy {strategy:?}, enable {enable}, cluster id known {cluster_id_known}"
+            );
+        }
+    }
+
+    /// A negative node id is never sent (`nodeId >= 0`,
+    /// `NetworkClient.java:1220`), even with the cluster id known: bootstrap
+    /// connections use negative ids that name no broker.
+    #[tokio::test]
+    async fn test_api_versions_request_omits_negative_node_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let node = Node::new(-1, "localhost".to_string(), 1969);
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!((5, None, -1), last_sent_api_versions(&client, &node));
+    }
+
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
         crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()

@@ -2002,6 +2002,9 @@ where
             log_context.clone(),
         );
         network_client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient` passes `metadata.cluster.check.enable`
+        // to the `NetworkClient` constructor (`ClientUtils.java:309`, KIP-1242).
+        network_client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
         // `ClientUtils.createNetworkClient(config, bootstrap.servers, ...)` passes
         // `bootstrapConfiguration(config, bootstrapServers)` to the
         // `NetworkClient` constructor (KIP-909, `NetworkClientDelegate.java:491`).

@@ -972,6 +972,9 @@ impl<K, V> KafkaProducer<K, V> {
             config.metadata_recovery_strategy,
             log_context.clone(),
         );
+        // `ClientUtils.createNetworkClient` passes `metadata.cluster.check.enable`
+        // to the `NetworkClient` constructor (`ClientUtils.java:309`, KIP-1242).
+        client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
         // `ClientUtils.createNetworkClient` passes
         // `bootstrapConfiguration(config, bootstrap.servers)` to the
         // `NetworkClient` constructor (KIP-909).

@@ -152,6 +152,8 @@ pub struct ConsumerConfig {
     pub(crate) metadata_recovery_strategy: String,
     /// `metadata.recovery.rebootstrap.trigger.ms`
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
+    /// `metadata.cluster.check.enable` (KIP-1242; `ConsumerConfig.java:723-727`)
+    pub(crate) metadata_cluster_check_enable: bool,
 
     // --- Misc / Behavior ---
     /// `exclude.internal.topics`
@@ -247,6 +249,7 @@ impl Default for ConsumerConfig {
             metadata_max_age_ms: 5 * 60 * 1000,
             metadata_recovery_strategy: "rebootstrap".to_string(),
             metadata_recovery_rebootstrap_trigger_ms: 5 * 60 * 1000,
+            metadata_cluster_check_enable: true,
 
             exclude_internal_topics: true,
             throw_on_fetch_stable_offset_unsupported: false,
@@ -792,6 +795,10 @@ impl ConsumerConfig {
                     }
                     config.metadata_recovery_rebootstrap_trigger_ms = v;
                 },
+                CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG => {
+                    // Java `ConsumerConfig` (`:723-727`): `Type.BOOLEAN`, default `true`.
+                    config.metadata_cluster_check_enable = parse_bool(key, value)?;
+                },
                 Self::EXCLUDE_INTERNAL_TOPICS_CONFIG => {
                     config.exclude_internal_topics = parse_bool(key, value)?;
                 },
@@ -1013,6 +1020,23 @@ mod tests {
         let mut props = base_props();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
+    }
+
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
+    /// (`ConsumerConfig.java:723-727`).
+    #[test]
+    fn test_metadata_cluster_check_enable() {
+        assert!(ConsumerConfig::new(&base_props()).unwrap().metadata_cluster_check_enable);
+
+        let mut props = base_props();
+        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "false".to_string());
+        assert!(!ConsumerConfig::new(&props).unwrap().metadata_cluster_check_enable);
+
+        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "maybe".to_string());
+        assert_eq!(
+            ConsumerConfig::new(&props).unwrap_err().message(),
+            "Invalid value maybe for configuration metadata.cluster.check.enable"
+        );
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
