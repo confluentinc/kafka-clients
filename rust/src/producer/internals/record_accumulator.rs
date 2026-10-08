@@ -5525,8 +5525,9 @@ mod tests {
     /// the second `try_append`. This drives it deterministically: a pool sized for
     /// exactly one batch, one append to consume it, a second append that therefore
     /// parks inside `free.allocate`, then `closed` is set and the memory released —
-    /// so `allocate` returns a real buffer and the second `try_append` (`:553-575`)
-    /// fails holding it.
+    /// so `allocate` returns a real buffer and the `try_append` inside `append_new_batch`
+    /// (`RecordAccumulator.java:419`, reached from the second `synchronized (dq)` block,
+    /// `:343-357`) fails holding it.
     ///
     /// Without the guard that `Vec` was simply dropped: `BufferPool::allocate` has
     /// already debited the pool and `deallocate` is the only thing that credits it,

@@ -1001,7 +1001,8 @@ impl<C: KafkaClient> Sender<C> {
         // any batch Java was still holding for a response keeps its `ByteBuffer` — the
         // `BufferPool` never gets it back. That is unobservable in Java only because
         // the pool is constructed inside `KafkaProducer`'s constructor
-        // (`KafkaProducer.java:508`), is reachable solely through the accumulator, and
+        // (`KafkaProducer.java:494` for the incremental strategy, `:508` for the full one),
+        // is reachable solely through the accumulator, and
         // is collected with the producer.
         //
         // Releasing them here instead keeps `BufferPool`'s accounting exact for the
