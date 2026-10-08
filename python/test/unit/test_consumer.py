@@ -20,7 +20,9 @@ import signal
 import threading
 import time
 
+import _confluentkafka as _lib
 import pytest
+from _sync_wait import SyncWaiter
 from consumer import (
     MockConsumer, AsyncMockConsumer, TopicPartition, OffsetAndMetadata,
     ConsumerGroupMetadata,
@@ -174,9 +176,9 @@ def test_commit_current_positions():
 # -- seek --------------------------------------------------------------------
 #
 # seek awaits the consumer's background task in Rust like every other operation
-# that blocks there, so it is a blocking method on Consumer (GIL released) and a
-# coroutine over the `_cb` twin on AsyncConsumer. See
-# test_consumer_callbacks.test_seek_uses_the_blocking_and_cb_entry_points.
+# that blocks there, so it goes through the `_cb` twin on both classes: waited
+# for in slices on Consumer, awaited as a coroutine on AsyncConsumer. See
+# test_consumer_callbacks.test_seek_uses_the_cb_entry_points_on_both_classes.
 
 def test_seek_int_offset():
     with MockConsumer("earliest") as c:
@@ -245,14 +247,68 @@ def test_pause_resume():
         assert tp not in c.paused()
 
 
+# -- the sync waiting model: `_cb` twins + SyncWaiter -------------------------
+#
+# The synchronous Consumer never calls a blocking C entry point: every method
+# submits the `_cb` twin and waits in Python slices (SyncWaiter), draining the
+# client's callbacks vector on the calling thread. These tests drive the two
+# shared helpers (`_void` / `_value`) with stand-in `_cb` functions, so the
+# waiting itself is exercised without a broker: MockConsumer completes every
+# real operation instantly, leaving no window to observe a wait.
+
+def test_sync_consumer_registers_the_waiter_notify_hook():
+    with MockConsumer("earliest") as c:
+        assert isinstance(c._waiter, SyncWaiter)
+        assert c._notify_callable() == c._waiter.notify
+
+
+def test_sync_value_op_waits_for_a_queued_completion():
+    with MockConsumer("earliest") as c:
+        calls = []
+
+        def fake_value_cb(h, arg, cb):
+            # Shape of every `_cb` twin: (h, *args, cb). Complete later, from
+            # another thread, the way a Rust task does -- the waiter must sleep
+            # until then and return the payload the completion carried.
+            calls.append((h, arg))
+
+            def fire():
+                time.sleep(0.2)
+                cb(42, None)
+            threading.Thread(target=fire, daemon=True).start()
+
+        t0 = time.monotonic()
+        assert c._value(fake_value_cb, "arg") == 42
+        assert 0.15 <= time.monotonic() - t0 < 2.0
+        assert calls == [(c._h, "arg")]
+
+
+def test_sync_void_op_accepts_an_inline_completion_and_raises_its_error():
+    with MockConsumer("earliest") as c:
+        c._void(lambda h, cb: cb(None))  # completed inline: no wait at all
+        err_tuple = (ec.LOCAL_TIMEOUT, "took too long", 1, 0, 0)
+        with pytest.raises(KafkaError) as exc:
+            c._void(lambda h, cb: cb(err_tuple))
+        assert exc.value.code == ec.LOCAL_TIMEOUT
+        assert str(exc.value) == "took too long"
+
+
+def test_sync_ops_are_rejected_once_closed_before_anything_is_submitted():
+    c = MockConsumer("earliest")
+    c.close()
+    submitted = []
+    with pytest.raises(RuntimeError):
+        c._void(lambda h, cb: submitted.append(h))
+    assert submitted == []
+
+
 # -- wakeup / signal interruption --------------------------------------------
 #
 # MockConsumer.poll returns immediately (it never blocks for the timeout, just
-# like Java's MockConsumer). The wakeup / KeyboardInterrupt / cancellation
-# paths can only be *triggered* when poll actually blocks, which requires a
-# real KafkaConsumer + broker. So here we only assert wakeup is safe and
-# non-disruptive; the blocking-interruption behavior is covered by integration
-# tests against a live broker.
+# like Java's MockConsumer), so a *real* poll leaves no window for a signal to
+# land inside the wait; the SIGINT test below therefore delays the completion
+# of a real `Consumer_poll_cb` by hand. The wakeup flag semantics are the
+# mock's own and are asserted directly.
 
 def test_wakeup_sets_flag_consumed_by_next_poll():
     # wakeup() sets a pending flag; the next poll raises a Wakeup error (Java
@@ -268,24 +324,58 @@ def test_wakeup_sets_flag_consumed_by_next_poll():
         assert c.assignment() == {tp}
 
 
-@pytest.mark.skip(reason="MockConsumer.poll does not block (matches Java); "
-                         "Ctrl-C interruption requires a blocking KafkaConsumer poll")
-def test_sigint_interrupts_sync_poll_and_consumer_reusable():
-    with MockConsumer("earliest") as c:
-        c.assign([TopicPartition("t", 0)])
-        c.update_beginning_offsets("t", 0, 0)
+def test_sigint_while_polling_wakes_up_once_then_reraises_and_consumer_reusable():
+    """Ctrl-C while a sync call is waiting: the consumer calls ``wakeup()`` once,
+    the in-flight operation completes with the Wakeup error (swallowed), and
+    only then is ``KeyboardInterrupt`` raised -- so the single-owner guard is
+    released and the payload freed. The consumer stays usable.
 
-        def fire():
-            time.sleep(0.2)
+    The mock's poll never blocks, so the wait is staged: the submit hands the
+    completion to the *real* ``Consumer_poll_cb`` only after 0.5 s, from a
+    thread, while SIGINT is raised after 0.15 s. That late poll observes the
+    wakeup the interrupt issued -- exactly what a blocking poll would do -- and
+    completes with ``Wakeup``, which the following ``poll(0)`` must not see.
+    """
+    with MockConsumer("earliest") as c:
+        tp = _seed(c, records=[(b"k", b"v")])
+        completion = []
+        callback_fired = threading.Event()
+
+        def submit(cb):
+            def fire():
+                time.sleep(0.5)
+
+                def record_then_deliver(value, err):
+                    completion.append((value, err))
+                    callback_fired.set()
+                    cb(value, err)
+                _lib.Consumer_poll_cb(c._h, 0, record_then_deliver)
+            threading.Thread(target=fire, daemon=True).start()
+
+        def raise_sigint():
+            time.sleep(0.15)
             signal.raise_signal(signal.SIGINT)
 
-        th = threading.Thread(target=fire)
+        th = threading.Thread(target=raise_sigint)
         th.start()
+        t0 = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
-            c.poll(5.0)
+            c._run(submit, c.wakeup)
+        elapsed = time.monotonic() - t0
         th.join()
-        c.add_record("t", 0, 0, b"k", b"v")
-        recs = c.poll(POLL_TIMEOUT)
+
+        # The interrupt was deferred until the completion had been drained ...
+        assert callback_fired.is_set()
+        assert 0.4 < elapsed < 1.5, elapsed
+        # ... and the operation ended with the Wakeup the interrupt issued.
+        (value, err), = completion
+        assert value is None
+        assert err is not None and err[0] == ec.WAKEUP
+
+        # The consumer is still usable: the wakeup was consumed by the
+        # interrupted operation, not left pending for the next one.
+        assert c.assignment() == {tp}
+        recs = c.poll(0)
         assert len(recs) == 1
 
 

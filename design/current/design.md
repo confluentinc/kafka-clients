@@ -1101,16 +1101,27 @@ extension (`_confluentkafka.c`) that links the `confluent_kafka` cdylib.
 `python/setup.py` resolves the library under `../rust/target/`, and
 `CONFLUENT_KAFKA_LIB_DIR` overrides that.
 
-Each module offers both shapes, matching the two C entry points underneath:
-- A synchronous family that calls the blocking entry points with the GIL
-  released; interface trampolines (rebalance listener, commit callback,
-  serdes) reacquire it on the calling thread.
-- An async family whose methods are coroutines over the `_cb` entry points:
-  `<Client>_set_callbacks_notify` is wired to
+Each module offers both shapes. Both drive the `_cb` entry points; they
+differ only in who waits for the completion:
+- A synchronous family that submits every blocking-in-Java operation through
+  its `_cb` twin and waits in Python (`_sync_wait.py`, `SyncWaiter`) in short
+  slices: `<Client>_set_callbacks_notify` only sets a `threading.Event` (the
+  producer uses the condvar inside `Producer_poll`), and each slice drains
+  `<Client>_execute_callbacks` on the calling thread, so completions,
+  delivery callbacks, rebalance listeners and commit callbacks run on the
+  thread that made the call. Waiting in Python rather than in a native
+  `block_on` keeps `Ctrl-C` prompt: on `KeyboardInterrupt` the consumer calls
+  `wakeup()` (the producer and admin let the operation finish), the waiter
+  still waits for the completion so the client's single-owner guard is
+  released and the payload freed, then re-raises. The blocking C entry points
+  are used only where the call cannot park (`begin_transaction`, the
+  re-entrant `ConsumerHandle` inside a listener).
+- An async family whose methods are coroutines over the same `_cb` entry
+  points: `<Client>_set_callbacks_notify` is wired to
   `loop.call_soon_threadsafe(<Client>_execute_callbacks)`, so every completion
-  and every queued interface call runs on the event-loop thread. No extension
-  thread exists any more; the old dispatcher thread and the producer's two
-  helper threads went with the `_async` functions.
+  and every queued interface call runs on the event-loop thread.
+No extension thread exists any more; the old dispatcher thread and the
+producer's two helper threads went with the `_async` functions.
 
 For the producer these are `Producer` / `KafkaProducer` / `MockProducer` and
 `AsyncProducer` / `AsyncKafkaProducer` / `AsyncMockProducer`, all on a shared

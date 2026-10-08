@@ -17,6 +17,7 @@
 import asyncio
 import gc
 import os
+import signal
 import threading
 import time
 import pytest
@@ -184,10 +185,11 @@ def test_manual_error_next_null_message():
 #
 # Java's send(record, Callback) fires the callback exactly once per record on the
 # producer's I/O thread. Here the client queues it and it fires on the CALLING
-# thread inside poll() / flush() / close() for the sync producer, and on the
-# event loop (the pump scheduled by the notify hook) for the async one. The
-# obligation holds on every path — including a cancelled or already resolved
-# Future — and a raising callback must not escape into the C caller.
+# thread for the sync producer -- inside poll() / flush() / close() and inside
+# the sliced waits of send() / SendFuture.result() -- and on the event loop (the
+# pump scheduled by the notify hook) for the async one. The obligation holds on
+# every path — including a cancelled or already resolved Future — and a raising
+# callback must not escape into the C caller.
 
 def test_on_delivery_success():
     with MockProducer(auto_complete=True) as p:
@@ -199,10 +201,10 @@ def test_on_delivery_success():
 
         future = p.send(ProducerRecord("cb-topic", b"v", b"k"),
                         on_delivery=on_delivery)
+        # The callback never runs on a background thread: it is queued until
+        # this thread pumps -- which the sliced wait of result() does too, so
+        # it may already have fired by the time result() returns.
         future.result(timeout=FUTURE_TIMEOUT)
-        # Waiting on the future does not run the callback: it is queued until
-        # the application polls, and then runs on the polling thread.
-        assert got == []
         _poll_until(p, lambda: got)
         (meta, err, thread), = got
         assert thread == caller, "on_delivery must run on the thread that polls"
@@ -351,8 +353,9 @@ def test_flush():
 
 
 def test_partitions_for():
-    # Blocking C call (kafka_producer_Producer_partitions_for). The mock has no
-    # topics, so the result is an empty list rather than an error.
+    # Queued C call (Producer_partitions_for_cb) waited for through the sync
+    # waiter. The mock has no topics, so the result is an empty list rather
+    # than an error.
     with MockProducer(auto_complete=True) as p:
         assert p.partitions_for("test-topic") == []
 
@@ -381,6 +384,171 @@ def test_close_with_send_in_flight():
     p.close()
     assert p.closed
     assert future.cancelled()
+
+
+# -- Sync waiting model: the `_cb` path and Ctrl-C ----------------------------
+#
+# The sync Producer never calls a blocking C entry point: every blocking-in-Java
+# op is submitted through its `_cb` twin and waited for in 100 ms Producer_poll
+# slices (python/_sync_wait.py, producer._ProducerWaiter), so a pending
+# KeyboardInterrupt is raised between two slices. The in-flight op is let
+# finish before the interrupt surfaces, so the producer stays usable afterwards.
+# pytest runs the test on the main thread, the only one that runs Python signal
+# handlers, so raise_signal(SIGINT) from a helper thread surfaces there.
+
+_BLOCKING_ENTRY_POINTS = (
+    "Producer_send", "Producer_flush", "Producer_partitions_for",
+    "Producer_init_transactions", "Producer_send_offsets_to_transaction",
+    "Producer_commit_transaction", "Producer_abort_transaction",
+    "Producer_close",
+)
+
+
+def test_sync_producer_never_calls_a_blocking_entry_point(monkeypatch):
+    def forbidden(name):
+        def fn(*args):
+            raise AssertionError(f"sync Producer called the blocking {name}")
+        return fn
+
+    for name in _BLOCKING_ENTRY_POINTS:
+        monkeypatch.setattr(_lib, name, forbidden(name))
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    got = []
+    p = MockProducer(auto_complete=True)
+    p.init_transactions()
+    p.begin_transaction()
+    future = p.send(ProducerRecord("test-topic", b"v"),
+                    on_delivery=lambda m, e: got.append(m))
+    assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+    p.send_offsets_to_transaction(
+        {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
+    p.commit_transaction()
+    p.begin_transaction()
+    p.abort_transaction()
+    p.flush()
+    assert p.partitions_for("test-topic") == []
+    assert p.poll(0) >= 0
+    p.close()
+    assert len(got) == 1
+    consumer.close()
+
+
+def test_future_result_runs_queued_delivery_callbacks():
+    # A SendFuture wait pumps the producer's callbacks: the on_delivery of a
+    # record completed meanwhile runs on the waiting thread, inside result(),
+    # without a poll(). The first record's callback is queued (synchronously,
+    # by complete_next) before the second record completes, so it has run by
+    # the time second.result() returns.
+    p = MockProducer(auto_complete=False)
+    got = []
+    first = p.send(ProducerRecord("test-topic", b"a"),
+                   on_delivery=lambda m, e: got.append((m, threading.get_ident())))
+    second = p.send(ProducerRecord("test-topic", b"b"))
+
+    def complete_later():
+        time.sleep(0.1)
+        p.complete_next()  # first
+        p.complete_next()  # second
+
+    th = threading.Thread(target=complete_later)
+    th.start()
+    try:
+        assert second.result(timeout=FUTURE_TIMEOUT).offset() == 1
+    finally:
+        th.join(timeout=FUTURE_TIMEOUT)
+    assert len(got) == 1
+    assert got[0][0].offset() == 0
+    assert got[0][1] == threading.get_ident(), "on_delivery must run on the waiting thread"
+    assert first.result(timeout=FUTURE_TIMEOUT).offset() == 0
+    p.close()
+
+
+def _raise_sigint_after(delay):
+    """Raise SIGINT (handled on the main thread, the test's) from a helper
+    thread after ``delay`` seconds; returns the thread to join."""
+    def fire():
+        time.sleep(delay)
+        signal.raise_signal(signal.SIGINT)
+
+    th = threading.Thread(target=fire)
+    th.start()
+    return th
+
+
+def test_sigint_while_waiting_lets_the_operation_finish_then_reraises():
+    # The shape of the pre-refactor admin SIGINT test, on the producer's
+    # waiter: a slow operation whose completion fires from a thread after
+    # 0.5 s and a SIGINT raised after 0.15 s. The producer passes no
+    # on_interrupt (it cannot abort an in-flight op), so the waiter must keep
+    # waiting until the completion ran, THEN re-raise the KeyboardInterrupt.
+    p = MockProducer(auto_complete=True)
+    fired_at = []
+
+    def submit(cb):
+        def complete_later():
+            time.sleep(0.5)
+            fired_at.append(time.monotonic())
+            cb("payload")
+        threading.Thread(target=complete_later).start()
+
+    start = time.monotonic()
+    sigint = _raise_sigint_after(0.15)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            p._waiter.run(submit)
+        raised_at = time.monotonic()
+    finally:
+        sigint.join(timeout=FUTURE_TIMEOUT)
+    assert fired_at, "the completion must run before the interrupt surfaces"
+    assert fired_at[0] <= raised_at
+    assert raised_at - start >= 0.5 - 0.01, "re-raised before the operation finished"
+    assert raised_at - start < FUTURE_TIMEOUT
+    # The producer is still usable.
+    assert p.send(ProducerRecord("test-topic", b"v")).result(
+        timeout=FUTURE_TIMEOUT).offset() == 0
+    p.close()
+
+
+def test_sigint_interrupts_unbounded_poll_and_producer_reusable():
+    # poll(None) would wait forever (nothing completes: auto_complete=False);
+    # the sliced wait raises KeyboardInterrupt within about one slice of the
+    # signal, and the producer keeps working afterwards.
+    p = MockProducer(auto_complete=False)
+    got = []
+    p.send(ProducerRecord("test-topic", b"v"), on_delivery=lambda m, e: got.append(m))
+    start = time.monotonic()
+    sigint = _raise_sigint_after(0.15)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            p.poll(None)
+    finally:
+        sigint.join(timeout=FUTURE_TIMEOUT)
+    assert time.monotonic() - start < 1.0
+    _sync_complete_next_when_ready(p)
+    assert p.poll(FUTURE_TIMEOUT) == 1
+    assert len(got) == 1 and got[0].offset() == 0
+    p.close()
+
+
+def test_sigint_interrupts_future_result_and_future_stays_pending():
+    # result() with no timeout would wait forever; the sliced wait raises
+    # KeyboardInterrupt promptly, the future is untouched (still pending, not
+    # cancelled) and a later result() completes normally.
+    p = MockProducer(auto_complete=False)
+    future = p.send(ProducerRecord("test-topic", b"v"))
+    start = time.monotonic()
+    sigint = _raise_sigint_after(0.15)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            future.result()
+    finally:
+        sigint.join(timeout=FUTURE_TIMEOUT)
+    assert time.monotonic() - start < 1.0
+    assert not future.done() and not future.cancelled()
+    _sync_complete_next_when_ready(p)
+    assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+    p.close()
 
 
 # -- Mock operations ----------------------------------------------------------
@@ -908,10 +1076,11 @@ async def test_async_kafka_producer_config_not_dict():
 # Producer transaction tests (mock-backed)
 #
 # Translated from Java MockProducerTest transaction tests. Every sync
-# transactional test produces with send(), the blocking C send, which registers
-# the record before it returns, so an in-transaction record is part of the
-# transaction. The async producer's queued sends that had returned before a
-# control call are drained into it (producer-transactions.md §13).
+# transactional test produces with send(), which waits (through the sync
+# waiter over Producer_send_cb) until the record is registered before it
+# returns, so an in-transaction record is part of the transaction. The async
+# producer's queued sends that had returned before a control call are drained
+# into it (producer-transactions.md §13).
 #
 # The offset-lifecycle behaviour (sent-offsets flag, publish-on-commit,
 # drop-on-abort) IS observable through the exposed

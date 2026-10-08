@@ -10,34 +10,41 @@ Design notes
 * The C extension (``_confluentkafka``) is a marshaling layer only: it converts
   Python objects to/from the C FFI and bridges the FFI's callbacks back into
   Python. All orchestration lives here in pure Python.
-* **The synchronous consumer calls the blocking C entry points** with the GIL
-  released. A rebalance listener (:meth:`Consumer.subscribe` ``listener=``) or a
-  ``commitAsync`` completion callback (:meth:`Consumer.commit_async`
-  ``callback=``) is invoked by the Rust client *on the calling thread*, inside
-  the operation that triggered it, and the operation does not complete until
-  the callback has returned -- exactly Java's guarantee of running them on the
-  polling thread. A listener that needs to reach back into the consumer uses
-  :meth:`Consumer.handle` (see :class:`ConsumerHandle`): the consumer's own
-  methods are rejected while the triggering operation is in flight.
-* **The asyncio consumer calls the ``_cb`` twins**: the operation runs on the
-  Rust runtime and queues its completion -- and every listener / commit-callback
-  invocation it triggers -- on the client's callback queue. The client's notify
-  hook fires once each time that queue goes from empty to non-empty and
-  schedules the pump (``Consumer_execute_callbacks``) on the event loop with
-  ``call_soon_threadsafe``, so every callback runs on the loop thread. Listener
-  methods may therefore be coroutines: the pumped invocation schedules the
-  coroutine on the loop and reports its outcome to the client when it
-  completes, and the rebalance does not advance before then.
+* **Both consumers drive the ``_cb`` twins of the C entry points**, never the
+  blocking ones: the operation runs on the Rust runtime and queues its
+  completion -- and every rebalance-listener / commit-callback invocation it
+  triggers -- on the client's callback queue. The client's notify hook fires
+  once each time that queue goes from empty to non-empty; it only signals.
+  What differs is who drains the queue (``Consumer_execute_callbacks``):
+
+  - the **synchronous consumer** waits in Python, in short slices, through
+    :class:`_sync_wait.SyncWaiter`: the notify hook sets an event, the calling
+    thread wakes and drains the queue itself, so the completion and every
+    callback on the way run *on the calling thread*, inside the operation that
+    triggered them, and the operation does not complete until the callback has
+    returned -- exactly Java's guarantee of running them on the polling thread.
+    A listener that needs to reach back into the consumer uses
+    :meth:`Consumer.handle` (see :class:`ConsumerHandle`); the consumer's own
+    methods are rejected while the triggering operation is in flight.
+  - the **asyncio consumer** schedules the pump on the event loop with
+    ``call_soon_threadsafe``, so every callback runs on the loop thread.
+    Listener methods may therefore be coroutines: the pumped invocation
+    schedules the coroutine on the loop and reports its outcome to the client
+    when it completes, and the rebalance does not advance before then.
 * The Rust consumer is single-owner (one operation in flight). Concurrent use
   surfaces as a ``KafkaError`` (LocalConcurrentModification); the non-blocking
   state reads return empty collections meanwhile.
 * Record keys and values are ``bytes`` (``None`` for a Java ``null``), copied
   out of the record batch when the record object is created.
-* ``wakeup()`` is the only way to interrupt a blocking call: the synchronous
-  consumer sits inside a native call that Python signal handlers cannot
-  interrupt, so ``Ctrl-C`` takes effect when the call returns. Call
-  :meth:`Consumer.wakeup` from another thread (or a signal handler) to abort the
-  in-flight operation promptly.
+* ``Ctrl-C`` interrupts a synchronous call promptly: the calling thread never
+  sits inside a native call for more than one 100 ms slice, so a pending
+  ``KeyboardInterrupt`` is raised between slices. The consumer then calls
+  :meth:`Consumer.wakeup` once -- the in-flight operation completes with the
+  ``Wakeup`` error, which is swallowed -- keeps waiting for that completion so
+  the single-owner guard is released and the payload freed, and re-raises the
+  ``KeyboardInterrupt``; the consumer stays usable. ``wakeup()`` from another
+  thread (or a signal handler) still aborts the in-flight operation with a
+  ``Wakeup`` ``KafkaError``, as in Java.
 
 Out of scope: ``clientInstanceId()``.
 
@@ -49,9 +56,12 @@ import asyncio
 import datetime as _dt
 import inspect
 import logging
+import threading
 import weakref
 
 import _confluentkafka as _lib
+import _error_code as _ec
+from _sync_wait import SyncWaiter
 from producer import KafkaError  # shared error type
 # ConsumerGroupMetadata is a C extension type that owns a live Rust
 # group-metadata handle (freed in its tp_dealloc on GC). It exposes the same
@@ -289,8 +299,20 @@ def _timestamps_to_spec(timestamps):
     return [(tp.topic, tp.partition, ts) for tp, ts in timestamps.items()]
 
 
+_CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
+
+
 def _concurrent_error():
-    return RuntimeError("KafkaConsumer is not safe for multi-threaded access.")
+    return RuntimeError(_CONCURRENT_MESSAGE)
+
+
+def _concurrent_kafka_error():
+    """The error the Rust single-owner guard reports for a concurrent call
+    (``LocalConcurrentModification``, Java's ``ConcurrentModificationException``),
+    built on the Python side where the guard's answer could not be awaited --
+    see :meth:`Consumer._check_not_in_callback`."""
+    return KafkaError._from_parts(_ec.LOCAL_CONCURRENT_MODIFICATION,
+                                  _CONCURRENT_MESSAGE, False, False)
 
 
 def _raise_if_error(err_tuple):
@@ -492,7 +514,14 @@ class ConsumerHandle:
 
     :meth:`wakeup` and the three state getters return immediately; every other
     method is a **blocking** call (GIL released) that runs the operation on the
-    client's runtime and waits for it -- safe from inside a listener, whose
+    client's runtime and waits for it. Unlike the synchronous :class:`Consumer`,
+    the handle deliberately stays on the blocking ``ConsumerHandle_*`` entry
+    points rather than their ``_cb`` twins: a callback runs on the calling
+    thread *inside* the consumer's callback pump (``Consumer_execute_callbacks``),
+    and a completion queued from there could only be drained once the callback
+    returned -- so a ``_cb`` wait would never end. The blocking call needs no
+    pump: it runs on the caller's thread while the consumer's background task
+    keeps spinning, which is what makes it safe from inside a listener whose
     consumer is busy with the operation that drove the callback. Only the
     operations the Rust handle exposes are available: there is no ``poll``,
     ``subscribe``, ``close`` or callback-taking commit.
@@ -729,8 +758,11 @@ class _ConsumerBase:
         _lib.Consumer_set_callbacks_notify(self._h, self._notify_callable())
 
     def _notify_callable(self):
-        """The Python callable the client's notify hook invokes (``None`` for
-        the synchronous consumer, which never queues a callback)."""
+        """The Python callable the client's notify hook invokes, registered
+        with ``Consumer_set_callbacks_notify`` right after the handle is
+        created: the synchronous consumer's waiter ``notify`` (sets an event),
+        the asyncio consumer's ``_on_notify`` (schedules the pump on the loop).
+        It must only signal, never run callbacks."""
         return None
 
     def _listener_loop(self):
@@ -862,6 +894,13 @@ class _MockConsumerMixin:
         Requires a topic subscription; a manually assigned consumer fails with
         "manual assignment in use". A listener exception surfaces here as a
         :class:`KafkaError` carrying its message.
+
+        This is the one operation the synchronous mock drives through the
+        blocking entry point (``MockConsumer_rebalance``) rather than a ``_cb``
+        twin: the mock's rebalance does no I/O, so the call only lasts as long
+        as the listener's own Python code -- which is interruptible as usual --
+        and the Rust call invokes the listener directly on this thread, leaving
+        the consumer's callback pump free for other threads meanwhile.
         """
         self._check_closed()
         _raise_if_error(_lib.MockConsumer_rebalance(self._h, _tp_to_spec(partitions)))
@@ -933,11 +972,72 @@ class _MockConsumerMixin:
 # --------------------------------------------------------------------------
 # Synchronous API.
 # --------------------------------------------------------------------------
+class _ConsumerWaiter(SyncWaiter):
+    """The synchronous consumer's :class:`SyncWaiter`, which additionally
+    knows which threads are inside :meth:`drain`.
+
+    A rebalance listener or commit callback runs *inside* the drain. If it
+    called one of the consumer's own methods, the ``_cb`` twin would be
+    rejected by the Rust single-owner guard -- but that rejection is queued on
+    the very callbacks vector the thread is draining, and a nested
+    ``Consumer_execute_callbacks`` from inside a callback returns 0 by design,
+    so the wait could never end. :meth:`in_drain` lets the consumer raise the
+    guard's error itself instead (:meth:`Consumer._check_not_in_callback`).
+    """
+
+    __slots__ = ("_draining",)
+
+    def __init__(self, execute_callbacks):
+        super().__init__(execute_callbacks)
+        # Idents of the threads currently inside drain(). A set, not a single
+        # value: a second thread may be blocked in the Rust drain (serialized
+        # behind the first) while the first thread's callback runs.
+        self._draining = set()
+
+    def drain(self):
+        me = threading.get_ident()
+        self._draining.add(me)
+        try:
+            return super().drain()
+        finally:
+            self._draining.discard(me)
+
+    def in_drain(self):
+        """Whether the calling thread is inside :meth:`drain` -- i.e. running
+        a callback the consumer's pump delivered."""
+        return threading.get_ident() in self._draining
+
+
 class Consumer(_ConsumerBase):
-    """A synchronous Kafka consumer. Every method that blocks in Java is a
-    blocking call here, made with the GIL released. Rebalance listeners and
-    commit callbacks run on the calling thread, inside the call that triggers
-    them. Use :meth:`wakeup` from another thread to interrupt a blocking call."""
+    """A synchronous Kafka consumer.
+
+    Every method that blocks in Java submits the operation through the C
+    API's queued ``_cb`` entry point and waits for its completion in Python,
+    in 100 ms slices, through a :class:`_sync_wait.SyncWaiter` -- never through
+    a blocking native call. The consumer's notify hook sets the waiter's event
+    when the client queues a callback; the calling thread wakes, drains the
+    client's callbacks vector (``Consumer_execute_callbacks``) and so runs the
+    completion itself. Rebalance listeners and commit callbacks are queued the
+    same way, so they run on the calling thread, inside the call that triggers
+    them, and that call does not return before they have -- Java's threading
+    model for these callbacks.
+
+    ``Ctrl-C`` is honoured between slices: the consumer calls :meth:`wakeup`
+    once (the in-flight operation completes with the ``Wakeup`` error, which is
+    swallowed), waits for that completion so the consumer is left consistent,
+    then raises ``KeyboardInterrupt``; the consumer stays usable. ``close`` is
+    the exception: it cannot be aborted, so an interrupt lets it finish and is
+    raised afterwards. :meth:`wakeup` from another thread (or a signal handler)
+    aborts the in-flight call with a ``Wakeup`` ``KafkaError``, as in Java.
+
+    The consumer's own methods are rejected while a callback is running (the
+    single-owner guard, as in Java); a callback reaches the consumer through
+    :meth:`handle` instead.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._waiter = _ConsumerWaiter(self._execute_callbacks)
 
     def __enter__(self):
         return self
@@ -945,19 +1045,52 @@ class Consumer(_ConsumerBase):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def _void(self, fn, *args):
+    def _execute_callbacks(self):
+        """The waiter's drain primitive: runs the queued callbacks on this
+        thread; ``0`` once the handle is gone (nothing can be queued then)."""
+        h = self._h
+        return 0 if h is None else _lib.Consumer_execute_callbacks(h)
+
+    def _notify_callable(self):
+        return self._waiter.notify
+
+    def _check_not_in_callback(self):
+        """Reject a consumer method called from inside a callback this
+        consumer's pump is running (a listener, a commit callback) with the
+        single-owner guard's own error, before anything is submitted.
+
+        The Rust guard would reject the ``_cb`` twin too, but its answer is
+        queued behind the running callback and a nested drain returns 0, so
+        waiting for it could never end (see :class:`_ConsumerWaiter`). The
+        guard is necessarily held here: a callback only runs while the
+        operation that triggered it is in flight."""
+        if self._waiter.in_drain():
+            raise _concurrent_kafka_error()
+
+    def _run(self, submit, on_interrupt):
+        """Submit a ``_cb`` op and wait for its completion; returns the
+        payload tuple the completion was called with (see
+        :meth:`_sync_wait.SyncWaiter.run`)."""
         self._check_closed()
-        _raise_if_error(fn(self._h, *args))
+        self._check_not_in_callback()
+        return self._waiter.run(submit, on_interrupt=on_interrupt)
+
+    def _void(self, fn, *args):
+        """A void op: ``fn(h, *args, cb)`` with ``cb(err | None)``. A
+        ``KeyboardInterrupt`` while waiting wakes the consumer up once."""
+        (err,) = self._run(lambda cb: fn(self._h, *args, cb), self.wakeup)
+        _raise_if_error(err)
 
     def _value(self, fn, *args):
-        self._check_closed()
-        value, err = fn(self._h, *args)
+        """A value op: ``fn(h, *args, cb)`` with ``cb(value, err | None)``;
+        the same interrupt handling as :meth:`_void`."""
+        value, err = self._run(lambda cb: fn(self._h, *args, cb), self.wakeup)
         _raise_if_error(err)
         return value
 
     def poll(self, timeout):
         """Fetch records, waiting up to ``timeout`` seconds -- Java ``poll(Duration)``."""
-        return ConsumerRecords(self._value(_lib.Consumer_poll, _ms(timeout)))
+        return ConsumerRecords(self._value(_lib.Consumer_poll_cb, _ms(timeout)))
 
     def subscribe(self, topics, listener=None):
         """Subscribe to ``topics``, optionally with a rebalance ``listener``.
@@ -980,50 +1113,50 @@ class Consumer(_ConsumerBase):
         partitions are taken away, say -- use :meth:`handle`; the consumer's own
         methods would be rejected as concurrent access.
         """
-        self._void(_lib.Consumer_subscribe, list(topics), self._listener_adapter(listener))
+        self._void(_lib.Consumer_subscribe_cb, list(topics), self._listener_adapter(listener))
 
     def subscribe_pattern(self, pattern, listener=None):
         """Subscribe to every topic matching the RE2 ``pattern`` -- Java's
         ``subscribe(SubscriptionPattern[, listener])``, evaluated by the group
         coordinator (KIP-848)."""
-        self._void(_lib.Consumer_subscribe_pattern, pattern, self._listener_adapter(listener))
+        self._void(_lib.Consumer_subscribe_pattern_cb, pattern, self._listener_adapter(listener))
 
     def unsubscribe(self):
-        self._void(_lib.Consumer_unsubscribe)
+        self._void(_lib.Consumer_unsubscribe_cb)
 
     def assign(self, partitions):
-        self._void(_lib.Consumer_assign, _tp_to_spec(partitions))
+        self._void(_lib.Consumer_assign_cb, _tp_to_spec(partitions))
 
     def pause(self, partitions):
-        self._void(_lib.Consumer_pause, _tp_to_spec(partitions))
+        self._void(_lib.Consumer_pause_cb, _tp_to_spec(partitions))
 
     def resume(self, partitions):
-        self._void(_lib.Consumer_resume, _tp_to_spec(partitions))
+        self._void(_lib.Consumer_resume_cb, _tp_to_spec(partitions))
 
     def seek(self, partition, offset):
         """Seek a partition. ``offset`` is an int, or an :class:`OffsetAndMetadata`.
 
         Java's ``seek`` does not block, but the Rust consumer's awaits its
         background task (which may run the rebalance listener on the way), so it
-        is a blocking call like the others."""
+        is waited for like every other operation."""
         if isinstance(offset, OffsetAndMetadata):
             epoch = offset.leader_epoch if offset.leader_epoch is not None else -1
-            self._void(_lib.Consumer_seek_with_metadata, partition.topic,
+            self._void(_lib.Consumer_seek_with_metadata_cb, partition.topic,
                        partition.partition, offset.offset, epoch, offset.metadata)
         else:
-            self._void(_lib.Consumer_seek, partition.topic, partition.partition, offset)
+            self._void(_lib.Consumer_seek_cb, partition.topic, partition.partition, offset)
 
     def seek_to_beginning(self, partitions):
-        self._void(_lib.Consumer_seek_to_beginning, _tp_to_spec(partitions))
+        self._void(_lib.Consumer_seek_to_beginning_cb, _tp_to_spec(partitions))
 
     def seek_to_end(self, partitions):
-        self._void(_lib.Consumer_seek_to_end, _tp_to_spec(partitions))
+        self._void(_lib.Consumer_seek_to_end_cb, _tp_to_spec(partitions))
 
     def commit(self, offsets=None, timeout=None):
         """Commit synchronously -- Java ``commitSync`` in all four forms
         (``()``, ``(Duration)``, ``(Map)``, ``(Map, Duration)``)."""
         spec = None if offsets is None else _offsets_to_spec(offsets)
-        self._void(_lib.Consumer_commit_sync, spec, _ms(timeout))
+        self._void(_lib.Consumer_commit_sync_cb, spec, _ms(timeout))
 
     commit_sync = commit
 
@@ -1051,50 +1184,64 @@ class Consumer(_ConsumerBase):
         thread. To touch the consumer from inside it, use :meth:`handle`.
         """
         spec = None if offsets is None else _offsets_to_spec(offsets)
-        self._void(_lib.Consumer_commit_async, spec, self._commit_adapter(callback))
+        self._void(_lib.Consumer_commit_async_cb, spec, self._commit_adapter(callback))
 
     def position(self, partition, timeout=None):
-        return self._value(_lib.Consumer_position, partition.topic, partition.partition,
+        return self._value(_lib.Consumer_position_cb, partition.topic, partition.partition,
                            _ms(timeout))
 
     def committed(self, partitions, timeout=None):
         return _to_offset_map(self._value(
-            _lib.Consumer_committed, _tp_to_spec(partitions), _ms(timeout)))
+            _lib.Consumer_committed_cb, _tp_to_spec(partitions), _ms(timeout)))
 
     def offsets_for_times(self, timestamps, timeout=None):
         return _to_offset_and_timestamp_map(self._value(
-            _lib.Consumer_offsets_for_times, _timestamps_to_spec(timestamps), _ms(timeout)))
+            _lib.Consumer_offsets_for_times_cb, _timestamps_to_spec(timestamps), _ms(timeout)))
 
     def beginning_offsets(self, partitions, timeout=None):
         return _to_long_map(self._value(
-            _lib.Consumer_beginning_offsets, _tp_to_spec(partitions), _ms(timeout)))
+            _lib.Consumer_beginning_offsets_cb, _tp_to_spec(partitions), _ms(timeout)))
 
     def end_offsets(self, partitions, timeout=None):
         return _to_long_map(self._value(
-            _lib.Consumer_end_offsets, _tp_to_spec(partitions), _ms(timeout)))
+            _lib.Consumer_end_offsets_cb, _tp_to_spec(partitions), _ms(timeout)))
 
     def partitions_for(self, topic, timeout=None):
         return _to_partition_info_list(self._value(
-            _lib.Consumer_partitions_for, topic, _ms(timeout)))
+            _lib.Consumer_partitions_for_cb, topic, _ms(timeout)))
 
     def list_topics(self, timeout=None):
-        return _to_topics_map(self._value(_lib.Consumer_list_topics, _ms(timeout)))
+        return _to_topics_map(self._value(_lib.Consumer_list_topics_cb, _ms(timeout)))
 
     def enforce_rebalance(self, reason=None):
         """Request a rebalance -- Java ``enforceRebalance([reason])``."""
         if reason is None:
-            self._void(_lib.Consumer_enforce_rebalance)
+            self._void(_lib.Consumer_enforce_rebalance_cb)
         else:
-            self._void(_lib.Consumer_enforce_rebalance_with_reason, reason)
+            self._void(_lib.Consumer_enforce_rebalance_with_reason_cb, reason)
 
     def close(self, timeout=None):
         """Close the consumer -- Java ``close()`` or ``close(CloseOptions.timeout(..))``
-        when ``timeout`` (seconds) is given. Idempotent."""
+        when ``timeout`` (seconds) is given. Idempotent.
+
+        Closing cannot be aborted, so a ``KeyboardInterrupt`` while waiting
+        does **not** wake the consumer up: the close runs to completion (and the
+        callbacks it delivers run on this thread), the handle is destroyed, and
+        the interrupt is raised afterwards. Called from inside a callback this
+        consumer is running, it is rejected like any other method and leaves
+        the consumer open."""
         if self.closed:
             return
+        # Before `closed` is set and before the `finally` below: destroying the
+        # handle from inside a callback would await the operation in flight,
+        # which is waiting for this very callback to return.
+        self._check_not_in_callback()
         self.closed = True
         try:
-            _raise_if_error(_lib.Consumer_close(self._h, _ms(timeout)))
+            (err,) = self._waiter.run(
+                lambda cb: _lib.Consumer_close_cb(self._h, _ms(timeout), cb),
+                on_interrupt=None)
+            _raise_if_error(err)
         finally:
             self._destroy()
 

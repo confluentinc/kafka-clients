@@ -302,22 +302,38 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // ===========================================================================
 // Producer -- marshaling-only bridge to the Rust producer FFI.
 //
-// The C layer runs NO background threads of its own (plan decision D8). The
-// sync producer calls the blocking entry points (`send_with_callback`, `flush`,
-// `close`, the transaction-control ops) directly with the GIL released; the
-// asyncio producer drives their `_cb` twins. Delivery completions and `_cb`
-// completions are QUEUED by Rust on the producer's callback vector and only
-// run when this extension calls `kafka_producer_Producer_execute_callbacks`
-// (Producer_poll / Producer_execute_callbacks), i.e. on the calling thread --
-// `poll(timeout)` / `flush()` / `close()` for the sync producer, the event loop
-// for the asyncio one.
+// The C layer runs NO background threads of its own (plan decision D8). BOTH
+// Python producers drive the `_cb` twins of the blocking-in-Java operations
+// (`send_with_callback_cb`, `flush_cb`, `partitions_for_cb`, `close_cb`, the
+// transaction-control `_cb` ops); the blocking entry points (`Producer_send`,
+// `Producer_flush`, ...) stay exported for completeness but neither Python
+// class calls them. Delivery completions and `_cb` completions are QUEUED by
+// Rust on the producer's callback vector and only run when this extension
+// calls `kafka_producer_Producer_execute_callbacks` (Producer_poll /
+// Producer_execute_callbacks), i.e. on the calling thread.
+//
+//   * The sync `Producer` registers NO Python notify callable. It waits for a
+//     completion in 100 ms slices of `Producer_poll(handle, 100)` -- drain,
+//     wait on the condvar below (GIL released), drain again -- driven by
+//     `python/_sync_wait.py`'s `SyncWaiter`. Between two slices the
+//     interpreter runs pending signal handlers, so `Ctrl-C` is honoured
+//     promptly (a native `block_on` would defer `KeyboardInterrupt` until the
+//     whole call returned); the in-flight operation is let finish before the
+//     interrupt is re-raised, so the client stays usable. `poll(timeout)` is
+//     sliced the same way, and `SendFuture.result()` registers the future's
+//     queued `get_cb` and waits on the same slices. Every callback -- the
+//     `_cb` completions and the delivery callbacks -- therefore runs on the
+//     thread that is waiting (Java's sender-thread callbacks moved onto the
+//     caller).
+//   * The asyncio producer registers a Python notify callable that does
+//     nothing but `loop.call_soon_threadsafe(pump)`; the pump runs the queued
+//     callbacks on the event loop.
 //
 // The hook installed with `kafka_producer_Producer_set_callbacks_notify` fires
 // from a Rust task once per empty->non-empty transition of that vector. It
 // only signals: it sets `notified` under `mtx` and broadcasts `cnd` (what the
-// sync `poll(timeout)` waits on) and, for the asyncio producer, invokes a
-// Python callable that does nothing but `loop.call_soon_threadsafe(pump)`. It
-// never calls back into the C API.
+// sync producer's `Producer_poll` slices wait on) and, when one is set,
+// invokes the Python notify callable. It never calls back into the C API.
 //
 // Ownership conventions (CLAUDE.md §4): `kafka_common_Error_t *` returns are
 // owned (NULL = success); a `RecordMetadata_t` read from a future is BORROWED
@@ -736,9 +752,62 @@ static PyObject* KafkaFuture_is_done(KafkaFutureObject* self, PyObject* Py_UNUSE
     return PyBool_FromLong(kafka_common_KafkaFuture_is_done(self->handle) ? 1 : 0);
 }
 
+// The queued `get`: the context keeps the Python future object -- and so the
+// C handle the BORROWED RecordMetadata belongs to -- alive until the
+// completion has copied the metadata out.
+typedef struct {
+    PyObject* cb;
+    KafkaFutureObject* fut;
+} FutureGetCtx;
+
+static void kafka_future_get_cb(void* value, kafka_common_Error_t* error, void* opaque) {
+    FutureGetCtx* ctx = (FutureGetCtx*)opaque;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* pair;
+    if (error != NULL) {
+        pair = build_value_error(Py_None, error);
+    } else {
+        PyObject* meta = metadata_to_py((const kafka_producer_RecordMetadata_t*)value);
+        pair = meta ? Py_BuildValue("(NO)", meta, Py_None) : NULL;
+    }
+    if (pair == NULL) {
+        PyErr_WriteUnraisable(ctx->cb);
+    } else {
+        PyObject* r = PyObject_Call(ctx->cb, pair, NULL);
+        if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
+        Py_DECREF(pair);
+    }
+    Py_DECREF(ctx->cb);
+    Py_DECREF((PyObject*)ctx->fut);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
+
+// get_cb(cb) -> None: the queued twin of get(). `cb(metadata_tuple | None,
+// error_tuple | None)` runs from the owning producer's callback pump
+// (`Producer_execute_callbacks` / `Producer_poll`) once the record completed,
+// or inline before this returns when the future belongs to no client. The
+// sync `SendFuture.result()` waits on it in slices, never in a native block.
+static PyObject* KafkaFuture_get_cb(KafkaFutureObject* self, PyObject* args) {
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "O", &cb)) return NULL;
+    FutureGetCtx* ctx = (FutureGetCtx*)PyMem_Malloc(sizeof(FutureGetCtx));
+    if (ctx == NULL) return PyErr_NoMemory();
+    Py_INCREF(cb);
+    Py_INCREF((PyObject*)self);
+    ctx->cb = cb;
+    ctx->fut = self;
+    Py_BEGIN_ALLOW_THREADS
+    kafka_common_KafkaFuture_get_cb(self->handle, kafka_future_get_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef KafkaFuture_methods[] = {
     {"get", (PyCFunction)KafkaFuture_get, METH_VARARGS,
-     "get(timeout_ms=None) -> (metadata_tuple | None, error_tuple | None); None on timeout"},
+     "get(timeout_ms=None) -> (metadata_tuple | None, error_tuple | None); None on timeout (blocking; the Python clients use get_cb)"},
+    {"get_cb", (PyCFunction)KafkaFuture_get_cb, METH_VARARGS,
+     "get_cb(cb) -> None; cb(metadata_tuple | None, error_tuple | None) queued on the owning producer's callbacks vector"},
     {"is_done", (PyCFunction)KafkaFuture_is_done, METH_NOARGS, "Whether the future completed"},
     {NULL}
 };
@@ -3887,14 +3956,23 @@ static PyObject* py_MockConsumer_last_poll_timeout(PyObject* self, PyObject* arg
 // return a *job* handle -- the result plus the list of futures it exposes --
 // and `Admin_resolve` / `Admin_resolve_cb` drive it.
 //
-//   * `Admin_resolve(job)` is the sync client: `kafka_common_KafkaFuture_get`
-//     on every future, on the calling thread, GIL released while it blocks.
-//   * `Admin_resolve_cb(job, cb)` is the asyncio client:
+//   * `Admin_resolve_cb(job, cb)` is what BOTH Python clients use:
 //     `kafka_common_KafkaFuture_get_cb` on every future; the callbacks arrive
-//     through `Admin_execute_callbacks`, which the Python pump runs on the
-//     event-loop thread when the `Admin_set_callbacks_notify` hook fires
-//     (`loop.call_soon_threadsafe`). A future that belongs to no client
-//     (refinements, `all_of`) fires inline, which the same code handles.
+//     through `Admin_execute_callbacks`, which the Python side runs on the
+//     thread that waits for them. The asyncio client drains on the event-loop
+//     thread when the `Admin_set_callbacks_notify` hook fires
+//     (`loop.call_soon_threadsafe`); the sync client's hook only sets a
+//     `threading.Event` that the calling thread waits on in 100 ms slices
+//     (`_sync_wait.SyncWaiter`), so a pending `KeyboardInterrupt` is raised
+//     promptly instead of once a native block returned. A future that belongs
+//     to no client (refinements, `all_of`) fires inline, which the same code
+//     handles. `Admin_close_cb` queues `cb()` on the same vector so `close`
+//     waits the same way.
+//   * `Admin_resolve(job)` and `Admin_close(handle, timeout_ms)` are the
+//     blocking forms: `kafka_common_KafkaFuture_get` on every future / the
+//     blocking `close`, on the calling thread, GIL released. They stay for
+//     callers that want a native block (the C / gRPC path); the Python
+//     clients no longer use them.
 //
 // Values delivered by a future are BORROWED from it: they are converted into
 // the raw Python tuples the `_to_*` converters in admin.py expect while the
@@ -3917,7 +3995,7 @@ typedef struct {
     kafka_admin_Admin_t* owned;              // AdminClient_create result, or NULL
     kafka_admin_MockAdminClient_t* mock;     // MockAdminClient_create result, or NULL
     const kafka_admin_Admin_t* admin;        // `owned` or the mock's __as_Admin view
-    PyObject* notify_cb;                     // asyncio notify hook, or NULL
+    PyObject* notify_cb;                     // Python notify hook, or NULL
 } AdminHandle;
 
 static AdminHandle* admin_from_handle(unsigned long long h) {
@@ -4016,7 +4094,9 @@ static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
 }
 
 // Admin_close(handle, timeout_ms): Java close() / close(Duration). Blocks
-// (GIL released); -1 is the no-argument form. Does not free the handle.
+// (GIL released); -1 is the no-argument form. Does not free the handle. The
+// Python clients use `Admin_close_cb` instead; this stays for callers that
+// want a native block.
 static PyObject* py_Admin_close(PyObject* self, PyObject* args) {
     unsigned long long h; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KL", &h, &timeout_ms)) return NULL;
@@ -4024,6 +4104,40 @@ static PyObject* py_Admin_close(PyObject* self, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS
     if (timeout_ms < 0) kafka_admin_Admin_close(a->admin);
     else kafka_admin_Admin_close_with_timeout(a->admin, (int64_t)timeout_ms);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+// Completion of `Admin_close_cb`: `cb()` runs from `Admin_execute_callbacks`
+// (or from `Admin_destroy`, which runs the still-pending callbacks). The C
+// API's close callback carries no error (`kafka_admin_Admin_close_cb_t` takes
+// only the opaque), so the Python callback takes no arguments. Reuses the
+// producer's `VoidCbCtx` for the callable reference.
+static void admin_close_cb(void* opaque) {
+    VoidCbCtx* ctx = (VoidCbCtx*)opaque;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallNoArgs(ctx->cb);
+    if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
+    Py_DECREF(ctx->cb);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
+
+// Admin_close_cb(handle, timeout_ms, cb): the queued twin of Admin_close.
+// Negative timeout_ms is Java's no-argument close(); otherwise
+// close(Duration). Returns at once; `cb()` is queued on the client's
+// callbacks vector when the close completed, and the notify hook fires if
+// the vector was empty. Does not free the handle: the caller drains the
+// completion (the Python waiter / loop pump) and then calls Admin_destroy.
+static PyObject* py_Admin_close_cb(PyObject* self, PyObject* args) {
+    unsigned long long h; long long timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KLO", &h, &timeout_ms, &cb)) return NULL;
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) return NULL;
+    AdminHandle* a = admin_from_handle(h);
+    Py_BEGIN_ALLOW_THREADS
+    if (timeout_ms < 0) kafka_admin_Admin_close_cb(a->admin, admin_close_cb, ctx);
+    else kafka_admin_Admin_close_with_timeout_cb(a->admin, (int64_t)timeout_ms, admin_close_cb, ctx);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
@@ -4378,8 +4492,9 @@ static void job_dispatch_range(AdminJob* job, int from, int to) {
     }
 }
 
-// Admin_resolve(job) -> payload. Sync: blocks on every future in turn with the
-// GIL released, converts, destroys everything, returns the raw payload.
+// Admin_resolve(job) -> payload. Blocking form: blocks on every future in turn
+// with the GIL released, converts, destroys everything, returns the raw
+// payload. Not used by the Python clients any more (see the section comment).
 static PyObject* py_Admin_resolve(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
@@ -4393,9 +4508,10 @@ static PyObject* py_Admin_resolve(PyObject* self, PyObject* args) {
     return payload;
 }
 
-// Admin_resolve_cb(job, cb): asyncio. cb(payload, None) / cb(None, exception)
-// once every future delivered, on the thread running Admin_execute_callbacks
-// (or inline, for a job with no futures or client-less ones).
+// Admin_resolve_cb(job, cb): both Python clients. cb(payload, None) /
+// cb(None, exception) once every future delivered, on the thread running
+// Admin_execute_callbacks (or inline, for a job with no futures or
+// client-less ones).
 static PyObject* py_Admin_resolve_cb(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KO", &h, &cb)) return NULL;
@@ -7917,7 +8033,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_MockAdminClient_new", py_Admin_MockAdminClient_new, METH_VARARGS, "Admin_MockAdminClient_new(num_brokers) -> handle"},
     {"Admin_AdminClient_new", py_Admin_AdminClient_new, METH_VARARGS, "Admin_AdminClient_new(config: dict[str, str]) -> handle; RuntimeError on a rejected config"},
     {"Admin_destroy", py_Admin_destroy, METH_VARARGS, "Admin_destroy(handle): destroy the client (runs the still pending callbacks)"},
-    {"Admin_close", py_Admin_close, METH_VARARGS, "Admin_close(handle, timeout_ms): blocking close, GIL released; -1 = Java's no-timeout close()"},
+    {"Admin_close", py_Admin_close, METH_VARARGS, "Admin_close(handle, timeout_ms): blocking close, GIL released; -1 = Java's no-timeout close() (the Python clients use Admin_close_cb)"},
+    {"Admin_close_cb", py_Admin_close_cb, METH_VARARGS, "Admin_close_cb(handle, timeout_ms, cb): close twin; cb() queued on the callbacks vector when the close completed; -1 = Java's no-timeout close()"},
     {"Admin_set_callbacks_notify", py_Admin_set_callbacks_notify, METH_VARARGS, "Admin_set_callbacks_notify(handle, cb | None): cb() fires when the callback queue goes non-empty (schedule only)"},
     {"Admin_execute_callbacks", py_Admin_execute_callbacks, METH_VARARGS, "Admin_execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
     {"Admin_resolve", py_Admin_resolve, METH_VARARGS, "Admin_resolve(job) -> payload: block on every future (GIL released), convert, free the job"},

@@ -14,20 +14,32 @@ Design notes
   resolves. The C layer hands the result back as an opaque *job* -- the result
   plus the futures it exposes -- and this module resolves it:
 
-  - the synchronous client (:class:`AdminClient`, :class:`MockAdminClient`)
-    resolves with ``kafka_common_KafkaFuture_get`` on the calling thread, GIL
-    released, exactly like a Java caller blocking in ``KafkaFuture.get()``;
-  - the asyncio client (:class:`AsyncAdminClient`, :class:`AsyncMockAdminClient`)
-    resolves with ``kafka_common_KafkaFuture_get_cb``. The completion callbacks
-    queue up on the client and the ``set_callbacks_notify`` hook -- which only
-    *schedules*, via ``loop.call_soon_threadsafe`` -- has the event loop drain
-    them with ``execute_callbacks`` on its own thread. No extra thread exists.
+  Both clients resolve with ``kafka_common_KafkaFuture_get_cb`` (the
+  ``Admin_resolve_cb`` twin): the completion callbacks queue up on the client
+  and the ``set_callbacks_notify`` hook -- which only *signals* -- tells the
+  waiting side to drain them with ``execute_callbacks`` on its own thread. No
+  extra thread exists.
 
-* There is no admin ``wakeup()``: an in-flight RPC cannot be aborted. The sync
-  client blocks inside ``KafkaFuture.get`` with the GIL released, so a
-  ``KeyboardInterrupt`` is raised once the call returns (the result is freed
-  rather than leaked, and the client stays usable). This matches Java, where
-  interrupting ``KafkaFuture.get()`` does not cancel the admin request.
+  - the synchronous client (:class:`AdminClient`, :class:`MockAdminClient`)
+    waits in Python through :class:`_sync_wait.SyncWaiter`: the hook sets a
+    ``threading.Event`` and the calling thread sleeps on it in 100 ms slices,
+    draining the queue each time it is set. The interpreter stays reachable
+    between slices, so ``Ctrl-C`` is honoured promptly rather than once a
+    native block returned;
+  - the asyncio client (:class:`AsyncAdminClient`, :class:`AsyncMockAdminClient`)
+    has the hook schedule the drain on the event loop with
+    ``loop.call_soon_threadsafe``.
+
+  ``close`` goes the same way, through ``Admin_close_cb``. The blocking entry
+  points (``Admin_resolve``, ``Admin_close``) remain in the extension for
+  callers that want a native block, but neither Python client uses them.
+
+* There is no admin ``wakeup()``: an in-flight RPC cannot be aborted. On a
+  ``KeyboardInterrupt`` while the sync client is waiting, the waiter lets the
+  operation finish, keeps waiting for its completion so the result is freed
+  rather than leaked, and then re-raises; the client stays usable. This
+  matches Java, where interrupting ``KafkaFuture.get()`` does not cancel the
+  admin request.
 * The Rust admin client is thread-safe (Java's ``KafkaAdminClient`` is too), so
   concurrent calls from several threads or tasks are allowed -- there is no
   single-owner guard as on the consumer.
@@ -96,6 +108,7 @@ import datetime as _dt
 import threading
 
 import _confluentkafka as _lib
+from _sync_wait import SyncWaiter
 from consumer import Node, OffsetAndMetadata  # shared broker-node / committed-offset types
 # `OffsetAndMetadata` is `org.apache.kafka.clients.consumer` in Java, so the
 # consumer module owns it and the admin group-offset RPCs reuse it, exactly as
@@ -2950,10 +2963,27 @@ class _MockAdminClientMixin:
 # --------------------------------------------------------------------------
 class Admin(_AdminBase):
     """A synchronous Kafka admin client. Every RPC issues the C call and then
-    resolves its ``KafkaFuture`` handles on the calling thread with the GIL
-    released, as a Java caller blocking in ``KafkaFuture.get()`` does. The
-    request itself cannot be interrupted (there is no admin ``wakeup()``; see
-    the module docstring)."""
+    resolves its ``KafkaFuture`` handles through the queued ``_cb`` twin
+    (``Admin_resolve_cb``), waiting on the calling thread in short slices
+    (:class:`_sync_wait.SyncWaiter`) and draining the completion with
+    ``Admin_execute_callbacks`` -- the result is delivered on the caller's
+    thread, as for a Java caller blocking in ``KafkaFuture.get()``, while
+    ``Ctrl-C`` is honoured between slices. The request itself cannot be
+    interrupted (there is no admin ``wakeup()``): on ``KeyboardInterrupt`` the
+    waiter lets the RPC finish, frees its result, then re-raises (see the
+    module docstring)."""
+
+    def __init__(self):
+        super().__init__()
+        self._waiter = SyncWaiter(self._execute_callbacks)
+
+    def _init_mock(self, num_brokers=1):
+        super()._init_mock(num_brokers)
+        _lib.Admin_set_callbacks_notify(self._h, self._waiter.notify)
+
+    def _init_kafka(self, config):
+        super()._init_kafka(config)
+        _lib.Admin_set_callbacks_notify(self._h, self._waiter.notify)
 
     def __enter__(self):
         return self
@@ -2961,12 +2991,25 @@ class Admin(_AdminBase):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def _execute_callbacks(self):
+        """One drain pass for the waiter: runs the queued completions on this
+        thread and returns how many ran (``0`` once the client is destroyed:
+        ``Admin_destroy`` already ran what was pending)."""
+        h = self._h
+        if h is None:
+            return 0
+        return _lib.Admin_execute_callbacks(h)
+
     def _run_sync(self, submit, convert):
         job = self._submit(submit())
-        # Blocks in `kafka_common_KafkaFuture_get` for every future of the job
-        # (GIL released), converts each value while the future is alive, and
-        # frees the result. A pending KeyboardInterrupt is raised on return.
-        payload = _lib.Admin_resolve(job)
+        # `Admin_resolve_cb` registers `get_cb` on every future of the job; the
+        # completion -- cb(payload, None) / cb(None, exc) -- is queued on the
+        # client and drained here, on the calling thread, by the waiter. There
+        # is no admin wakeup(), so an interrupt lets the RPC finish
+        # (`on_interrupt=None`), frees the payload, then re-raises.
+        payload, exc = self._waiter.run(lambda cb: _lib.Admin_resolve_cb(job, cb))
+        if exc is not None:
+            raise exc
         return convert(payload)
 
     def create_topics(self, new_topics, timeout=None, validate_only=False,
@@ -3463,14 +3506,17 @@ class Admin(_AdminBase):
         return self._run_sync(*self._force_terminate_transaction_spec(transactional_id, timeout))
 
     def close(self, timeout=None):
-        """Java ``close()`` / ``close(Duration)``: blocks (GIL released) until
-        the background task has drained or ``timeout`` elapsed, then frees the
-        client."""
+        """Java ``close()`` / ``close(Duration)``: waits (through the waiter,
+        on the queued ``Admin_close_cb``) until the background task has drained
+        or ``timeout`` elapsed, then frees the client. A ``KeyboardInterrupt``
+        while waiting cannot abort the close: the waiter finishes it, frees the
+        client, and then re-raises."""
         if self.closed:
             return
         self.closed = True
         try:
-            _lib.Admin_close(self._h, _close_ms(timeout))
+            ms = _close_ms(timeout)
+            self._waiter.run(lambda cb: _lib.Admin_close_cb(self._h, ms, cb))
         finally:
             self._destroy()
 
@@ -3803,15 +3849,28 @@ class AsyncAdmin(_AdminBase):
             *self._force_terminate_transaction_spec(transactional_id, timeout))
 
     async def close(self, timeout=None):
-        """Java ``close()`` / ``close(Duration)``: the blocking C close runs on
-        the default executor so the loop stays free, then the client is
-        freed."""
+        """Java ``close()`` / ``close(Duration)``: issues the queued
+        ``Admin_close_cb`` and ``await``s its completion on the event loop --
+        the same primitive as every RPC, so the loop stays free -- then frees
+        the client."""
         if self.closed:
             return
         self.closed = True
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _lib.Admin_close, self._h, _close_ms(timeout))
+            self._loop = loop
+            fut = loop.create_future()
+
+            def cb():
+                # Runs on the loop thread from `_execute_callbacks`, or from
+                # `Admin_destroy` draining the still-pending callbacks after a
+                # cancellation; the future is touched only through the loop.
+                if loop.is_closed():
+                    return
+                loop.call_soon_threadsafe(self._deliver, fut, None, None)
+
+            _lib.Admin_close_cb(self._h, _close_ms(timeout), cb)
+            await fut
         finally:
             self._destroy()
 

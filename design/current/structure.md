@@ -375,6 +375,7 @@ c/
 
 python/
 ├── producer.py, consumer.py, admin.py
+├── _sync_wait.py       # SyncWaiter: the sync clients' sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
 ├── _error_code.py      # generated from kafka_common_ErrorCode_e in
 │                       # rust/src/ffi/common.rs by tools/generate_error_code.py

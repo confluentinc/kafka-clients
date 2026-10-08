@@ -18,9 +18,12 @@ callbacks, and the :class:`ConsumerHandle` reentrancy path.
 Driven by ``MockConsumer.rebalance``, which invokes the registered listener
 inline — the deterministic, broker-free equivalent of a real rebalance. On the
 synchronous consumer the listener runs on the thread calling ``rebalance``,
-inside that call; on the asyncio consumer ``rebalance`` is a coroutine over the
-``_cb`` twin and the listener invocation is pumped on the event loop. Its
-semantics constrain what can be asserted here:
+inside that call (the sync mock's ``rebalance`` is the one operation still on
+a blocking entry point; a listener driven by ``poll`` & co. runs on the calling
+thread too, inside the waiter's drain of the client's callbacks vector); on
+the asyncio consumer ``rebalance`` is a coroutine over the ``_cb`` twin and the
+listener invocation is pumped on the event loop. Its semantics constrain what
+can be asserted here:
 
 * it requires a **topic subscription** (a manually assigned consumer fails);
 * it fires ``on_partitions_revoked`` only when something was removed;
@@ -291,25 +294,26 @@ def test_listener_can_use_handle_without_deadlock():
         assert "not supported on a MockConsumer handle" in seen["commit_error"]
 
 
-# -- seek is a blocking op (sync) / a `_cb` coroutine (async), like the rest ---
+# -- seek is a waited-for `_cb` op (sync) / a `_cb` coroutine (async) ---------
 
-def test_seek_uses_the_blocking_and_cb_entry_points():
-    """``seek`` goes through the blocking C entry point on ``Consumer`` and the
-    ``_cb`` twin on ``AsyncConsumer``, like every other operation that blocks in
-    Rust.
+def test_seek_uses_the_cb_entry_points_on_both_classes():
+    """``seek`` goes through the ``_cb`` twin on both classes, like every other
+    operation that blocks in Rust: waited for in slices on ``Consumer``,
+    awaited on ``AsyncConsumer``.
 
     Java's ``seek`` does not block, but ``AsyncKafkaConsumer::seek`` submits a
     ``SeekUnvalidatedEvent`` and drains background events, so it can invoke the
-    rebalance listener (`consumer-threading.md` §31). The blocking entry point
-    releases the GIL and the listener trampoline reacquires it on the same
-    thread, so the synchronous consumer cannot deadlock on itself; the asyncio
-    consumer must not block its loop (a coroutine listener has to run there), so
-    it uses the ``_cb`` twin and the pump. Hence ``seek`` is per-class (plain on
+    rebalance listener (`consumer-threading.md` §31). The listener invocation is
+    queued and run by whoever drains the client's callbacks vector: the calling
+    thread on the synchronous consumer, the event loop on the asyncio one (a
+    coroutine listener has to run there). Hence ``seek`` is per-class (plain on
     ``Consumer``, a coroutine on ``AsyncConsumer``) rather than a shared method
-    on ``_ConsumerBase``, and the old ``*_async`` C entry points are gone.
+    on ``_ConsumerBase``, and the old ``*_async`` C entry points are gone. The
+    blocking entry points stay exported for the C / gRPC path and for
+    :class:`ConsumerHandle`, which must not wait on the pump it runs inside of.
     """
-    for name in ("Consumer_seek", "Consumer_seek_cb",
-                 "Consumer_seek_with_metadata", "Consumer_seek_with_metadata_cb"):
+    for name in ("Consumer_seek_cb", "Consumer_seek_with_metadata_cb",
+                 "ConsumerHandle_seek", "ConsumerHandle_seek_with_metadata"):
         assert hasattr(_lib, name), name
     assert not hasattr(_lib, "Consumer_seek_async")
     assert not hasattr(_lib, "Consumer_seek_with_metadata_async")
@@ -329,11 +333,14 @@ def test_seek_while_a_listener_callback_is_being_dispatched():
     On the mock the single-owner guard rejects the concurrent seek, so the
     broker-backed reproduction lives in the integration / multilanguage suites.
 
-    What this does pin is that the blocking routing stays live in that window:
-    the parked listener has released the GIL (``Event.wait``), the seek enters
-    the C call with the GIL released, and the guard rejection comes back as a
-    plain ``KafkaError`` return -- neither hanging nor losing the error -- while
-    Python keeps running on both other threads.
+    What this does pin is that the sync routing stays live in that window:
+    the parked listener has released the GIL (``Event.wait``), the seek submits
+    its ``_cb`` twin and waits in Python slices, and the guard rejection --
+    queued on the client's callbacks vector -- is drained by the seeking thread
+    and raised as a ``KafkaError``, neither hanging nor losing the error, while
+    Python keeps running on both other threads. That drain is free because the
+    mock's ``rebalance`` invokes the listener directly (blocking entry point)
+    rather than from the pump.
     """
     entered = threading.Event()
     release = threading.Event()
@@ -386,7 +393,10 @@ def test_seek_while_a_listener_callback_is_being_dispatched():
 
 def test_consumer_method_from_listener_is_rejected_as_concurrent():
     """Documents why ``handle()`` exists: the consumer's own methods are rejected
-    while the operation that drove the callback still owns the access guard."""
+    while the operation that drove the callback still owns the access guard.
+    Here the listener runs inside the mock's blocking ``rebalance``, so the
+    rejection is the Rust guard's, delivered through the callbacks vector and
+    drained by the seek's own wait (the pump is not busy)."""
     c = MockConsumer("earliest")
     seen = {}
 
@@ -627,6 +637,45 @@ def test_none_offset_metadata_is_still_accepted():
         tp = _seeded(c)
         c.commit_async({tp: OffsetAndMetadata(5, None)})
         assert c.committed([tp]) == {tp: OffsetAndMetadata(5, "", None)}
+
+
+def test_consumer_method_from_a_pumped_callback_is_rejected_without_hanging():
+    """A commit callback is delivered by the waiter's drain of the client's
+    callbacks vector (a `_cb` op queues the interface methods it triggers), so
+    it runs *inside* the pump. A consumer method called from there cannot wait
+    for the pump -- the Rust guard's rejection would be queued behind the very
+    callback that is running, and a nested ``Consumer_execute_callbacks``
+    returns 0 -- so the consumer raises the guard's error itself, up front,
+    rather than waiting forever. ``close`` is rejected the same way and must
+    leave the consumer open (destroying the handle from inside a callback
+    would await the operation that is waiting for the callback)."""
+    with MockConsumer("earliest") as c:
+        tp = _seeded(c)
+        seen = {}
+
+        def callback(offsets, exception):
+            seen["in_drain"] = c._waiter.in_drain()
+            for name, call in [
+                ("commit", lambda: c.commit()),
+                ("position", lambda: c.position(tp)),
+                ("close", lambda: c.close()),
+            ]:
+                try:
+                    call()
+                    seen[name] = None
+                except KafkaError as exc:
+                    seen[name] = exc
+
+        c.commit_async(callback=callback)
+        assert seen["in_drain"] is True
+        for name in ("commit", "position", "close"):
+            assert seen[name] is not None, f"{name} must be rejected from a callback"
+            assert seen[name].code == LOCAL_CONCURRENT_MODIFICATION, name
+            assert str(seen[name]) == "KafkaConsumer is not safe for multi-threaded access."
+        # Rejected cleanly: the consumer is open, the pump idle, and it works.
+        assert not c.closed
+        assert not c._waiter.in_drain()
+        assert c.committed([tp]) == {tp: OffsetAndMetadata(1, "", None)}
 
 
 def test_commit_async_callback_can_use_handle():
