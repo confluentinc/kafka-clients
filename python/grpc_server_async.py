@@ -24,8 +24,9 @@ Python client. It exercises the async API through the full integration matrix
 against a real broker (the sync server covers the sync client).
 
 Uses grpc.aio (asyncio server) rather than a thread pool: the async client's
-completions already marshal onto the event loop (loop.call_soon_threadsafe from
-the C dispatcher thread), so awaiting the coroutines is the natural fit. All RPC
+completions already run on the event loop (the client's notify hook schedules
+the callback pump with loop.call_soon_threadsafe), so awaiting the coroutines
+is the natural fit. All RPC
 handlers run as tasks on a single event loop, so the producer/consumer id maps
 need no lock — id allocation and dict pops happen without an intervening await.
 
@@ -161,8 +162,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # GroupMetadataStore shared with the other service.
         self._group_metadata = group_metadata
         self._next_id = 1
-        # AsyncProducer invokes on_delivery on the loop (inside its completion
-        # drain), so this log is in fact only touched from the loop; CallbackLog
+        # AsyncProducer invokes on_delivery on the loop (inside its callback
+        # pump), so this log is in fact only touched from the loop; CallbackLog
         # locks anyway, which is what the consumer service genuinely needs.
         self._callback_log = CallbackLog()
 
@@ -202,7 +203,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
         # with_callback => register a real on_delivery through producer.py so the
         # Rust harness can read back (via GetCallbackLog) what the binding's own
-        # callback saw. On AsyncProducer it fires on the event loop.
+        # callback saw. On AsyncProducer it fires on the event loop, in the same
+        # pump step that resolves the record future, so it has run by the time
+        # the await below resumes.
         on_delivery = None
         if request.with_callback:
             on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
@@ -215,8 +218,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Await the record future on the event loop; completions hop onto the
-        # loop from the C dispatcher thread. Bounded like the sync server's 120s.
+        # Await the record future on the event loop; the client's notify hook
+        # schedules the callback pump that resolves it. Bounded like the sync
+        # server's 120s.
         try:
             metadata = await asyncio.wait_for(future, timeout=120)
         except kp.KafkaError as e:

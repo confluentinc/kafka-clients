@@ -746,9 +746,9 @@ class _OtelSink(object):
     line still said "otel on". Confirmed against a real collector: 30+ minutes
     with ``OTEL_METRICS_EXPORTER=otlp``, counters flat, no errors logged.
 
-    This class is thread-safe. ``SoakMetrics`` calls into it from four threads —
-    the producer, the consumer, the C extension's delivery-report thread and the
-    main thread's rusage sampling — and the SDK collects from a fifth. One lock
+    This class is thread-safe. ``SoakMetrics`` calls into it from three threads —
+    the producer (whose ``poll()`` also runs the delivery reports), the consumer
+    and the main thread's rusage sampling — and the SDK collects from a fourth. One lock
     covers instrument creation (a check-then-set that could otherwise register a
     duplicate instrument, which the SDK drops, silently losing a series); the
     gauge store has its own.
@@ -1093,9 +1093,10 @@ class SoakClient(object):
     """A Producer sending messages at the given rate and a Consumer consuming
     them, each on its own thread, printing their counters every ~10 seconds.
 
-    Producer ``send()`` is thread-safe (the C extension takes a mutex under
-    ``Py_BEGIN_ALLOW_THREADS``); the Consumer is single-owner, hence exactly one
-    consumer thread and no other caller touching it.
+    Producer ``send()`` is thread-safe (the Rust producer is), and its delivery
+    callbacks run on the producer thread inside ``poll()`` / ``flush()``; the
+    Consumer is single-owner, hence exactly one consumer thread and no other
+    caller touching it.
     """
 
     METRIC_PFX = METRIC_PFX
@@ -1147,7 +1148,8 @@ class SoakClient(object):
         self._TopicPartition = bindings.TopicPartition
         self._OffsetAndMetadata = bindings.OffsetAndMetadata
 
-        # Counters. Delivery callbacks fire on the C poll thread, so every
+        # Counters. Delivery callbacks run on the producer thread (inside
+        # poll()) while the consumer and main threads read them, so every
         # counter is guarded.
         self._lock = threading.Lock()
         self.producer_msgid = 0
@@ -1428,36 +1430,34 @@ class SoakClient(object):
                 metadata.topic(), metadata.partition(), metadata.offset(),
                 latency_ms)
 
-    def _on_delivery(self, future, sent_at):
-        """Delivery report. Runs on the C extension's poll thread."""
-        try:
-            try:
-                metadata = future.result()
-            finally:
-                with self._lock:
-                    self.outstanding -= 1
+    def _on_delivery(self, metadata, exception, sent_at):
+        """Delivery report (``on_delivery(metadata, exception)``). Runs on the
+        producer thread, inside ``producer.poll()`` / ``flush()``."""
+        with self._lock:
+            self.outstanding -= 1
+        if exception is None:
             self._record_delivery(metadata, (time.time() - sent_at) * 1000.0)
-        except Exception as ex:
-            # A failed send raises KafkaError through the future; a cancelled
-            # one raises CancelledError. Both are counted the same way, and the
-            # error's code/message are read by duck typing (error_code /
-            # error_message) rather than by isinstance, so this file needs no
-            # module-scope KafkaError.
-            with self._lock:
-                self.dr_err_cnt += 1
-            code = error_code(ex)
-            self.logger.warning("producer: delivery failed: %s [code %s]",
-                                error_message(ex), code)
-            self.incr_counter("producer.drerr", 1)
-            self.incr_counter("producer.delivery.failure", 1,
-                              tags={"err": str(code)})
+            return
+        # A failed record reports a KafkaError (beside Java's placeholder
+        # metadata). The error's code/message are read by duck typing
+        # (error_code / error_message) rather than by isinstance, so this file
+        # needs no module-scope KafkaError.
+        with self._lock:
+            self.dr_err_cnt += 1
+        code = error_code(exception)
+        self.logger.warning("producer: delivery failed: %s [code %s]",
+                            error_message(exception), code)
+        self.incr_counter("producer.drerr", 1)
+        self.incr_counter("producer.delivery.failure", 1,
+                          tags={"err": str(code)})
 
     def produce_record(self):
         """Produce a single record.
 
         ``send()`` returns a future and blocks the calling thread when the
         accumulator is full (there is no ``BufferError``/retry-on-full loop to
-        port, and no ``poll()`` to serve a queue). ``txcnt`` counts *send
+        port); the delivery report is registered as ``on_delivery`` and served
+        by the ``poll()`` in :meth:`producer_run`. ``txcnt`` counts *send
         attempts*: the loop only re-runs when ``send()`` itself raises a
         retriable error.
         """
@@ -1475,7 +1475,9 @@ class SoakClient(object):
                 self.outstanding += 1
             sent_at = time.time()
             try:
-                future = self.producer.send(producer_record)
+                self.producer.send(
+                    producer_record,
+                    on_delivery=lambda m, e, t=sent_at: self._on_delivery(m, e, t))
             except Exception as ex:
                 with self._lock:
                     self.outstanding -= 1
@@ -1489,8 +1491,6 @@ class SoakClient(object):
                 self.stop_event.wait(0.1)
                 continue
 
-            future.add_done_callback(
-                lambda f, t=sent_at: self._on_delivery(f, t))
             self.incr_counter("producer.send", 1)
             return
 
@@ -1532,6 +1532,10 @@ class SoakClient(object):
                     break
                 self.produce_record()
 
+            # Serve the delivery reports queued so far (they only run inside
+            # poll() / flush(), on this thread).
+            self.producer.poll(0)
+
             now = time.time()
             if now > next_status:
                 self.producer_status()
@@ -1542,9 +1546,10 @@ class SoakClient(object):
                 # Event.wait() rather than sleep(): aborts on shutdown.
                 self.stop_event.wait(remaining_time)
 
-        # Wait for outstanding messages to be delivered. flush() is
-        # uninterruptible in this binding, which is why main() arms a shutdown
-        # watchdog before joining the threads.
+        # Wait for outstanding messages to be delivered; flush() also runs
+        # their delivery reports. flush() is uninterruptible in this binding,
+        # which is why main() arms a shutdown watchdog before joining the
+        # threads.
         self.logger.info("producer: flushing")
         self.producer.flush()
         self.producer_status()

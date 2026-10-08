@@ -161,7 +161,6 @@ pub(crate) unsafe fn serializer_ref<'a>(
 ///
 /// `serializer` must be a valid serializer handle, not used again by the
 /// caller when it was owned.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) unsafe fn take_serializer(serializer: *mut kafka_common_serialization_Serializer_t) -> Arc<DynSerializer> {
     let inner = serializer as *mut SerializerInner;
     if unsafe { &*inner }.owned {

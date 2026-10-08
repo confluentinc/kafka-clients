@@ -11,9 +11,16 @@ the multilanguage tests.
   `../rust/target/release/` or `../rust/target/debug/`.
 - **Naming:** symbols keep the Java namespace, without `clients`:
   `org.apache.kafka.clients.producer.KafkaProducer` →
-  `kafka_producer_KafkaProducer_t`. Most operations come twice: a blocking
-  function and an `*_async` variant that delivers its result through a
-  `*_callback_t` plus `user_data`.
+  `kafka_producer_KafkaProducer_t`. Fallible functions return a
+  `kafka_common_Error_t *` (`NULL` on success) and deliver their value through
+  a trailing `out_<name>` parameter. Blocking operations come twice: the
+  blocking function and a `*_cb` variant that takes a `*_cb_t` plus an opaque
+  pointer and returns at once. No Rust thread ever runs a C callback: `_cb`
+  completions and delivery callbacks are queued on the client, and
+  `<Client>_execute_callbacks` runs the pending ones on the calling thread;
+  `<Client>_set_callbacks_notify` installs a hook fired once each time the
+  queue goes from empty to non-empty, which may only schedule a pump, never
+  run callbacks. `_destroy` runs whatever is still pending, exactly once.
 
 ## Status
 

@@ -28,7 +28,7 @@
 
 #![expect(non_camel_case_types)]
 
-use std::ffi::c_char;
+use std::ffi::{CString, c_char};
 use std::sync::OnceLock;
 
 use crate::common::{Metric, MetricValue};
@@ -64,9 +64,32 @@ pub enum kafka_common_MetricValue_e {
     int,
 }
 
+/// What a [`kafka_common_MetricValue_t`] points at: the value plus the
+/// NUL-terminated copy of a string reading that `as_string` hands out.
+struct MetricValueInner {
+    value: MetricValue,
+    string_c: Option<CString>,
+}
+
+impl MetricValueInner {
+    fn new(value: MetricValue) -> Self {
+        let string_c = value.as_string().map(|s| CString::new(s).unwrap_or_default());
+        Self { value, string_c }
+    }
+}
+
 /// Hands `value` to C as an owned handle.
 pub(crate) fn box_metric_value(value: MetricValue) -> *mut kafka_common_MetricValue_t {
-    Box::into_raw(Box::new(value)) as *mut kafka_common_MetricValue_t
+    Box::into_raw(Box::new(MetricValueInner::new(value))) as *mut kafka_common_MetricValue_t
+}
+
+/// The value behind a metric-value handle.
+///
+/// # Safety
+///
+/// `value` must be a valid metric-value handle.
+unsafe fn metric_value_ref<'a>(value: *const kafka_common_MetricValue_t) -> &'a MetricValueInner {
+    unsafe { &*(value as *const MetricValueInner) }
 }
 
 /// Takes an owned metric value back from C.
@@ -75,7 +98,7 @@ pub(crate) fn box_metric_value(value: MetricValue) -> *mut kafka_common_MetricVa
 ///
 /// `value` must be an owned metric-value handle not destroyed afterwards.
 pub(crate) unsafe fn take_metric_value(value: *mut kafka_common_MetricValue_t) -> MetricValue {
-    *unsafe { Box::from_raw(value as *mut MetricValue) }
+    unsafe { Box::from_raw(value as *mut MetricValueInner) }.value
 }
 
 /// What a [`kafka_common_Metric_t`] points at: the implementation, owned by
@@ -152,7 +175,7 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
 pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     self_: *const kafka_common_MetricValue_t,
 ) -> kafka_common_MetricValue_e {
-    match unsafe { &*(self_ as *const MetricValue) } {
+    match unsafe { metric_value_ref(self_) }.value {
         MetricValue::Double(_) => kafka_common_MetricValue_e::double,
         MetricValue::String(_) => kafka_common_MetricValue_e::string,
         MetricValue::Long(_) => kafka_common_MetricValue_e::long,
@@ -198,7 +221,45 @@ pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_
 /// `self_` must be a valid metric-value handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_common_MetricValue_t) -> f64 {
-    unsafe { &*(self_ as *const MetricValue) }.as_double().unwrap_or(f64::NAN)
+    unsafe { metric_value_ref(self_) }.value.as_double().unwrap_or(f64::NAN)
+}
+
+/// `as_string()`: the reading when it is a string gauge (borrowed, valid
+/// until the handle is destroyed), `NULL` otherwise.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric-value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_common_MetricValue_t) -> *const c_char {
+    unsafe { metric_value_ref(self_) }
+        .string_c
+        .as_ref()
+        .map_or(std::ptr::null(), |s| s.as_ptr())
+}
+
+/// `as_long()`: the reading when it is a long gauge, `-1` otherwise. A long
+/// gauge may legitimately read `-1`, so check [`kafka_common_MetricValue__enum`]
+/// first.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric-value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_common_MetricValue_t) -> i64 {
+    unsafe { metric_value_ref(self_) }.value.as_long().unwrap_or(-1)
+}
+
+/// `as_int()`: the reading when it is an int gauge, `-1` otherwise. An int
+/// gauge may legitimately read `-1`, so check [`kafka_common_MetricValue__enum`]
+/// first.
+///
+/// # Safety
+///
+/// `self_` must be a valid metric-value handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_MetricValue_as_int(self_: *const kafka_common_MetricValue_t) -> i32 {
+    unsafe { metric_value_ref(self_) }.value.as_int().unwrap_or(-1)
 }
 
 /// Frees an owned metric-value handle; null is a no-op.
@@ -209,7 +270,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_destroy(self_: *mut kafka_common_MetricValue_t) {
     if !self_.is_null() {
-        drop(unsafe { Box::from_raw(self_ as *mut MetricValue) });
+        drop(unsafe { Box::from_raw(self_ as *mut MetricValueInner) });
     }
 }
 
@@ -301,6 +362,40 @@ mod tests {
             unsafe {
                 let value = kafka_common_Metric_metric_value(inner.as_ptr());
                 assert!(kafka_common_MetricValue_as_double(value).is_nan());
+                kafka_common_MetricValue_destroy(value);
+            }
+        }
+    }
+
+    #[test]
+    fn typed_accessors_answer_only_their_own_kind() {
+        unsafe {
+            let long = kafka_common_MetricValue_long(3);
+            let int = kafka_common_MetricValue_int(4);
+            let s = std::ffi::CString::new("s").unwrap();
+            let string = kafka_common_MetricValue_string(s.as_ptr());
+            let double = kafka_common_MetricValue_double(1.5);
+
+            assert_eq!(kafka_common_MetricValue_as_long(long), 3);
+            assert_eq!(kafka_common_MetricValue_as_int(int), 4);
+            assert_eq!(
+                std::ffi::CStr::from_ptr(kafka_common_MetricValue_as_string(string))
+                    .to_str()
+                    .unwrap(),
+                "s"
+            );
+
+            // Every other kind reads as the documented absent value.
+            for other in [int, string, double] {
+                assert_eq!(kafka_common_MetricValue_as_long(other), -1);
+            }
+            for other in [long, string, double] {
+                assert_eq!(kafka_common_MetricValue_as_int(other), -1);
+            }
+            for other in [long, int, double] {
+                assert!(kafka_common_MetricValue_as_string(other).is_null());
+            }
+            for value in [long, int, string, double] {
                 kafka_common_MetricValue_destroy(value);
             }
         }

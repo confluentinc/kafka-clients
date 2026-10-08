@@ -98,6 +98,15 @@ pub(crate) fn box_cluster(cluster: Cluster) -> *mut kafka_common_Cluster_t {
     Box::into_raw(Box::new(ClusterInner::new(cluster))) as *mut kafka_common_Cluster_t
 }
 
+/// The cluster behind a handle.
+///
+/// # Safety
+///
+/// `cluster` must be a live handle.
+pub(crate) unsafe fn cluster_ref<'a>(cluster: *const kafka_common_Cluster_t) -> &'a Cluster {
+    &unsafe { &*(cluster as *const ClusterInner) }.cluster
+}
+
 /// `new Cluster(String clusterId, Collection<Node> nodes,
 /// Collection<PartitionInfo> partitions, Set<String> unauthorizedTopics,
 /// Set<String> internalTopics)`. `cluster_id` is nullable; `nodes` holds

@@ -81,6 +81,12 @@ impl FfiValue {
         })
     }
 
+    /// Wraps an owned C handle (a `<Type>_t *` from one of the `box_*`
+    /// helpers), freed with the handle through its `_destroy`.
+    pub(crate) fn handle(ptr: *mut c_void, destroy: unsafe fn(*mut c_void)) -> Arc<Self> {
+        Arc::new(Self { ptr, destroy: Some(destroy) })
+    }
+
     /// Wraps a pointer C owns, never freed by Rust.
     pub(crate) fn borrowed(ptr: *mut c_void) -> Arc<Self> {
         Arc::new(Self { ptr, destroy: None })
@@ -114,13 +120,24 @@ impl Drop for FfiValue {
 pub(crate) type FfiFuture = KafkaFuture<Arc<FfiValue>>;
 
 /// Maps a typed future to its C value, boxing `T` when it resolves.
-// wired by the first future over a Rust value, `KafkaProducer_send` (Phase 2)
+// the clients deliver C handles through `map_future_handle`; this one backs the tests
 #[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn map_future<T>(future: &KafkaFuture<T>) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,
 {
     future.then_apply(FfiValue::owned)
+}
+
+/// Maps a typed future to the C handle `boxer` builds from its value when it
+/// resolves, freed with `destroy` (the handle type's `_destroy`) together with
+/// the future's value.
+pub(crate) fn map_future_handle<T, F>(future: &KafkaFuture<T>, boxer: F, destroy: unsafe fn(*mut c_void)) -> FfiFuture
+where
+    T: Clone + Send + Sync + 'static,
+    F: Fn(T) -> *mut c_void + Send + Sync + 'static,
+{
+    future.then_apply(move |value| FfiValue::handle(boxer(value), destroy))
 }
 
 /// Maps a `Void` future to the `NULL` it delivers.

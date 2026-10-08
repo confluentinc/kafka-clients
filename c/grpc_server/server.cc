@@ -346,23 +346,31 @@ bool selects_mock(const ConfigMap& config) {
   return true;
 }
 
-// Fields from a metadata handle, copied via the convenience callback so
-// we get all fields in one FFI hop and the handle is destroyed for us.
+// Fields copied out of a RecordMetadata handle through its accessors. The
+// handles this server sees are all BORROWED — from the future a send returned
+// (valid until that future is destroyed) or for the duration of a delivery
+// callback — so the fields are copied while the handle is alive and the handle
+// is never destroyed here.
 struct MetadataFields {
   int64_t offset = -1;
   int32_t partition = -1;
   std::string topic;
   int64_t timestamp = -1;
+  int32_t serialized_key_size = -1;
+  int32_t serialized_value_size = -1;
 };
 
-extern "C" void metadata_copy_cb(int64_t offset, int32_t partition,
-                                 const char* topic, int64_t timestamp,
-                                 void* user_data) {
-  auto* out = static_cast<MetadataFields*>(user_data);
-  out->offset = offset;
-  out->partition = partition;
-  out->topic = topic ? std::string(topic) : std::string();
-  out->timestamp = timestamp;
+MetadataFields read_metadata(const kafka_producer_RecordMetadata_t* metadata) {
+  MetadataFields out;
+  // offset() / timestamp() are -1 when unknown, like Java's.
+  out.offset = kafka_producer_RecordMetadata_offset(metadata);
+  out.partition = kafka_producer_RecordMetadata_partition(metadata);
+  const char* topic = kafka_producer_RecordMetadata_topic(metadata);  // borrowed
+  out.topic = topic ? std::string(topic) : std::string();
+  out.timestamp = kafka_producer_RecordMetadata_timestamp(metadata);
+  out.serialized_key_size = kafka_producer_RecordMetadata_serialized_key_size(metadata);
+  out.serialized_value_size = kafka_producer_RecordMetadata_serialized_value_size(metadata);
+  return out;
 }
 
 // Defined in the consumer section below; reused by the producer PartitionsFor.
@@ -415,13 +423,18 @@ class CallbackLog {
   // grpc_server.py / grpc_server_async.py, whose service-level CallbackLog is
   // likewise never popped on Close.
   //
-  // Post-close reads are *eventually* consistent on this backend, though: an
-  // FFI callback is enqueued on the client's dispatcher thread and appended
-  // when that job runs, and neither `..._close` nor `..._destroy` joins the
-  // dispatcher. The Python servers append synchronously in-process and so have
-  // no such window. Callers that assert on entry counts must therefore poll
-  // (`wait_for_kind` / `wait_for_kind_settled` / `poll_until_kind` on the Rust
-  // side) rather than read once.
+  // Post-close reads of the *consumer* log are *eventually* consistent on this
+  // backend, though: an FFI callback is enqueued on the client's dispatcher
+  // thread and appended when that job runs, and neither `..._close` nor
+  // `..._destroy` joins the dispatcher. The Python servers append synchronously
+  // in-process and so have no such window. Callers that assert on entry counts
+  // must therefore poll (`wait_for_kind` / `wait_for_kind_settled` /
+  // `poll_until_kind` on the Rust side) rather than read once. The *producer*
+  // log has no such window any more: its delivery callbacks are queued on the
+  // producer's callback vector and this server pumps them on the RPC thread
+  // (after a Send's future resolved, in Flush / Close, and in GetCallbackLog
+  // itself), so an entry is appended before the RPC that completed the record
+  // returns.
   void fill(uint64_t client_id, CallbackLogResponse* resp) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = entries_.find(client_id);
@@ -445,10 +458,11 @@ class CallbackLog {
 //   - a rebalance listener is released only by a *replacing* subscribe or by
 //     consumer destroy (never by unsubscribe), and a later re-subscribe must be
 //     able to reuse the same state;
-//   - `kafka_producer_Producer_send_with_callback` has no destroy hook at all,
-//     so a per-send allocation would have to be freed by the callback itself —
-//     and then leak on the validation-failure path where the callback is
-//     documented not to fire.
+//   - a `kafka_producer_Callback_t` (the delivery callback's registration) has
+//     no destroy hook for its `self` either: the caller owns `self` and must
+//     keep it alive until the callback fired, so a per-send allocation would
+//     have to be freed by the callback itself — and then leak on the
+//     validation-failure path where the callback is documented not to fire.
 //
 // The state is **never freed before the service is destroyed** — it is
 // session-lifetime, held by `log_states_` as a `unique_ptr` that `Close` does
@@ -456,16 +470,20 @@ class CallbackLog {
 //
 // It used to be `delete`d in Close right after `..._destroy(client)` returned,
 // on the premise that destroying the client drops the listener / commit
-// adapters so no callback could still reference it. That premise is false:
-// neither destroy *joins* the dispatcher thread that actually runs the C
-// callback, both deliberately detach it (`src/ffi/producer.rs`,
-// `src/ffi/consumer.rs`), and the Rust-side callback only *enqueues* the C
-// callback as a dispatcher job. A queued `log_delivery(..., state)` could
-// therefore still dereference `state->log` after the `delete` — a
-// use-after-free. Keeping the state alive for the whole session also removes
-// the `log_state_for()`-returns-nullptr-after-Close race in Send / CommitAsync
-// and the leak for a client that is never Closed (neither service impl has a
-// destructor).
+// adapters so no callback could still reference it. That premise is false for
+// the consumer: its destroy does not *join* the dispatcher thread that actually
+// runs the C callback, it deliberately detaches it (`src/ffi/consumer.rs`),
+// and the Rust-side callback only *enqueues* the C callback as a dispatcher
+// job. A queued `log_commit_complete(..., state)` could therefore still
+// dereference `state->log` after the `delete` — a use-after-free. (The
+// producer's callbacks are different since the Phase 2 FFI rewrite: they are
+// queued on the producer's callback vector and run only when this server pumps
+// `kafka_producer_Producer_execute_callbacks`, and `_destroy` runs the ones
+// still pending before returning — but the state is kept session-long for both
+// clients for uniformity.) Keeping the state alive for the whole session also
+// removes the `log_state_for()`-returns-nullptr-after-Close race in Send /
+// CommitAsync and the leak for a client that is never Closed (neither service
+// impl has a destructor).
 struct LogState {
   CallbackLog* log;
   uint64_t client_id;
@@ -563,9 +581,15 @@ extern "C" void discard_commit_complete(kafka_consumer_OffsetMap_t* offsets,
   if (error != nullptr) kafka_common_Error_destroy(error);
 }
 
-extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
-                             kafka_common_Error_t* error, void* user_data) {
-  auto* state = static_cast<LogState*>(user_data);
+// The `on_completion` of the kafka_producer_Callback_t registered by Send with
+// with_callback; `self` is the producer's LogState. Unlike the consumer
+// callbacks above, both arguments are BORROWED for the call (the FFI frees
+// them after it returns), so nothing is destroyed here. It runs on whichever
+// gRPC worker thread pumps kafka_producer_Producer_execute_callbacks (see
+// pump_callbacks below), never on a Rust thread.
+extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* metadata,
+                             const kafka_common_Error_t* error) {
+  auto* state = static_cast<LogState*>(self);
   CallbackLogEntry entry;
   entry.set_kind(KIND_DELIVERY);
   // Both arguments can be set at once: a real producer rejecting a record
@@ -573,15 +597,16 @@ extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
   // (offset/partition -1) alongside the error, mirroring Java's
   // callback.onCompletion(nullMetadata, e). Record whichever is present.
   if (metadata != nullptr) {
-    MetadataFields fields;
-    // Also destroys the handle, which the callee owns.
-    kafka_producer_RecordMetadata_copy(metadata, metadata_copy_cb, &fields);
+    const MetadataFields fields = read_metadata(metadata);
     CallbackLogPartition* p = entry.add_partitions();
     p->set_topic(fields.topic);
     p->set_partition(fields.partition);
     (*entry.mutable_offsets())[offset_key(fields.topic, fields.partition)] = fields.offset;
   }
-  take_error_into(&entry, error);
+  if (error != nullptr) {
+    const char* msg = kafka_common_Error_message(error);
+    entry.set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
+  }
   state->log->append(state->client_id, std::move(entry));
 }
 
@@ -634,6 +659,40 @@ class GroupMetadataStore {
   std::atomic<uint64_t> next_id_{1};
 };
 
+// A producer as CreateProducer built it: the owning class handle (exactly one
+// of `kafka` / `mock` is set, because `kafka_producer_Producer_t` is the
+// `Producer` interface and has no `_new` / `_destroy` of its own) and its
+// `__as_Producer` view, borrowed from the class handle and valid until that
+// handle is destroyed. Every operation takes the view; only Close touches the
+// class handle.
+struct ProducerHandle {
+  kafka_producer_KafkaProducer_t* kafka = nullptr;
+  kafka_producer_MockProducer_t* mock = nullptr;
+  const kafka_producer_Producer_t* view = nullptr;
+
+  // Frees the class handle; the view is invalid afterwards. `_destroy` also
+  // runs the callbacks still queued on the producer, so each delivery callback
+  // fires exactly once even if nothing pumped it before.
+  void destroy() {
+    if (kafka != nullptr) kafka_producer_KafkaProducer_destroy(kafka);
+    if (mock != nullptr) kafka_producer_MockProducer_destroy(mock);
+    kafka = nullptr;
+    mock = nullptr;
+    view = nullptr;
+  }
+};
+
+// Runs the producer's queued callbacks on this gRPC worker thread. Delivery
+// callbacks are always *queued* by the FFI (the producer's background task
+// fires them onto the callback vector) and only run when a caller pumps
+// `kafka_producer_Producer_execute_callbacks`; this server has no pump thread,
+// so every RPC that can complete a record (Send after its future resolved,
+// Flush, Close) and GetCallbackLog itself pump here. Pumping is serialized
+// inside the FFI, so concurrent RPCs may call this freely.
+void pump_callbacks(const kafka_producer_Producer_t* producer) {
+  kafka_producer_Producer_execute_callbacks(producer);
+}
+
 class ProducerServiceImpl final : public ProducerService::Service {
  public:
   explicit ProducerServiceImpl(GroupMetadataStore* group_metadata)
@@ -642,34 +701,51 @@ class ProducerServiceImpl final : public ProducerService::Service {
   grpc::Status CreateProducer(grpc::ServerContext*,
                               const CreateProducerRequest* req,
                               CreateProducerResponse* resp) override {
-    kafka_producer_Producer_t* producer = nullptr;
-    kafka_common_Error_t* err = nullptr;
+    ProducerHandle handle;
 
     if (req->config().empty()) {
-      // Empty config selects MockProducer for client-side smoke testing.
-      producer = kafka_producer_MockProducer_new(/*auto_complete=*/true);
+      // Empty config selects MockProducer for client-side smoke testing. NULL
+      // serializers (the only choice for the mock constructor used here): keys
+      // and values are `kafka_Bytes_t *`, see Send.
+      handle.mock = kafka_producer_MockProducer_with_auto_complete(/*auto_complete=*/1);
+      handle.view = kafka_producer_MockProducer__as_Producer(handle.mock);
     } else {
-      kafka_producer_ProducerProperties_t* props =
-          kafka_producer_ProducerProperties_new();
+      // ProducerConfig takes a C-built map of `char *` -> `char *`, borrowed
+      // for the call (the config copies and validates them), so the proto
+      // strings can be handed over without copying and the map destroyed
+      // right after.
+      kafka_Map_t* props = kafka_Map_new();
       for (const auto& kv : req->config()) {
-        kafka_producer_ProducerProperties_put(props, kv.first.c_str(),
-                                              kv.second.c_str());
+        kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
+                      const_cast<char*>(kv.second.c_str()));
       }
-      producer = kafka_producer_KafkaProducer_new(props, &err);
-      kafka_producer_ProducerProperties_destroy(props);
-    }
-
-    if (producer == nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
+      kafka_producer_ProducerConfig_t* config = nullptr;
+      kafka_common_Error_t* err = kafka_producer_ProducerConfig_new(props, &config);
+      kafka_Map_destroy(props);
+      if (err != nullptr) {
+        // Validation happens here, not in KafkaProducer_new: an invalid value
+        // fails the creation with the ConfigException Java would throw.
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      // NULL serializers: keys and values cross as `kafka_Bytes_t *`, exactly
+      // the bytes the proto carries. The config stays ours and can be destroyed
+      // right after the producer was built from it.
+      err = kafka_producer_KafkaProducer_new(config, nullptr, nullptr, &handle.kafka);
+      kafka_producer_ProducerConfig_destroy(config);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      handle.view = kafka_producer_KafkaProducer__as_Producer(handle.kafka);
     }
 
     const uint64_t id = next_id_.fetch_add(1);
     {
       std::lock_guard<std::mutex> lock(mu_);
-      producers_[id] = producer;
+      producers_[id] = handle;
       // One stable LogState per producer — see the struct's comment for why the
-      // delivery callback's user_data cannot be per-send, and why it lives for
+      // delivery callback's `self` cannot be per-send, and why it lives for
       // the whole session rather than being freed at Close.
       log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
     }
@@ -680,7 +756,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   grpc::Status Send(grpc::ServerContext*, const SendRequest* req,
                     SendResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
           "unknown producer_id " + std::to_string(req->producer_id()));
@@ -688,76 +764,148 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
 
     const auto& rec = req->record();
-    const int32_t partition = rec.has_partition() ? rec.partition() : -1;
-    const int64_t timestamp = rec.has_timestamp() ? rec.timestamp() : -1;
-    const uint8_t* key = nullptr;
-    int32_t key_len = -1;
+    // The producers here are built without serializers, so the record's key
+    // and value `void *` are `kafka_Bytes_t *` (NULL for Java's null). The
+    // record keeps the pointers, not the bytes: the blocking send below reads
+    // them during the call, so these locals (and the proto they point into)
+    // must outlive it — they do, the RPC is synchronous.
+    kafka_Bytes_t key_bytes{nullptr, 0};
+    const void* key = nullptr;
     if (rec.has_key()) {
-      key = reinterpret_cast<const uint8_t*>(rec.key().data());
-      key_len = static_cast<int32_t>(rec.key().size());
+      key_bytes.data = reinterpret_cast<const uint8_t*>(rec.key().data());
+      key_bytes.len = static_cast<int32_t>(rec.key().size());
+      key = &key_bytes;
     }
-    const uint8_t* value = nullptr;
-    int32_t value_len = -1;
+    kafka_Bytes_t value_bytes{nullptr, 0};
+    const void* value = nullptr;
     if (rec.has_value()) {
-      value = reinterpret_cast<const uint8_t*>(rec.value().data());
-      value_len = static_cast<int32_t>(rec.value().size());
+      value_bytes.data = reinterpret_cast<const uint8_t*>(rec.value().data());
+      value_bytes.len = static_cast<int32_t>(rec.value().size());
+      value = &value_bytes;
+    }
+
+    // Headers, when the record carries any. `add_with_key_value` copies the
+    // bytes; the builder's `set_headers` copies the headers again, so the
+    // handle is destroyed together with the builder below.
+    kafka_common_header_internals_RecordHeaders_t* headers = nullptr;
+    if (rec.headers_size() > 0) {
+      headers = kafka_common_header_internals_RecordHeaders_new();
+      // Borrowed view of the handle, never destroyed on its own.
+      kafka_common_header_Headers_t* headers_view =
+          kafka_common_header_internals_RecordHeaders__as_Headers(headers);
+      for (const auto& h : rec.headers()) {
+        kafka_Bytes_t header_value{reinterpret_cast<const uint8_t*>(h.value().data()),
+                                   static_cast<int32_t>(h.value().size())};
+        kafka_common_Error_t* header_err = kafka_common_header_Headers_add_with_key_value(
+            headers_view, h.key().c_str(), header_value);
+        if (header_err != nullptr) {
+          kafka_common_header_internals_RecordHeaders_destroy(headers);
+          fill_proto_error(resp->mutable_error(), header_err);
+          return grpc::Status::OK;
+        }
+      }
+    }
+
+    // Java's six-argument ProducerRecord constructor through its options
+    // builder: it takes every optional the proto can carry (partition,
+    // timestamp, key, headers), unset meaning Java's null. `set_value` is
+    // mandatory even for a null (tombstone) value.
+    kafka_producer_ProducerRecordOptionsBuilder_t* builder =
+        kafka_producer_ProducerRecordOptionsBuilder_new();
+    kafka_producer_ProducerRecordOptionsBuilder_set_topic(builder, rec.topic().c_str());
+    if (rec.has_partition()) {
+      kafka_producer_ProducerRecordOptionsBuilder_set_partition(builder, rec.partition());
+    }
+    if (rec.has_timestamp()) {
+      kafka_producer_ProducerRecordOptionsBuilder_set_timestamp(builder, rec.timestamp());
+    }
+    kafka_producer_ProducerRecordOptionsBuilder_set_key(builder, key);
+    kafka_producer_ProducerRecordOptionsBuilder_set_value(builder, value);
+    if (headers != nullptr) {
+      kafka_producer_ProducerRecordOptionsBuilder_set_headers(builder, headers);
+    }
+    kafka_producer_ProducerRecordOptions_t* options = nullptr;
+    kafka_common_Error_t* build_err =
+        kafka_producer_ProducerRecordOptionsBuilder_build(builder, &options);
+    // `build` consumed the builder's content; the handle itself is still ours.
+    kafka_producer_ProducerRecordOptionsBuilder_destroy(builder);
+    if (headers != nullptr) kafka_common_header_internals_RecordHeaders_destroy(headers);
+    if (build_err != nullptr) {
+      fill_proto_error(resp->mutable_error(), build_err);
+      return grpc::Status::OK;
+    }
+    kafka_producer_ProducerRecord_t* record = nullptr;
+    kafka_common_Error_t* record_err = kafka_producer_ProducerRecord_with_options(options, &record);
+    kafka_producer_ProducerRecordOptions_destroy(options);
+    if (record_err != nullptr) {
+      // Java's constructor validation (e.g. "Invalid timestamp").
+      fill_proto_error(resp->mutable_error(), record_err);
+      return grpc::Status::OK;
     }
 
     // with_callback => register a *real* delivery callback through the FFI, so
     // the Rust harness can assert (via GetCallbackLog) on what the binding's own
     // callback saw. The blocking future path below is unchanged: the FFI gives us
-    // both, exactly like Java's send(record, callback).
+    // both, exactly like Java's send(record, callback). The registration is
+    // copied into the Rust closure during the call, so the Callback_t handle is
+    // destroyed right after send returned; its `self` (the LogState) lives for
+    // the whole session.
     kafka_common_Error_t* send_err = nullptr;
-    kafka_common_KafkaFuture_RecordMetadata_t* future = nullptr;
+    kafka_common_KafkaFuture_t* future = nullptr;
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
-      future = kafka_producer_Producer_send_with_callback(
-          producer, rec.topic().c_str(), partition, timestamp, key, key_len,
-          value, value_len, log_delivery, state, &send_err);
+      kafka_producer_Callback_t* callback = kafka_producer_Callback_new(state, log_delivery);
+      send_err = kafka_producer_Producer_send_with_callback(producer, record, callback, &future);
+      kafka_producer_Callback_destroy(callback);
     } else {
-      future = kafka_producer_Producer_send(
-          producer, rec.topic().c_str(), partition, timestamp, key, key_len,
-          value, value_len, &send_err);
+      send_err = kafka_producer_Producer_send(producer, record, &future);
     }
-    if (future == nullptr) {
+    // send cloned the record.
+    kafka_producer_ProducerRecord_destroy(record);
+    if (send_err != nullptr) {
       // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
-      // FFI returns a non-null error we forward verbatim.
+      // FFI returns a non-null error we forward verbatim. A pre-accumulator
+      // rejection also queued the delivery callback (with placeholder
+      // metadata beside the error, as Java does), so pump it into the log.
+      pump_callbacks(producer);
       fill_proto_error(resp->mutable_error(), send_err);
       return grpc::Status::OK;
     }
 
-    // Block this gRPC worker thread waiting for the future to resolve.
-    // The FFI's get() blocks on a tokio runtime handle that the producer
-    // owns, so it's safe to call from arbitrary threads.
-    kafka_common_Error_t* get_err = nullptr;
-    kafka_producer_RecordMetadata_t* metadata =
-        kafka_common_KafkaFuture_RecordMetadata_get(future, &get_err);
-    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
-    if (metadata == nullptr) {
+    // Block this gRPC worker thread waiting for the future to resolve. The
+    // FFI's get() drives the producer's tokio runtime from the calling thread,
+    // so it's safe to call from arbitrary threads.
+    //
+    // The metadata is BORROWED from the future (valid until the future is
+    // destroyed, never passed to RecordMetadata_destroy), so copy the fields
+    // out before destroying the future.
+    void* raw_metadata = nullptr;
+    kafka_common_Error_t* get_err = kafka_common_KafkaFuture_get(future, &raw_metadata);
+    if (get_err != nullptr) {
+      kafka_common_KafkaFuture_destroy(future);
+      // The record's delivery callback was queued before its future resolved.
+      pump_callbacks(producer);
       fill_proto_error(resp->mutable_error(), get_err);
       return grpc::Status::OK;
     }
-
-    MetadataFields fields;
-    kafka_producer_RecordMetadata_copy(metadata, metadata_copy_cb, &fields);
+    const MetadataFields fields =
+        read_metadata(static_cast<const kafka_producer_RecordMetadata_t*>(raw_metadata));
+    kafka_common_KafkaFuture_destroy(future);
+    pump_callbacks(producer);
 
     RecordMetadata* m = resp->mutable_metadata();
     m->set_offset(fields.offset);
     m->set_timestamp(fields.timestamp);
     m->set_topic(fields.topic);
     m->set_partition(fields.partition);
-    // The C FFI metadata API doesn't expose serialized key/value sizes;
-    // surface -1 so the Rust side's RecordMetadata::new still constructs
-    // validly. Tests that depend on these specific fields are skipped
-    // for the c backend.
-    m->set_serialized_key_size(-1);
-    m->set_serialized_value_size(-1);
+    m->set_serialized_key_size(fields.serialized_key_size);
+    m->set_serialized_value_size(fields.serialized_value_size);
     return grpc::Status::OK;
   }
 
   // ── Transactions (Milestone 11) ──
   //
-  // Each maps to the same-named KafkaProducer FFI call, which returns a
+  // Each maps to the same-named Producer FFI call, which returns a
   // *error handle directly (not via an out-param), and reports it through
   // StatusResponse. fill_proto_error copies the handle's code and message; the
   // code identifies the error class on its own, so nothing is inferred from the
@@ -766,7 +914,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
   grpc::Status InitTransactions(grpc::ServerContext*,
                                 const TransactionRequest* req,
                                 StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
@@ -782,7 +930,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
   grpc::Status BeginTransaction(grpc::ServerContext*,
                                 const TransactionRequest* req,
                                 StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
@@ -798,7 +946,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
   grpc::Status CommitTransaction(grpc::ServerContext*,
                                  const TransactionRequest* req,
                                  StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
@@ -808,13 +956,16 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
+    // Committing (or failing to) completes the transaction's records, whose
+    // delivery callbacks are now queued.
+    pump_callbacks(producer);
     return grpc::Status::OK;
   }
 
   grpc::Status AbortTransaction(grpc::ServerContext*,
                                 const TransactionRequest* req,
                                 StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
@@ -824,50 +975,63 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
+    // Aborting fails the transaction's in-flight records, whose delivery
+    // callbacks are now queued.
+    pump_callbacks(producer);
     return grpc::Status::OK;
   }
 
   // Java sendOffsetsToTransaction(offsets, groupMetadata): the producer half of
-  // consume-transform-produce. Flattens the repeated OffsetEntry into the
-  // parallel arrays the sync FFI expects, and passes the group-metadata handle
+  // consume-transform-produce. Builds the C map of TopicPartition ->
+  // OffsetAndMetadata the FFI expects, and passes the group-metadata handle
   // stored under the request's id by ConsumerService.GroupMetadata.
   grpc::Status SendOffsetsToTransaction(
       grpc::ServerContext*, const SendOffsetsToTransactionRequest* req,
       StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    // Flatten repeated OffsetEntry into the parallel arrays
-    // kafka_producer_Producer_send_offsets_to_transaction expects, marshaled
-    // exactly like kafka_consumer_Consumer_commit_sync_offsets via
-    // read_offset_map: an absent (or < 0) leader_epoch means "no epoch", and a
-    // null metadata entry means the empty string. The const char* borrow into
-    // `req`, which outlives this synchronous FFI call.
-    std::vector<const char*> topics;
-    std::vector<int32_t> partitions;
-    std::vector<int64_t> offsets;
-    std::vector<int32_t> leader_epochs;
-    std::vector<const char*> metadata;
-    const int n = req->offsets_size();
-    topics.reserve(n);
-    partitions.reserve(n);
-    offsets.reserve(n);
-    leader_epochs.reserve(n);
-    metadata.reserve(n);
+    // A C-built map holds borrowed elements: the FFI copies what it needs
+    // during the call, and we free the entries and the map afterwards. The
+    // marshaling matches kafka_consumer_Consumer_commit_sync_offsets via
+    // read_offset_map: an absent leader_epoch is -1 ("no epoch"), and an
+    // absent metadata entry means the empty string.
+    kafka_Map_t* offsets = kafka_Map_new();
+    std::vector<kafka_common_TopicPartition_t*> partitions;
+    std::vector<kafka_consumer_OffsetAndMetadata_t*> offset_values;
+    partitions.reserve(req->offsets_size());
+    offset_values.reserve(req->offsets_size());
+    auto release = [&]() {
+      for (auto* tp : partitions) kafka_common_TopicPartition_destroy(tp);
+      for (auto* oam : offset_values) kafka_consumer_OffsetAndMetadata_destroy(oam);
+      kafka_Map_destroy(offsets);
+    };
     for (const auto& e : req->offsets()) {
-      topics.push_back(e.topic().c_str());
-      partitions.push_back(e.partition());
-      offsets.push_back(e.offset());
-      leader_epochs.push_back(e.has_leader_epoch() ? e.leader_epoch() : -1);
-      metadata.push_back(e.has_metadata() ? e.metadata().c_str() : nullptr);
+      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
+      // Java's OffsetAndMetadata constructor validation (negative offset)
+      // surfaces here, as the IllegalArgumentException it is.
+      kafka_common_Error_t* build_err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+          e.offset(), e.has_leader_epoch() ? e.leader_epoch() : -1,
+          e.has_metadata() ? e.metadata().c_str() : "", &oam);
+      if (build_err != nullptr) {
+        release();
+        fill_proto_error(resp->mutable_error(), build_err);
+        return grpc::Status::OK;
+      }
+      kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartition_new(e.topic().c_str(), e.partition());
+      partitions.push_back(tp);
+      offset_values.push_back(oam);
+      kafka_Map_put(offsets, tp, oam);
     }
     // Holding the shared_ptr keeps the handle alive through the FFI call even
     // if a ReleaseGroupMetadata for it arrives meanwhile.
     std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> group_meta =
         group_metadata_->get(req->group_metadata_id());
     if (group_meta == nullptr) {
+      release();
       *resp->mutable_error() = make_synthetic_error(
           "unknown group_metadata_id " +
           std::to_string(req->group_metadata_id()));
@@ -875,9 +1039,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     kafka_common_Error_t* err =
         kafka_producer_Producer_send_offsets_to_transaction(
-            producer, topics.data(), partitions.data(), offsets.data(),
-            leader_epochs.data(), metadata.data(),
-            static_cast<int32_t>(topics.size()), group_meta.get());
+            producer, offsets, group_meta.get());
+    release();
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -886,153 +1049,193 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   grpc::Status Flush(grpc::ServerContext*, const FlushRequest* req,
                      StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err = nullptr;
-    kafka_producer_Producer_flush(producer, &err);
+    kafka_common_Error_t* err = kafka_producer_Producer_flush(producer);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
+    // flush() completes every outstanding record, so their delivery callbacks
+    // are queued by now: run them before answering, as Java's flush returns
+    // only after the callbacks ran.
+    pump_callbacks(producer);
     return grpc::Status::OK;
   }
 
   grpc::Status PartitionsFor(grpc::ServerContext*,
                              const PartitionsForRequest* req,
                              PartitionsForResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_PartitionInfoList_t* list = nullptr;
+    // An owned list of owned PartitionInfo handles: destroying the list frees
+    // the elements.
+    kafka_List_t* list = nullptr;
     kafka_common_Error_t* err =
         kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_common_PartitionInfoList_count(list);
+    const int32_t n = kafka_List_size(list);
     for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_common_PartitionInfoList_get(list, i), resp->add_partitions());
+      partition_info_to_proto(
+          static_cast<const kafka_common_PartitionInfo_t*>(kafka_List_get(list, i)),
+          resp->add_partitions());
     }
-    kafka_common_PartitionInfoList_destroy(list);
+    kafka_List_destroy(list);
     return grpc::Status::OK;
   }
 
   grpc::Status Metrics(grpc::ServerContext*, const MetricsRequest* req,
                        MetricsResponse* resp) override {
-    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_producer_MetricMap_t* map = kafka_producer_Producer_metrics(producer);
+    // An owned map of owned MetricName -> KafkaMetric handles; destroying the
+    // map frees both sides of every entry.
+    kafka_Map_t* map = kafka_producer_Producer_metrics(producer);
     if (map == nullptr) {
       *resp->mutable_error() = make_synthetic_error("no metrics for producer " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
     MetricList* out = resp->mutable_metrics();
-    int32_t n = kafka_producer_MetricMap_count(map);
+    const int32_t n = kafka_Map_size(map);
     for (int32_t i = 0; i < n; i++) {
       Metric* m = out->add_metrics();
-      const char* name = kafka_producer_MetricMap_get_name(map, i);
-      const char* group = kafka_producer_MetricMap_get_group(map, i);
-      const char* desc = kafka_producer_MetricMap_get_description(map, i);
-      m->set_name(name ? name : "");
+      const auto* name = static_cast<const kafka_common_MetricName_t*>(kafka_Map_key(map, i));
+      const auto* metric =
+          static_cast<const kafka_common_metrics_KafkaMetric_t*>(kafka_Map_value(map, i));
+      const char* metric_name = kafka_common_MetricName_name(name);
+      const char* group = kafka_common_MetricName_group(name);
+      const char* desc = kafka_common_MetricName_description(name);
+      m->set_name(metric_name ? metric_name : "");
       m->set_group(group ? group : "");
       m->set_description(desc ? desc : "");
-      int32_t tn = kafka_producer_MetricMap_get_tag_count(map, i);
+      // tags(): an owned map of `char *` -> `char *`.
+      kafka_Map_t* tags = kafka_common_MetricName_tags(name);
+      const int32_t tn = kafka_Map_size(tags);
       for (int32_t t = 0; t < tn; t++) {
-        const char* k = kafka_producer_MetricMap_get_tag_key(map, i, t);
-        const char* v = kafka_producer_MetricMap_get_tag_value(map, i, t);
+        const char* k = static_cast<const char*>(kafka_Map_key(tags, t));
+        const char* v = static_cast<const char*>(kafka_Map_value(tags, t));
         (*m->mutable_tags())[k ? k : ""] = v ? v : "";
       }
-      // Kind constants mirror the Rust MetricValue variants; see
-      // METRIC_VALUE_* in src/ffi/common.rs.
-      switch (kafka_producer_MetricMap_get_value_kind(map, i)) {
-        case 1: {
-          const char* s = kafka_producer_MetricMap_get_value_string(map, i);
+      kafka_Map_destroy(tags);
+      // metricValue(): an owned snapshot of the reading, taken through the
+      // metric's `Metric` view (borrowed from the KafkaMetric handle).
+      kafka_common_MetricValue_t* value =
+          kafka_common_Metric_metric_value(kafka_common_metrics_KafkaMetric__as_Metric(metric));
+      // One typed accessor per variant, selected by `__enum` (each accessor
+      // returns a sentinel for the other variants, so the switch comes first).
+      switch (kafka_common_MetricValue__enum(value)) {
+        case kafka_common_MetricValue_e_string: {
+          // Borrowed until the value handle is destroyed below.
+          const char* s = kafka_common_MetricValue_as_string(value);
           m->set_string_value(s ? s : "");
           break;
         }
-        case 2:
-          m->set_long_value(kafka_producer_MetricMap_get_value_long(map, i));
+        case kafka_common_MetricValue_e_long_:
+          m->set_long_value(kafka_common_MetricValue_as_long(value));
           break;
-        case 3:
-          m->set_int_value(kafka_producer_MetricMap_get_value_int(map, i));
+        case kafka_common_MetricValue_e_int_:
+          m->set_int_value(kafka_common_MetricValue_as_int(value));
           break;
+        case kafka_common_MetricValue_e_double_:
         default:
-          m->set_double_value(kafka_producer_MetricMap_get_value_double(map, i));
+          m->set_double_value(kafka_common_MetricValue_as_double(value));
           break;
       }
+      kafka_common_MetricValue_destroy(value);
     }
-    kafka_producer_MetricMap_destroy(map);
+    kafka_Map_destroy(map);
     return grpc::Status::OK;
   }
 
   grpc::Status Close(grpc::ServerContext*, const CloseRequest* req,
                      StatusResponse* resp) override {
-    kafka_producer_Producer_t* producer = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = producers_.find(req->producer_id());
-      if (it != producers_.end()) {
-        producer = it->second;
-        producers_.erase(it);
-      }
-      // log_states_ is deliberately NOT erased — see LogState's comment: a
-      // dispatcher job queued by a callback that already fired may still hold
-      // the pointer, because destroy detaches the dispatcher instead of
-      // joining it.
-    }
-    if (producer == nullptr) {
-      // Idempotent close — silent success on unknown id.
-      return grpc::Status::OK;
-    }
-    kafka_common_Error_t* err = nullptr;
-    // close() flushes, so the *Rust* side of every outstanding delivery
-    // callback has run by the time this returns — i.e. its C callback has been
-    // enqueued on the dispatcher. It does not guarantee the dispatcher has run
-    // that job, so a GetCallbackLog issued immediately after Close may still be
-    // one entry behind; see CallbackLog's comment.
-    kafka_producer_Producer_close(producer, &err);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-    }
-    kafka_producer_Producer_destroy(producer);
-    // The log entries stay in callback_log_ and the LogState stays in
-    // log_states_, so GetCallbackLog still works post-close and a late
-    // dispatcher job still has valid user_data.
-    return grpc::Status::OK;
+    return close_producer(req->producer_id(), /*has_timeout=*/false, 0, resp);
   }
 
   grpc::Status GetCallbackLog(grpc::ServerContext*, const ProducerCallbackLogRequest* req,
                               CallbackLogResponse* resp) override {
+    // Pump first, so a delivery callback queued since the last RPC (e.g. by a
+    // batch the background task completed after Send returned) is in the log
+    // the reader gets. A closed producer has no view any more; its callbacks
+    // ran during Close.
+    const kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer != nullptr) pump_callbacks(producer);
     callback_log_.fill(req->producer_id(), resp);
     return grpc::Status::OK;
   }
 
-  grpc::Status CloseTimeout(grpc::ServerContext* ctx,
+  grpc::Status CloseTimeout(grpc::ServerContext*,
                             const CloseTimeoutRequest* req,
                             StatusResponse* resp) override {
-    // The C FFI's close doesn't take a timeout — best-effort: behaves
-    // like Close. Surface this in the message field if anything goes
-    // wrong so the Rust side can distinguish from a true close error.
-    CloseRequest close_req;
-    close_req.set_producer_id(req->producer_id());
-    return Close(ctx, &close_req, resp);
+    return close_producer(req->producer_id(), /*has_timeout=*/true, req->timeout_ms(), resp);
   }
 
  private:
-  kafka_producer_Producer_t* producer_for(uint64_t id) {
+  // Shared body of Close (Java's close(), i.e. Duration.ofMillis(Long.MAX_VALUE))
+  // and CloseTimeout (close(Duration)).
+  grpc::Status close_producer(uint64_t producer_id, bool has_timeout, int64_t timeout_ms,
+                              StatusResponse* resp) {
+    if (has_timeout && timeout_ms < 0) {
+      // Java's close(Duration) rejects a negative timeout up front with
+      // IllegalArgumentException and leaves the producer open, so do not
+      // unregister it: forward the FFI's own validation error and keep it.
+      const kafka_producer_Producer_t* producer = producer_for(producer_id);
+      if (producer == nullptr) return grpc::Status::OK;
+      kafka_common_Error_t* err = kafka_producer_Producer_close_with_timeout(producer, timeout_ms);
+      if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    ProducerHandle handle;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = producers_.find(producer_id);
+      if (it != producers_.end()) {
+        handle = it->second;
+        producers_.erase(it);
+      }
+      // log_states_ is deliberately NOT erased — see LogState's comment.
+    }
+    if (handle.view == nullptr) {
+      // Idempotent close — silent success on unknown id.
+      return grpc::Status::OK;
+    }
+    // close() flushes, so every outstanding delivery callback is queued by the
+    // time this returns; pumping them here before destroying the handle makes
+    // a GetCallbackLog issued right after Close complete (destroy would run
+    // the still-pending ones anyway, so each fires exactly once either way).
+    kafka_common_Error_t* err =
+        has_timeout ? kafka_producer_Producer_close_with_timeout(handle.view, timeout_ms)
+                    : kafka_producer_Producer_close(handle.view);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+    }
+    pump_callbacks(handle.view);
+    // Destroying the class handle invalidates the view; it does not close the
+    // producer, which is why close ran first.
+    handle.destroy();
+    // The log entries stay in callback_log_ and the LogState stays in
+    // log_states_, so GetCallbackLog still works post-close.
+    return grpc::Status::OK;
+  }
+
+  // The producer's `Producer` view, or nullptr for an unknown (or closed) id.
+  const kafka_producer_Producer_t* producer_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = producers_.find(id);
-    return it == producers_.end() ? nullptr : it->second;
+    return it == producers_.end() ? nullptr : it->second.view;
   }
 
   LogState* log_state_for(uint64_t id) {
@@ -1045,8 +1248,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
   // Shared with ConsumerServiceImpl; owned by main().
   GroupMetadataStore* group_metadata_;
   std::mutex mu_;
-  std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
-  // user_data for the delivery callbacks; owned here, one per producer, for the
+  std::unordered_map<uint64_t, ProducerHandle> producers_;
+  // `self` for the delivery callbacks; owned here, one per producer, for the
   // whole session (never erased by Close — see LogState).
   std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
   // Has its own mutex; see CallbackLog.

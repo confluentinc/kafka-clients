@@ -16,24 +16,18 @@
 #include <unistd.h>
 #endif
 
-#define PRODUCER_RECORD_SLOT_THRESHOLD 1000
-#define PRODUCER_RECORD_SLOT_CAPACITY (PRODUCER_RECORD_SLOT_THRESHOLD + 100)
-
-// Backpressure bound: once this many records are accumulated but not yet taken
-// by the send task, the producer is "full" and further enqueuing should wait
-// until the send task drains a batch. One complete batch beyond the one being
-// filled — mirrors Java's send() blocking once buffer.memory is full, applied
-// here at batch granularity in front of the Rust accumulator.
-#define PRODUCER_MAX_ACCUMULATED_RECORDS PRODUCER_RECORD_SLOT_THRESHOLD
-
 // ProducerRecord C extension type
 typedef struct {
     PyObject_HEAD
     PyObject* key;          // PyBytesObject or Py_None
     PyObject* value;        // PyBytesObject
-    kafka_producer_ProducerRecord_t record_struct;
     char* topic_owned;      // owned copy of topic string
+    int32_t partition;      // -1 = unset (Java null)
+    int64_t timestamp;      // -1 = unset (Java null)
 } ProducerRecordObject;
+
+// The kafka_producer_ProducerRecord_t is opaque and is built per send
+// (producer_record_to_c below) over this object's bytes, zero-copy.
 
 static int ProducerRecord_traverse(ProducerRecordObject* self, visitproc visit, void* arg) {
     Py_VISIT(self->key);
@@ -46,9 +40,6 @@ static int ProducerRecord_clear(ProducerRecordObject* self) {
     Py_CLEAR(self->value);
     PyMem_Free(self->topic_owned);
     self->topic_owned = NULL;
-    self->record_struct.topic = NULL;
-    self->record_struct.key = NULL;
-    self->record_struct.value = NULL;
     return 0;
 }
 
@@ -65,7 +56,8 @@ static PyObject* ProducerRecord_new(PyTypeObject* type, PyObject* args, PyObject
         self->key = NULL;
         self->value = NULL;
         self->topic_owned = NULL;
-        memset(&self->record_struct, 0, sizeof(self->record_struct));
+        self->partition = -1;
+        self->timestamp = -1;
     }
     return (PyObject*)self;
 }
@@ -133,7 +125,6 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
     Py_INCREF(value);
     self->value = value;
 
-    // Populate record_struct
     self->topic_owned = PyMem_Malloc(strlen(topic) + 1);
     if (self->topic_owned == NULL) {
         PyErr_NoMemory();
@@ -144,20 +135,8 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
         return -1;
     }
     strcpy(self->topic_owned, topic);
-    self->record_struct.topic = self->topic_owned;
-    self->record_struct.partition = partition;
-    self->record_struct.timestamp = timestamp;
-
-    if (key != Py_None) {
-        self->record_struct.key = (const uint8_t*)PyBytes_AsString(key);
-        self->record_struct.key_len = (int32_t)PyBytes_Size(key);
-    } else {
-        self->record_struct.key = NULL;
-        self->record_struct.key_len = -1;
-    }
-
-    self->record_struct.value = (const uint8_t*)PyBytes_AsString(value);
-    self->record_struct.value_len = (int32_t)PyBytes_Size(value);
+    self->partition = (int32_t)partition;
+    self->timestamp = (int64_t)timestamp;
 
     return 0;
 }
@@ -171,17 +150,17 @@ static PyObject* ProducerRecord_get_topic(ProducerRecordObject* self, void* clos
 }
 
 static PyObject* ProducerRecord_get_partition(ProducerRecordObject* self, void* closure) {
-    if (self->record_struct.partition == -1) {
+    if (self->partition == -1) {
         Py_RETURN_NONE;
     }
-    return PyLong_FromLong(self->record_struct.partition);
+    return PyLong_FromLong((long)self->partition);
 }
 
 static PyObject* ProducerRecord_get_timestamp(ProducerRecordObject* self, void* closure) {
-    if (self->record_struct.timestamp == -1) {
+    if (self->timestamp == -1) {
         Py_RETURN_NONE;
     }
-    return PyLong_FromLongLong(self->record_struct.timestamp);
+    return PyLong_FromLongLong((long long)self->timestamp);
 }
 
 static PyObject* ProducerRecord_get_key(ProducerRecordObject* self, void* closure) {
@@ -320,1083 +299,1194 @@ static PyTypeObject ConsumerGroupMetadataType = {
     .tp_repr = (reprfunc)ConsumerGroupMetadata_repr,
 };
 
-// Linked list node for tracking pending batches
-typedef struct BatchNode {
-    int count;
-    ProducerRecordObject* producer_records[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
-    PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_KafkaFuture_RecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_Error_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
-    struct BatchNode* next_batch;
-} BatchNode;
+// ===========================================================================
+// Producer -- marshaling-only bridge to the Rust producer FFI.
+//
+// The C layer runs NO background threads of its own (plan decision D8). The
+// sync producer calls the blocking entry points (`send_with_callback`, `flush`,
+// `close`, the transaction-control ops) directly with the GIL released; the
+// asyncio producer drives their `_cb` twins. Delivery completions and `_cb`
+// completions are QUEUED by Rust on the producer's callback vector and only
+// run when this extension calls `kafka_producer_Producer_execute_callbacks`
+// (Producer_poll / Producer_execute_callbacks), i.e. on the calling thread --
+// `poll(timeout)` / `flush()` / `close()` for the sync producer, the event loop
+// for the asyncio one.
+//
+// The hook installed with `kafka_producer_Producer_set_callbacks_notify` fires
+// from a Rust task once per empty->non-empty transition of that vector. It
+// only signals: it sets `notified` under `mtx` and broadcasts `cnd` (what the
+// sync `poll(timeout)` waits on) and, for the asyncio producer, invokes a
+// Python callable that does nothing but `loop.call_soon_threadsafe(pump)`. It
+// never calls back into the C API.
+//
+// Ownership conventions (CLAUDE.md §4): `kafka_common_Error_t *` returns are
+// owned (NULL = success); a `RecordMetadata_t` read from a future is BORROWED
+// from the future (fields are copied, the future is destroyed, the metadata is
+// never destroyed); `const` pointers handed to a C interface method are
+// borrowed for the duration of the call. Errors and metadata cross into Python
+// as plain tuples (`error_to_py`, `metadata_to_py`) so no handle outlives the
+// C frame that produced it.
+// ===========================================================================
 
-// Producer with background batch sending
+// Defined in the consumer section below; the producer's partitions_for reuses
+// it (the FFI returns the same kafka_common_PartitionInfo_t).
+static PyObject* partition_info_to_py(const kafka_common_PartitionInfo_t* info);
+
+// A `kafka_producer_Callback_t` implementation: Java's `Callback`. The `void
+// *self` Rust hands back is this struct; it lives until `on_completion` fired
+// (or, when the send that took it returned Err and the callback can therefore
+// never fire, until the producer is destroyed -- see producer_orphan_delivery).
+typedef struct DeliveryCtx {
+    PyObject* callable;        // Python callable(meta_tuple | None, err_tuple | None)
+    PyObject* record;          // keeps the record's key/value bytes alive
+    int orphaned;              // the send returned Err: freed at destroy, not here
+    struct DeliveryCtx* next;  // orphan-list link
+} DeliveryCtx;
+
 typedef struct {
-    PyObject *py_producer;
-    kafka_producer_Producer_t *producer;
-    int closed;
-    int send_completed;
-    BatchNode *next_batches_to_send;
-    BatchNode *last_accumulating_batch;
-    BatchNode* next_pending_batch;
-    BatchNode* last_pending_batch;
-    cnd_t record_batches_new_record_cnd;
-    mtx_t record_batches_mutex;
-    cnd_t pending_batches_available_cnd;
-    mtx_t pending_batches_mutex;
-    thrd_t send_thread;
-    thrd_t poll_futures_thread;
-    // Backpressure: records accumulated but not yet taken by the send task,
-    // and the "space available" callbacks waiting for the next take. Both are
-    // guarded by record_batches_mutex.
-    int64_t accumulated_records;
-    PyObject** space_cbs;
-    int space_cbs_count;
-    int space_cbs_capacity;
-    // Test-only: when set, the send task stops draining accumulated batches so
-    // backpressure can be exercised deterministically (the mock otherwise
-    // accepts instantly and never fills). Always 0 in production.
-    int test_paused;
+    int is_mock;
+    kafka_producer_KafkaProducer_t* kp;         // owned class handle (real producer)
+    kafka_producer_MockProducer_t* mp;          // owned class handle (mock)
+    const kafka_producer_Producer_t* producer;  // borrowed __as_Producer view of the above
+    mtx_t mtx;
+    cnd_t cnd;
+    int notified;              // set by the notify hook, consumed by Producer_poll
+    PyObject* notify_cb;       // asyncio: scheduler callable; NULL for the sync producer
+    DeliveryCtx* orphans;      // delivery contexts whose send returned Err (GIL-guarded)
 } Producer;
 
+static inline Producer* producer_from_handle(unsigned long long ptr) {
+    return (Producer*)(uintptr_t)ptr;
+}
 
-static void Producer_complete_callback(PyObject* cb,
-    ProducerRecordObject *record_obj,
-    kafka_producer_RecordMetadata_t *metadata,
-    kafka_common_Error_t *error) {
-    // Pass raw pointers as Python ints — the Python wrapper
-    // calls accessor/destroy functions on them.
-    PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
-    PyObject *error_long  = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)error);
-    PyObject* result = PyObject_CallFunctionObjArgs(cb,
-        result_long, error_long, NULL);
-    Py_DECREF(cb);
-    Py_DECREF(result_long);
-    Py_DECREF(error_long);
-    if (result) {
-        Py_DECREF(result);
+// ---- error / metadata -> Python tuples -------------------------------------
+
+// Mirrors KafkaError._from_c field for field, from a BORROWED error:
+// (code, message | None, is_retriable, is_fatal, txn_requires_abort).
+// `error_is_fatal` (defined with the KafkaError accessors below) composes
+// RequestUtils.isFatalException from the exported predicates.
+static int error_is_fatal(const kafka_common_Error_t* e);
+
+static PyObject* error_to_py(const kafka_common_Error_t* e) {
+    const char* msg = kafka_common_Error_message(e);
+    PyObject* py_msg = msg ? PyUnicode_FromString(msg) : (Py_INCREF(Py_None), Py_None);
+    if (py_msg == NULL) return NULL;
+    return Py_BuildValue("(iNOOO)",
+                         (int)kafka_common_Error_code(e),
+                         py_msg,
+                         kafka_common_Error_is_retriable_error(e) ? Py_True : Py_False,
+                         error_is_fatal(e) ? Py_True : Py_False,
+                         kafka_common_Error_is_transaction_abortable_error(e) ? Py_True : Py_False);
+}
+
+// Same, consuming an OWNED error.
+static PyObject* owned_error_to_py(kafka_common_Error_t* e) {
+    PyObject* out = error_to_py(e);
+    kafka_common_Error_destroy(e);
+    return out;
+}
+
+// (topic, partition, offset, timestamp, serialized_key_size,
+// serialized_value_size) from a BORROWED RecordMetadata; `offset` /
+// `timestamp` are -1 when Java's hasOffset() / hasTimestamp() is false.
+static PyObject* metadata_to_py(const kafka_producer_RecordMetadata_t* m) {
+    const char* topic = kafka_producer_RecordMetadata_topic(m);
+    long long offset = kafka_producer_RecordMetadata_has_offset(m)
+        ? (long long)kafka_producer_RecordMetadata_offset(m) : -1LL;
+    long long timestamp = kafka_producer_RecordMetadata_has_timestamp(m)
+        ? (long long)kafka_producer_RecordMetadata_timestamp(m) : -1LL;
+    return Py_BuildValue("(siLLii)",
+                         topic ? topic : "",
+                         (int)kafka_producer_RecordMetadata_partition(m),
+                         offset, timestamp,
+                         (int)kafka_producer_RecordMetadata_serialized_key_size(m),
+                         (int)kafka_producer_RecordMetadata_serialized_value_size(m));
+}
+
+// Returns a new reference to a (value, error) pair where `value` is a borrowed
+// reference and the error is an owned handle (NULL = None).
+static PyObject* build_value_error(PyObject* value, kafka_common_Error_t* err) {
+    PyObject* py_err = err ? owned_error_to_py(err) : (Py_INCREF(Py_None), Py_None);
+    if (py_err == NULL) return NULL;
+    return Py_BuildValue("(ON)", value, py_err);
+}
+
+// ---- delivery callback (kafka_producer_Callback_t) -------------------------
+
+static DeliveryCtx* delivery_ctx_new(PyObject* callable, PyObject* record) {
+    DeliveryCtx* ctx = (DeliveryCtx*)PyMem_Malloc(sizeof(DeliveryCtx));
+    if (ctx == NULL) { PyErr_NoMemory(); return NULL; }
+    Py_INCREF(callable);
+    Py_XINCREF(record);
+    ctx->callable = callable;
+    ctx->record = record;
+    ctx->orphaned = 0;
+    ctx->next = NULL;
+    return ctx;
+}
+
+static void delivery_ctx_free(DeliveryCtx* ctx) {
+    Py_DECREF(ctx->callable);
+    Py_XDECREF(ctx->record);
+    PyMem_Free(ctx);
+}
+
+// A send that returned Err does not fire the delivery callback (the Rust
+// producer only fires it from a registered record, which an Err means there is
+// not -- `KafkaProducer.doSend`'s rethrow paths drop the callback). The one
+// exception is a record that WAS appended before a non-API error surfaced,
+// whose future still carries the callback. Rather than reason about that edge
+// from C, an Err'd context is parked here and freed at destroy, after
+// `_destroy` ran every still-pending callback: a late `on_completion` finds
+// the context alive, a never-firing one is reclaimed with the producer.
+static void producer_orphan_delivery(Producer* p, DeliveryCtx* ctx) {
+    ctx->orphaned = 1;
+    ctx->next = p->orphans;
+    p->orphans = ctx;
+}
+
+// Runs inside kafka_producer_Producer_execute_callbacks, i.e. on the thread
+// that called Producer_poll / Producer_execute_callbacks / Producer_destroy,
+// with the GIL released by that wrapper. Both arguments are BORROWED; exactly
+// one is non-NULL except for a pre-accumulator rejection, which delivers the
+// placeholder metadata (offset/partition -1) beside the error, as Java's
+// `callback.onCompletion(nullMetadata, e)`.
+static void producer_on_completion(void* self_,
+                                   const kafka_producer_RecordMetadata_t* metadata,
+                                   const kafka_common_Error_t* error) {
+    DeliveryCtx* ctx = (DeliveryCtx*)self_;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* meta = metadata ? metadata_to_py(metadata) : (Py_INCREF(Py_None), Py_None);
+    PyObject* err = error ? error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+    if (meta != NULL && err != NULL) {
+        PyObject* r = PyObject_CallFunctionObjArgs(ctx->callable, meta, err, NULL);
+        if (r == NULL) PyErr_WriteUnraisable(ctx->callable); else Py_DECREF(r);
     } else {
-        PyErr_Print();
+        PyErr_WriteUnraisable(ctx->callable);
     }
-    Py_DECREF(record_obj);
+    Py_XDECREF(meta);
+    Py_XDECREF(err);
+    if (!ctx->orphaned) delivery_ctx_free(ctx);
+    PyGILState_Release(g);
 }
 
-static void Producer_complete_callbacks(
-    PyObject **complete_cbs,
-    ProducerRecordObject **result_objs,
-    kafka_common_KafkaFuture_RecordMetadata_t **futures,
-    int count) {
-    // Phase 1: Block on all futures at once WITHOUT the GIL.
-    // Uses a single tokio runtime for the entire batch.
-    kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_Error_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_KafkaFuture_RecordMetadata_get_all(
-        futures, count, metadata_ptrs, error_ptrs);
-    kafka_common_KafkaFuture_RecordMetadata_destroy_all(futures, count);
+// ---- notify hook -----------------------------------------------------------
 
-    // Phase 2: Acquire GIL and dispatch Python callbacks.
-    // Ownership of metadata/error handles transfers to the callback.
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    for (int i = 0; i < count; i++) {
-        Producer_complete_callback(complete_cbs[i], result_objs[i],
-                                   metadata_ptrs[i], error_ptrs[i]);
+// Fired by Rust once each time the callback vector goes from empty to
+// non-empty, from a Rust task (or from the calling thread when a blocking call
+// completes a record synchronously -- the mock with auto_complete). It only
+// signals. `notify_cb` is read without the GIL: it is set once before any send
+// can queue a completion and released only after the class handle is destroyed
+// (no hook can fire past that point), so the pointer is stable here.
+static void producer_callbacks_notify(void* opaque) {
+    Producer* p = (Producer*)opaque;
+    mtx_lock(&p->mtx);
+    p->notified = 1;
+    cnd_broadcast(&p->cnd);
+    mtx_unlock(&p->mtx);
+    if (p->notify_cb != NULL) {
+        // asyncio: schedule the pump on the loop. PyGILState_Ensure is a no-op
+        // when this thread already holds the GIL and re-acquires it when it is
+        // the calling thread inside Py_BEGIN_ALLOW_THREADS.
+        PyGILState_STATE g = PyGILState_Ensure();
+        PyObject* r = PyObject_CallNoArgs(p->notify_cb);
+        if (r == NULL) PyErr_WriteUnraisable(p->notify_cb); else Py_DECREF(r);
+        PyGILState_Release(g);
     }
-    PyGILState_Release(gstate);
 }
 
+// ---- construction / destruction --------------------------------------------
 
-// Invoke each pending "space available" callback (resolving the Python-side
-// space Future) and release the array. The caller must have detached the array
-// from the producer under record_batches_mutex first, so this runs without that
-// lock held. Acquires the GIL to call into Python.
-static void Producer_fire_and_free_space_cbs(PyObject** cbs, int count) {
-    if (cbs == NULL) {
-        return;
+static Producer* producer_alloc(PyObject* notify_cb) {
+    Producer* p = (Producer*)PyMem_Malloc(sizeof(Producer));
+    if (p == NULL) { PyErr_NoMemory(); return NULL; }
+    memset(p, 0, sizeof(*p));
+    mtx_init(&p->mtx, mtx_plain);
+    cnd_init(&p->cnd);
+    if (notify_cb != NULL && notify_cb != Py_None) {
+        Py_INCREF(notify_cb);
+        p->notify_cb = notify_cb;
     }
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    for (int i = 0; i < count; i++) {
-        PyObject* result = PyObject_CallFunctionObjArgs(cbs[i], NULL);
-        if (result) {
-            Py_DECREF(result);
-        } else {
-            PyErr_Print();
-        }
-        Py_DECREF(cbs[i]);
-    }
-    PyGILState_Release(gstate);
-    PyMem_RawFree(cbs);
+    return p;
 }
 
-// Detach the pending space-callback array under record_batches_mutex. Returns
-// the array (caller owns it) via out params and resets the producer's fields.
-// The mutex MUST be held by the caller.
-static void Producer_take_space_cbs_locked(Producer* producer,
-    PyObject*** out_cbs, int* out_count) {
-    *out_cbs = producer->space_cbs;
-    *out_count = producer->space_cbs_count;
-    producer->space_cbs = NULL;
-    producer->space_cbs_count = 0;
-    producer->space_cbs_capacity = 0;
-}
-
-static int Producer_poll_futures_thread(void* arg) {
-    Producer* producer = (Producer*)arg;
-
-    BatchNode* current_pending_batch = NULL;
-    while (!producer->send_completed || current_pending_batch != NULL)
-    {
-        BatchNode* batch_to_free = NULL;
-        if (current_pending_batch != NULL) {
-            Producer_complete_callbacks(
-                &current_pending_batch->complete_cbs[0],
-                &current_pending_batch->producer_records[0],
-                &current_pending_batch->futures[0],
-                current_pending_batch->count
-            );
-            batch_to_free = current_pending_batch;
-        }
-
-        mtx_lock(&producer->pending_batches_mutex);
-        if (current_pending_batch != NULL) {
-            if (current_pending_batch == producer->last_pending_batch)
-                producer->last_pending_batch = NULL;
-            producer->next_pending_batch = current_pending_batch->next_batch;
-        }
-        
-        while (producer->next_pending_batch == NULL && !producer->send_completed) {
-            cnd_wait(&producer->pending_batches_available_cnd,
-                     &producer->pending_batches_mutex);
-        }
-        current_pending_batch = producer->next_pending_batch;
-        mtx_unlock(&producer->pending_batches_mutex);
-        PyMem_RawFree(batch_to_free);
-    }
-
-    return thrd_success;
-}
-
-static int64_t current_time_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
-}
-
-
-static int Producer_send_thread(void* arg) {
-    Producer* producer = (Producer*)arg;
-
-    thrd_create(&producer->poll_futures_thread,
-        Producer_poll_futures_thread, producer);
-
-    while (!producer->closed) {
-        int64_t timeout, now;
-        BatchNode *batch_node, *head_batch_node = NULL, *tail_batch_node = NULL;
-
-        mtx_lock(&producer->record_batches_mutex);
-        now = current_time_ns();
-        timeout = now + 10000000; // 10ms
-        while ((
-            producer->next_batches_to_send == NULL
-            || producer->next_batches_to_send->count < PRODUCER_RECORD_SLOT_THRESHOLD
-        ) && timeout > now && !producer->closed) {
-            struct timespec ts;
-
-            timespec_get(&ts, TIME_UTC);
-            ts.tv_nsec += timeout + 1000 - now;
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec += 1;
-                ts.tv_nsec -= 1000000000;
-            }
-            cnd_timedwait(&producer->record_batches_new_record_cnd,
-                          &producer->record_batches_mutex, &ts);
-            now = current_time_ns();
-        }
-
-        // Test-only: while paused, do not drain — let accumulation build so
-        // backpressure (py_Producer_on_space_available) can be tested.
-        if (producer->test_paused) {
-            mtx_unlock(&producer->record_batches_mutex);
-            struct timespec pause_ts = {0, 5000000};  // 5ms
-            thrd_sleep(&pause_ts, NULL);
-            continue;
-        }
-
-        if (producer->next_batches_to_send == NULL) {
-            mtx_unlock(&producer->record_batches_mutex);
-            continue;
-        }
-
-        head_batch_node = producer->next_batches_to_send;
-        tail_batch_node = producer->last_accumulating_batch;
-        producer->next_batches_to_send = NULL;
-        producer->last_accumulating_batch = NULL;
-        // Accumulation has been taken: capacity is free again. Reset the
-        // backpressure counter and wake any senders waiting for space.
-        producer->accumulated_records = 0;
-        PyObject** space_cbs;
-        int space_cbs_count;
-        Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
-        mtx_unlock(&producer->record_batches_mutex);
-
-        Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
-
-        batch_node = head_batch_node;
-
-        while (batch_node != NULL) {
-            // Build a flat array of records for send_batch
-            kafka_producer_ProducerRecord_t flat_records[PRODUCER_RECORD_SLOT_CAPACITY];
-            for (int i = 0; i < batch_node->count; i++) {
-                flat_records[i] = *batch_node->producer_structs[i];
-            }
-
-            memset(batch_node->futures, 0, sizeof(batch_node->futures[0]) * batch_node->count);
-            memset(batch_node->batch_errors, 0, sizeof(batch_node->batch_errors[0]) * batch_node->count);
-
-            kafka_producer_Producer_send_batch(
-                producer->producer,
-                flat_records,
-                batch_node->count,
-                batch_node->futures,
-                batch_node->batch_errors);
-
-            // Handle immediate errors from send_batch
-            int errors_found = 0;
-            {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                for (int i = 0; i < batch_node->count; i++) {
-                    if (batch_node->batch_errors[i] != NULL) {
-                        if (batch_node->futures[i] != NULL) {
-                            kafka_common_KafkaFuture_RecordMetadata_destroy(batch_node->futures[i]);
-                            batch_node->futures[i] = NULL;
-                        }
-                        // Pass error pointer to callback; ownership transfers
-                        Producer_complete_callback(batch_node->complete_cbs[i],
-                            batch_node->producer_records[i],
-                            NULL, batch_node->batch_errors[i]);
-                        batch_node->batch_errors[i] = NULL;
-                        errors_found++;
-                    } else if (errors_found > 0) {
-                        batch_node->complete_cbs[i - errors_found] = batch_node->complete_cbs[i];
-                        batch_node->producer_records[i - errors_found] = batch_node->producer_records[i];
-                        batch_node->producer_structs[i - errors_found] = batch_node->producer_structs[i];
-                        batch_node->futures[i - errors_found] = batch_node->futures[i];
-                    }
-                }
-                batch_node->count -= errors_found;
-                PyGILState_Release(gstate);
-            }
-
-            batch_node = batch_node->next_batch;
-        }
-        mtx_lock(&producer->pending_batches_mutex);
-        if (producer->last_pending_batch) {
-            producer->last_pending_batch->next_batch = head_batch_node;
-            producer->last_pending_batch = tail_batch_node;
-        } else {
-            producer->next_pending_batch = head_batch_node;
-            producer->last_pending_batch = tail_batch_node;
-        }
-        cnd_signal(&producer->pending_batches_available_cnd);
-        mtx_unlock(&producer->pending_batches_mutex);
-    }
-    mtx_lock(&producer->pending_batches_mutex);
-    producer->send_completed = 1;
-    cnd_signal(&producer->pending_batches_available_cnd);
-    mtx_unlock(&producer->pending_batches_mutex);
-    // Flush so every in-flight record resolves before we join the poll-futures
-    // task. Without this the poll task can block forever in
-    // KafkaFuture_RecordMetadata_get_all on a record that never completes on its own
-    // (e.g. a MockProducer with auto_complete disabled), deadlocking the join
-    // below. Java's flush() likewise completes outstanding records. We hold no
-    // GIL here (background C task), so the blocking flush does not stall the
-    // event loop.
-    kafka_producer_Producer_flush(producer->producer, NULL);
-    thrd_join(producer->poll_futures_thread, NULL);
-
-    return thrd_success;
-}
-
-// Batching Producer functions
-static PyObject* py_Producer_new(PyObject* self, PyObject* args) {
+// MockProducer_new(auto_complete: bool, notify_cb: callable | None) -> handle
+static PyObject* py_MockProducer_new(PyObject* self, PyObject* args) {
     int auto_complete;
-    PyObject *producer_obj;
-    Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
-    if (!producer) {
-        return PyErr_NoMemory();
-    }
-
-    if (!PyArg_ParseTuple(args, "pO", &auto_complete, &producer_obj)) {
-        PyMem_Free(producer);
-        return NULL;
-    }
-
-    memset(producer, 0, sizeof(Producer));
-    producer->closed = 0;
-
-    mtx_init(&producer->record_batches_mutex, mtx_plain);
-    cnd_init(&producer->record_batches_new_record_cnd);
-
-    mtx_init(&producer->pending_batches_mutex, mtx_plain);
-    cnd_init(&producer->pending_batches_available_cnd);
-    producer->next_batches_to_send = NULL;
-    producer->last_accumulating_batch = NULL;
-    producer->next_pending_batch = NULL;
-    producer->last_pending_batch = NULL;
-    producer->py_producer = producer_obj;
-    Py_INCREF(producer->py_producer);
-
-    producer->producer = kafka_producer_MockProducer_new(auto_complete ? true : false);
-    if (producer->producer == NULL) {
-        Py_DECREF(producer->py_producer);
-        PyMem_Free(producer);
-        PyErr_SetString(PyExc_RuntimeError, "Failed to create MockProducer");
-        return NULL;
-    }
-
-    thrd_create(&producer->send_thread, Producer_send_thread, producer);
-
-    return PyLong_FromVoidPtr(producer);
+    PyObject* notify_cb = Py_None;
+    if (!PyArg_ParseTuple(args, "p|O", &auto_complete, &notify_cb)) return NULL;
+    Producer* p = producer_alloc(notify_cb);
+    if (p == NULL) return NULL;
+    p->is_mock = 1;
+    p->mp = kafka_producer_MockProducer_with_auto_complete((int8_t)(auto_complete ? 1 : 0));
+    p->producer = kafka_producer_MockProducer__as_Producer(p->mp);
+    kafka_producer_Producer_set_callbacks_notify(p->producer, producer_callbacks_notify, p);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)p);
 }
 
+// KafkaProducer_new(config: dict[str, str], notify_cb: callable | None) -> handle
+// Raises RuntimeError with the Rust error's message when the config is
+// rejected (the pre-existing contract of KafkaProducer({...bad config...})).
 static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
-    PyObject *config_dict;
-    PyObject *producer_obj;
-
-    if (!PyArg_ParseTuple(args, "OO", &config_dict, &producer_obj)) {
-        return NULL;
-    }
-
+    PyObject* config_dict;
+    PyObject* notify_cb = Py_None;
+    if (!PyArg_ParseTuple(args, "O|O", &config_dict, &notify_cb)) return NULL;
     if (!PyDict_Check(config_dict)) {
         PyErr_SetString(PyExc_TypeError, "config must be a dict");
         return NULL;
     }
 
-    kafka_producer_ProducerProperties_t *props =
-        kafka_producer_ProducerProperties_new();
-    if (props == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to create ProducerProperties");
-        return NULL;
-    }
-
+    // A C-built kafka_Map_t holds BORROWED char* -> char*: the strings stay
+    // owned by the dict's str objects, which outlive this call.
+    kafka_Map_t* props = kafka_Map_new();
     PyObject *key, *value;
     Py_ssize_t pos = 0;
     while (PyDict_Next(config_dict, &pos, &key, &value)) {
-        const char *k = PyUnicode_AsUTF8(key);
-        const char *v = PyUnicode_AsUTF8(value);
+        const char* k = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : NULL;
+        const char* v = PyUnicode_Check(value) ? PyUnicode_AsUTF8(value) : NULL;
         if (k == NULL || v == NULL) {
-            kafka_producer_ProducerProperties_destroy(props);
-            PyErr_SetString(PyExc_TypeError, "config keys and values must be strings");
+            kafka_Map_destroy(props);
+            if (!PyErr_Occurred())
+                PyErr_SetString(PyExc_TypeError, "config keys and values must be strings");
             return NULL;
         }
-        kafka_producer_ProducerProperties_put(props, k, v);
+        kafka_Map_put(props, (void*)k, (void*)v);
     }
 
-    kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_t *kafka_producer =
-        kafka_producer_KafkaProducer_new(props, &err);
-    kafka_producer_ProducerProperties_destroy(props);
-
-    if (kafka_producer == NULL) {
-        if (err != NULL) {
-            const char *msg = kafka_common_Error_message(err);
-            PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaProducer");
-            kafka_common_Error_destroy(err);
-        } else {
-            PyErr_SetString(PyExc_RuntimeError, "Failed to create KafkaProducer");
-        }
+    kafka_producer_ProducerConfig_t* config = NULL;
+    kafka_common_Error_t* err = kafka_producer_ProducerConfig_new(props, &config);
+    kafka_Map_destroy(props);
+    kafka_producer_KafkaProducer_t* kp = NULL;
+    if (err == NULL) {
+        // NULL serializers: key and value cross as kafka_Bytes_t *.
+        Py_BEGIN_ALLOW_THREADS
+        err = kafka_producer_KafkaProducer_new(config, NULL, NULL, &kp);
+        Py_END_ALLOW_THREADS
+        kafka_producer_ProducerConfig_destroy(config);
+    }
+    if (err != NULL) {
+        const char* msg = kafka_common_Error_message(err);
+        PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaProducer");
+        kafka_common_Error_destroy(err);
         return NULL;
     }
 
-    Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
-    if (!producer) {
-        kafka_producer_Producer_close(kafka_producer, NULL);
-        kafka_producer_Producer_destroy(kafka_producer);
-        return PyErr_NoMemory();
+    Producer* p = producer_alloc(notify_cb);
+    if (p == NULL) {
+        kafka_producer_KafkaProducer_destroy(kp);
+        return NULL;
     }
-
-    memset(producer, 0, sizeof(Producer));
-    producer->closed = 0;
-
-    mtx_init(&producer->record_batches_mutex, mtx_plain);
-    cnd_init(&producer->record_batches_new_record_cnd);
-
-    mtx_init(&producer->pending_batches_mutex, mtx_plain);
-    cnd_init(&producer->pending_batches_available_cnd);
-    producer->next_batches_to_send = NULL;
-    producer->last_accumulating_batch = NULL;
-    producer->next_pending_batch = NULL;
-    producer->last_pending_batch = NULL;
-    producer->py_producer = producer_obj;
-    Py_INCREF(producer->py_producer);
-
-    producer->producer = kafka_producer;
-
-    thrd_create(&producer->send_thread, Producer_send_thread, producer);
-
-    return PyLong_FromVoidPtr(producer);
+    p->kp = kp;
+    p->producer = kafka_producer_KafkaProducer__as_Producer(kp);
+    kafka_producer_Producer_set_callbacks_notify(p->producer, producer_callbacks_notify, p);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)p);
 }
 
-static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject *record_obj, *complete_cb;
-
-    if (!PyArg_ParseTuple(args, "KOO", &producer_ptr, &record_obj, &complete_cb)) {
-        return NULL;
-    }
-
-    if (!PyObject_TypeCheck(record_obj, &ProducerRecordType)) {
-        PyErr_SetString(PyExc_TypeError, "Record must be a ProducerRecord object");
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-
-    if (producer->closed) {
-        PyErr_SetString(PyExc_RuntimeError, "Producer is closed");
-        return NULL;
-    }
-
-    ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
-
-    // Increment refcounts while we still hold the GIL
-    Py_INCREF(record);
-    Py_INCREF(complete_cb);
-
-    int full = 0;
+// Producer_close(handle) -> err_tuple | None. Java close(): blocks until the
+// in-flight records are delivered. Does not free anything.
+static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
-    if (!producer->last_accumulating_batch || producer->last_accumulating_batch->count == PRODUCER_RECORD_SLOT_CAPACITY) {
-        BatchNode* new_batch = (BatchNode*)PyMem_RawMalloc(sizeof(BatchNode));
-        new_batch->count = 0;
-        new_batch->next_batch = NULL;
-        if (producer->last_accumulating_batch) {
-            producer->last_accumulating_batch->next_batch = new_batch;
-            producer->last_accumulating_batch = new_batch;
-        } else {
-            producer->next_batches_to_send = new_batch;
-            producer->last_accumulating_batch = new_batch;
-        }
-    }
-
-    producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
-    producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
-    producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
-    producer->last_accumulating_batch->count++;
-    producer->accumulated_records++;
-
-    if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
-        cnd_signal(&producer->record_batches_new_record_cnd);
-    }
-    // Report whether the producer is now over the backpressure bound, so the
-    // caller can wait for space (see py_Producer_on_space_available).
-    full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
-    mtx_unlock(&producer->record_batches_mutex);
+    err = kafka_producer_Producer_close(p->producer);
     Py_END_ALLOW_THREADS
-    return PyBool_FromLong(full ? 1 : 0);
+    if (err == NULL) Py_RETURN_NONE;
+    return owned_error_to_py(err);
 }
 
-// Register a "space available" callback to be invoked when the send task next
-// drains accumulated batches (freeing capacity). Returns True if space is
-// already available (the caller need not wait), False if `space_cb` was
-// registered and will be called later. The check-and-register is done under
-// record_batches_mutex — the same lock the send task holds when it takes
-// batches — so there is no lost-wakeup window. Called by the Python `send`
-// only after `Producer_send` reported the producer full.
-static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* space_cb;
-
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &space_cb)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-
-    int available = 0;
-    Py_INCREF(space_cb);
+// Producer_destroy(handle): frees the class handle (which stops the submission
+// task, waits for the `_cb` tasks and runs every still-pending callback exactly
+// once -- on this thread) and then the C struct. Call Producer_close first for
+// a graceful close.
+static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
     Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
-    if (producer->closed
-        || producer->accumulated_records < PRODUCER_MAX_ACCUMULATED_RECORDS) {
-        // Space already freed (or producer closing): don't make the caller wait.
-        available = 1;
-    } else {
-        if (producer->space_cbs_count == producer->space_cbs_capacity) {
-            int new_capacity = producer->space_cbs_capacity
-                ? producer->space_cbs_capacity * 2 : 8;
-            producer->space_cbs = (PyObject**)PyMem_RawRealloc(
-                producer->space_cbs, new_capacity * sizeof(PyObject*));
-            producer->space_cbs_capacity = new_capacity;
-        }
-        producer->space_cbs[producer->space_cbs_count++] = space_cb;
-    }
-    mtx_unlock(&producer->record_batches_mutex);
+    if (p->is_mock) kafka_producer_MockProducer_destroy(p->mp);
+    else kafka_producer_KafkaProducer_destroy(p->kp);
     Py_END_ALLOW_THREADS
-
-    if (available) {
-        Py_DECREF(space_cb);  // not stored
-        Py_RETURN_TRUE;
+    // No callback can fire past this point: reclaim the Err'd contexts.
+    while (p->orphans != NULL) {
+        DeliveryCtx* next = p->orphans->next;
+        delivery_ctx_free(p->orphans);
+        p->orphans = next;
     }
-    Py_RETURN_FALSE;
-}
-
-// Test-only: pause/resume the send task's draining so backpressure can be
-// exercised deterministically (the mock accepts instantly and would never
-// fill the buffer otherwise). Not part of the public API.
-static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    int paused;
-
-    if (!PyArg_ParseTuple(args, "Kp", &producer_ptr, &paused)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-    mtx_lock(&producer->record_batches_mutex);
-    producer->test_paused = paused ? 1 : 0;
-    cnd_signal(&producer->record_batches_new_record_cnd);
-    mtx_unlock(&producer->record_batches_mutex);
+    Py_XDECREF(p->notify_cb);
+    mtx_destroy(&p->mtx);
+    cnd_destroy(&p->cnd);
+    PyMem_Free(p);
     Py_RETURN_NONE;
 }
 
-// ---- async producer op trampolines -----------------------------------------
-// These sit here so they precede the producer wrappers that reference them
-// (fire_handle_cb / consumer_op_trampoline live later in the file, after the
-// consumer section, so we can't reuse them from the producer wrappers above).
+// ---- callback pump ---------------------------------------------------------
 
-// cb(error_int): void-returning producer async op (flush, close). Mirrors the
-// consumer's consumer_op_trampoline.
-static void producer_op_trampoline(kafka_common_Error_t* error, void* user_data) {
-    PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(cb, "K", (unsigned long long)(uintptr_t)error);
-    if (r) Py_DECREF(r); else PyErr_Print();
-    Py_DECREF(cb);
-    PyGILState_Release(g);
+// Producer_execute_callbacks(handle) -> int: runs the queued callbacks on this
+// thread (with the GIL released around the drain; each callback re-acquires
+// it) and returns how many ran.
+static PyObject* py_Producer_execute_callbacks(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    int32_t n;
+    Py_BEGIN_ALLOW_THREADS
+    n = kafka_producer_Producer_execute_callbacks(p->producer);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromLong((long)n);
 }
 
-// cb(list_int, error_int): producer partitions_for async. The list handle is a
-// kafka_common_PartitionInfoList_t (shared with the consumer FFI) that Python
-// drains via PartitionInfoList_drain.
-static void producer_partitions_for_trampoline(kafka_common_PartitionInfoList_t* list,
-                                               kafka_common_Error_t* error, void* user_data) {
-    PyObject* cb = (PyObject*)user_data;
-    PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(cb, "KK",
-        (unsigned long long)(uintptr_t)list,
-        (unsigned long long)(uintptr_t)error);
-    if (r) Py_DECREF(r); else PyErr_Print();
-    Py_DECREF(cb);
-    PyGILState_Release(g);
-}
-
-// Close is split into three Python-visible steps so the Rust-side close can be
-// awaited/interrupted from Python exactly like flush, instead of blocking in a
-// C-level wait:
-//   1. Producer_shutdown   — stop + join the C batching threads (blocking C
-//                            join; GIL released), fire pending space waiters,
-//                            tear down the C mutexes/cnds, drop the py_producer
-//                            self-reference. Does NOT touch the Rust producer.
-//   2. Producer_close_async — drive kafka_producer_Producer_close_async; the
-//                            Python wrapper waits on it via _run_sync /
-//                            _run_async (interruptible), like flush.
-//   3. Producer_destroy    — free the Rust producer handle and the C struct.
-// The Python Producer.close() / AsyncProducer.close() orchestrate the three in
-// order (idempotency is guarded Python-side by self.closed).
-
-static PyObject* py_Producer_shutdown(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
+// Producer_poll(handle, timeout_ms) -> int: the sync producer's pump. Runs the
+// queued callbacks; when none were queued and timeout_ms != 0, waits on the
+// notify condition (up to timeout_ms, forever when negative) and drains again.
+// `notified` is cleared BEFORE the first drain so a notification that races
+// the drain is not lost, and a notification already consumed by the drain
+// costs at most one spurious early return.
+static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    long long timeout_ms;
+    if (!PyArg_ParseTuple(args, "KL", &ptr, &timeout_ms)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    int32_t n;
+    Py_BEGIN_ALLOW_THREADS
+    mtx_lock(&p->mtx);
+    p->notified = 0;
+    mtx_unlock(&p->mtx);
+    n = kafka_producer_Producer_execute_callbacks(p->producer);
+    if (n == 0 && timeout_ms != 0) {
+        mtx_lock(&p->mtx);
+        if (timeout_ms < 0) {
+            while (!p->notified) cnd_wait(&p->cnd, &p->mtx);
+        } else {
+            struct timespec ts;
+            timespec_get(&ts, TIME_UTC);
+            ts.tv_sec += (time_t)(timeout_ms / 1000);
+            ts.tv_nsec += (long)((timeout_ms % 1000) * 1000000LL);
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+            while (!p->notified) {
+                if (cnd_timedwait(&p->cnd, &p->mtx, &ts) == thrd_timedout) break;
+            }
+        }
+        p->notified = 0;
+        mtx_unlock(&p->mtx);
+        n = kafka_producer_Producer_execute_callbacks(p->producer);
     }
-    Producer* producer = (Producer*)producer_ptr;
+    Py_END_ALLOW_THREADS
+    return PyLong_FromLong((long)n);
+}
 
-    if (producer->closed) {
+// ---- KafkaFuture<RecordMetadata> wrapper -----------------------------------
+//
+// The owned kafka_common_KafkaFuture_t a blocking send returns. `get()`
+// blocks with the GIL released (driving the client runtime), copies the
+// BORROWED RecordMetadata's fields out and never destroys the metadata; the
+// future handle is destroyed in tp_dealloc.
+
+typedef struct {
+    PyObject_HEAD
+    kafka_common_KafkaFuture_t* handle;
+} KafkaFutureObject;
+
+static void KafkaFuture_dealloc(KafkaFutureObject* self) {
+    if (self->handle != NULL) {
+        kafka_common_KafkaFuture_destroy(self->handle);
+        self->handle = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle);
+
+// get(timeout_ms=None) -> (meta_tuple | None, err_tuple | None), or None when
+// the wait timed out (Java's java.util.concurrent.TimeoutException, i.e.
+// kafka_common_Error_is_local_timeout_error on a future that is not done).
+static PyObject* KafkaFuture_get(KafkaFutureObject* self, PyObject* args) {
+    PyObject* timeout_obj = Py_None;
+    if (!PyArg_ParseTuple(args, "|O", &timeout_obj)) return NULL;
+    long long timeout_ms = 0;
+    if (timeout_obj != Py_None) {
+        timeout_ms = PyLong_AsLongLong(timeout_obj);
+        if (timeout_ms == -1 && PyErr_Occurred()) return NULL;
+        if (timeout_ms < 0) timeout_ms = 0;
+    }
+    void* out = NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    if (timeout_obj == Py_None) {
+        err = kafka_common_KafkaFuture_get(self->handle, &out);
+    } else {
+        err = kafka_common_KafkaFuture_get_with_timeout(self->handle, (int64_t)timeout_ms, &out);
+    }
+    Py_END_ALLOW_THREADS
+    if (err != NULL) {
+        if (kafka_common_Error_is_local_timeout_error(err) &&
+            !kafka_common_KafkaFuture_is_done(self->handle)) {
+            kafka_common_Error_destroy(err);
+            Py_RETURN_NONE;
+        }
+        return build_value_error(Py_None, err);
+    }
+    PyObject* meta = metadata_to_py((const kafka_producer_RecordMetadata_t*)out);
+    if (meta == NULL) return NULL;
+    return Py_BuildValue("(NO)", meta, Py_None);
+}
+
+static PyObject* KafkaFuture_is_done(KafkaFutureObject* self, PyObject* Py_UNUSED(ignored)) {
+    return PyBool_FromLong(kafka_common_KafkaFuture_is_done(self->handle) ? 1 : 0);
+}
+
+static PyMethodDef KafkaFuture_methods[] = {
+    {"get", (PyCFunction)KafkaFuture_get, METH_VARARGS,
+     "get(timeout_ms=None) -> (metadata_tuple | None, error_tuple | None); None on timeout"},
+    {"is_done", (PyCFunction)KafkaFuture_is_done, METH_NOARGS, "Whether the future completed"},
+    {NULL}
+};
+
+static PyTypeObject KafkaFutureType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "kafkanative.KafkaFuture",
+    .tp_doc = "Owned KafkaFuture<RecordMetadata> handle returned by a blocking send",
+    .tp_basicsize = sizeof(KafkaFutureObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)KafkaFuture_dealloc,
+    .tp_methods = KafkaFuture_methods,
+};
+
+static PyObject* KafkaFuture_wrap(kafka_common_KafkaFuture_t* handle) {
+    KafkaFutureObject* f = PyObject_New(KafkaFutureObject, &KafkaFutureType);
+    if (f == NULL) { kafka_common_KafkaFuture_destroy(handle); return NULL; }
+    f->handle = handle;
+    return (PyObject*)f;
+}
+
+// ---- ProducerRecord -> kafka_producer_ProducerRecord_t ---------------------
+
+// Builds the C record over the Python record's bytes, zero-copy: `key_b` /
+// `value_b` (caller storage) point straight into the bytes objects, so they --
+// and the Python record -- must stay alive for as long as Rust may read them:
+// the duration of a blocking send, or until the `_cb` completion fires for a
+// queued one. A None key crosses as a NULL key pointer (Java null); -1
+// partition / timestamp are the constructors' "unset".
+static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObject* rec,
+                                                             kafka_Bytes_t* key_b,
+                                                             kafka_Bytes_t* value_b,
+                                                             kafka_common_Error_t** out_err) {
+    const void* key_ptr = NULL;
+    if (rec->key != NULL && rec->key != Py_None) {
+        key_b->data = (const uint8_t*)PyBytes_AS_STRING(rec->key);
+        key_b->len = (int32_t)PyBytes_GET_SIZE(rec->key);
+        key_ptr = key_b;
+    }
+    value_b->data = (const uint8_t*)PyBytes_AS_STRING(rec->value);
+    value_b->len = (int32_t)PyBytes_GET_SIZE(rec->value);
+    kafka_producer_ProducerRecord_t* out = NULL;
+    *out_err = kafka_producer_ProducerRecord_with_partition_timestamp_key(
+        rec->topic_owned, rec->partition, rec->timestamp, key_ptr, value_b, &out);
+    return *out_err == NULL ? out : NULL;
+}
+
+// ---- send (blocking) -------------------------------------------------------
+
+// Producer_send(handle, record, on_completion | None)
+//   -> (KafkaFuture | None, err_tuple | None)
+// Blocks (GIL released) until the record is registered, as Java's send(). The
+// on_completion callable is registered as a kafka_producer_Callback_t and is
+// run by Producer_poll / Producer_execute_callbacks / Producer_destroy on the
+// calling thread, exactly once; it receives (meta_tuple | None, err_tuple | None).
+static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    PyObject* rec_obj;
+    PyObject* callable;
+    if (!PyArg_ParseTuple(args, "KO!O", &ptr, &ProducerRecordType, &rec_obj, &callable)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+
+    kafka_Bytes_t key_b = {NULL, 0}, value_b = {NULL, 0};
+    kafka_common_Error_t* err = NULL;
+    kafka_producer_ProducerRecord_t* rec =
+        producer_record_to_c((ProducerRecordObject*)rec_obj, &key_b, &value_b, &err);
+    if (rec == NULL) return build_value_error(Py_None, err);
+
+    DeliveryCtx* ctx = NULL;
+    kafka_producer_Callback_t* cb = NULL;
+    if (callable != Py_None) {
+        ctx = delivery_ctx_new(callable, rec_obj);
+        if (ctx == NULL) { kafka_producer_ProducerRecord_destroy(rec); return NULL; }
+        cb = kafka_producer_Callback_new(ctx, producer_on_completion);
+    }
+
+    kafka_common_KafkaFuture_t* fut = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_send_with_callback(p->producer, rec, cb, &fut);
+    Py_END_ALLOW_THREADS
+    // Both are read during the call only (the record was cloned, the callback
+    // registration copied into the Rust closure).
+    if (cb != NULL) kafka_producer_Callback_destroy(cb);
+    kafka_producer_ProducerRecord_destroy(rec);
+
+    if (err != NULL) {
+        if (ctx != NULL) producer_orphan_delivery(p, ctx);
+        return build_value_error(Py_None, err);
+    }
+    PyObject* py_fut = KafkaFuture_wrap(fut);
+    if (py_fut == NULL) return NULL;
+    return Py_BuildValue("(NO)", py_fut, Py_None);
+}
+
+// ---- send (queued, asyncio) ------------------------------------------------
+
+// The completion of a `send_with_callback_cb`: the record handle, its bytes
+// (key_b / value_b, pointed at by the C record's key/value void *) and the
+// Python record stay alive until `cb` fires. `delivery` is only touched when
+// the send FAILED (the Callback can then never fire) -- on success it is owned
+// by the pending on_completion, which may already have run.
+typedef struct {
+    PyObject* resolve;         // Python callable(KafkaFuture | None, err_tuple | None)
+    PyObject* record;
+    kafka_producer_ProducerRecord_t* c_record;
+    kafka_Bytes_t key_b;
+    kafka_Bytes_t value_b;
+    DeliveryCtx* delivery;     // may be NULL
+    Producer* producer;
+} SendCtx;
+
+static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Error_t* error, void* opaque) {
+    SendCtx* ctx = (SendCtx*)opaque;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* py_fut = value ? KafkaFuture_wrap(value) : (Py_INCREF(Py_None), Py_None);
+    PyObject* py_err = error ? owned_error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+    if (error != NULL && ctx->delivery != NULL) producer_orphan_delivery(ctx->producer, ctx->delivery);
+    if (py_fut != NULL && py_err != NULL) {
+        PyObject* r = PyObject_CallFunctionObjArgs(ctx->resolve, py_fut, py_err, NULL);
+        if (r == NULL) PyErr_WriteUnraisable(ctx->resolve); else Py_DECREF(r);
+    } else {
+        PyErr_WriteUnraisable(ctx->resolve);
+    }
+    Py_XDECREF(py_fut);
+    Py_XDECREF(py_err);
+    kafka_producer_ProducerRecord_destroy(ctx->c_record);
+    Py_DECREF(ctx->record);
+    Py_DECREF(ctx->resolve);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
+
+// Producer_send_cb(handle, record, on_completion | None, resolve) -> None
+// Queues the record on the producer's submission task and returns at once;
+// `resolve(KafkaFuture | None, err_tuple | None)` runs from the callback pump
+// once the record is registered (or rejected). `on_completion`, when given,
+// is registered exactly as for Producer_send.
+static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    PyObject* rec_obj;
+    PyObject* callable;
+    PyObject* resolve;
+    if (!PyArg_ParseTuple(args, "KO!OO", &ptr, &ProducerRecordType, &rec_obj, &callable, &resolve)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+
+    SendCtx* ctx = (SendCtx*)PyMem_Malloc(sizeof(SendCtx));
+    if (ctx == NULL) return PyErr_NoMemory();
+    memset(ctx, 0, sizeof(*ctx));
+    kafka_common_Error_t* err = NULL;
+    ctx->c_record = producer_record_to_c((ProducerRecordObject*)rec_obj, &ctx->key_b, &ctx->value_b, &err);
+    if (ctx->c_record == NULL) {
+        PyMem_Free(ctx);
+        PyObject* py_err = owned_error_to_py(err);
+        if (py_err == NULL) return NULL;
+        // Deliver the rejection through resolve(), exactly like a queued failure.
+        PyObject* r = PyObject_CallFunctionObjArgs(resolve, Py_None, py_err, NULL);
+        Py_DECREF(py_err);
+        if (r == NULL) return NULL;
+        Py_DECREF(r);
         Py_RETURN_NONE;
     }
+    Py_INCREF(resolve);
+    Py_INCREF(rec_obj);
+    ctx->resolve = resolve;
+    ctx->record = rec_obj;
+    ctx->producer = p;
 
-    // Signal the send thread to stop, then join it (releasing the GIL
-    // so the background threads can acquire it for callbacks).
-    PyObject** space_cbs = NULL;
-    int space_cbs_count = 0;
+    kafka_producer_Callback_t* cb = NULL;
+    if (callable != Py_None) {
+        ctx->delivery = delivery_ctx_new(callable, rec_obj);
+        if (ctx->delivery == NULL) {
+            kafka_producer_ProducerRecord_destroy(ctx->c_record);
+            Py_DECREF(ctx->resolve);
+            Py_DECREF(ctx->record);
+            PyMem_Free(ctx);
+            return NULL;
+        }
+        cb = kafka_producer_Callback_new(ctx->delivery, producer_on_completion);
+    }
     Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
-    producer->closed = 1;
-    // Take any pending space waiters so blocked senders unblock on close
-    // instead of hanging (whoever wins the lock — here or the send task's
-    // final take — fires them once).
-    Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
-    cnd_signal(&producer->record_batches_new_record_cnd);
-    mtx_unlock(&producer->record_batches_mutex);
-    thrd_join(producer->send_thread, NULL);
+    kafka_producer_Producer_send_with_callback_cb(p->producer, ctx->c_record, cb, producer_send_cb, ctx);
     Py_END_ALLOW_THREADS
-
-    Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
-
-    // Clean up after threads have stopped
-    cnd_destroy(&producer->record_batches_new_record_cnd);
-    mtx_destroy(&producer->record_batches_mutex);
-    cnd_destroy(&producer->pending_batches_available_cnd);
-    mtx_destroy(&producer->pending_batches_mutex);
-    Py_DECREF(producer->py_producer);
-
+    if (cb != NULL) kafka_producer_Callback_destroy(cb);
     Py_RETURN_NONE;
 }
 
-// Drive the Rust-side close asynchronously; cb(error_int) fires on the
-// dispatcher thread. The Python wrapper waits via _run_sync / _run_async so a
-// stuck close stays interruptible on the main thread (like flush). Must be
-// called after Producer_shutdown (the C batching threads are already joined).
-static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_close_async(producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
+// ---- void ops: blocking + _cb ----------------------------------------------
 
-// Free the Rust producer handle and the C struct. Call after the close future
-// (Producer_close_async) has completed.
-static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
+typedef kafka_common_Error_t* (*producer_void_op_fn)(const kafka_producer_Producer_t*);
+
+// Shared body of the blocking void ops: GIL released around the call, the
+// owned error (or None) returned as a tuple for KafkaError._from_parts.
+static PyObject* producer_void_op(PyObject* args, producer_void_op_fn op) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
-    kafka_producer_Producer_destroy(producer->producer);
+    err = op(p->producer);
     Py_END_ALLOW_THREADS
-    PyMem_Free(producer);
-    Py_RETURN_NONE;
-}
-
-// MockProducer-specific functions
-static PyObject* py_MockProducer_complete_next(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-    bool result = kafka_producer_MockProducer_complete_next(producer->producer);
-    return PyBool_FromLong(result ? 1 : 0);
-}
-
-static PyObject* py_MockProducer_error_next(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    int32_t error_code;
-    const char *error_message = NULL;
-
-    if (!PyArg_ParseTuple(args, "Kiz", &producer_ptr, &error_code, &error_message)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-    bool result = kafka_producer_MockProducer_error_next(
-        producer->producer, error_code, error_message);
-    return PyBool_FromLong(result ? 1 : 0);
-}
-
-static PyObject* py_MockProducer_history_count(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-    int32_t count = kafka_producer_MockProducer_history_count(producer->producer);
-    return PyLong_FromLong(count);
-}
-
-static PyObject* py_MockProducer_clear(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
-    }
-
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_producer_MockProducer_clear(producer->producer);
-    Py_RETURN_NONE;
-}
-
-// ---- MockProducer transaction test hooks (unit tests only) -----------------
-
-// Install (or clear) the error the mock's commitTransaction returns. Mirrors the
-// FFI hook used to exercise the abortable-commit path. clear=True removes any
-// installed error (error_code/message ignored). Returns True if applied.
-static PyObject* py_MockProducer_set_commit_transaction_error(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    int clear;
-    int error_code;
-    const char* message = NULL;
-    if (!PyArg_ParseTuple(args, "Kpiz", &producer_ptr, &clear, &error_code, &message)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    bool ok = kafka_producer_MockProducer_set_commit_transaction_error(
-        producer->producer, clear ? true : false, error_code, message);
-    return PyBool_FromLong(ok ? 1 : 0);
-}
-
-// Whether the mock has staged consumer-group offsets in the current transaction
-// (Java MockProducer.sentOffsets()).
-static PyObject* py_MockProducer_sent_offsets(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    return PyBool_FromLong(
-        kafka_producer_MockProducer_sent_offsets(producer->producer) ? 1 : 0);
-}
-
-// Look up the offset a committed transaction staged for (group_id, topic,
-// partition). Returns (offset, leader_epoch, metadata) or None if not found —
-// so a test can verify the send_offsets_to_transaction round-trip.
-static PyObject* py_MockProducer_committed_offset(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    const char* group_id;
-    const char* topic;
-    int partition;
-    if (!PyArg_ParseTuple(args, "Kssi", &producer_ptr, &group_id, &topic, &partition)) {
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    int64_t offset = 0;
-    int32_t leader_epoch = -1;
-    char metadata[512];
-    metadata[0] = '\0';
-    bool found = kafka_producer_MockProducer_committed_offset(
-        producer->producer, group_id, topic, partition,
-        &offset, &leader_epoch, metadata, (int32_t)sizeof(metadata));
-    if (!found) Py_RETURN_NONE;
-    return Py_BuildValue("(Lis)", (long long)offset, leader_epoch, metadata);
+    if (err == NULL) Py_RETURN_NONE;
+    return owned_error_to_py(err);
 }
 
 static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
+    return producer_void_op(args, kafka_producer_Producer_flush);
+}
+static PyObject* py_Producer_init_transactions(PyObject* self, PyObject* args) {
+    return producer_void_op(args, kafka_producer_Producer_init_transactions);
+}
+static PyObject* py_Producer_begin_transaction(PyObject* self, PyObject* args) {
+    return producer_void_op(args, kafka_producer_Producer_begin_transaction);
+}
+static PyObject* py_Producer_commit_transaction(PyObject* self, PyObject* args) {
+    return producer_void_op(args, kafka_producer_Producer_commit_transaction);
+}
+static PyObject* py_Producer_abort_transaction(PyObject* self, PyObject* args) {
+    return producer_void_op(args, kafka_producer_Producer_abort_transaction);
+}
 
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
-        return NULL;
+// A queued void op's completion: `cb(err_tuple | None)` runs from the pump.
+typedef struct {
+    PyObject* cb;
+} VoidCbCtx;
+
+static void producer_void_cb(kafka_common_Error_t* error, void* opaque) {
+    VoidCbCtx* ctx = (VoidCbCtx*)opaque;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* py_err = error ? owned_error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+    if (py_err != NULL) {
+        PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_err, NULL);
+        if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
+        Py_DECREF(py_err);
+    } else {
+        PyErr_WriteUnraisable(ctx->cb);
     }
+    Py_DECREF(ctx->cb);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
 
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_common_Error_t *err = NULL;
-    // Blocking FFI call: release the GIL. flush() parks until every in-flight
-    // send completes, and each completion fires the on_delivery trampoline on
-    // the dispatcher thread, which needs the GIL.
+static VoidCbCtx* void_cb_ctx_new(PyObject* cb) {
+    VoidCbCtx* ctx = (VoidCbCtx*)PyMem_Malloc(sizeof(VoidCbCtx));
+    if (ctx == NULL) { PyErr_NoMemory(); return NULL; }
+    Py_INCREF(cb);
+    ctx->cb = cb;
+    return ctx;
+}
+
+typedef void (*producer_void_cb_op_fn)(const kafka_producer_Producer_t*,
+                                       void (*)(kafka_common_Error_t*, void*),
+                                       void*);
+
+static PyObject* producer_void_cb_op(PyObject* args, producer_void_cb_op_fn op) {
+    unsigned long long ptr;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KO", &ptr, &cb)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) return NULL;
     Py_BEGIN_ALLOW_THREADS
-    kafka_producer_Producer_flush(producer->producer, &err);
+    op(p->producer, producer_void_cb, ctx);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_Producer_flush_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_flush_cb);
+}
+static PyObject* py_Producer_init_transactions_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_init_transactions_cb);
+}
+static PyObject* py_Producer_commit_transaction_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_commit_transaction_cb);
+}
+static PyObject* py_Producer_abort_transaction_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_abort_transaction_cb);
+}
+static PyObject* py_Producer_close_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_close_cb);
+}
+
+// ---- send_offsets_to_transaction -------------------------------------------
+
+// Shared with the consumer section: the Python-side
+// (topic, partition, offset, leader_epoch, metadata) tuple list -> five
+// parallel arrays. Returns count or -1 (exception set); on success the caller
+// releases the arrays with offset_arrays_free.
+typedef struct {
+    const char** topics;
+    int32_t* parts;
+    int64_t* offs;
+    int32_t* epochs;
+    const char** metas;
+} offset_arrays_t;
+
+static void offset_arrays_free(offset_arrays_t* a) {
+    PyMem_Free((void*)a->topics);
+    PyMem_Free(a->parts);
+    PyMem_Free(a->offs);
+    PyMem_Free(a->epochs);
+    PyMem_Free((void*)a->metas);
+}
+
+static Py_ssize_t offsets_to_arrays(PyObject* list, offset_arrays_t* out) {
+    Py_ssize_t n = PySequence_Size(list);
+    if (n < 0) return -1;
+    out->topics = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
+    out->parts = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
+    out->offs = n > 0 ? PyMem_Malloc(n * sizeof(int64_t)) : NULL;
+    out->epochs = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
+    out->metas = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
+    if (n > 0 && (!out->topics || !out->parts || !out->offs || !out->epochs || !out->metas)) {
+        offset_arrays_free(out);
+        PyErr_NoMemory();
+        return -1;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(list, i);  // new ref
+        const char* t = NULL; int p = 0; long long o = 0; int e = -1; PyObject* meta = Py_None;
+        int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
+        if (ok) {
+            out->topics[i] = t; out->parts[i] = p; out->offs[i] = o; out->epochs[i] = e;
+            // A non-str metadata must fail the whole call: treating the failed
+            // conversion as "no metadata" would commit a different map than the
+            // caller passed AND return success with a live exception set, which
+            // CPython later reports as an unrelated SystemError.
+            if (meta == Py_None) {
+                out->metas[i] = NULL;
+            } else if (!PyUnicode_Check(meta)) {
+                PyErr_Format(PyExc_TypeError,
+                             "offset metadata must be str or None, not %s",
+                             Py_TYPE(meta)->tp_name);
+                ok = 0;
+            } else {
+                out->metas[i] = PyUnicode_AsUTF8(meta);
+                if (out->metas[i] == NULL) ok = 0;  // e.g. unencodable surrogates
+            }
+        }
+        Py_XDECREF(item);
+        if (!ok) { offset_arrays_free(out); return -1; }
+    }
+    return n;
+}
+
+// The offsets map every send_offsets_to_transaction form takes: a C-built
+// kafka_Map_t of OWNED kafka_common_TopicPartition_t* ->
+// kafka_consumer_OffsetAndMetadata_t* (the container borrows, so the entries
+// are destroyed one by one before the map).
+typedef struct {
+    kafka_Map_t* map;
+    kafka_common_TopicPartition_t** tps;
+    kafka_consumer_OffsetAndMetadata_t** oams;
+    Py_ssize_t n;
+} offsets_map_t;
+
+static void offsets_map_free(offsets_map_t* m) {
+    for (Py_ssize_t i = 0; i < m->n; i++) {
+        if (m->oams && m->oams[i]) kafka_consumer_OffsetAndMetadata_destroy(m->oams[i]);
+        if (m->tps && m->tps[i]) kafka_common_TopicPartition_destroy(m->tps[i]);
+    }
+    PyMem_Free(m->tps);
+    PyMem_Free(m->oams);
+    if (m->map) kafka_Map_destroy(m->map);
+}
+
+// Returns 0 on success (exception set otherwise).
+static int offsets_map_build(PyObject* spec, offsets_map_t* m) {
+    memset(m, 0, sizeof(*m));
+    offset_arrays_t a;
+    Py_ssize_t n = offsets_to_arrays(spec, &a);
+    if (n < 0) return -1;
+    m->map = kafka_Map_new();
+    m->tps = n > 0 ? PyMem_Calloc(n, sizeof(*m->tps)) : NULL;
+    m->oams = n > 0 ? PyMem_Calloc(n, sizeof(*m->oams)) : NULL;
+    if (n > 0 && (!m->tps || !m->oams)) {
+        offset_arrays_free(&a);
+        offsets_map_free(m);
+        PyErr_NoMemory();
+        return -1;
+    }
+    m->n = n;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        m->tps[i] = kafka_common_TopicPartition_new(a.topics[i], a.parts[i]);
+        // A negative leader_epoch is Optional.empty(); a NULL metadata is
+        // Java null, stored by the class as "".
+        kafka_common_Error_t* err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+            a.offs[i], a.epochs[i], a.metas[i], &m->oams[i]);
+        if (err != NULL) {
+            const char* msg = kafka_common_Error_message(err);
+            PyErr_SetString(PyExc_ValueError, msg ? msg : "invalid OffsetAndMetadata");
+            kafka_common_Error_destroy(err);
+            offset_arrays_free(&a);
+            offsets_map_free(m);
+            return -1;
+        }
+        kafka_Map_put(m->map, m->tps[i], m->oams[i]);
+    }
+    offset_arrays_free(&a);
+    return 0;
+}
+
+// Producer_send_offsets_to_transaction(handle, spec, group_metadata)
+//   -> err_tuple | None (blocking)
+static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    PyObject* spec;
+    PyObject* gm_obj;
+    if (!PyArg_ParseTuple(args, "KOO!", &ptr, &spec, &ConsumerGroupMetadataType, &gm_obj)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    const kafka_consumer_ConsumerGroupMetadata_t* gm = ((ConsumerGroupMetadataObject*)gm_obj)->handle;
+    offsets_map_t m;
+    if (offsets_map_build(spec, &m) < 0) return NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_send_offsets_to_transaction(p->producer, m.map, gm);
+    Py_END_ALLOW_THREADS
+    offsets_map_free(&m);
+    if (err == NULL) Py_RETURN_NONE;
+    return owned_error_to_py(err);
+}
+
+// Producer_send_offsets_to_transaction_cb(handle, spec, group_metadata, cb)
+// The offsets map and group metadata are read during the call (the Rust side
+// clones them for the submission task), so they are freed right after it.
+static PyObject* py_Producer_send_offsets_to_transaction_cb(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    PyObject* spec;
+    PyObject* gm_obj;
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOO!O", &ptr, &spec, &ConsumerGroupMetadataType, &gm_obj, &cb)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    const kafka_consumer_ConsumerGroupMetadata_t* gm = ((ConsumerGroupMetadataObject*)gm_obj)->handle;
+    offsets_map_t m;
+    if (offsets_map_build(spec, &m) < 0) return NULL;
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) { offsets_map_free(&m); return NULL; }
+    Py_BEGIN_ALLOW_THREADS
+    kafka_producer_Producer_send_offsets_to_transaction_cb(p->producer, m.map, gm, producer_void_cb, ctx);
+    Py_END_ALLOW_THREADS
+    offsets_map_free(&m);
+    Py_RETURN_NONE;
+}
+
+// ---- partitions_for --------------------------------------------------------
+
+// Converts an OWNED kafka_List_t of kafka_common_PartitionInfo_t* into a list
+// of (topic, partition, leader, replicas, isr, offline) tuples and frees it.
+static PyObject* partition_info_list_to_py(kafka_List_t* infos) {
+    if (infos == NULL) return PyList_New(0);
+    int32_t n = kafka_List_size(infos);
+    PyObject* out = PyList_New(n);
+    if (out == NULL) { kafka_List_destroy(infos); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* item = partition_info_to_py((const kafka_common_PartitionInfo_t*)kafka_List_get(infos, i));
+        if (item == NULL) { Py_DECREF(out); kafka_List_destroy(infos); return NULL; }
+        PyList_SET_ITEM(out, i, item);
+    }
+    kafka_List_destroy(infos);
+    return out;
+}
+
+// Producer_partitions_for(handle, topic) -> (list | None, err_tuple | None)
+static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    const char* topic;
+    if (!PyArg_ParseTuple(args, "Ks", &ptr, &topic)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_List_t* infos = NULL;
+    kafka_common_Error_t* err;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_partitions_for(p->producer, topic, &infos);
     Py_END_ALLOW_THREADS
     if (err != NULL) {
-        return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+        if (infos != NULL) kafka_List_destroy(infos);
+        return build_value_error(Py_None, err);
     }
-    return PyLong_FromLong(0);
+    PyObject* list = partition_info_list_to_py(infos);
+    if (list == NULL) return NULL;
+    return Py_BuildValue("(NO)", list, Py_None);
 }
 
-// Producer partitions_for: returns (list_handle_int, error_int). The list
-// handle is a kafka_common_PartitionInfoList_t (shared with the consumer FFI)
-// that Python drains via PartitionInfoList_drain.
-static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
+static void producer_partitions_for_cb(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
+    VoidCbCtx* ctx = (VoidCbCtx*)opaque;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* py_list = NULL;
+    PyObject* py_err = NULL;
+    if (error != NULL) {
+        if (value != NULL) kafka_List_destroy(value);
+        py_err = owned_error_to_py(error);
+        py_list = (Py_INCREF(Py_None), Py_None);
+    } else {
+        py_list = partition_info_list_to_py(value);
+        py_err = (Py_INCREF(Py_None), Py_None);
+    }
+    if (py_list != NULL && py_err != NULL) {
+        PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_list, py_err, NULL);
+        if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
+    } else {
+        PyErr_WriteUnraisable(ctx->cb);
+    }
+    Py_XDECREF(py_list);
+    Py_XDECREF(py_err);
+    Py_DECREF(ctx->cb);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
+
+// Producer_partitions_for_cb(handle, topic, cb); cb(list | None, err_tuple | None)
+static PyObject* py_Producer_partitions_for_cb(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
     const char* topic;
-    if (!PyArg_ParseTuple(args, "Ks", &producer_ptr, &topic)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_common_PartitionInfoList_t* list = NULL;
-    kafka_common_Error_t* err;
-    // Blocking FFI call (metadata round trip): release the GIL, so a delivery
-    // callback firing meanwhile can take it.
+    PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KsO", &ptr, &topic, &cb)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    VoidCbCtx* ctx = void_cb_ctx_new(cb);
+    if (ctx == NULL) return NULL;
     Py_BEGIN_ALLOW_THREADS
-    err = kafka_producer_Producer_partitions_for(producer->producer, topic, &list);
+    kafka_producer_Producer_partitions_for_cb(p->producer, topic, producer_partitions_for_cb, ctx);
     Py_END_ALLOW_THREADS
-    return Py_BuildValue("KK",
-        (unsigned long long)(uintptr_t)list,
-        (unsigned long long)(uintptr_t)err);
+    Py_RETURN_NONE;
 }
 
-// Producer_metrics -> list[dict] with keys name/group/description/tags/value/kind.
-//
-// Mirrors py_Consumer_metrics exactly, over the producer's namespaced
-// kafka_producer_MetricMap_* accessors. A list of dicts (rather than a dict
-// keyed by name) keeps the MetricName identity intact: two metrics share a name
-// and group and differ only by tags. `value` is float / str / int depending on
-// the kind reported by kafka_producer_MetricMap_get_value_kind (0=double,
-// 1=string, 2=long, 3=int); `kind` is carried through so the caller can
-// distinguish Long from Int (both surface as Python int).
+// ---- metrics ---------------------------------------------------------------
+
+// Producer_metrics(handle) -> list[dict] (name, group, description, tags,
+// value, kind). `kind`: 0 double, 1 string, 2 long, 3 int, selected with
+// kafka_common_MetricValue__enum; `value` is read with the matching typed
+// accessor (float / str / int / int). `as_string` is borrowed until the
+// MetricValue handle is destroyed, so it is copied into a str first.
 static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_producer_MetricMap_t* map =
-        kafka_producer_Producer_metrics(producer->producer);
-    if (map == NULL) Py_RETURN_NONE;  // null producer / no snapshot
-    int32_t n = kafka_producer_MetricMap_count(map);
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_Map_t* map = kafka_producer_Producer_metrics(p->producer);  // owned, owns its entries
+    if (map == NULL) return PyList_New(0);
+    int32_t n = kafka_Map_size(map);
     PyObject* out = PyList_New(n < 0 ? 0 : n);
-    if (out == NULL) { kafka_producer_MetricMap_destroy(map); return NULL; }
+    if (out == NULL) { kafka_Map_destroy(map); return NULL; }
     for (int32_t i = 0; i < n; i++) {
+        const kafka_common_MetricName_t* name =
+            (const kafka_common_MetricName_t*)kafka_Map_key(map, i);
+        const kafka_common_metrics_KafkaMetric_t* metric =
+            (const kafka_common_metrics_KafkaMetric_t*)kafka_Map_value(map, i);
+
         PyObject* tags = PyDict_New();
         if (tags == NULL) goto fail;
-        int32_t tn = kafka_producer_MetricMap_get_tag_count(map, i);
-        for (int32_t t = 0; t < tn; t++) {
-            const char* k = kafka_producer_MetricMap_get_tag_key(map, i, t);
-            const char* v = kafka_producer_MetricMap_get_tag_value(map, i, t);
-            PyObject* pv = PyUnicode_FromString(v ? v : "");
-            if (pv == NULL) { Py_DECREF(tags); goto fail; }
-            if (PyDict_SetItemString(tags, k ? k : "", pv) != 0) {
-                Py_DECREF(pv); Py_DECREF(tags); goto fail;
+        kafka_Map_t* tag_map = kafka_common_MetricName_tags(name);  // owned, char* -> char*
+        if (tag_map != NULL) {
+            int32_t tn = kafka_Map_size(tag_map);
+            for (int32_t t = 0; t < tn; t++) {
+                const char* k = (const char*)kafka_Map_key(tag_map, t);
+                const char* v = (const char*)kafka_Map_value(tag_map, t);
+                PyObject* pv = PyUnicode_FromString(v ? v : "");
+                if (pv == NULL || PyDict_SetItemString(tags, k ? k : "", pv) != 0) {
+                    Py_XDECREF(pv); Py_DECREF(tags); kafka_Map_destroy(tag_map); goto fail;
+                }
+                Py_DECREF(pv);
             }
-            Py_DECREF(pv);
+            kafka_Map_destroy(tag_map);
         }
+
         PyObject* value = NULL;
-        int32_t kind = kafka_producer_MetricMap_get_value_kind(map, i);
-        switch (kind) {
-            case 1: {
-                const char* s = kafka_producer_MetricMap_get_value_string(map, i);
-                value = PyUnicode_FromString(s ? s : "");
-                break;
+        int kind = 0;
+        kafka_common_MetricValue_t* mv =
+            kafka_common_Metric_metric_value(kafka_common_metrics_KafkaMetric__as_Metric(metric));
+        if (mv != NULL) {
+            switch (kafka_common_MetricValue__enum(mv)) {
+                case kafka_common_MetricValue_e_string: {
+                    kind = 1;
+                    const char* s = kafka_common_MetricValue_as_string(mv);
+                    value = s ? PyUnicode_FromString(s) : (Py_INCREF(Py_None), Py_None);
+                    break;
+                }
+                case kafka_common_MetricValue_e_long_:
+                    kind = 2;
+                    value = PyLong_FromLongLong((long long)kafka_common_MetricValue_as_long(mv));
+                    break;
+                case kafka_common_MetricValue_e_int_:
+                    kind = 3;
+                    value = PyLong_FromLong((long)kafka_common_MetricValue_as_int(mv));
+                    break;
+                default:
+                    kind = 0;
+                    value = PyFloat_FromDouble(kafka_common_MetricValue_as_double(mv));
+                    break;
             }
-            case 2:
-                value = PyLong_FromLongLong(
-                    (long long)kafka_producer_MetricMap_get_value_long(map, i));
-                break;
-            case 3:
-                value = PyLong_FromLong((long)kafka_producer_MetricMap_get_value_int(map, i));
-                break;
-            default:
-                value = PyFloat_FromDouble(kafka_producer_MetricMap_get_value_double(map, i));
-                break;
+            kafka_common_MetricValue_destroy(mv);
+        } else {
+            value = (Py_INCREF(Py_None), Py_None);
         }
         if (value == NULL) { Py_DECREF(tags); goto fail; }
-        const char* name = kafka_producer_MetricMap_get_name(map, i);
-        const char* group = kafka_producer_MetricMap_get_group(map, i);
-        const char* desc = kafka_producer_MetricMap_get_description(map, i);
-        // "N" steals the reference to tags/value, so they are not leaked here.
+
+        const char* mname = kafka_common_MetricName_name(name);
+        const char* group = kafka_common_MetricName_group(name);
+        const char* desc = kafka_common_MetricName_description(name);
+        // "N" steals the references to tags/value.
         PyObject* entry = Py_BuildValue("{s:s,s:s,s:s,s:N,s:N,s:i}",
-            "name", name ? name : "",
+            "name", mname ? mname : "",
             "group", group ? group : "",
             "description", desc ? desc : "",
             "tags", tags,
             "value", value,
-            "kind", (int)kind);
+            "kind", kind);
         if (entry == NULL) goto fail;
         PyList_SET_ITEM(out, i, entry);
     }
-    kafka_producer_MetricMap_destroy(map);
+    kafka_Map_destroy(map);
     return out;
 fail:
     Py_DECREF(out);
-    kafka_producer_MetricMap_destroy(map);
+    kafka_Map_destroy(map);
     return NULL;
 }
 
-// Producer flush (async): submit and return; cb(error_int) fires on the
-// dispatcher thread. The Python wrapper waits (threading.Event / asyncio.Future)
-// so no Rust block_on parks the calling thread — mirrors the consumer.
-static PyObject* py_Producer_flush_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_flush_async(producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
+// ---- MockProducer hooks ----------------------------------------------------
 
-// Producer partitions_for (async): submit and return; cb(list_int, error_int)
-// fires on the dispatcher thread.
-static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    const char* topic;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KsO", &producer_ptr, &topic, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_partitions_for_async(producer->producer, topic,
-        producer_partitions_for_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-// ---- Producer transaction control ops (sync) -------------------------------
-//
-// Thin 1:1 bindings of the SYNCHRONOUS transaction FFI: each returns the error
-// handle *directly* (null = success; Python owns and frees a non-null handle via
-// KafkaError._from_c / KafkaError_destroy). The blocking ops
-// (init/commit/abort/send_offsets are block_on in the FFI) release the GIL;
-// begin_transaction is a pure state transition and keeps it.
-//
-// producer.py's transaction API is async-first and drives the *_async variants
-// (further below) instead, via _run_sync / _run_async, so it no longer calls
-// these. They are retained as a faithful binding of the synchronous FFI surface
-// (also exercised by the C and gRPC layers), not because Python uses them.
-//
-// §13 (merged): a transaction-control op drains any returned async sends into
-// the transaction first, exactly as flush/close do (committed on commit,
-// discarded on abort); the earlier "async-in-transaction is unsupported UB" note
-// is obsolete. Python's own send() is synchronous (registers before it returns)
-// and Python does not expose an async/outbox send path.
-
-static PyObject* py_Producer_init_transactions(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_common_Error_t* err = NULL;
-    Py_BEGIN_ALLOW_THREADS
-    err = kafka_producer_Producer_init_transactions(producer->producer);
-    Py_END_ALLOW_THREADS
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
-}
-
-static PyObject* py_Producer_begin_transaction(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    // Pure state transition, never waits (Java beginTransaction) — no GIL release.
-    kafka_common_Error_t* err =
-        kafka_producer_Producer_begin_transaction(producer->producer);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
-}
-
-static PyObject* py_Producer_commit_transaction(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_common_Error_t* err = NULL;
-    Py_BEGIN_ALLOW_THREADS
-    err = kafka_producer_Producer_commit_transaction(producer->producer);
-    Py_END_ALLOW_THREADS
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
-}
-
-static PyObject* py_Producer_abort_transaction(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_common_Error_t* err = NULL;
-    Py_BEGIN_ALLOW_THREADS
-    err = kafka_producer_Producer_abort_transaction(producer->producer);
-    Py_END_ALLOW_THREADS
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
-}
-
-// send_offsets_to_transaction(producer, offsets, group_metadata):
-//   offsets: list[(topic, partition, offset, leader_epoch|-1, metadata|None)]
-//   group_metadata: a ConsumerGroupMetadata object (owns the live handle).
-// Marshals the offsets into the parallel arrays the FFI expects, exactly like
-// py_Consumer_commit_sync_offsets_async, then makes the blocking FFI call with
-// the GIL released. The group-metadata handle is borrowed for the call; the
-// object stays alive as a live argument, so it outlives the call (no
-// use-after-free). An empty offsets list is a legitimate count == 0.
-static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* offsets;
-    PyObject* gm_obj;
-    if (!PyArg_ParseTuple(args, "KOO", &producer_ptr, &offsets, &gm_obj)) return NULL;
-
-    // Extract the borrowed group-metadata handle (typecheck matches the
-    // ProducerRecord precedent in py_Producer_send, and prevents dereferencing an
-    // arbitrary object's memory).
-    if (!PyObject_TypeCheck(gm_obj, &ConsumerGroupMetadataType)) {
-        PyErr_SetString(PyExc_TypeError,
-            "group_metadata must be a ConsumerGroupMetadata object");
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_consumer_ConsumerGroupMetadata_t* gm =
-        ((ConsumerGroupMetadataObject*)gm_obj)->handle;
-
-    Py_ssize_t n = PySequence_Size(offsets);
-    if (n < 0) return NULL;
-    const char** topics = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
-    int32_t* parts = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
-    int64_t* offs = n > 0 ? PyMem_Malloc(n * sizeof(int64_t)) : NULL;
-    int32_t* epochs = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
-    const char** metas = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
-    if (n > 0 && (!topics || !parts || !offs || !epochs || !metas)) {
-        PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
-        return PyErr_NoMemory();
-    }
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PySequence_GetItem(offsets, i);  // new ref
-        const char* t = NULL; int p = 0; long long o = 0; int e = -1; PyObject* meta = Py_None;
-        int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
-        if (ok) {
-            // A non-None metadata that is not a str makes PyUnicode_AsUTF8 return
-            // NULL and set a TypeError. Bail here (ok = 0) so the arrays are freed
-            // and we return NULL *before* the FFI call — otherwise the offsets
-            // would be staged with the metadata silently dropped, and the wrapper
-            // would return a PyLong with an exception still pending (a confusing
-            // SystemError). PyUnicode_AsUTF8("") returns a valid pointer, so a
-            // legitimate empty-string metadata is unaffected. The returned pointer
-            // borrows meta's internal buffer, kept alive by the caller's list for
-            // the whole synchronous FFI call (the DECREF below only drops our own
-            // new reference from PySequence_GetItem).
-            const char* m = NULL;
-            if (meta != Py_None && !(m = PyUnicode_AsUTF8(meta))) {
-                ok = 0;
-            } else {
-                topics[i] = t; parts[i] = p; offs[i] = o; epochs[i] = e;
-                metas[i] = m;
-            }
-        }
-        Py_XDECREF(item);
-        if (!ok) {
-            PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
+// Builds the error a mock test hook injects. There is no factory from a
+// numeric code -- an error is a class, built by the kafka_common_Error_*
+// factory of that class -- so the codes the Python tests use are mapped to
+// their class here; anything else raises ValueError. `message` may be NULL.
+static kafka_common_Error_t* mock_error_from_code(int code, const char* message) {
+    switch (code) {
+        case kafka_common_ErrorCode_e_LOCAL_TIMEOUT:
+            return kafka_common_Error_local_timeout(message);
+        case kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE:
+            return kafka_common_Error_local_illegal_state(message);
+        case kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT:
+            return kafka_common_Error_local_illegal_argument(message);
+        case kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION:
+            return kafka_common_Error_local_concurrent_modification(message);
+        case kafka_common_ErrorCode_e_REQUEST_TIMED_OUT:
+            return kafka_common_Error_timeout(message);
+        case kafka_common_ErrorCode_e_MESSAGE_TOO_LARGE:
+            return kafka_common_Error_record_too_large(message);
+        case kafka_common_ErrorCode_e_RECORD_LIST_TOO_LARGE:
+            return kafka_common_Error_record_batch_too_large(message);
+        case kafka_common_ErrorCode_e_INVALID_GROUP_ID:
+            return kafka_common_Error_invalid_group_id(message);
+        case kafka_common_ErrorCode_e_UNSUPPORTED_VERSION:
+            return kafka_common_Error_unsupported_version(message);
+        case kafka_common_ErrorCode_e_THROTTLING_QUOTA_EXCEEDED:
+            return kafka_common_Error_throttling_quota_exceeded(0, message);
+        default:
+            PyErr_Format(PyExc_ValueError,
+                         "no kafka_common_Error_* factory is mapped for error code %d; "
+                         "see mock_error_from_code in _confluentkafka.c", code);
             return NULL;
-        }
     }
-    kafka_common_Error_t* err = NULL;
-    Py_BEGIN_ALLOW_THREADS
-    err = kafka_producer_Producer_send_offsets_to_transaction(
-        producer->producer, topics, parts, offs, epochs, metas, (int32_t)n, gm);
-    Py_END_ALLOW_THREADS
-    PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
 }
 
-// RecordMetadata destroy and copy functions
-static PyObject* py_RecordMetadata_destroy(PyObject* self, PyObject* args) {
+static PyObject* py_MockProducer_complete_next(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_producer_RecordMetadata_t *m = (kafka_producer_RecordMetadata_t*)(uintptr_t)ptr;
-    kafka_producer_RecordMetadata_destroy(m);
-    Py_RETURN_NONE;
+    Producer* p = producer_from_handle(ptr);
+    int8_t r;
+    Py_BEGIN_ALLOW_THREADS
+    r = kafka_producer_MockProducer_complete_next(p->mp);
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(r ? 1 : 0);
 }
 
-// RecordMetadata copy-via-callback
-static void record_metadata_copy_callback(int64_t offset, int32_t partition,
-                                          const char* topic, int64_t timestamp,
-                                          void* user_data) {
-    PyObject* callback = (PyObject*)user_data;
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    PyObject* result = PyObject_CallFunction(callback, "LisL",
-                                            offset, partition, topic, timestamp);
-    if (result) {
-        Py_DECREF(result);
-    } else {
-        PyErr_Print();
-    }
-    PyGILState_Release(gstate);
-}
-
-static PyObject* py_RecordMetadata_copy(PyObject* self, PyObject* args) {
+// MockProducer_error_next(handle, code, message | None) -> bool
+static PyObject* py_MockProducer_error_next(PyObject* self, PyObject* args) {
     unsigned long long ptr;
-    PyObject* callback;
-    if (!PyArg_ParseTuple(args, "KO", &ptr, &callback)) return NULL;
-    if (!PyCallable_Check(callback)) {
-        PyErr_SetString(PyExc_TypeError, "callback must be callable");
-        return NULL;
-    }
-    kafka_producer_RecordMetadata_t *m = (kafka_producer_RecordMetadata_t*)(uintptr_t)ptr;
-    Py_INCREF(callback);
-    kafka_producer_RecordMetadata_copy(m, record_metadata_copy_callback, (void*)callback);
-    Py_DECREF(callback);
+    int code;
+    const char* message = NULL;
+    if (!PyArg_ParseTuple(args, "Kiz", &ptr, &code, &message)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_Error_t* err = mock_error_from_code(code, message);
+    if (err == NULL) return NULL;
+    int8_t r;
+    Py_BEGIN_ALLOW_THREADS
+    r = kafka_producer_MockProducer_error_next(p->mp, err);  // ownership moves to the mock
+    Py_END_ALLOW_THREADS
+    return PyBool_FromLong(r ? 1 : 0);
+}
+
+static PyObject* py_MockProducer_history_count(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_List_t* history = kafka_producer_MockProducer_history(p->mp);  // owned
+    int32_t n = history ? kafka_List_size(history) : 0;
+    if (history) kafka_List_destroy(history);
+    return PyLong_FromLong((long)n);
+}
+
+static PyObject* py_MockProducer_clear(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_producer_MockProducer_clear(p->mp);
     Py_RETURN_NONE;
+}
+
+// MockProducer_set_commit_transaction_error(handle, code | None, message | None)
+// None clears the injected error.
+static PyObject* py_MockProducer_set_commit_transaction_error(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    PyObject* code_obj;
+    const char* message = NULL;
+    if (!PyArg_ParseTuple(args, "KO|z", &ptr, &code_obj, &message)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_Error_t* err = NULL;
+    if (code_obj != Py_None) {
+        long code = PyLong_AsLong(code_obj);
+        if (code == -1 && PyErr_Occurred()) return NULL;
+        err = mock_error_from_code((int)code, message);
+        if (err == NULL) return NULL;
+    }
+    kafka_producer_MockProducer_set_commit_transaction_error(p->mp, err);  // ownership moves
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_MockProducer_sent_offsets(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    return PyBool_FromLong(kafka_producer_MockProducer_sent_offsets(p->mp) ? 1 : 0);
+}
+
+// MockProducer_committed_offset(handle, group_id, topic, partition)
+//   -> (offset, leader_epoch | None, metadata) or None
+static PyObject* py_MockProducer_committed_offset(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    const char* group;
+    const char* topic;
+    int partition;
+    if (!PyArg_ParseTuple(args, "Kssi", &ptr, &group, &topic, &partition)) return NULL;
+    Producer* p = producer_from_handle(ptr);
+    kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(topic, partition);
+    kafka_consumer_OffsetAndMetadata_t* oam =
+        kafka_producer_MockProducer_committed_offset(p->mp, group, tp);  // owned or NULL
+    kafka_common_TopicPartition_destroy(tp);
+    if (oam == NULL) Py_RETURN_NONE;
+    int32_t epoch = 0;
+    int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(oam, &epoch);
+    const char* metadata = kafka_consumer_OffsetAndMetadata_metadata(oam);
+    PyObject* py_epoch = has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
+    PyObject* out = py_epoch ? Py_BuildValue("(LNs)",
+                                             (long long)kafka_consumer_OffsetAndMetadata_offset(oam),
+                                             py_epoch,
+                                             metadata ? metadata : "")
+                             : NULL;
+    kafka_consumer_OffsetAndMetadata_destroy(oam);
+    return out;
 }
 
 // KafkaError accessor/destroy functions
@@ -1780,180 +1870,6 @@ static Py_ssize_t tp_to_arrays(PyObject* list, const char*** out_t, int32_t** ou
     }
     *out_t = topics; *out_p = parts;
     return n;
-}
-
-// list[(topic:str, partition:int, offset:int, leader_epoch:int|-1, metadata:str|None)]
-// -> the five parallel arrays every commit-with-offsets FFI entry point takes
-// (Consumer_commit_sync_offsets_async, Consumer_commit_async_offsets,
-// ConsumerHandle_commit_{sync,async}_offsets). Returns count or -1 (exception
-// set); on success the caller must release the arrays with offset_arrays_free.
-typedef struct {
-    const char** topics;
-    int32_t* parts;
-    int64_t* offs;
-    int32_t* epochs;
-    const char** metas;
-} offset_arrays_t;
-
-static void offset_arrays_free(offset_arrays_t* a) {
-    PyMem_Free((void*)a->topics);
-    PyMem_Free(a->parts);
-    PyMem_Free(a->offs);
-    PyMem_Free(a->epochs);
-    PyMem_Free((void*)a->metas);
-}
-
-static Py_ssize_t offsets_to_arrays(PyObject* list, offset_arrays_t* out) {
-    Py_ssize_t n = PySequence_Size(list);
-    if (n < 0) return -1;
-    out->topics = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
-    out->parts = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
-    out->offs = n > 0 ? PyMem_Malloc(n * sizeof(int64_t)) : NULL;
-    out->epochs = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
-    out->metas = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
-    if (n > 0 && (!out->topics || !out->parts || !out->offs || !out->epochs || !out->metas)) {
-        offset_arrays_free(out);
-        PyErr_NoMemory();
-        return -1;
-    }
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PySequence_GetItem(list, i);  // new ref
-        const char* t = NULL; int p = 0; long long o = 0; int e = -1; PyObject* meta = Py_None;
-        int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
-        if (ok) {
-            out->topics[i] = t; out->parts[i] = p; out->offs[i] = o; out->epochs[i] = e;
-            // A non-str metadata must fail the whole call: treating the failed
-            // conversion as "no metadata" would commit a different map than the
-            // caller passed AND return success with a live exception set, which
-            // CPython later reports as an unrelated SystemError.
-            if (meta == Py_None) {
-                out->metas[i] = NULL;
-            } else if (!PyUnicode_Check(meta)) {
-                PyErr_Format(PyExc_TypeError,
-                             "offset metadata must be str or None, not %s",
-                             Py_TYPE(meta)->tp_name);
-                ok = 0;
-            } else {
-                out->metas[i] = PyUnicode_AsUTF8(meta);
-                if (out->metas[i] == NULL) ok = 0;  // e.g. unencodable surrogates
-            }
-        }
-        Py_XDECREF(item);
-        if (!ok) { offset_arrays_free(out); return -1; }
-    }
-    return n;
-}
-
-// ---- Producer transaction control ops (async) ------------------------------
-//
-// Async twins of the five sync transaction ops above, driving the
-// kafka_producer_Producer_<op>_async FFI variants. The Python wrapper waits on
-// the completion via _run_sync (threading.Event, GIL released -> the main
-// thread stays responsive to SIGTERM/KeyboardInterrupt) or _run_async
-// (asyncio.Future, awaited/cancellable), exactly as flush/close already do, so a
-// transaction op never parks the caller inside a native block_on: the Python
-// transaction API is async-first, consistent with flush/close/partitions_for.
-//
-// All four no-arg ops reuse producer_op_trampoline (the shared void-op
-// trampoline used by flush_async/close_async): it fires cb(error_int) exactly
-// once on the dispatcher thread and Py_DECREFs the callback exactly once. The
-// Py_INCREF(cb) before handing it to the FFI as user_data balances that single
-// DECREF (the Rust *_async path always fires the callback once -- success, op
-// error, null-producer, or concurrent-modification rejection). The *_async FFI
-// calls only enqueue/spawn and return immediately, so -- like close_async /
-// flush_async -- they are NOT wrapped in Py_BEGIN_ALLOW_THREADS.
-//
-// These are placed here (rather than beside the sync txn wrappers) so
-// send_offsets_to_transaction_async can reuse offsets_to_arrays above instead of
-// duplicating the marshaling loop; the sync send_offsets wrapper predates that
-// helper and keeps its own inline copy.
-
-static PyObject* py_Producer_init_transactions_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_init_transactions_async(
-        producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_Producer_begin_transaction_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_begin_transaction_async(
-        producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_Producer_commit_transaction_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_commit_transaction_async(
-        producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_Producer_abort_transaction_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KO", &producer_ptr, &cb)) return NULL;
-    Producer* producer = (Producer*)producer_ptr;
-    Py_INCREF(cb);
-    kafka_producer_Producer_abort_transaction_async(
-        producer->producer, producer_op_trampoline, cb);
-    Py_RETURN_NONE;
-}
-
-// send_offsets_to_transaction_async(producer, offsets, group_metadata, cb):
-// combines the sync send_offsets marshaling (via the shared offsets_to_arrays)
-// with the async callback. The parallel arrays and the borrowed group-metadata
-// handle are marshaled/cloned synchronously on the calling thread by the Rust
-// *_async variant before it spawns (verified against
-// send_offsets_to_transaction_async in src/ffi/producer.rs), so the C
-// temporaries only need to survive this synchronous call and are freed right
-// after it returns -- exactly as the sync wrapper does; no extra keep-alive is
-// needed for the arrays or the group-metadata handle (gm_obj is a live argument
-// and the GIL is held throughout).
-static PyObject* py_Producer_send_offsets_to_transaction_async(PyObject* self, PyObject* args) {
-    unsigned long long producer_ptr;
-    PyObject* offsets;
-    PyObject* gm_obj;
-    PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KOOO", &producer_ptr, &offsets, &gm_obj, &cb)) return NULL;
-
-    // Typecheck the borrowed group-metadata handle before dereferencing it
-    // (matches the sync wrapper).
-    if (!PyObject_TypeCheck(gm_obj, &ConsumerGroupMetadataType)) {
-        PyErr_SetString(PyExc_TypeError,
-            "group_metadata must be a ConsumerGroupMetadata object");
-        return NULL;
-    }
-    Producer* producer = (Producer*)producer_ptr;
-    kafka_consumer_ConsumerGroupMetadata_t* gm =
-        ((ConsumerGroupMetadataObject*)gm_obj)->handle;
-
-    offset_arrays_t a;
-    Py_ssize_t n = offsets_to_arrays(offsets, &a);
-    if (n < 0) return NULL;  // exception set; offsets_to_arrays already freed a.
-
-    // Only Py_INCREF once the marshaling has succeeded and the FFI call is
-    // guaranteed to run (so the single DECREF in producer_op_trampoline is
-    // always balanced). An empty offsets map is a legitimate count == 0: the
-    // arrays are NULL and the FFI reads none of them.
-    Py_INCREF(cb);
-    kafka_producer_Producer_send_offsets_to_transaction_async(
-        producer->producer, a.topics, a.parts, a.offs, a.epochs, a.metas,
-        (int32_t)n, gm, producer_op_trampoline, cb);
-    offset_arrays_free(&a);
-    Py_RETURN_NONE;
 }
 
 // ---- trampolines (run on the Rust dispatcher thread) -----------------------
@@ -6988,67 +6904,62 @@ static PyObject* py_ListTransactionsResult_drain(PyObject* self, PyObject* args)
 }
 
 static PyMethodDef ProducerNativeMethods[] = {
-    {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
-    {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
-    {"Producer_send", py_Producer_send, METH_VARARGS, "Send record to batch"},
-    {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
-     "Register a callback fired when buffer space frees; returns True if "
-     "space is already available"},
-    {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
-     "Test-only: pause/resume the send task to exercise backpressure"},
-    {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,
-     "Stop/join the C batching threads (step 1 of close)"},
-    {"Producer_close_async", py_Producer_close_async, METH_VARARGS,
-     "Async Rust-side close; cb(error_int) (step 2 of close)"},
-    {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
-     "Free the Rust handle + C struct (step 3 of close)"},
-    {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
-    {"Producer_metrics", py_Producer_metrics, METH_VARARGS,
-     "Point-in-time metrics snapshot; returns list[dict] or None"},
+    {"MockProducer_new", py_MockProducer_new, METH_VARARGS,
+     "MockProducer_new(auto_complete, notify_cb=None) -> handle"},
+    {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS,
+     "KafkaProducer_new(config, notify_cb=None) -> handle; RuntimeError on a rejected config"},
+    {"Producer_send", py_Producer_send, METH_VARARGS,
+     "Blocking send(record, on_completion | None) -> (KafkaFuture | None, error | None)"},
+    {"Producer_send_cb", py_Producer_send_cb, METH_VARARGS,
+     "Queued send(record, on_completion | None, resolve); resolve(KafkaFuture | None, error | None)"},
+    {"Producer_poll", py_Producer_poll, METH_VARARGS,
+     "poll(timeout_ms): run queued callbacks on this thread, waiting up to timeout_ms; returns count"},
+    {"Producer_execute_callbacks", py_Producer_execute_callbacks, METH_VARARGS,
+     "Run the queued callbacks on this thread; returns count"},
+    {"Producer_flush", py_Producer_flush, METH_VARARGS, "Blocking flush -> error | None"},
+    {"Producer_flush_cb", py_Producer_flush_cb, METH_VARARGS, "Queued flush; cb(error | None)"},
     {"Producer_partitions_for", py_Producer_partitions_for, METH_VARARGS,
-     "Partition metadata for a topic; returns (PartitionInfoList_handle, error)"},
-    {"Producer_flush_async", py_Producer_flush_async, METH_VARARGS,
-     "Async flush; cb(error_int)"},
-    {"Producer_partitions_for_async", py_Producer_partitions_for_async, METH_VARARGS,
-     "Async partitions_for; cb(PartitionInfoList_handle_int, error_int)"},
+     "Blocking partitions_for(topic) -> (list | None, error | None)"},
+    {"Producer_partitions_for_cb", py_Producer_partitions_for_cb, METH_VARARGS,
+     "Queued partitions_for(topic, cb); cb(list | None, error | None)"},
+    {"Producer_metrics", py_Producer_metrics, METH_VARARGS,
+     "Point-in-time metrics snapshot; returns list[dict]"},
     {"Producer_init_transactions", py_Producer_init_transactions, METH_VARARGS,
-     "initTransactions (blocking); returns error_int (0 = success)"},
+     "Blocking initTransactions -> error | None"},
+    {"Producer_init_transactions_cb", py_Producer_init_transactions_cb, METH_VARARGS,
+     "Queued initTransactions; cb(error | None)"},
     {"Producer_begin_transaction", py_Producer_begin_transaction, METH_VARARGS,
-     "beginTransaction (non-blocking state transition); returns error_int"},
-    {"Producer_commit_transaction", py_Producer_commit_transaction, METH_VARARGS,
-     "commitTransaction (blocking); returns error_int"},
-    {"Producer_abort_transaction", py_Producer_abort_transaction, METH_VARARGS,
-     "abortTransaction (blocking); returns error_int"},
+     "beginTransaction -> error | None (no _cb twin: a state transition in Java)"},
     {"Producer_send_offsets_to_transaction", py_Producer_send_offsets_to_transaction, METH_VARARGS,
-     "sendOffsetsToTransaction(offsets, group_metadata) (blocking); returns error_int"},
-    {"Producer_init_transactions_async", py_Producer_init_transactions_async, METH_VARARGS,
-     "Async initTransactions; cb(error_int)"},
-    {"Producer_begin_transaction_async", py_Producer_begin_transaction_async, METH_VARARGS,
-     "Async beginTransaction; cb(error_int)"},
-    {"Producer_commit_transaction_async", py_Producer_commit_transaction_async, METH_VARARGS,
-     "Async commitTransaction; cb(error_int)"},
-    {"Producer_abort_transaction_async", py_Producer_abort_transaction_async, METH_VARARGS,
-     "Async abortTransaction; cb(error_int)"},
-    {"Producer_send_offsets_to_transaction_async", py_Producer_send_offsets_to_transaction_async, METH_VARARGS,
-     "Async sendOffsetsToTransaction(offsets, group_metadata, cb); cb(error_int)"},
+     "Blocking sendOffsetsToTransaction(spec, group_metadata) -> error | None"},
+    {"Producer_send_offsets_to_transaction_cb", py_Producer_send_offsets_to_transaction_cb, METH_VARARGS,
+     "Queued sendOffsetsToTransaction(spec, group_metadata, cb); cb(error | None)"},
+    {"Producer_commit_transaction", py_Producer_commit_transaction, METH_VARARGS,
+     "Blocking commitTransaction -> error | None"},
+    {"Producer_commit_transaction_cb", py_Producer_commit_transaction_cb, METH_VARARGS,
+     "Queued commitTransaction; cb(error | None)"},
+    {"Producer_abort_transaction", py_Producer_abort_transaction, METH_VARARGS,
+     "Blocking abortTransaction -> error | None"},
+    {"Producer_abort_transaction_cb", py_Producer_abort_transaction_cb, METH_VARARGS,
+     "Queued abortTransaction; cb(error | None)"},
+    {"Producer_close", py_Producer_close, METH_VARARGS, "Blocking close -> error | None"},
+    {"Producer_close_cb", py_Producer_close_cb, METH_VARARGS, "Queued close; cb(error | None)"},
+    {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
+     "Free the class handle (runs still-pending callbacks) and the C struct"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,
      "Complete the next pending send successfully"},
     {"MockProducer_error_next", py_MockProducer_error_next, METH_VARARGS,
-     "Complete the next pending send with an error"},
+     "Complete the next pending send with the error class mapped from (code, message)"},
     {"MockProducer_history_count", py_MockProducer_history_count, METH_VARARGS,
      "Return the number of records in the sent history"},
     {"MockProducer_clear", py_MockProducer_clear, METH_VARARGS,
      "Clear the sent history and pending completions"},
     {"MockProducer_set_commit_transaction_error", py_MockProducer_set_commit_transaction_error,
-     METH_VARARGS, "Test hook: install/clear the mock's commitTransaction error"},
+     METH_VARARGS, "Test hook: install (code, message) / clear (None) the mock's commitTransaction error"},
     {"MockProducer_sent_offsets", py_MockProducer_sent_offsets, METH_VARARGS,
      "Test hook: whether offsets were staged in the current transaction"},
     {"MockProducer_committed_offset", py_MockProducer_committed_offset, METH_VARARGS,
-     "Test hook: committed offset for (group_id, topic, partition) or None"},
-    {"RecordMetadata_destroy", py_RecordMetadata_destroy, METH_VARARGS,
-     "Destroy RecordMetadata handle"},
-    {"RecordMetadata_copy", py_RecordMetadata_copy, METH_VARARGS,
-     "Copy all fields via callback and destroy handle"},
+     "Test hook: (offset, leader_epoch | None, metadata) for (group_id, topic, partition) or None"},
     {"KafkaError_code", py_KafkaError_code, METH_VARARGS,
      "Get error code from KafkaError pointer"},
     {"KafkaError_message", py_KafkaError_message, METH_VARARGS,
@@ -7336,6 +7247,9 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     if (PyType_Ready(&ProducerRecordType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&KafkaFutureType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&BorrowedBytesType) < 0) {
         return NULL;
     }
@@ -7357,6 +7271,13 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     Py_INCREF(&ProducerRecordType);
     if (PyModule_AddObject(m, "ProducerRecord", (PyObject*)&ProducerRecordType) < 0) {
         Py_DECREF(&ProducerRecordType);
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    Py_INCREF(&KafkaFutureType);
+    if (PyModule_AddObject(m, "KafkaFuture", (PyObject*)&KafkaFutureType) < 0) {
+        Py_DECREF(&KafkaFutureType);
         Py_DECREF(m);
         return NULL;
     }

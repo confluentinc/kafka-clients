@@ -141,12 +141,11 @@ def _record_metadata_to_proto(meta):
     return pb.RecordMetadata(
         offset=meta.offset(),
         timestamp=meta.timestamp(),
-        # producer.py's RecordMetadata doesn't expose serialized sizes
-        # today; the C FFI carries them but the Python wrapper drops
-        # them. Surface -1 so RecordMetadata::new on the Rust side still
-        # constructs validly.
-        serialized_key_size=-1,
-        serialized_value_size=-1,
+        # The C API's RecordMetadata carries the serialized sizes (-1 for a
+        # null key / value) and producer.py now copies them out, like the
+        # C++ server does.
+        serialized_key_size=meta.serialized_key_size(),
+        serialized_value_size=meta.serialized_value_size(),
         topic=meta.topic(),
         partition=meta.partition(),
     )
@@ -389,9 +388,10 @@ class CallbackLog:
     One instance per service (producer or consumer), keyed by the server-local
     client id. The lock is mandatory rather than defensive: consumer callbacks
     are invoked from the Rust dispatcher thread and producer delivery callbacks
-    from the completion thread, while GetCallbackLog is served on a gRPC worker
-    thread — and in the async server the event loop is a *fourth* context. None
-    of those are the same thread, in either server.
+    inside poll() on whichever gRPC worker pumps the producer, while
+    GetCallbackLog is served on another gRPC worker thread — and in the async
+    server the event loop is yet another context. None of those are the same
+    thread, in either server.
     """
 
     def __init__(self):

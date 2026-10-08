@@ -50,6 +50,15 @@ pub(crate) type NotifyFn = unsafe extern "C" fn(opaque: *mut c_void);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SendPtr(pub(crate) *mut c_void);
 
+impl SendPtr {
+    /// The pointer. Taking it through a method (not the field) makes a
+    /// `move` closure capture the whole `Send` wrapper rather than the raw
+    /// pointer field (edition 2021 disjoint captures).
+    pub(crate) fn get(self) -> *mut c_void {
+        self.0
+    }
+}
+
 // SAFETY: the pointer is opaque to Rust; whoever registered it is responsible
 // for the thread-safety of what it points at (the C side documents that
 // callbacks may be executed from any thread the caller chooses).
@@ -109,8 +118,6 @@ impl CallbackQueue {
 
     /// Registers the hook fired on every empty-to-non-empty transition, or
     /// clears it with `None`.
-    // wired by the first client `_set_callbacks_notify` (Phase 2, producer)
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_notify(&self, notify: Option<NotifyFn>, opaque: *mut c_void) {
         *lock(&self.notify) = notify.map(|f| (f, SendPtr(opaque)));
     }
@@ -123,8 +130,6 @@ impl CallbackQueue {
     /// notify hook fires and the caller drains again later. Concurrent calls
     /// are serialized; a nested call from inside a running callback (same
     /// thread) returns 0 immediately instead of deadlocking.
-    // wired by the first client `_execute_callbacks` (Phase 2, producer)
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn execute(&self) -> i32 {
         let me = thread::current().id();
         if *lock(&self.owner) == Some(me) {

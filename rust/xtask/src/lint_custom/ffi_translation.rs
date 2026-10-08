@@ -167,7 +167,10 @@ const C_ONLY_FREE_FUNCTIONS: &[&str] = &["kafka_string_destroy"];
 /// `<prefix>_<method>_fn_t`) that no Rust item stands behind: the closure
 /// parameter of the Rust method is `unmapped` by design, and these are the C
 /// items it takes instead.
-const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[("kafka_common_KafkaFuture_BaseFunction", &["apply"])];
+const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[
+    ("kafka_common_KafkaFuture_BaseFunction", &["apply"]),
+    ("kafka_producer_Callback", &["on_completion"]),
+];
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
 /// caller classifies an error "beyond its numeric code" through the
@@ -3268,6 +3271,44 @@ mod tests {
             [
                 "unexpected kafka_common_KafkaFuture_BaseFunction_stray",
                 "unmapped kafka_common_KafkaFuture_then_apply"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_producer_callback_interface_is_accepted_as_c_only() {
+        // `Producer::send_with_callback` takes Java's `Callback` as a closure:
+        // the method is `unmapped`, and `kafka_producer_Callback` is the C-only
+        // interface standing in for it — admitted with its rule 3 items only.
+        let rust = r#"
+            pub mod producer {
+                #[doc(alias = "org.apache.kafka.clients.producer.Producer")]
+                pub trait Producer<K, V> {
+                    fn send_with_callback(&self, record: K, callback: Option<Box<dyn FnOnce(Option<&V>) + Send + Sync>>) -> i32;
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_producer_Callback_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, metadata: *const c_void, error: *const kafka_common_Error_t);
+            #[unsafe(no_mangle)] pub extern "C" fn kafka_producer_Callback_new(self_: *mut c_void, on_completion: kafka_producer_Callback_on_completion_fn_t) -> *mut kafka_producer_Callback_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *const kafka_producer_Callback_t, metadata: *const c_void, error: *const kafka_common_Error_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_stray(self_: *mut kafka_producer_Callback_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(self_: *const kafka_producer_Producer_t, record: *const c_void, callback: *const kafka_producer_Callback_t) -> i32 { 0 }
+        "#;
+        let findings = run("callback-interface", rust, ffi);
+        let keys: Vec<&str> = keys(&findings)
+            .into_iter()
+            .filter(|k| k.contains("Callback") || k.contains("send_with_callback"))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "unexpected kafka_producer_Callback_stray",
+                "unmapped kafka_producer_Producer_send_with_callback"
             ]
         );
     }

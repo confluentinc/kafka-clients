@@ -53,7 +53,10 @@ enable_testing()
 # Test executables
 add_executable(test_mock_producer tests/test_mock_producer.c)
 target_include_directories(test_mock_producer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The callback pump (test_support.h) waits on a pthread condition variable and
+# one test pumps from a helper thread, so pthread is needed explicitly in
+# addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_kafka_producer tests/test_kafka_producer.c)
 target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})

@@ -74,6 +74,7 @@ use super::common::{
     self, CallbackTarget, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     dispatch_and_wait, enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
+use super::util::{c_str_to_string, into_c_string};
 
 // The byte-array consumer is monomorphized over refcounted `bytes::Bytes` keys
 // and values, so each record's key/value is a zero-copy slice of the owning
@@ -1508,6 +1509,90 @@ pub(crate) unsafe fn offset_and_metadata_ref<'a>(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> &'a OffsetAndMetadata {
     &unsafe { &*(oam as *const OffsetAndMetadataInner) }.oam
+}
+
+/// Delivers a freshly constructed offset-and-metadata through `out`, or
+/// returns the construction error (CLAUDE.md §4 error slot).
+unsafe fn deliver_offset_and_metadata(
+    oam: Result<OffsetAndMetadata, Error>,
+    out: *mut *mut kafka_consumer_OffsetAndMetadata_t,
+) -> *mut kafka_common_Error_t {
+    match oam {
+        Ok(oam) => {
+            unsafe { *out = box_offset_and_metadata(oam) };
+            std::ptr::null_mut()
+        },
+        Err(error) => box_error(error),
+    }
+}
+
+/// `new OffsetAndMetadata(long offset)`: an owned handle delivered through
+/// `out_new`, freed with [`kafka_consumer_OffsetAndMetadata_destroy`]. A
+/// negative offset fails with the Java `IllegalArgumentException`
+/// (`LocalIllegalArgument`, "Invalid negative offset").
+///
+/// # Safety
+///
+/// `out_new` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
+    offset: i64,
+    out_new: *mut *mut kafka_consumer_OffsetAndMetadata_t,
+) -> *mut kafka_common_Error_t {
+    unsafe { deliver_offset_and_metadata(OffsetAndMetadata::new(offset), out_new) }
+}
+
+/// `new OffsetAndMetadata(long offset, String metadata)`; a null `metadata`
+/// is Java `null`, which the class stores as the empty string.
+///
+/// # Safety
+///
+/// `metadata` must be null or a valid NUL-terminated string; `out_with_metadata`
+/// a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
+    offset: i64,
+    metadata: *const c_char,
+    out_with_metadata: *mut *mut kafka_consumer_OffsetAndMetadata_t,
+) -> *mut kafka_common_Error_t {
+    let metadata = unsafe { c_str_to_string(metadata) };
+    unsafe { deliver_offset_and_metadata(OffsetAndMetadata::with_metadata(offset, metadata), out_with_metadata) }
+}
+
+/// `new OffsetAndMetadata(long offset, Optional<Integer> leaderEpoch, String metadata)`;
+/// a negative `leader_epoch` is `Optional.empty()`.
+///
+/// # Safety
+///
+/// `metadata` must be null or a valid NUL-terminated string;
+/// `out_with_leader_epoch_metadata` a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+    offset: i64,
+    leader_epoch: i32,
+    metadata: *const c_char,
+    out_with_leader_epoch_metadata: *mut *mut kafka_consumer_OffsetAndMetadata_t,
+) -> *mut kafka_common_Error_t {
+    let metadata = unsafe { c_str_to_string(metadata) };
+    let leader_epoch = (leader_epoch >= 0).then_some(leader_epoch);
+    unsafe {
+        deliver_offset_and_metadata(
+            OffsetAndMetadata::with_leader_epoch_metadata(offset, leader_epoch, metadata),
+            out_with_leader_epoch_metadata,
+        )
+    }
+}
+
+/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `oam` must be a valid offset-and-metadata handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
+    oam: *const kafka_consumer_OffsetAndMetadata_t,
+) -> *mut c_char {
+    into_c_string(&unsafe { offset_and_metadata_ref(oam) }.to_string())
 }
 
 /// Returns the committed offset.
