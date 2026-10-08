@@ -2493,6 +2493,23 @@ pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t
     }
 }
 
+/// Returns whether the node is fenced — Java's `Node.isFenced()`.
+///
+/// Only `describeCluster` with `includeFencedBrokers(true)` (KIP-1073) can
+/// return a fenced broker, so every node obtained any other way answers `false`.
+///
+/// # Safety
+///
+/// `node` must be a valid node handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Node_is_fenced(node: *const kafka_common_Node_t) -> bool {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle, i.e. a pointer
+    // to a live `Node` this library handed out (owned or borrowed from a live result); the
+    // reference is used only to read one flag during this call.
+    unsafe { &*(node as *const Node) }.is_fenced()
+}
+
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
 pub struct kafka_common_PartitionInfo_t {
@@ -6912,6 +6929,27 @@ mod tests {
         let mn = MetricName::new(name, "grp", "desc", tag_map);
         let km = KafkaMetric::new(mn.clone(), provider, Arc::new(MetricConfig::new()), Arc::new(SystemTime));
         (mn, Arc::new(km))
+    }
+
+    /// `kafka_common_Node_is_fenced` reads Java's `Node.isFenced()`: a broker
+    /// that `describeCluster(includeFencedBrokers)` reports fenced answers
+    /// `true`, every other node `false`.
+    #[test]
+    fn node_is_fenced_reads_the_fenced_flag() {
+        let fenced = Node::with_rack_is_fenced(1, "h".to_string(), 9092, Some("r1".to_string()), true);
+        let active = Node::new(2, "h".to_string(), 9092);
+        // SAFETY: Test code: Every accessor is called on a live handle (built by this test or
+        // received by the running callback and not yet destroyed); borrowed results are read before
+        // their owner is freed, and out-of-range indices exercise the documented null / -1 / 0
+        // paths.
+        unsafe {
+            assert!(kafka_common_Node_is_fenced(
+                &fenced as *const Node as *const kafka_common_Node_t
+            ));
+            assert!(!kafka_common_Node_is_fenced(
+                &active as *const Node as *const kafka_common_Node_t
+            ));
+        }
     }
 
     /// A group-metadata handle's four accessors read back exactly the

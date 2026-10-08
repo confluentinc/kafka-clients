@@ -90,8 +90,24 @@ pub(crate) fn init_default_logger() {
 ///
 /// No Java counterpart: Java has no C boundary.
 pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error) -> R, body: impl FnOnce() -> R) -> R {
-    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+    match catch_panic(fn_name, body) {
         Ok(value) => value,
+        Err(error) => on_panic(error),
+    }
+}
+
+/// Runs `body`, turning a Rust panic into the [`Error`] [`panic_error`] builds
+/// for `fn_name`, logged at `error` level: the catching half of
+/// [`ffi_guard_or`].
+///
+/// Also used inside an entry point, where a panic must be reported somewhere
+/// more specific than the entry point's own `on_panic` value — the per-key
+/// admin dispatch catches a panic in its RPC submission with it, so the panic
+/// reaches every requested key's callback instead of unwinding to the guard.
+/// The same unwind-safety reasoning as [`ffi_guard_or`] applies.
+pub(crate) fn catch_panic<R>(fn_name: &'static str, body: impl FnOnce() -> R) -> Result<R, Error> {
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => Ok(value),
         Err(payload) => {
             let error = panic_error(fn_name, &*payload);
             // A payload's destructor is arbitrary code, and one that panicked
@@ -101,7 +117,7 @@ pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error
                 std::mem::forget(nested);
             }
             log::error!("{}", error.message());
-            on_panic(error)
+            Err(error)
         },
     }
 }
@@ -146,6 +162,27 @@ where
     F::Output: Send + 'static,
 {
     spawn_or_abort(|| runtime.spawn(task))
+}
+
+/// Runs `body` and aborts the process, after logging `reason`, if it panics.
+///
+/// For code that may already have fired some of a call's C callbacks: an
+/// unwind from there would reach `#[ffi_guard]`, whose `on_panic` reports the
+/// panic through those callbacks again, breaking their exactly-once contract.
+/// Aborting is what every panic at the boundary did before `#[ffi_guard]`, and
+/// what [`spawn_callback_task`] does for the same reason. The per-key admin
+/// dispatch runs its callback fan-out under it.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn run_or_abort<R>(reason: &str, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        // The payload is not dropped: nothing runs after the abort.
+        Err(_) => {
+            log::error!("aborting: {reason}");
+            std::process::abort()
+        },
+    }
 }
 
 /// Runs `spawn` and aborts the process if it panics: the body of
@@ -1385,6 +1422,63 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
     }
 }
 
+/// Returns an independent, owned copy of an error handle: same variant, code,
+/// message, payload and cause chain.
+///
+/// Every owned `kafka_common_Error_t` is freed exactly once, so a caller that
+/// must hand one error to several consumers — for example a binding that
+/// resolves one per-key future per requested key from a single whole-request
+/// failure — hands each its own copy. Free the copy with
+/// [`kafka_common_Error_destroy`]; the original is left untouched.
+///
+/// # Safety
+///
+/// `error` must be a valid, non-null error handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_clone(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    // SAFETY: `error_ref` requires a non-null, live error handle, which this function's
+    // `# Safety` requires of `error` (a required parameter, so it is not null-checked); the
+    // reference is used only to clone the error during this call, and the returned handle is
+    // a fresh `box_error` allocation independent of `error`.
+    box_error(unsafe { error_ref(error) }.error.clone())
+}
+
+/// Returns the error that caused this one, or null when there is none —
+/// Java's `Throwable.getCause()`.
+///
+/// The Rust core keeps a cause wherever Java passes one to the exception's
+/// constructor, for example `KafkaException("Failed to create new
+/// KafkaAdminClient", exc)`, `KafkaException("Failed to find brokers to send
+/// ListGroups", throwable)`, the `removeMembersFromConsumerGroup` remove-all
+/// wrap, and a `TimeoutException` that records the last error seen before the
+/// deadline. Walking the chain means calling this again on the returned
+/// handle, until it returns null.
+///
+/// # Ownership
+///
+/// The returned handle is **owned** by the caller, the same as
+/// [`kafka_common_Error_clone`]: it is an independent copy of the cause
+/// (variant, code, message, payload and its own cause chain), not a view into
+/// `error`. Free it with [`kafka_common_Error_destroy`]. It stays valid after
+/// `error` is destroyed, and destroying it leaves `error` untouched.
+///
+/// # Safety
+///
+/// `error` must be a valid, non-null error handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_cause(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    // SAFETY: `error_ref` requires a non-null, live error handle, which this function's
+    // `# Safety` requires of `error` (a required parameter, so it is not null-checked); the
+    // reference is used only to clone its cause during this call, and the returned handle is
+    // a fresh `box_error` allocation independent of `error`.
+    match unsafe { error_ref(error) }.error.source() {
+        Some(cause) => box_error(cause.clone()),
+        None => std::ptr::null_mut(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-variant payload accessors (CLAUDE.md §4: "Exceptions having additional
 // fields in Java")
@@ -1510,8 +1604,11 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization(
     }
 }
 
-/// Returns the offending group id as an owned, NUL-terminated C string. The
-/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
+/// Returns the offending group id as an owned, NUL-terminated C string, or
+/// null where Java's `GroupAuthorizationException.groupId()` is null — the
+/// group is not known where the error was raised, e.g. an error built from a
+/// broker's `GROUP_AUTHORIZATION_FAILED` code. A non-null result must be freed
+/// with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
@@ -1530,7 +1627,10 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     // (the payload is a borrow that dies with `kafka_common_Error_destroy`, see the
     // `Per-variant payload accessors` comment).
     let e = unsafe { &*(handle as *const crate::common::errors::GroupAuthorizationError) };
-    CString::new(e.group_id()).unwrap_or_default().into_raw()
+    match e.group_id() {
+        Some(group_id) => CString::new(group_id).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// `InvalidTopicException` -> `kafka_common_InvalidTopicError_t`.
@@ -3403,6 +3503,21 @@ mod tests {
             let other = box_error(other_error());
             assert!(kafka_common_Error_group_authorization(other).is_null());
             kafka_common_Error_destroy(other);
+
+            // Java's `groupId()` is null for the `Errors` builder's error, so
+            // C gets null, not "".
+            for error in [
+                Error::GroupAuthorization(GroupAuthorizationError::with_default_message()),
+                Errors::GroupAuthorizationFailed
+                    .error_with_message("denied")
+                    .expect("a real code"),
+            ] {
+                let error = box_error(error);
+                let handle = kafka_common_Error_group_authorization(error);
+                assert!(!handle.is_null());
+                assert!(kafka_common_GroupAuthorizationError_group_id(handle).is_null());
+                kafka_common_Error_destroy(error);
+            }
         }
     }
 
@@ -4401,6 +4516,153 @@ mod tests {
             let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
             assert!(!guarded_new(false, &mut out_error).is_null());
             assert!(out_error.is_null(), "a call that does not panic leaves out_error alone");
+        }
+    }
+
+    /// A clone is an independent handle with the same variant, message and
+    /// cause chain, freed separately from the original.
+    #[test]
+    fn error_clone_is_an_independent_equal_handle() {
+        let original = box_error(Error::kafka_message_source("outer", Error::group_authorization("g")));
+        // SAFETY: Test code: `original` is a live handle from `box_error` just above;
+        // `kafka_common_Error_clone` returns a fresh owned handle, every accessor reads a
+        // live handle, and each of `original` and `copy` is destroyed exactly once, with
+        // `copy` read after `original` is freed to show it is independent.
+        unsafe {
+            let copy = kafka_common_Error_clone(original);
+            assert_ne!(copy, original);
+            assert_eq!(kafka_common_Error_code(copy), kafka_common_Error_code(original));
+            assert_eq!(CStr::from_ptr(kafka_common_Error_message(copy)).to_str(), Ok("outer"));
+            assert_eq!(
+                kafka_common_Error_is_kafka_error(copy),
+                kafka_common_Error_is_kafka_error(original)
+            );
+            assert_eq!(kafka_common_Error_is_api_error(copy), kafka_common_Error_is_api_error(original));
+            assert!(matches!(error_ref(copy).error.source(), Some(Error::GroupAuthorization(_))));
+            kafka_common_Error_destroy(original);
+            // The copy outlives the original.
+            assert_eq!(CStr::from_ptr(kafka_common_Error_message(copy)).to_str(), Ok("outer"));
+            kafka_common_Error_destroy(copy);
+        }
+    }
+
+    /// Walks a handle's cause chain through `kafka_common_Error_cause`,
+    /// returning `(code, message)` per link, freeing every owned cause handle.
+    unsafe fn cause_chain(error: *const kafka_common_Error_t) -> Vec<(kafka_common_ErrorCode_t, String)> {
+        let mut chain = Vec::new();
+        // SAFETY: Test code: Every accessor is called on a live handle (built by this test or
+        // received by the running callback and not yet destroyed); borrowed results are read before
+        // their owner is freed, and out-of-range indices exercise the documented null / -1 / 0
+        // paths.
+        let mut current = unsafe { kafka_common_Error_cause(error) };
+        while !current.is_null() {
+            // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
+            // string borrowed from a live handle or passed to the running callback, and is copied
+            // before that owner goes away. Each handle passed to a `_destroy` is a live, owned handle
+            // (built by this test or received by the callback) that nothing uses afterwards, destroyed
+            // exactly once. Every accessor is called on a live handle (built by this test or received
+            // by the running callback and not yet destroyed); borrowed results are read before their
+            // owner is freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
+            unsafe {
+                chain.push((
+                    kafka_common_Error_code(current),
+                    CStr::from_ptr(kafka_common_Error_message(current))
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                ));
+                let next = kafka_common_Error_cause(current);
+                kafka_common_Error_destroy(current);
+                current = next;
+            }
+        }
+        chain
+    }
+
+    /// An error built without a cause — Java's null `getCause()` — returns null.
+    #[test]
+    fn error_cause_is_null_without_a_cause() {
+        let error = box_error(Error::kafka_message("no cause"));
+        // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
+        // this test or received by the callback) that nothing uses afterwards, destroyed exactly
+        // once. Every accessor is called on a live handle (built by this test or received by the
+        // running callback and not yet destroyed); borrowed results are read before their owner is
+        // freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
+        unsafe {
+            assert!(kafka_common_Error_cause(error).is_null());
+            kafka_common_Error_destroy(error);
+        }
+    }
+
+    /// Each wrap the admin client builds with a Java cause — a bare
+    /// `KafkaException(message, cause)` for client creation, the ListGroups
+    /// broker lookup and the remove-all member error, and a
+    /// `TimeoutException(message, cause)` for a call's deadline — hands the
+    /// cause back through `kafka_common_Error_cause`, as an owned handle that
+    /// outlives its parent.
+    #[test]
+    fn error_cause_returns_each_admin_wrap_cause() {
+        use crate::common::errors::TimeoutError;
+        let cases = [
+            Error::kafka_message_source(
+                "Failed to create new KafkaAdminClient",
+                Error::local_illegal_argument("bad bootstrap"),
+            ),
+            Error::kafka_message_source(
+                "Failed to find brokers to send ListGroups",
+                Error::new(Errors::BrokerNotAvailable),
+            ),
+            Error::kafka_message_source(
+                "Encounter error when trying to remove: removeAll()",
+                Error::new(Errors::UnknownMemberId),
+            ),
+            Error::Timeout(TimeoutError::with_source(
+                "Call(callName=listNodes) timed out at 5 after 1 attempt(s)",
+                Error::new(Errors::NetworkError),
+            )),
+        ];
+        for wrapped in cases {
+            let expected_cause = wrapped.source().expect("each case has a cause").clone();
+            let parent = box_error(wrapped);
+            // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
+            // string borrowed from a live handle or passed to the running callback, and is copied
+            // before that owner goes away. Each handle passed to a `_destroy` is a live, owned handle
+            // (built by this test or received by the callback) that nothing uses afterwards, destroyed
+            // exactly once. Every accessor is called on a live handle (built by this test or received
+            // by the running callback and not yet destroyed); borrowed results are read before their
+            // owner is freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
+            unsafe {
+                let cause = kafka_common_Error_cause(parent);
+                assert!(!cause.is_null());
+                // Owned: still valid after the parent is destroyed.
+                kafka_common_Error_destroy(parent);
+                assert_eq!(kafka_common_Error_code(cause), error_code_of(&expected_cause));
+                assert_eq!(
+                    CStr::from_ptr(kafka_common_Error_message(cause)).to_str(),
+                    Ok(expected_cause.message())
+                );
+                kafka_common_Error_destroy(cause);
+            }
+        }
+    }
+
+    /// A two-level chain is walked link by link, ending in null.
+    #[test]
+    fn error_cause_walks_a_nested_chain() {
+        let error = box_error(Error::kafka_message_source(
+            "outer",
+            Error::kafka_message_source("middle", Error::group_authorization("g")),
+        ));
+        // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
+        // this test or received by the callback) that nothing uses afterwards, destroyed exactly
+        // once. The test helper is called on a live handle built by this test, as its `# Safety`
+        // requires.
+        unsafe {
+            let chain = cause_chain(error);
+            assert_eq!(chain.len(), 2);
+            assert_eq!(chain[0].1, "middle");
+            assert_eq!(chain[1].1, "Not authorized to access group: g");
+            kafka_common_Error_destroy(error);
         }
     }
 }
