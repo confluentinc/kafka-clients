@@ -31,6 +31,7 @@ import asyncio
 import inspect
 import itertools
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -1144,6 +1145,49 @@ def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     assert str(err.value) == "The timeout cannot be negative."
     assert p.metrics() is not None
     p.close(timeout=0)
+
+
+# A close timeout beyond Long.MAX_VALUE milliseconds (CLAUDE.md, Python Binding
+# Conventions, Signatures, Timeouts): OverflowError, and NaN ValueError, before
+# the FFI, so before close() marks the producer closed.
+TOO_LONG = f"timeout of {math.floor(1e300 * 1000.0)} ms does not fit a signed 64-bit integer"
+
+
+def test_close_rejects_a_timeout_beyond_a_long_and_stays_open() -> None:
+    p = KafkaProducer(configs=UNREACHABLE)
+    with pytest.raises(OverflowError) as err:
+        p.close(timeout=1e300)
+    assert str(err.value) == TOO_LONG
+    with pytest.raises(OverflowError):
+        p.close(timeout=float("inf"))
+    with pytest.raises(ValueError):
+        p.close(timeout=float("nan"))
+    # Still open: a send and a flush work, and a plain close() closes it.
+    f = p.send(record=RECORD)
+    p.flush()
+    assert isinstance(f.exception(), KafkaTimeoutError)
+    p.close()
+    with pytest.raises(IllegalStateError) as err:
+        p.send(record=RECORD)
+    assert str(err.value) == CLOSED
+
+
+async def test_async_close_rejects_a_timeout_beyond_a_long_and_stays_open() -> None:
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    with pytest.raises(OverflowError) as err:
+        await p.close(timeout=1e300)
+    assert str(err.value) == TOO_LONG
+    with pytest.raises(OverflowError):
+        await p.close(timeout=float("inf"))
+    with pytest.raises(ValueError):
+        await p.close(timeout=float("nan"))
+    f = await p.send(record=RECORD)
+    await p.flush()
+    assert isinstance(f.exception(), KafkaTimeoutError)
+    await p.close()
+    with pytest.raises(IllegalStateError) as err:
+        await p.send(record=RECORD)
+    assert str(err.value) == CLOSED
 
 
 def test_closed_first_then_the_argument_checks() -> None:

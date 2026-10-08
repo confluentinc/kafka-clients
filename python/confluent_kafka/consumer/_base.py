@@ -104,6 +104,9 @@ _T = TypeVar("_T")
 
 _LOG = logging.getLogger("confluent_kafka.consumer")
 
+# Java's Long.MAX_VALUE, the largest Duration.toMillis().
+_LONG_MAX = (1 << 63) - 1
+
 # Java's AsyncKafkaConsumer.acquireAndEnsureOpen() / acquire() messages.
 CLOSED_MESSAGE = "This consumer has already been closed."
 CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
@@ -195,13 +198,21 @@ def _listener_error_for(failure: BaseException, errors: _ListenerErrors) -> Base
 
 
 def poll_timeout_ms(timeout: Duration) -> int:
-    """``poll(Duration)``'s timeout in milliseconds, as Java's
-    ``Duration.toMillis()`` (rounded down); a negative one raises Java's
-    ``Timer`` message, ``Invalid negative timeout -N``."""
-    seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout)
-    millis = math.floor(seconds * 1000.0)
+    """``poll(Duration)``'s timeout in whole milliseconds, rounded down as Java's
+    ``Duration.toMillis()``: a ``timedelta`` exactly, from its integer fields, a
+    number through ``float()``. A negative one raises Java's ``Timer`` message,
+    ``Invalid negative timeout -N``; one that does not fit a signed 64-bit
+    millisecond count raises ``OverflowError``, infinity included, and ``NaN``
+    ``ValueError`` (see ``duration_to_ms``)."""
+    if isinstance(timeout, timedelta):
+        millis = ((timeout.days * 86_400 + timeout.seconds) * 1_000
+                  + timeout.microseconds // 1_000)
+    else:
+        millis = math.floor(float(timeout) * 1000.0)
     if millis < 0:
         raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
+    if millis > _LONG_MAX:
+        raise OverflowError(f"timeout of {millis} ms does not fit a signed 64-bit integer")
     return millis
 
 

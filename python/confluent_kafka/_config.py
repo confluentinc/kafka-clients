@@ -37,6 +37,7 @@ The keys and types are generated from Java's ``ProducerConfig`` /
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Collection, Mapping
 from datetime import timedelta
 from typing import Any, Literal
@@ -49,6 +50,9 @@ from confluent_kafka.illegal_argument_error import IllegalArgumentError
 __all__ = ["coerce", "convert_to_string", "duration_to_ms", "prepare"]
 
 Client = Literal["producer", "consumer"]
+
+# Java's Long.MAX_VALUE, the largest Duration.toMillis().
+_LONG_MAX = (1 << 63) - 1
 
 _TYPES: dict[str, dict[str, str]] = {
     "producer": _config_types.PRODUCER,
@@ -198,16 +202,24 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
 
 
 def duration_to_ms(timeout: float | timedelta | None, *, default_ms: int) -> int:
-    """A ``Duration`` (seconds, or a ``timedelta``) in milliseconds; ``None`` is
+    """A ``Duration`` (seconds, or a ``timedelta``) in whole milliseconds,
+    rounded down as Java's ``Duration.toMillis()``: a ``timedelta`` exactly, from
+    its integer fields, a number through ``float()``; ``None`` is
     ``default_ms``. A negative value raises
     ``IllegalArgumentError(message="The timeout cannot be negative.")``, Java's
-    text for every client's negative-timeout check."""
+    text for every client's negative-timeout check. A value that does not fit a
+    signed 64-bit millisecond count raises ``OverflowError``, infinity included,
+    and ``NaN`` ``ValueError`` *(deviation: Java's ``toMillis()`` throws
+    ``ArithmeticException``)*, so neither reaches the FFI."""
     if timeout is None:
         return default_ms
     if isinstance(timeout, timedelta):
-        millis = timeout.total_seconds() * 1000.0
+        millis = ((timeout.days * 86_400 + timeout.seconds) * 1_000
+                  + timeout.microseconds // 1_000)
     else:
-        millis = float(timeout) * 1000.0
+        millis = math.floor(float(timeout) * 1000.0)
     if millis < 0:
         raise IllegalArgumentError(message="The timeout cannot be negative.")
-    return int(millis)
+    if millis > _LONG_MAX:
+        raise OverflowError(f"timeout of {millis} ms does not fit a signed 64-bit integer")
+    return millis

@@ -126,6 +126,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import math
 import sys
 import threading
 import time
@@ -149,6 +150,7 @@ from confluent_kafka.consumer import (
     AsyncKafkaConsumer, CloseOptions, ConsumerRebalanceListener, KafkaConsumer,
     OffsetAndMetadata, SubscriptionPattern,
 )
+from confluent_kafka.consumer._base import poll_timeout_ms
 
 WAIT = 10.0
 TOPIC = "test"
@@ -686,6 +688,72 @@ def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
         consumer.close(option=CloseOptions.timeout(timedelta(seconds=-1)))
     assert consumer.subscription() == set()
     consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_poll_reads_a_timedelta_exactly() -> None:
+    # Java's Duration.toMillis() is integer arithmetic, rounding down;
+    # timedelta.total_seconds() goes through a float, one millisecond too long
+    # for timedelta.max. A poll that long cannot be waited out, so the
+    # conversion is checked on its own.
+    td = timedelta.max
+    assert poll_timeout_ms(td) == (td.days * 86_400 + td.seconds) * 1_000 + td.microseconds // 1_000
+    assert poll_timeout_ms(timedelta(microseconds=1_999)) == 1
+    assert poll_timeout_ms(timedelta(microseconds=999)) == 0
+    assert poll_timeout_ms(0.0019999) == 1
+
+
+# A timeout beyond Long.MAX_VALUE milliseconds (CLAUDE.md, Python Binding
+# Conventions, Signatures, Timeouts): OverflowError, and NaN ValueError, before
+# the FFI.
+TOO_LONG = f"timeout of {math.floor(1e300 * 1000.0)} ms does not fit a signed 64-bit integer"
+
+
+def test_a_timeout_beyond_a_long_raises_before_the_ffi_and_the_consumer_stays_open() -> None:
+    consumer = new_consumer()
+    consumer.assign(partitions=[TP0])
+    with pytest.raises(OverflowError) as e:
+        consumer.poll(timeout=1e300)
+    assert str(e.value) == TOO_LONG
+    with pytest.raises(OverflowError):
+        consumer.poll(timeout=float("inf"))
+    with pytest.raises(ValueError):
+        consumer.poll(timeout=float("nan"))
+    with pytest.raises(OverflowError) as e:
+        consumer.close(option=CloseOptions.timeout(1e300))
+    assert str(e.value) == TOO_LONG
+    with pytest.raises(OverflowError):
+        consumer.close(option=CloseOptions.timeout(float("inf")))
+    with pytest.raises(ValueError):
+        consumer.close(option=CloseOptions.timeout(float("nan")))
+    # Still open: nothing reached the FFI.
+    assert consumer.assignment() == {TP0}
+    assert consumer.poll(timeout=0).is_empty()
+    consumer.close(option=CloseOptions.timeout(0))
+    with pytest.raises(IllegalStateError) as e:
+        consumer.assignment()
+    assert str(e.value) == CLOSED
+
+
+def test_an_async_timeout_beyond_a_long_raises_before_the_ffi_and_the_consumer_stays_open(
+        ) -> None:
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+        await consumer.assign(partitions=[TP0])
+        with pytest.raises(OverflowError) as e:
+            await consumer.poll(timeout=1e300)
+        assert str(e.value) == TOO_LONG
+        with pytest.raises(OverflowError) as e:
+            await consumer.close(option=CloseOptions.timeout(1e300))
+        assert str(e.value) == TOO_LONG
+        with pytest.raises(ValueError):
+            await consumer.close(option=CloseOptions.timeout(float("nan")))
+        assert consumer.assignment() == {TP0}
+        await consumer.close(option=CloseOptions.timeout(0))
+        with pytest.raises(IllegalStateError) as e:
+            consumer.assignment()
+        assert str(e.value) == CLOSED
+
+    asyncio.run(main())
 
 
 def test_close_with_a_timeout_is_not_generated() -> None:

@@ -26,6 +26,7 @@ themselves and are not.
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 
 import pytest
@@ -302,3 +303,41 @@ def test_duration_to_ms() -> None:
         with pytest.raises(IllegalArgumentError) as exc:
             _config.duration_to_ms(negative, default_ms=0)
         assert str(exc.value) == "The timeout cannot be negative."
+
+
+def test_duration_to_ms_reads_a_timedelta_exactly() -> None:
+    # Java's Duration.toMillis() is integer arithmetic. timedelta.total_seconds()
+    # goes through a float, which makes timedelta.max one millisecond too long.
+    td = timedelta.max
+    exact = (td.days * 86_400 + td.seconds) * 1_000 + td.microseconds // 1_000
+    assert exact == 86_399_999_999_999_999
+    assert _config.duration_to_ms(td, default_ms=0) == exact
+    # Rounded down to the millisecond, as toMillis().
+    assert _config.duration_to_ms(timedelta(milliseconds=1), default_ms=0) == 1
+    assert _config.duration_to_ms(timedelta(microseconds=1_999), default_ms=0) == 1
+    assert _config.duration_to_ms(timedelta(microseconds=999), default_ms=0) == 0
+    assert _config.duration_to_ms(0.0019999, default_ms=0) == 1
+    assert _config.duration_to_ms(0.0009, default_ms=0) == 0
+
+
+def test_duration_to_ms_rejects_what_does_not_fit_a_long() -> None:
+    # Beyond Long.MAX_VALUE milliseconds Java's toMillis() throws
+    # ArithmeticException; here OverflowError, infinity included, and NaN
+    # ValueError, before the FFI (CLAUDE.md, Python Binding Conventions,
+    # Signatures, Timeouts). A float number of seconds cannot hold
+    # Long.MAX_VALUE ms: 9223372036854776.0 s is 2**63 ms, the first refused,
+    # and the float below it the largest accepted.
+    assert _config.duration_to_ms(9_223_372_036_854_774.0, default_ms=0) == (
+        9_223_372_036_854_773_760)
+    for too_long, millis in ((9_223_372_036_854_776.0, 2**63),
+                             (1e300, math.floor(1e300 * 1000.0))):
+        with pytest.raises(OverflowError) as exc:
+            _config.duration_to_ms(too_long, default_ms=0)
+        assert str(exc.value) == f"timeout of {millis} ms does not fit a signed 64-bit integer"
+    for infinite in (float("inf"), float("-inf")):
+        with pytest.raises(OverflowError) as exc:
+            _config.duration_to_ms(infinite, default_ms=0)
+        assert str(exc.value) == "cannot convert float infinity to integer"
+    with pytest.raises(ValueError) as exc:
+        _config.duration_to_ms(float("nan"), default_ms=0)
+    assert str(exc.value) == "cannot convert float NaN to integer"
