@@ -11,7 +11,7 @@ sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 # exported: the FFI is the only module that defines C-named (`kafka_*`) items,
 # and `item_types` leaves the crate's `pub const`s out. `cargo xtask lint-custom`
 # (`check-ffi-translation`) ties each exported name to its Rust item.
-# "enums" is needed for kafka_common_ErrorCode_t; without it cbindgen emits no
+# "enums" is needed for kafka_common_ErrorCode_e; without it cbindgen emits no
 # enum at all.
 item_types = ["functions", "structs", "typedefs", "enums"]
 
@@ -20,7 +20,7 @@ prefix = ""
 args = "Vertical"
 
 [enum]
-# Global default; kafka_common_ErrorCode_t overrides it locally with a
+# Global default; kafka_common_ErrorCode_e overrides it locally with a
 # `cbindgen:prefix-with-name=false` annotation, because prefixing with the
 # export name would push the `_t` suffix into all 162 enumerators.
 prefix_with_name = true
