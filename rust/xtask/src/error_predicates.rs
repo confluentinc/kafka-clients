@@ -168,7 +168,9 @@ fn predicates_rust(predicates: &[Predicate]) -> anyhow::Result<String> {
 //! (`is_retriable_error` -> `kafka_common_Error_is_retriable_error`,
 //! CLAUDE.md §4). C cannot see the error's variants, so these predicates are
 //! how a C caller classifies an error beyond its numeric code
-//! (`kafka_common_Error_code`). Every one is `false` for a null handle.
+//! (`kafka_common_Error_code`). Each returns `1` when it holds and `0` when it
+//! does not or the handle is null: booleans cross the C boundary as `int8_t`
+//! (CLAUDE.md §4), never as `bool`.
 
 use super::common::{error_ref, kafka_common_Error_t};
 "#,
@@ -186,17 +188,17 @@ use super::common::{error_ref, kafka_common_Error_t};
 ///
 /// # Returns
 ///
-/// `true` if the predicate holds, `false` if not or if the handle is null.
+/// `1` if the predicate holds, `0` if not or if the handle is null.
 ///
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Error_t) -> bool {{
+pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Error_t) -> i8 {{
     if error.is_null() {{
-        return false;
+        return 0;
     }}
-    unsafe {{ error_ref(error) }}.error.{name}()
+    i8::from(unsafe {{ error_ref(error) }}.error.{name}())
 }}
 "#,
             name = p.name
@@ -207,7 +209,7 @@ pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Er
 /// Every export above, by the name of the predicate it mirrors, for the tests
 /// that check each export against every error class.
 #[cfg(test)]
-pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_Error_t) -> bool)] = &[
+pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_Error_t) -> i8)] = &[
 "#,
     );
     for p in predicates {

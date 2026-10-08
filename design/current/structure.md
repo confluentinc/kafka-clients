@@ -101,9 +101,10 @@ rust/build.rs           # invokes the generator before compilation; writes the
                         # C header to rust/target/include/confluent_kafka.h
 rust/xtask/             # format, format-check, check-generated,
                         # generate-error-codes, java-deprecated, lint,
-                        # lint-custom, doc-hygiene, lint-fix,
+                        # lint-custom, ffi-baseline, doc-hygiene, lint-fix,
                         # coverage{,-lcov,-all}, test-multilanguage,
-                        # producer-perf-test
+                        # producer-perf-test; ffi-baseline.txt is the
+                        # check-ffi-translation burn-down list
 rust/tests/             # integration + multilanguage tests (see below)
 rust/examples/          # transactional examples (txn_*)
 rust/consumer-perf/     # consumer benchmark harness (workspace member)

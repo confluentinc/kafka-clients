@@ -500,6 +500,7 @@ fn upper_first(s: &str) -> String {
 }
 
 /// Every class of the Java client, main and test.
+#[derive(Clone)]
 pub struct JavaIndex {
     pub classes: Vec<JavaClass>,
 }

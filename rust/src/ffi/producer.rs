@@ -5741,8 +5741,9 @@ mod tests {
             );
             assert!(!err.is_null());
 
-            // Just verify the function is callable and returns a boolean.
-            let _retriable = kafka_common_Error_is_retriable_error(err);
+            // Just verify the function is callable and returns an `int8_t` boolean.
+            let retriable = kafka_common_Error_is_retriable_error(err);
+            assert!(retriable == 0 || retriable == 1);
 
             kafka_common_Error_destroy(err);
             kafka_producer_Producer_destroy(producer);
@@ -5754,7 +5755,7 @@ mod tests {
         unsafe {
             assert_eq!(kafka_common_Error_code(std::ptr::null()), kafka_common_ErrorCode_NONE);
             assert!(kafka_common_Error_message(std::ptr::null()).is_null());
-            assert!(!kafka_common_Error_is_retriable_error(std::ptr::null()));
+            assert_eq!(kafka_common_Error_is_retriable_error(std::ptr::null()), 0);
             kafka_common_Error_destroy(std::ptr::null_mut()); // no-op
         }
     }

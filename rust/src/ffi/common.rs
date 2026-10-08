@@ -2195,7 +2195,7 @@ mod tests {
             let export = predicates
                 .get(own.as_str())
                 .unwrap_or_else(|| panic!("no C export for `{own}`"));
-            assert!(unsafe { export(*handle) }, "`{own}` is false for its own class");
+            assert_eq!(unsafe { export(*handle) }, 1, "`{own}` is false for its own class");
         }
 
         // Every export is either an intermediate predicate or some class's own.
@@ -2214,11 +2214,15 @@ mod tests {
                 let expected = own == name || LEAF_SUBCLASSES.contains(&(*name, own.as_str()));
                 assert_eq!(
                     unsafe { export(*handle) },
-                    expected,
+                    i8::from(expected),
                     "`{name}` on an instance of the class `{own}` names"
                 );
             }
-            assert!(!unsafe { export(std::ptr::null()) }, "`{name}` must be false for a null handle");
+            assert_eq!(
+                unsafe { export(std::ptr::null()) },
+                0,
+                "`{name}` must be false for a null handle"
+            );
         }
 
         for (_, handle) in errors {

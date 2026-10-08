@@ -986,7 +986,8 @@ its own.
 Rust, C and Python sides. For Rust only, use `make verify-rust`.
 
 The xtask subcommands are `format`, `format-check`, `check-generated`,
-`generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`,
+`generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`
+(optionally one rule name and `--no-baseline`), `ffi-baseline`,
 `doc-hygiene`, `lint-fix`, `coverage`, `coverage-lcov`, `coverage-all`,
 `test-multilanguage` and `producer-perf-test`.
 

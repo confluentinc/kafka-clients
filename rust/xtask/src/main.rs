@@ -31,7 +31,8 @@ fn main() -> anyhow::Result<()> {
         Some("generate-error-predicates") => error_predicates::generate_error_predicates()?,
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
-        Some("lint-custom") => lint_custom::lint_custom()?,
+        Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -438,7 +439,7 @@ fn lint() -> anyhow::Result<()> {
     // before paying for three full clippy passes. It covers what clippy cannot:
     // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
     // of its variants and the visibility of public structs' fields.
-    lint_custom::lint_custom()?;
+    lint_custom::lint_custom(&[])?;
 
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
@@ -1101,6 +1102,16 @@ fn print_help() {
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
                     check-no-public-field                 public structs have no `pub` field
+                    check-no-fixed-size-array             no fixed-size array in a public signature
+                    check-java-name                       every public item names the Java API it translates
+                    check-no-deprecated-translation       no deprecated Java API is translated
+                    check-public-audience                 public items are public in Java
+                    check-dyn-compatible                  public traits are dyn-compatible
+                    check-error-predicate                 every Error class has its predicate
+                    check-ffi-translation                 every public Rust item has its C counterpart
+                  With a rule name only that rule runs; `--no-baseline` ignores
+                  xtask/ffi-baseline.txt so every FFI finding is shown
+  ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -1118,7 +1129,8 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
-  cargo xtask lint-custom
+  cargo xtask lint-custom [rule-name] [--no-baseline]
+  cargo xtask ffi-baseline
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix
