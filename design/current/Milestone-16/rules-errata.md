@@ -441,3 +441,8 @@ Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not ed
 - **Suggested anti-patterns:** a `ChunkedProducerBatch` struct or a `Box<dyn ..Batch>` deque element;
   `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a batch without checking
   `is_chunked()` (it would credit a chunk of memory the pool never lent: Critic 97 caution (a)).
+- **Suggested anti-pattern (Critic 98 F1):** a folded `ChunkedProducerBatch` override that adds work
+  to a plain batch's per-record path. In Java the override costs a plain `ProducerBatch` nothing.
+  Put chunk-only checks behind a `#[cold]` out-of-line helper, or at the one call site that needs
+  them. Here the inline first-append check alone cost a few ns per record on the default strategy
+  until it moved out of line.

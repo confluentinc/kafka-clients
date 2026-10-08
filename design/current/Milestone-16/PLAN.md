@@ -1404,7 +1404,7 @@ notes commit.
   errors without panicking; constructor messages; steady-state incremental append allocates exactly
   what a full one does. `ProducerConfigTest` +3, `RecordAccumulatorTest` +2 and the `testFull` hunk;
   `KafkaProducer` wiring tests (strategy and fallback, compression `ConfigException`, partitioner
-  closed on that failure). Integration: 12 tests in
+  closed on that failure). Integration: 11 tests in
   `producer_test::incremental_allocation_producer_send`.
 - **DoD #10.**
   - Producer send path: `test_send_allocations_do_not_grow_*` = 2 allocations per steady send,
@@ -1419,14 +1419,61 @@ notes commit.
     HEAD. First version: 10.3-10.7 M rec/s before, 9.65-9.94 after (about -7 %). The extra
     `Option`s in `AppendGuard` were most of it; splitting out `ChunkedAppendGuard` (`d529098c`)
     brought it to 10.19-10.47 after vs 10.70-10.78 before (-2 to -5 %, about 3-4 ns per append).
-    Allocation counts are unchanged. The rest is the wider `RecordAppendResult` (outcome tag,
-    optional future and partition) on every return. It is under 1 % of a producer `send`.
+    Allocation counts are unchanged.
+  - **Critic 98 F1 (fixup `77183531`).** That accumulator-only figure understated the cost, which
+    was +6 % at `do_send_bytes`. The largest single lever was the folded `ChunkedProducerBatch`
+    first-append check running inline in every plain `ProducerBatch::try_append`. Three changes
+    were needed together:
+    - the check moved into a `#[cold] #[inline(never)]` helper;
+    - `#[inline]` on five small helpers, and the two full-path `partition_changed` calls guarded
+      with `unknown_partition &&`;
+    - `RecordAppendResult` back to 40 B, with the extension size sharing `appended_bytes` and read
+      through `extension_bytes_needed()` (a test pins the size).
+
+    Behaviour is unchanged. Re-measured with the Critic's harness: clean `git archive` release
+    builds with fat LTO, a current-thread runtime, 500 000 appends of a 10 B key and a 100 B value,
+    best of 9 per run, 8 runs interleaved with 3957e76f, at load 4-5. Medians, ns per record:
+
+    | | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
+    |---|---|---|---|---|
+    | base `3957e76f` | 93.39 | 98.72 | 107.95 | 122.63 |
+    | after the fixup | 93.92 (+0.6 %) | 99.81 (+1.1 %) | 109.27 (+1.2 %) | 124.38 (+1.4 %) |
+
+    Allocations per steady send are still 2 at the producer and 1 at the accumulator.
 - **Cites.** `KafkaProducer.java`, `RecordAccumulator.java` and `ProducerBatch.java` cites across
   `rust/src` refreshed to rc4 by content (204 cites in 13 files, `1daace6b`), including the bare
   `:1056` / `:1072` in `buffer_pool.rs` (now `KafkaProducer.java:1130` / `:1147`). One historical
-  statement in `kafka_producer.rs` (`:1449-1450` vs 4.3.1's `:1446`) is left as written. One cite,
-  `record_accumulator.rs` "the second `try_append` (`:553-575`)", matches no `append` region in 4.2,
-  4.3.1 or rc4 and is left for review.
+  statement in `kafka_producer.rs` (`:1449-1450` vs 4.3.1's `:1446`) is left as written. The cite
+  `record_accumulator.rs` "the second `try_append` (`:553-575`)" matched no version, so it now names
+  the construct (the `try_append` inside `append_new_batch`, `RecordAccumulator.java:419`). The
+  `sender.rs` pool cite names both 4.4 pools, `:494` and `:508` (Critic 98 L2, fixup `9769c54b`).
+- **Open questions for the human (Critic 98 S1 and S2).** Both are pre-existing, both would change
+  default-path behaviour, and both are left open in `COMMENTS.98.md` as "deferred to human decision".
+  - **S1 (Medium): a full-strategy batch's creation time predates the blocking `allocate`.**
+    - Java refreshes `nowMs = time.milliseconds()` after `free.allocate`
+      (`RecordAccumulator.java:336-340`), and that time becomes the batch's `createdMs`. Rust keeps
+      the caller's `now_ms` (`record_accumulator.rs`, the full `append_inner`).
+    - The Critic's probe: with MockTime and a full pool, an append parked 5000 ms in `allocate` gets
+      `created_ms` 5000 ms before the memory arrived. The incremental path gets Java's value.
+    - The consequence: time blocked in `send()`, up to `max.block.ms`, is charged against
+      `delivery.timeout.ms`. With `max.block.ms >= delivery.timeout.ms` a batch can be born already
+      expired. `record-queue-time` is inflated and `linger.ms` counts as elapsed. The two strategies
+      now disagree.
+    - Proposed fix: one clock read after `allocate` (once per new batch), plus moving
+      `RecordAccumulator::new_for_test` and its callers to a `MockTime`, as Java's tests pass `time`.
+      Without that fixture, about 15 Sender tests break (seen during this phase).
+  - **S2 (Low): `partition_changed` cannot see a concurrent sticky switch.**
+    - Java checks `isPartitionChanged(partitionInfo)` by identity first (`RecordAccumulator.java:244-247`,
+      `BuiltInPartitioner.java:195-197`). Rust re-reads the partition under the lock, so a switch
+      made between the peek and the deque lock goes unseen.
+    - The Critic's probe: append A peeks partition 0 and parks in `allocate`, a concurrent switch
+      moves the sticky partition to 1, and memory is freed. Rust lands A on 0 and credits its bytes
+      to partition 1's sticky info; Java retries and lands on 1.
+    - Phase 8 impact: none on accounting. The chunked second block re-checks the same deque, and
+      the two tests whose hooks report the move stay faithful to what they assert.
+    - Proposed fix: a switch generation counter on `BuiltInPartitioner`, returned by the peek and
+      compared under the deque lock. `testPartitionChangeRetriesBoundedByMaxBlockTime` could then
+      call the real check. The wrong `is_partition_changed` doc is already corrected (`6d339e83`).
 - **§5.1:** the two shared rows (`ProducerBatch.isWritable`, `RecordAccumulator.recordsBuilder`) are
   cleared and removed. Lint shows exactly the 11 remaining rows.
 - **Environment.** Docker Desktop's backend was killed at 11:06 (`com.docker.backend ... signal:
@@ -1451,7 +1498,7 @@ notes commit.
   - `cargo test`: 4406 passed, 0 failed, 3 ignored (lib), plus 36, 8 and 5 (7 ignored).
   - `cargo xtask lint --keep-going`: clippy clean; exactly the 11 §5.1 rows.
   - `cargo test --features integration-tests --test integration -- producer` (under the lock):
-    104 passed, 1 failed out of 105. All 12 incremental-strategy tests passed. The failure,
+    104 passed, 1 failed out of 105. All 11 incremental-strategy tests passed. The failure,
     `client_rebootstrap_test::test_producer_rebootstrap_disabled`, was a container startup
     timeout under load, and it passed when re-run alone.
   - `make -k verify` (12:08-12:14, under the lock):
