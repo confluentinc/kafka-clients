@@ -5260,6 +5260,80 @@ mod tests {
         assert_eq!((5, None, -1), last_sent_api_versions(&client, &node));
     }
 
+    /// The rebootstrap cadence when every broker is unreachable (Milestone 16
+    /// Phase 4 follow-up). Java's `DefaultMetadataUpdater.maybeUpdate`
+    /// (`NetworkClient.java:1450-1484`) rebootstraps whenever an update is due
+    /// and no node is available, and then, with the bootstrap node still in
+    /// reconnect backoff, returns `reconnectBackoffMs` as the poll bound: one
+    /// rebootstrap per poll, the poll bounded by the reconnect backoff, not 0.
+    /// A failed attempt then defers the next update by the refresh backoff,
+    /// during which there is no rebootstrap at all.
+    #[tokio::test]
+    async fn test_rebootstrap_with_every_node_unavailable_is_paced_by_the_backoffs() {
+        let refresh_backoff_ms = 100;
+        let reconnect_backoff_ms = 50;
+        let metadata = Arc::new(Metadata::new(
+            refresh_backoff_ms,
+            refresh_backoff_ms,
+            300_000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        metadata.bootstrap(vec![(
+            "localhost".to_string(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
+        )]);
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+            MockSelector::new(),
+            metadata.clone(),
+            "mock",
+            usize::MAX,
+            reconnect_backoff_ms,
+            reconnect_backoff_ms,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            false,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            300_000,
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_mock_time();
+        let now = 10_000_i64;
+        // The bootstrap node's connection just failed: it is in reconnect backoff.
+        client.connection_states.connecting("-1", now, "localhost");
+        client.connection_states.disconnected("-1", now);
+        assert!(!client.connection_states.can_connect("-1", now));
+
+        // An update is due and no node is available: one rebootstrap, and the
+        // returned poll bound is the reconnect backoff.
+        let version = metadata.update_version();
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(now).await);
+        assert_eq!(version + 1, metadata.update_version());
+        // The next poll does the same, still bounded, never 0.
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(now + 10).await);
+        assert_eq!(version + 2, metadata.update_version());
+
+        // A failed update (Java's `handleServerDisconnect` -> `failedUpdate`)
+        // defers the next one by the refresh backoff: no rebootstrap until then.
+        metadata.failed_update(now + 10);
+        let wait = client.maybe_update(now + 20).await;
+        assert!(wait > 0 && wait <= refresh_backoff_ms, "refresh backoff remaining, got {wait}");
+        assert_eq!(version + 2, metadata.update_version());
+
+        // Once the reconnect backoff has passed, the bootstrap node is
+        // connectable again: the update connects to it instead of
+        // rebootstrapping.
+        let later = now + 10 + refresh_backoff_ms * 2;
+        assert!(client.connection_states.can_connect("-1", later));
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(later).await);
+        assert_eq!(version + 2, metadata.update_version());
+        assert!(client.connection_states.is_connecting("-1"));
+    }
+
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
         crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
