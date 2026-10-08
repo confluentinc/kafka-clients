@@ -831,17 +831,27 @@ impl RecordAccumulator {
             // partition reaches the caller as `RecordAppendResult::topic_partition` instead (see
             // that field).
 
-            // Ensure the deque for this partition exists, then drop the DashMap guard
-            // before any potential .await to avoid holding the shard lock across
-            // an await point (which would block ready()/drain() from iterating).
-            topic_info
-                .batches
-                .entry(effective_partition)
-                .or_insert_with(|| Mutex::new(VecDeque::new()));
-
             // check if we have an in-progress batch
             {
-                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
+                // Java's `topicInfo.batches.computeIfAbsent(effectivePartition, ..)`. The deque
+                // almost always exists, so take the shard's read lock first and fall back to the
+                // write-locking `entry` only on a miss (Critic 98 P1: the per-append `entry` was
+                // the largest single cost on the send path). Written out here rather than through
+                // `deque_for`, which the chunked path also calls: a shared helper is not inlined
+                // into this path in a fat-LTO build, and that call is measurable per record. The
+                // DashMap guard is dropped at the end of this block, before any potential .await,
+                // so the shard lock is never held across an await point (which would block
+                // ready()/drain() from iterating).
+                let dq_ref = match topic_info.batches.get(&effective_partition) {
+                    Some(deque) => deque,
+                    None => {
+                        topic_info
+                            .batches
+                            .entry(effective_partition)
+                            .or_insert_with(|| Mutex::new(VecDeque::new()));
+                        topic_info.batches.get(&effective_partition).unwrap()
+                    },
+                };
                 let mut deque = dq_ref.lock().unwrap();
 
                 // After taking the lock, validate that the partition hasn't changed and retry.
@@ -975,10 +985,32 @@ impl RecordAccumulator {
         }
     }
 
+    /// The deque of `partition` in `topic_info`, creating it on first use (Java's
+    /// `batches.computeIfAbsent(partition, k -> new ArrayDeque<>())`). Looks it up under the
+    /// shard's read lock first and takes the write lock (`entry`) only when it is missing, which
+    /// is the first append to the partition: `or_insert_with` inserts only when absent, so the
+    /// outcome is the same as an unconditional `entry`. Used by the incremental path; the full
+    /// path writes the same lookup out in place (see `append_inner`).
+    pub(crate) fn deque_for(topic_info: &TopicInfo, partition: i32) -> PartitionDequeRef<'_> {
+        if let Some(deque) = topic_info.batches.get(&partition) {
+            return deque;
+        }
+        topic_info
+            .batches
+            .entry(partition)
+            .or_insert_with(|| Mutex::new(VecDeque::new()));
+        topic_info
+            .batches
+            .get(&partition)
+            .expect("the deque was inserted just above and is never removed")
+    }
+
     /// The [`TopicInfo`] for the given topic, creating it (with its built-in partitioner) on
     /// first use. Also returns the accumulator's interned `Arc<str>` for the topic name, which
     /// every batch and append result of the topic shares (CLAUDE.md §13).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#topicInfoFor")]
+    // `inline(always)`: see `update_partition_info_on_append`.
+    #[inline(always)]
     pub(crate) fn topic_info_for(&self, topic: &str) -> (Arc<str>, Arc<TopicInfo>) {
         if let Some(entry) = self.topic_info_map.get(topic) {
             return (entry.key().clone(), Arc::clone(entry.value()));
@@ -1003,7 +1035,9 @@ impl RecordAccumulator {
     /// `BuiltInPartitioner.updatePartitionInfo` returns at once for a `null` info, which Rust
     /// spells as not calling it.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#updatePartitionInfoOnAppend")]
-    #[inline]
+    // `inline(always)`: shared by both strategies, so fat LTO otherwise keeps it out of line on
+    // the full path's per-record append (Critic 98 P1, measured in a production build).
+    #[inline(always)]
     pub(crate) fn update_partition_info_on_append(
         &self,
         append_result: RecordAppendResult,

@@ -1043,6 +1043,10 @@ impl MemoryRecordsBuilder {
     ///
     /// If no records have been appended, then this returns true.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#hasRoomFor")]
+    // `inline(always)`: on the producer's per-record path, and called from two places since
+    // KIP-1332 (the plain append and the chunked extension check), so fat LTO otherwise keeps it
+    // out of line (Critic 98 P1, measured in a production build).
+    #[inline(always)]
     pub fn has_room_for(
         &self,
         timestamp: i64,

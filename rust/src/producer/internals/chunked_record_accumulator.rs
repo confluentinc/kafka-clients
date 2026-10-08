@@ -280,11 +280,6 @@ impl ChunkedRecordAccumulator {
             };
             // Java's `setPartition(callbacks, effectivePartition)`: see `RecordAccumulator::append`.
 
-            topic_info
-                .batches
-                .entry(effective_partition)
-                .or_insert_with(|| Mutex::new(VecDeque::new()));
-
             let append_result;
             // The batch the extension gap was sized against, set exactly when the result is
             // needs_buffer_extension. The acquire below runs off the deque lock, so this is used to
@@ -294,7 +289,8 @@ impl ChunkedRecordAccumulator {
             // reused by a replacement batch while it is compared.
             let mut batch_to_extend = None;
             {
-                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
+                // As the full `append`: the read-locked lookup first, `entry` only on a miss.
+                let dq_ref = RecordAccumulator::deque_for(topic_info, effective_partition);
                 let mut deque = dq_ref.lock().unwrap();
                 if self.partition_changed(topic_info, unknown_partition, &deque, cluster) {
                     continue;
