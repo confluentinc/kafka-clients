@@ -778,21 +778,23 @@ impl ConsumerHeartbeatRequestManager {
                 }))
             },
             Errors::GroupIdNotFound => {
-                // AK 4.3.1: if the group doesn't exist (e.g., the member never
-                // joined due to InvalidTopicException) and the member is
-                // UNSUBSCRIBED, GROUP_ID_NOT_FOUND is ignored — the leave is
-                // effectively complete. When a leave heartbeat (epoch=-1) is
-                // sent, the state transitions synchronously from LEAVING to
-                // UNSUBSCRIBED in on_heartbeat_request_generated() before the
-                // request is sent. Java:
-                //   `if (state() == UNSUBSCRIBED) { onHeartbeatRequestSkipped(); }`
+                // If the group doesn't exist (e.g., the member never joined due
+                // to InvalidTopicException) and the member is UNSUBSCRIBED,
+                // GROUP_ID_NOT_FOUND is ignored — the leave is effectively
+                // complete. When a leave heartbeat (epoch=-1) is sent, the state
+                // transitions synchronously from LEAVING to UNSUBSCRIBED in
+                // on_heartbeat_request_generated() before the request is sent.
+                // Java (`AbstractHeartbeatRequestManager.java:466-479`) only logs
+                // here: b8429b93a7 removed its `onHeartbeatRequestSkipped()` call,
+                // a no-op for an UNSUBSCRIBED member (it acts only on LEAVING).
+                // The `onHeartbeatFailure(false)` that ends `onErrorResponse`
+                // still runs (`on_response`'s tail).
                 if self.membership_manager.state() == MemberState::Unsubscribed {
                     log::info!(
                         "ConsumerGroupHeartbeatRequest received GROUP_ID_NOT_FOUND for group {} while \
-                         unsubscribed.",
+                         unsubscribed. ",
                         self.membership_manager.group_id()
                     );
-                    let _ = self.membership_manager.abstract_mm.on_heartbeat_request_skipped();
                     return Some(HeartbeatErrorAction::Handled);
                 }
 
@@ -1626,10 +1628,12 @@ mod tests {
         );
     }
 
-    /// AK 4.3.1: `GROUP_ID_NOT_FOUND` while the member is UNSUBSCRIBED is a
-    /// benign skip (the leave is effectively complete) — NOT a fatal error.
-    /// Translated from
-    /// `ConsumerHeartbeatRequestManagerTest#testGroupIdNotFoundExceptionWhileUnsubscribed`.
+    /// `GROUP_ID_NOT_FOUND` while the member is UNSUBSCRIBED is a benign skip
+    /// (the leave is effectively complete) — NOT a fatal error. The
+    /// classification half of
+    /// `AbstractHeartbeatRequestManagerTest#testGroupIdNotFoundExceptionWhileUnsubscribed`
+    /// (in `ConsumerHeartbeatRequestManagerTest` before e7b0cb7908); the full
+    /// response route is `test_group_id_not_found_exception_while_unsubscribed`.
     /// (`testGroupIdNotFoundWhileStableIsFatal` is a recorded skip: the Rust
     /// GROUP_ID_NOT_FOUND handling keeps the Issue-9 epoch-conditional recovery
     /// for non-unsubscribed members instead of Java's fatal treatment — a
@@ -3446,5 +3450,51 @@ mod tests {
         );
         assert!(f.drain_events().is_empty(), "a successful heartbeat emits no background event");
         assert_eq!(MemberState::Stable, f.mm.state());
+    }
+
+    /// `AbstractHeartbeatRequestManagerTest#testGroupIdNotFoundExceptionWhileUnsubscribed`,
+    /// through the full response route (b8429b93a7 updated its verification
+    /// from `onHeartbeatRequestSkipped()` to `onHeartbeatFailure(false)`). Java
+    /// mocks the member as UNSUBSCRIBED with epoch -1 yet still heartbeating;
+    /// the real state machine gets there through the leave heartbeat, which
+    /// `onHeartbeatRequestGenerated()` moves from LEAVING to UNSUBSCRIBED
+    /// before the request goes out — the case the Java branch exists for.
+    /// `verify(membershipManager, never()).transitionToFatal()` /
+    /// `verify(backgroundEventHandler, never()).add(any())` become: the member
+    /// stays UNSUBSCRIBED and no background event is emitted.
+    /// `onHeartbeatFailure(false)` has no observable effect here (it records a
+    /// failed rebalance only when a rebalance metrics manager is wired), so
+    /// its call is not asserted.
+    #[tokio::test]
+    async fn test_group_id_not_found_exception_while_unsubscribed() {
+        let mut f = AbstractFixture::new();
+        // STABLE -> PREPARE_LEAVING (where `leaveGroup` parks the member while
+        // its revocation callback runs) -> LEAVING.
+        force_state(&f.mm, MemberState::PrepareLeaving);
+        f.mm.transition_to_sending_leave_group(false).unwrap();
+        assert_eq!(MemberState::Leaving, f.mm.state());
+
+        f.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let result = f.poll();
+        assert_eq!(1, result.unsent_requests.len());
+        assert_eq!(MemberState::Unsubscribed, f.mm.state());
+        assert_eq!(-1, f.mm.member_epoch());
+
+        f.complete(
+            &result.unsent_requests[0],
+            Errors::GroupIdNotFound,
+            DEFAULT_HEARTBEAT_INTERVAL_MS,
+        )
+        .await;
+
+        assert_eq!(
+            MemberState::Unsubscribed,
+            f.mm.state(),
+            "GROUP_ID_NOT_FOUND while unsubscribed is not fatal"
+        );
+        assert!(
+            f.drain_events().is_empty(),
+            "no background event for GROUP_ID_NOT_FOUND while unsubscribed"
+        );
     }
 }
