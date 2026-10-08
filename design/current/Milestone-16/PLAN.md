@@ -1713,8 +1713,9 @@ produced were pure relocations and were fixed in Phase 0.
 - Each phase deletes its rows here in the commit that fixes them.
 - Phase 13 requires this table to be empty and `cargo xtask lint` fully green.
 
-Count by owner: Phase 5 2, Phases 7/8 2, Phase 11 10. (Phase 1 cleared its 30: 25 D2 moves + 5 throttle; Phase 9
-cleared its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766.)
+Count by owner: Phase 5 2, Phases 7/8 2. (Phase 1 cleared its 30: 25 D2 moves + 5 throttle; Phase 9
+cleared its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cleared its 10, the
+`SensorBuilder` move to `consumer::internals::metrics`.)
 
 | Rust item | Java marker | Cause | Owner |
 |---|---|---|---|
@@ -1722,16 +1723,6 @@ cleared its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766.)
 | `rust/src/common/requests/txn_offset_commit_response.rs` `errors` | `common.requests.TxnOffsetCommitResponse#errors` | Removed by KIP-1319 (89f3888c87); TxnOffsetCommit held back by §2.2 | Phase 5 |
 | `rust/src/producer/internals/producer_batch.rs` `is_writable` | `clients.producer.internals.ProducerBatch#isWritable` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
 | `rust/src/producer/internals/record_accumulator.rs` `records_builder` | `clients.producer.internals.RecordAccumulator#recordsBuilder` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
-| `rust/src/consumer/internals/sensor_builder.rs` `SensorBuilder` | `clients.consumer.internals.SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `new` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_tags` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_avg` | `clients.consumer.internals.SensorBuilder#withAvg` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_min` | `clients.consumer.internals.SensorBuilder#withMin` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_max` | `clients.consumer.internals.SensorBuilder#withMax` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_value` | `clients.consumer.internals.SensorBuilder#withValue` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_meter` | `clients.consumer.internals.SensorBuilder#withMeter` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `with_meter_stat` | `clients.consumer.internals.SensorBuilder#SensorBuilder` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
-| `rust/src/consumer/internals/sensor_builder.rs` `build` | `clients.consumer.internals.SensorBuilder#build` | Moved to `consumer.internals.metrics` (KAFKA-19542, 9a28bd23ad) | Phase 11 |
 
 ## 6. Commit classification (input to the Phase 13 audit)
 

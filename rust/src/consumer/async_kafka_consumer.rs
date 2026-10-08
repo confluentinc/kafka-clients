@@ -72,7 +72,6 @@ use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
-use crate::consumer::internals::AsyncConsumerMetrics;
 use crate::consumer::internals::ConsumerInterceptors;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::ConsumerRebalanceListenerInvoker;
@@ -81,7 +80,6 @@ use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchCollector;
 use crate::consumer::internals::FetchMetricsManager;
 use crate::consumer::internals::FetchMetricsRegistry;
-use crate::consumer::internals::KafkaConsumerMetrics;
 use crate::consumer::internals::MemberState;
 use crate::consumer::internals::MemberStateListener;
 use crate::consumer::internals::OffsetAndTimestampInternal;
@@ -96,6 +94,8 @@ use crate::consumer::internals::events::CompletableEvent;
 use crate::consumer::internals::events::CompletableEventReaper;
 use crate::consumer::internals::events::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
+use crate::consumer::internals::metrics::KafkaConsumerMetrics;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
@@ -1918,8 +1918,9 @@ where
         // interceptor-hook setter pattern.
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
         let offset_commit_metrics_manager =
-            Arc::new(crate::consumer::internals::OffsetCommitMetricsManager::new(&metrics));
-        let heartbeat_metrics_manager = Arc::new(crate::consumer::internals::HeartbeatMetricsManager::new(&metrics));
+            Arc::new(crate::consumer::internals::metrics::OffsetCommitMetricsManager::new(&metrics));
+        let heartbeat_metrics_manager =
+            Arc::new(crate::consumer::internals::metrics::HeartbeatMetricsManager::new(&metrics));
 
         // M6: the async-consumer background-task / event-queue metrics
         // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
@@ -2234,10 +2235,12 @@ where
                 // the consumer's shared Arc<Metrics> (M3 field). Java builds the
                 // ConsumerRebalanceMetricsManager inside the membership-manager
                 // constructor; we build it here and pass it in.
-                Some(Arc::new(crate::consumer::internals::ConsumerRebalanceMetricsManager::new(
-                    &metrics,
-                    Arc::clone(&subscriptions),
-                ))),
+                Some(Arc::new(
+                    crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
                 Arc::clone(&time),
             ))),
             _ => None,
@@ -2497,7 +2500,7 @@ where
         // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
         rebalance_listener_invoker.set_metrics(
-            crate::consumer::internals::RebalanceCallbackMetricsManager::new(&metrics),
+            crate::consumer::internals::metrics::RebalanceCallbackMetricsManager::new(&metrics),
             Arc::clone(&time),
         );
 

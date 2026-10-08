@@ -348,7 +348,7 @@ impl ConsumerHeartbeatRequestManager {
     /// the consumer's `Arc<Metrics>` registry and is wired post-construction.
     pub(crate) fn set_metrics_manager(
         &mut self,
-        metrics_manager: Arc<crate::consumer::internals::HeartbeatMetricsManager>,
+        metrics_manager: Arc<crate::consumer::internals::metrics::HeartbeatMetricsManager>,
     ) {
         self.inner.metrics_manager = Some(metrics_manager);
     }
@@ -3095,7 +3095,7 @@ mod tests {
     #[tokio::test]
     async fn poll_on_close_records_heartbeat_sent_ms() {
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::HeartbeatMetricsManager;
+        use crate::consumer::internals::metrics::HeartbeatMetricsManager;
 
         let (mut mgr, _coord, mm, _subs) =
             make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));

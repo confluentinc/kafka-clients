@@ -62,9 +62,9 @@ use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-use crate::consumer::internals::ConsumerRebalanceMetricsManager;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
+use crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager;
 
 use super::ConsumerMembershipManager;
 use super::ConsumerMetadata;

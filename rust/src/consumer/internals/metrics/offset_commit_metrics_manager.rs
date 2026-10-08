@@ -29,6 +29,7 @@ use crate::consumer::internals::ConsumerUtils;
 ///
 /// Owned by the commit request manager (bg task); `record_request_latency`
 /// runs once per commit response (low frequency, never per-record).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.OffsetCommitMetricsManager")]
 pub(crate) struct OffsetCommitMetricsManager {
     // MetricName fields visible for testing (Java: package-private `final`).
     #[cfg(test)]

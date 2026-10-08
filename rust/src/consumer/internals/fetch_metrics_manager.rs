@@ -23,8 +23,8 @@ use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, RecordingLevel, Sensor};
 use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::FetchMetricsRegistry;
-use crate::consumer::internals::SensorBuilder;
 use crate::consumer::internals::SubscriptionState;
+use crate::consumer::internals::metrics::SensorBuilder;
 
 /// Records lag, lead, latency, and fetch metrics. It keeps an internal ID of
 /// the assigned set of partitions which is updated to ensure the set of metrics

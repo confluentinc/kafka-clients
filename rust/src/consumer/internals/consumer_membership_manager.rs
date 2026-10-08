@@ -40,11 +40,11 @@ use crate::consumer::internals::events::BackgroundEventHandler;
 
 use super::CommitRequestManager;
 use super::ConsumerMetadata;
-use super::ConsumerRebalanceMetricsManager;
 use super::MemberState;
 use super::PollResult;
 use super::RequestManager;
 use super::SubscriptionState;
+use super::metrics::ConsumerRebalanceMetricsManager;
 use super::{AbstractMembershipManager, LocalAssignment};
 
 /// KIP-848 consumer-group membership manager.

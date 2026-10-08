@@ -33,6 +33,7 @@ use crate::consumer::internals::ConsumerUtils;
 /// `last_poll_ms` while `record_poll_start` writes it — an idiomatic-Rust,
 /// value-neutral swap for Java's plain `long` fields read inside the
 /// `synchronized`-free measurable lambda.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics")]
 pub(crate) struct KafkaConsumerMetrics {
     metrics: Arc<Metrics>,
     last_poll_metric_name: MetricName,
