@@ -5671,30 +5671,47 @@ static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
 
 // (resource_type, resource_name, pattern_type, principal, host, operation,
 //  permission_type) — the field order `_to_acl_binding` unpacks.
+// The binding keeps Java's object graph, so the fields are read off its
+// `pattern()` and `entry()`; each enum is passed on as its Java code, which
+// is what the Python side's int-based enum classes expect.
 static PyObject* acl_binding_to_py(const kafka_common_acl_AclBinding_t* b) {
     if (b == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(isissii)",
-                         kafka_common_acl_AclBinding_resource_type(b),
-                         kafka_common_acl_AclBinding_resource_name(b),
-                         kafka_common_acl_AclBinding_pattern_type(b),
-                         kafka_common_acl_AclBinding_principal(b),
-                         kafka_common_acl_AclBinding_host(b),
-                         kafka_common_acl_AclBinding_operation(b),
-                         kafka_common_acl_AclBinding_permission_type(b));
+    const kafka_common_resource_ResourcePattern_t* pattern = kafka_common_acl_AclBinding_pattern(b);
+    const kafka_common_acl_AccessControlEntry_t* entry = kafka_common_acl_AclBinding_entry(b);
+    return Py_BuildValue(
+        "(isissii)",
+        (int)kafka_common_resource_ResourceType_code(
+            kafka_common_resource_ResourcePattern_resource_type(pattern)),
+        kafka_common_resource_ResourcePattern_name(pattern),
+        (int)kafka_common_resource_PatternType_code(
+            kafka_common_resource_ResourcePattern_pattern_type(pattern)),
+        kafka_common_acl_AccessControlEntry_principal(entry),
+        kafka_common_acl_AccessControlEntry_host(entry),
+        (int)kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntry_operation(entry)),
+        (int)kafka_common_acl_AclPermissionType_code(
+            kafka_common_acl_AccessControlEntry_permission_type(entry)));
 }
 
 // Same seven fields, but the three strings use 'z' so a NULL (Java's "match
 // any") becomes None rather than crashing on PyUnicode_FromString(NULL).
 static PyObject* acl_binding_filter_to_py(const kafka_common_acl_AclBindingFilter_t* f) {
     if (f == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(izizzii)",
-                         kafka_common_acl_AclBindingFilter_resource_type(f),
-                         kafka_common_acl_AclBindingFilter_resource_name(f),
-                         kafka_common_acl_AclBindingFilter_pattern_type(f),
-                         kafka_common_acl_AclBindingFilter_principal(f),
-                         kafka_common_acl_AclBindingFilter_host(f),
-                         kafka_common_acl_AclBindingFilter_operation(f),
-                         kafka_common_acl_AclBindingFilter_permission_type(f));
+    const kafka_common_resource_ResourcePatternFilter_t* pattern =
+        kafka_common_acl_AclBindingFilter_pattern_filter(f);
+    const kafka_common_acl_AccessControlEntryFilter_t* entry =
+        kafka_common_acl_AclBindingFilter_entry_filter(f);
+    return Py_BuildValue(
+        "(izizzii)",
+        (int)kafka_common_resource_ResourceType_code(
+            kafka_common_resource_ResourcePatternFilter_resource_type(pattern)),
+        kafka_common_resource_ResourcePatternFilter_name(pattern),
+        (int)kafka_common_resource_PatternType_code(
+            kafka_common_resource_ResourcePatternFilter_pattern_type(pattern)),
+        kafka_common_acl_AccessControlEntryFilter_principal(entry),
+        kafka_common_acl_AccessControlEntryFilter_host(entry),
+        (int)kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntryFilter_operation(entry)),
+        (int)kafka_common_acl_AclPermissionType_code(
+            kafka_common_acl_AccessControlEntryFilter_permission_type(entry)));
 }
 
 // [(entity_type, entity_name_or_None)] — a None name is Java's null map value,

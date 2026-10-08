@@ -88,8 +88,12 @@
 //!     `Arc<dyn T>`, `&dyn T`, `impl T`, a bounded type parameter) or a
 //!     public enum's variant carries (`MetricValueProvider::Gauge(Box<dyn
 //!     Gauge>)`) also `<prefix>_new(void *self, <prefix>_<m>_fn_t ..)`
-//!     with one `_fn_t` per method, nullable (`Option<..>`) when the Rust
-//!     method has a default body (a Java default method); an async method's
+//!     with one `_fn_t` per method; the typedef is declared
+//!     `Option<unsafe extern "C" fn(..)>` when the Rust method has a default
+//!     body (a Java default method: a nullable pointer in C, `NULL` meaning
+//!     the default), a bare `unsafe extern "C" fn(..)` otherwise, and the
+//!     `_new` parameter is always the bare typedef name (cbindgen does not
+//!     see through `Option<alias>` in a signature); an async method's
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `_execute_callbacks`,
 //!     `_set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
@@ -291,7 +295,9 @@ enum CType {
     List { mutable: bool },
     /// `*const kafka_Map_t` / `*mut kafka_Map_t`.
     Map { mutable: bool },
-    /// A function-pointer typedef, `Option<..>` when nullable.
+    /// A function-pointer typedef. Nullability is part of the typedef's
+    /// declaration (`Option<unsafe extern "C" fn(..)>`), not of the places
+    /// that use it, so it renders as the bare name either way.
     FnPtr { name: String, nullable: bool },
 }
 
@@ -306,8 +312,7 @@ impl CType {
             CType::Handle { prefix, mutable } => format!("{} {prefix}_t", ptr(*mutable)),
             CType::List { mutable } => format!("{} kafka_List_t", ptr(*mutable)),
             CType::Map { mutable } => format!("{} kafka_Map_t", ptr(*mutable)),
-            CType::FnPtr { name, nullable: true } => format!("Option<{name}>"),
-            CType::FnPtr { name, nullable: false } => name.clone(),
+            CType::FnPtr { name, .. } => name.clone(),
         }
     }
 
@@ -691,8 +696,12 @@ enum Shape {
     /// A `#[repr(C)]` enum with exactly these variants.
     CEnum(Vec<String>),
     Fn(Sig),
-    /// A `pub type .. = unsafe extern "C" fn(..)` typedef.
-    FnPtr(Sig),
+    /// A `pub type .. = unsafe extern "C" fn(..)` typedef, declared
+    /// `Option<unsafe extern "C" fn(..)>` when `nullable`.
+    FnPtr {
+        sig: Sig,
+        nullable: bool,
+    },
     /// Must exist; its shape could not be derived (an unmapped Rust type).
     Unknown,
 }
@@ -1549,7 +1558,10 @@ impl FfiTranslation {
                     let notify = format!("{prefix}_callbacks_notify_fn_t");
                     out.add(
                         notify.clone(),
-                        Shape::FnPtr(Sig { params: vec![Param::new("opaque", "*mut c_void".to_string())], ret: None }),
+                        Shape::FnPtr {
+                            sig: Sig { params: vec![Param::new("opaque", "*mut c_void".to_string())], ret: None },
+                            nullable: false,
+                        },
                         file,
                     );
                     out.add(
@@ -1968,7 +1980,7 @@ fn expect_method(
             typedef.params.push(Param::new("error", CType::error()));
         }
         typedef.params.push(Param::new("opaque", "*mut c_void".to_string()));
-        out.add(cb_t, Shape::FnPtr(typedef), file);
+        out.add(cb_t, Shape::FnPtr { sig: typedef, nullable: false }, file);
     }
 }
 
@@ -2034,7 +2046,7 @@ fn expect_interface<'a>(
                 _ => {},
             }
         }
-        out.add(fn_t, Shape::FnPtr(sig), file);
+        out.add(fn_t, Shape::FnPtr { sig, nullable: m.has_default }, file);
     }
     out.add(
         format!("{prefix}_new"),
@@ -2188,11 +2200,13 @@ fn render_type(ty: &syn::Type) -> String {
     }
 }
 
-/// The function-pointer type a typedef declares: `unsafe extern "C" fn(..)`,
-/// possibly wrapped in `Option<..>` for a nullable pointer.
-fn bare_fn(ty: &syn::Type) -> Option<&syn::TypeBareFn> {
+/// The function-pointer type a typedef declares, `unsafe extern "C" fn(..)`
+/// or `Option<unsafe extern "C" fn(..)>`, and whether it is the latter: the
+/// nullable form, which cbindgen emits as a plain C function pointer while an
+/// `Option<alias>` in a signature it copies into the header verbatim.
+fn fn_ptr_decl(ty: &syn::Type) -> Option<(&syn::TypeBareFn, bool)> {
     match ty {
-        syn::Type::BareFn(f) => Some(f),
+        syn::Type::BareFn(f) => Some((f, false)),
         syn::Type::Path(p) => {
             let last = p.path.segments.last()?;
             if last.ident != "Option" {
@@ -2202,11 +2216,20 @@ fn bare_fn(ty: &syn::Type) -> Option<&syn::TypeBareFn> {
                 return None;
             };
             match args.args.first()? {
-                syn::GenericArgument::Type(syn::Type::BareFn(f)) => Some(f),
+                syn::GenericArgument::Type(syn::Type::BareFn(f)) => Some((f, true)),
                 _ => None,
             }
         },
         _ => None,
+    }
+}
+
+/// How a function-pointer typedef must be declared.
+fn render_fn_ptr_decl(name: &str, sig: &Sig, nullable: bool) -> String {
+    if nullable {
+        format!("type {name} = Option<unsafe extern \"C\" {}>", sig.render())
+    } else {
+        format!("type {name} = unsafe extern \"C\" {}", sig.render())
     }
 }
 
@@ -2298,14 +2321,15 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                     Some(())
                 },
             },
-            Shape::FnPtr(sig) => match actual.types.get(name) {
+            Shape::FnPtr { sig, nullable } => match actual.types.get(name) {
                 None => None,
                 Some(t) => {
-                    let want = sig.render();
+                    let want = render_fn_ptr_decl(name, sig, *nullable);
                     match &t.item {
                         syn::Item::Type(td) => {
-                            let ok = bare_fn(&td.ty).is_some_and(|f| {
-                                f.inputs.len() == sig.params.len()
+                            let ok = fn_ptr_decl(&td.ty).is_some_and(|(f, declared_nullable)| {
+                                declared_nullable == *nullable
+                                    && f.inputs.len() == sig.params.len()
                                     && f.inputs.iter().zip(sig.params.iter()).all(|(a, p)| render_type(&a.ty) == p.ty)
                                     && render_return(&f.output) == sig.ret
                             });
@@ -2314,10 +2338,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                                     kind: "shape",
                                     symbol: name.clone(),
                                     file: t.file.clone(),
-                                    detail: format!(
-                                        "expected `type {name} = unsafe extern \"C\" {want}`, found `{}`",
-                                        render_type(&td.ty)
-                                    ),
+                                    detail: format!("expected `{want}`, found `{}`", render_type(&td.ty)),
                                 });
                             }
                         },
@@ -2325,7 +2346,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                             kind: "shape",
                             symbol: name.clone(),
                             file: t.file.clone(),
-                            detail: format!("expected `type {name} = unsafe extern \"C\" {want}`"),
+                            detail: format!("expected `{want}`"),
                         }),
                     }
                     Some(())
@@ -2339,7 +2360,9 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                 file: exp.file.clone(),
                 detail: match &exp.shape {
                     Shape::Fn(sig) => format!("expected `{}`", sig.render()),
-                    Shape::FnPtr(sig) => format!("expected `type {name} = unsafe extern \"C\" {}`", sig.render()),
+                    Shape::FnPtr { sig, nullable } => {
+                        format!("expected `{}`", render_fn_ptr_decl(name, sig, *nullable))
+                    },
                     Shape::Opaque => "expected an opaque `#[repr(C)] struct`".to_string(),
                     Shape::CEnum(v) => format!("expected a `#[repr(C)]` enum with variants [{}]", v.join(", ")),
                     Shape::Unknown => "expected to exist".to_string(),
@@ -2868,9 +2891,9 @@ mod tests {
         #[repr(C)] pub struct kafka_Map_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_Map_new() -> *mut kafka_Map_t { std::ptr::null_mut() }
         #[repr(C)] pub struct kafka_producer_Partitioner_t { _p: [u8; 0] }
-        pub type kafka_producer_Partitioner_configure_fn_t = unsafe extern "C" fn(this: *mut c_void, configs: *const kafka_Map_t);
+        pub type kafka_producer_Partitioner_configure_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, configs: *const kafka_Map_t)>;
         pub type kafka_producer_Partitioner_partition_fn_t = unsafe extern "C" fn(this: *mut c_void, topic: *const c_char, key: *const c_void, key_bytes: kafka_Bytes_t, cluster: *const kafka_common_Cluster_t) -> i32;
-        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_new(this: *mut c_void, configure: Option<kafka_producer_Partitioner_configure_fn_t>, partition: kafka_producer_Partitioner_partition_fn_t) -> *mut kafka_producer_Partitioner_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_new(this: *mut c_void, configure: kafka_producer_Partitioner_configure_fn_t, partition: kafka_producer_Partitioner_partition_fn_t) -> *mut kafka_producer_Partitioner_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_destroy(this: *mut kafka_producer_Partitioner_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_configure(this: *mut kafka_producer_Partitioner_t, configs: *const kafka_Map_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_partition(this: *const kafka_producer_Partitioner_t, topic: *const c_char, key: *const c_void, key_bytes: kafka_Bytes_t, cluster: *const kafka_common_Cluster_t) -> i32 { 0 }
@@ -2905,7 +2928,7 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_producer_Partitioner_new"),
-            "expected `fn(self: *mut c_void, configure: Option<kafka_producer_Partitioner_configure_fn_t>, \
+            "expected `fn(self: *mut c_void, configure: kafka_producer_Partitioner_configure_fn_t, \
              partition: kafka_producer_Partitioner_partition_fn_t) -> *mut kafka_producer_Partitioner_t`"
         );
     }

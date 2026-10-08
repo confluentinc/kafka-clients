@@ -4156,6 +4156,65 @@ static void test_mock_admin_b4_null_out_result(void) {
 #define ACL_PERMISSION_DENY 2
 #define ACL_PERMISSION_ALLOW 3
 
+/* A result's bindings and filters are the shared `kafka_common_acl_*` handles,
+ * which keep Java's object graph: the strings and enums sit on `pattern()` /
+ * `entry()` (or their filters). These read each enum back as its Java code so
+ * the assertions below can keep using the request-side defines. */
+static int32_t acl_resource_type(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_resource_ResourceType_code(
+        kafka_common_resource_ResourcePattern_resource_type(kafka_common_acl_AclBinding_pattern(b)));
+}
+static const char *acl_resource_name(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_resource_ResourcePattern_name(kafka_common_acl_AclBinding_pattern(b));
+}
+static int32_t acl_pattern_type(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_resource_PatternType_code(
+        kafka_common_resource_ResourcePattern_pattern_type(kafka_common_acl_AclBinding_pattern(b)));
+}
+static const char *acl_principal(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_acl_AccessControlEntry_principal(kafka_common_acl_AclBinding_entry(b));
+}
+static const char *acl_host(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_acl_AccessControlEntry_host(kafka_common_acl_AclBinding_entry(b));
+}
+static int32_t acl_operation(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_acl_AclOperation_code(
+        kafka_common_acl_AccessControlEntry_operation(kafka_common_acl_AclBinding_entry(b)));
+}
+static int32_t acl_permission_type(const kafka_common_acl_AclBinding_t *b) {
+    return kafka_common_acl_AclPermissionType_code(
+        kafka_common_acl_AccessControlEntry_permission_type(kafka_common_acl_AclBinding_entry(b)));
+}
+
+static int32_t acl_filter_resource_type(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_resource_ResourceType_code(kafka_common_resource_ResourcePatternFilter_resource_type(
+        kafka_common_acl_AclBindingFilter_pattern_filter(f)));
+}
+/* NULL is Java's null name: match any. */
+static const char *acl_filter_resource_name(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_resource_ResourcePatternFilter_name(
+        kafka_common_acl_AclBindingFilter_pattern_filter(f));
+}
+static int32_t acl_filter_pattern_type(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_resource_PatternType_code(kafka_common_resource_ResourcePatternFilter_pattern_type(
+        kafka_common_acl_AclBindingFilter_pattern_filter(f)));
+}
+static const char *acl_filter_principal(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_acl_AccessControlEntryFilter_principal(
+        kafka_common_acl_AclBindingFilter_entry_filter(f));
+}
+static const char *acl_filter_host(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_acl_AccessControlEntryFilter_host(kafka_common_acl_AclBindingFilter_entry_filter(f));
+}
+static int32_t acl_filter_operation(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntryFilter_operation(
+        kafka_common_acl_AclBindingFilter_entry_filter(f)));
+}
+static int32_t acl_filter_permission_type(const kafka_common_acl_AclBindingFilter_t *f) {
+    return kafka_common_acl_AclPermissionType_code(kafka_common_acl_AccessControlEntryFilter_permission_type(
+        kafka_common_acl_AclBindingFilter_entry_filter(f)));
+}
+
 /* Wire match types for a client-quota filter component. */
 #define QUOTA_MATCH_EXACT 0
 #define QUOTA_MATCH_DEFAULT 1
@@ -4187,23 +4246,23 @@ static void test_mock_admin_create_acls_reports_unsupported_per_binding(void) {
      * whole row together is what catches a column swap. */
     const kafka_common_acl_AclBinding_t *b0 = kafka_admin_CreateAclsResult_get_binding(result, 0);
     TEST_ASSERT_NOT_NULL(b0);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_TOPIC, kafka_common_acl_AclBinding_resource_type(b0));
-    TEST_ASSERT_EQUAL_STRING("z-topic", kafka_common_acl_AclBinding_resource_name(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL, kafka_common_acl_AclBinding_pattern_type(b0));
-    TEST_ASSERT_EQUAL_STRING("User:zoe", kafka_common_acl_AclBinding_principal(b0));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.9", kafka_common_acl_AclBinding_host(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_WRITE, kafka_common_acl_AclBinding_operation(b0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY, kafka_common_acl_AclBinding_permission_type(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_TOPIC, acl_resource_type(b0));
+    TEST_ASSERT_EQUAL_STRING("z-topic", acl_resource_name(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL, acl_pattern_type(b0));
+    TEST_ASSERT_EQUAL_STRING("User:zoe", acl_principal(b0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.9", acl_host(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_WRITE, acl_operation(b0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY, acl_permission_type(b0));
 
     const kafka_common_acl_AclBinding_t *b1 = kafka_admin_CreateAclsResult_get_binding(result, 1);
     TEST_ASSERT_NOT_NULL(b1);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_GROUP, kafka_common_acl_AclBinding_resource_type(b1));
-    TEST_ASSERT_EQUAL_STRING("a-group", kafka_common_acl_AclBinding_resource_name(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_PREFIXED, kafka_common_acl_AclBinding_pattern_type(b1));
-    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_acl_AclBinding_principal(b1));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_acl_AclBinding_host(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_READ, kafka_common_acl_AclBinding_operation(b1));
-    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ALLOW, kafka_common_acl_AclBinding_permission_type(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_GROUP, acl_resource_type(b1));
+    TEST_ASSERT_EQUAL_STRING("a-group", acl_resource_name(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_PREFIXED, acl_pattern_type(b1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", acl_principal(b1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", acl_host(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_READ, acl_operation(b1));
+    TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ALLOW, acl_permission_type(b1));
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e = kafka_admin_CreateAclsResult_get_error(result, i);
@@ -4475,27 +4534,27 @@ static void test_mock_admin_delete_acls_reports_unsupported_per_filter(void) {
     /* Sorted by resource type: ANY (1) before TOPIC (2). */
     const kafka_common_acl_AclBindingFilter_t *f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
     TEST_ASSERT_NOT_NULL(f0);
-    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_ANY, kafka_common_acl_AclBindingFilter_resource_type(f0));
-    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_resource_name(f0));
-    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_principal(f0));
-    TEST_ASSERT_NULL(kafka_common_acl_AclBindingFilter_host(f0));
-    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_ANY, kafka_common_acl_AclBindingFilter_pattern_type(f0));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_ANY, kafka_common_acl_AclBindingFilter_operation(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_RESOURCE_TYPE_ANY, acl_filter_resource_type(f0));
+    TEST_ASSERT_NULL(acl_filter_resource_name(f0));
+    TEST_ASSERT_NULL(acl_filter_principal(f0));
+    TEST_ASSERT_NULL(acl_filter_host(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_ANY, acl_filter_pattern_type(f0));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_ANY, acl_filter_operation(f0));
     TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_ANY,
-                            kafka_common_acl_AclBindingFilter_permission_type(f0));
+                            acl_filter_permission_type(f0));
 
     const kafka_common_acl_AclBindingFilter_t *f1 = kafka_admin_DeleteAclsResult_get_filter(result, 1);
     TEST_ASSERT_NOT_NULL(f1);
     /* Present but empty: a pointer to "", never the null that means match-any. */
-    TEST_ASSERT_NOT_NULL(kafka_common_acl_AclBindingFilter_resource_name(f1));
-    TEST_ASSERT_EQUAL_STRING("", kafka_common_acl_AclBindingFilter_resource_name(f1));
-    TEST_ASSERT_EQUAL_STRING("User:alice", kafka_common_acl_AclBindingFilter_principal(f1));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_acl_AclBindingFilter_host(f1));
+    TEST_ASSERT_NOT_NULL(acl_filter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("", acl_filter_resource_name(f1));
+    TEST_ASSERT_EQUAL_STRING("User:alice", acl_filter_principal(f1));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", acl_filter_host(f1));
     TEST_ASSERT_EQUAL_INT32(ACL_PATTERN_TYPE_LITERAL,
-                            kafka_common_acl_AclBindingFilter_pattern_type(f1));
-    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_DESCRIBE, kafka_common_acl_AclBindingFilter_operation(f1));
+                            acl_filter_pattern_type(f1));
+    TEST_ASSERT_EQUAL_INT32(ACL_OPERATION_DESCRIBE, acl_filter_operation(f1));
     TEST_ASSERT_EQUAL_INT32(ACL_PERMISSION_DENY,
-                            kafka_common_acl_AclBindingFilter_permission_type(f1));
+                            acl_filter_permission_type(f1));
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e = kafka_admin_DeleteAclsResult_get_error(result, i);

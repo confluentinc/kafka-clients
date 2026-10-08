@@ -172,6 +172,8 @@ use crate::common::{
 };
 use crate::consumer::OffsetAndMetadata;
 
+use super::common::acl::acl_binding::{AclBindingInner, kafka_common_acl_AclBinding_t};
+use super::common::acl::acl_binding_filter::{AclBindingFilterInner, kafka_common_acl_AclBindingFilter_t};
 use super::common::node::{NodeInner, kafka_common_Node_t, optional_node_ptr};
 use super::common::quota::client_quota_entity::{
     client_quota_entity_ptr, kafka_common_quota_ClientQuotaEntity_t, sorted_entries as client_quota_entity_sort_key,
@@ -11590,380 +11592,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 }
 
 // ---------------------------------------------------------------------------
-// B5a — ACL and client-quota value types
-//
-// Every Java class bound here lives in `org.apache.kafka.common` (`.acl`,
-// `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §4 the C
-// spelling is `kafka_common_*`. `kafka_common_Node_t` and
-// `kafka_common_Error_t` are the existing precedent. Naming these
-// `kafka_admin_*` would repeat the `kafka_common_TopicPartition_t` mistake
-// in a second public surface.
-//
-// The three handles below are **output-only and borrowed**: they are interior
-// references into the owning result handle's allocation, so they live until
-// that result is destroyed and must never be freed. Request-side ACL bindings,
-// filters and quota entities cross as parallel arrays instead — the shape
-// `alterPartitionReassignments`, `alterConsumerGroupOffsets` and
-// `listConsumerGroupOffsets` already use — which keeps ownership unambiguous:
-// no handle in this module is ever both caller-owned and borrowed.
-//
-// `AclBinding.pattern()` (a `ResourcePattern`) and `.entry()` (an
-// `AccessControlEntry`) are flattened onto the binding rather than getting
-// handles of their own, following B2's treatment of
-// `LogDirDescription.ReplicaInfo`. The accessor names keep Java's field names,
-// so `kafka_common_acl_AclBinding_resource_name` is `pattern().name()` and
-// `..._principal` is `entry().principal()`.
-//
-// All four ACL enums have a numeric `code()` in Java
-// (`AclOperation.code()`, `AclPermissionType.code()`, `ResourceType.code()`,
-// `PatternType.code()`), so per the B2 rule they cross as `int32_t` codes
-// rather than as `toString()` names. The codes are Java's, listed on each
-// accessor.
-// ---------------------------------------------------------------------------
-
-/// Opaque handle to an `AclBinding` (Java's
-/// `org.apache.kafka.common.acl.AclBinding`).
-///
-/// Borrowed from the owning `create_acls` / `describe_acls` / `delete_acls`
-/// result handle; valid until that handle is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_acl_AclBinding_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_acl_AclBinding_t`].
-///
-/// `AclBinding`'s two components are flattened: `pattern()`'s three fields and
-/// `entry()`'s four. Every string is non-nullable on a *binding* (only a
-/// *filter* has nullable ones), because `AccessControlEntry::new` always stores
-/// a principal and a host and `ResourcePattern` always stores a name.
-struct AclBindingInner {
-    resource_type: i32,
-    resource_name_c: CString,
-    pattern_type: i32,
-    principal_c: CString,
-    host_c: CString,
-    operation: i32,
-    permission_type: i32,
-}
-
-impl AclBindingInner {
-    fn new(binding: &AclBinding) -> Self {
-        let pattern = binding.pattern();
-        let entry = binding.entry();
-        Self {
-            resource_type: i32::from(pattern.resource_type().code()),
-            resource_name_c: to_cstring(pattern.name()),
-            pattern_type: i32::from(pattern.pattern_type().code()),
-            principal_c: to_cstring(entry.principal()),
-            host_c: to_cstring(entry.host()),
-            operation: i32::from(entry.operation().code()),
-            permission_type: i32::from(entry.permission_type().code()),
-        }
-    }
-
-    /// Deterministic ordering key. Java's `*Result` maps are unordered, but C
-    /// addresses entries by index, so the flattened entries are sorted;
-    /// `AclBinding` is `Hash + Eq` in Java and here, but not `Ord`.
-    fn sort_key(&self) -> (i32, &str, i32, &str, &str, i32, i32) {
-        (
-            self.resource_type,
-            self.resource_name_c.to_str().unwrap_or_default(),
-            self.pattern_type,
-            self.principal_c.to_str().unwrap_or_default(),
-            self.host_c.to_str().unwrap_or_default(),
-            self.operation,
-            self.permission_type,
-        )
-    }
-
-    fn as_ptr(&self) -> *const kafka_common_acl_AclBinding_t {
-        self as *const AclBindingInner as *const kafka_common_acl_AclBinding_t
-    }
-}
-
-/// Casts a `*const kafka_common_acl_AclBinding_t` to a reference.
-///
-/// # Safety
-///
-/// `binding` must be a non-null borrowed pointer from an ACL result getter.
-unsafe fn acl_binding_ref(binding: *const kafka_common_acl_AclBinding_t) -> &'static AclBindingInner {
-    unsafe { &*(binding as *const AclBindingInner) }
-}
-
-/// Returns `pattern().resourceType().code()`: UNKNOWN=0, ANY=1, TOPIC=2,
-/// GROUP=3, CLUSTER=4, TRANSACTIONAL_ID=5, DELEGATION_TOKEN=6, USER=7.
-///
-/// A binding never carries ANY (`ResourcePattern` rejects it), but UNKNOWN is
-/// possible when the broker reports a resource type this client does not know.
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_type(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> i32 {
-    unsafe { acl_binding_ref(binding) }.resource_type
-}
-
-/// Returns `pattern().name()` (borrowed). Never null on a binding.
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_name(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> *const c_char {
-    unsafe { acl_binding_ref(binding) }.resource_name_c.as_ptr()
-}
-
-/// Returns `pattern().patternType().code()`: UNKNOWN=0, ANY=1, MATCH=2,
-/// LITERAL=3, PREFIXED=4.
-///
-/// A binding never carries ANY or MATCH (`ResourcePattern` rejects both);
-/// those are filter-only pattern types.
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern_type(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> i32 {
-    unsafe { acl_binding_ref(binding) }.pattern_type
-}
-
-/// Returns `entry().principal()` (borrowed), e.g. `"User:alice"`. Never null on
-/// a binding.
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_principal(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> *const c_char {
-    unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
-}
-
-/// Returns `entry().host()` (borrowed), e.g. `"*"`. Never null on a binding.
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_host(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> *const c_char {
-    unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
-}
-
-/// Returns `entry().operation().code()`: UNKNOWN=0, ANY=1, ALL=2, READ=3,
-/// WRITE=4, CREATE=5, DELETE=6, ALTER=7, DESCRIBE=8, CLUSTER_ACTION=9,
-/// DESCRIBE_CONFIGS=10, ALTER_CONFIGS=11, IDEMPOTENT_WRITE=12,
-/// CREATE_TOKENS=13, DESCRIBE_TOKENS=14, TWO_PHASE_COMMIT=15.
-///
-/// A binding never carries ANY (`AccessControlEntry` rejects it).
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_operation(binding: *const kafka_common_acl_AclBinding_t) -> i32 {
-    unsafe { acl_binding_ref(binding) }.operation
-}
-
-/// Returns `entry().permissionType().code()`: UNKNOWN=0, ANY=1, DENY=2,
-/// ALLOW=3.
-///
-/// A binding never carries ANY (`AccessControlEntry` rejects it).
-///
-/// # Safety
-///
-/// `binding` must be a valid borrowed ACL-binding pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBinding_permission_type(
-    binding: *const kafka_common_acl_AclBinding_t,
-) -> i32 {
-    unsafe { acl_binding_ref(binding) }.permission_type
-}
-
-/// Opaque handle to an `AclBindingFilter` (Java's
-/// `org.apache.kafka.common.acl.AclBindingFilter`).
-///
-/// Borrowed from the owning `delete_acls` result handle; valid until that
-/// handle is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_acl_AclBindingFilter_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_acl_AclBindingFilter_t`].
-///
-/// A *filter* differs from a binding in exactly two ways, both of which the C
-/// surface has to preserve: its three string fields are genuinely nullable
-/// (Java's `ResourcePatternFilter.name()` / `AccessControlEntryFilter
-/// .principal()` / `.host()` return null to mean "match any"), and its enums
-/// may be ANY or MATCH.
-///
-/// A null `const char *` is the right encoding for those three, and needs no
-/// companion discriminant: it is distinguishable from a pointer to `""`, and an
-/// empty name is a legal, distinct filter. That is the B3 rule applied, not
-/// waived — a discriminant is required only where the sentinel would *collide*
-/// with a real value, as it would for a nullable number.
-struct AclBindingFilterInner {
-    resource_type: i32,
-    resource_name_c: Option<CString>,
-    pattern_type: i32,
-    principal_c: Option<CString>,
-    host_c: Option<CString>,
-    operation: i32,
-    permission_type: i32,
-}
-
-impl AclBindingFilterInner {
-    fn new(filter: &AclBindingFilter) -> Self {
-        let pattern = filter.pattern_filter();
-        let entry = filter.entry_filter();
-        Self {
-            resource_type: i32::from(pattern.resource_type().code()),
-            resource_name_c: pattern.name().map(to_cstring),
-            pattern_type: i32::from(pattern.pattern_type().code()),
-            principal_c: entry.principal().map(to_cstring),
-            host_c: entry.host().map(to_cstring),
-            operation: i32::from(entry.operation().code()),
-            permission_type: i32::from(entry.permission_type().code()),
-        }
-    }
-
-    /// Deterministic ordering key; see [`AclBindingInner::sort_key`]. An absent
-    /// (match-any) string sorts before any present one.
-    fn sort_key(&self) -> (i32, Option<&str>, i32, Option<&str>, Option<&str>, i32, i32) {
-        fn text(value: &Option<CString>) -> Option<&str> {
-            value.as_ref().map(|s| s.to_str().unwrap_or_default())
-        }
-        (
-            self.resource_type,
-            text(&self.resource_name_c),
-            self.pattern_type,
-            text(&self.principal_c),
-            text(&self.host_c),
-            self.operation,
-            self.permission_type,
-        )
-    }
-}
-
-/// Casts a `*const kafka_common_acl_AclBindingFilter_t` to a reference.
-///
-/// # Safety
-///
-/// `filter` must be a non-null borrowed pointer from a `delete_acls` result
-/// getter.
-unsafe fn acl_binding_filter_ref(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'static AclBindingFilterInner {
-    unsafe { &*(filter as *const AclBindingFilterInner) }
-}
-
-/// Returns `patternFilter().resourceType().code()`. See
-/// [`kafka_common_acl_AclBinding_resource_type`] for the codes; a filter may also
-/// carry ANY=1, which matches every resource type.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_type(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> i32 {
-    unsafe { acl_binding_filter_ref(filter) }.resource_type
-}
-
-/// Returns `patternFilter().name()` (borrowed), or null when the filter matches
-/// any resource name (Java's null name). Null is distinct from a pointer to the
-/// empty string, which filters on the name `""`.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_name(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.resource_name_c)
-}
-
-/// Returns `patternFilter().patternType().code()`. See
-/// [`kafka_common_acl_AclBinding_pattern_type`] for the codes; a filter may also
-/// carry ANY=1 (any pattern type) and MATCH=2 (literal, prefixed and wildcard
-/// patterns that would match the name).
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_type(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> i32 {
-    unsafe { acl_binding_filter_ref(filter) }.pattern_type
-}
-
-/// Returns `entryFilter().principal()` (borrowed), or null when the filter
-/// matches any principal.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_principal(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.principal_c)
-}
-
-/// Returns `entryFilter().host()` (borrowed), or null when the filter matches
-/// any host.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_host(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> *const c_char {
-    optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.host_c)
-}
-
-/// Returns `entryFilter().operation().code()`. See
-/// [`kafka_common_acl_AclBinding_operation`] for the codes; a filter may also carry
-/// ANY=1.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_operation(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> i32 {
-    unsafe { acl_binding_filter_ref(filter) }.operation
-}
-
-/// Returns `entryFilter().permissionType().code()`. See
-/// [`kafka_common_acl_AclBinding_permission_type`] for the codes; a filter may also
-/// carry ANY=1.
-///
-/// # Safety
-///
-/// `filter` must be a valid borrowed ACL-filter pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_permission_type(
-    filter: *const kafka_common_acl_AclBindingFilter_t,
-) -> i32 {
-    unsafe { acl_binding_filter_ref(filter) }.permission_type
-}
-
-// ---------------------------------------------------------------------------
 // B5a — ACL and client-quota input marshaling and submission helpers
 //
 // Request-side ACL bindings, filters and quota entities cross as parallel
@@ -12529,14 +12157,48 @@ struct CreateAclsResultInner {
     errors: Vec<Option<ErrorInner>>,
 }
 
+/// The order bindings take inside a result: resource type, resource name,
+/// pattern type, principal, host, operation and permission type, each enum by
+/// its Java `code()`. Java's `values()` map is unordered; a fixed order is
+/// what makes index addressing from C reproducible.
+fn acl_binding_sort_key(binding: &AclBinding) -> (i8, &str, i8, &str, &str, i8, i8) {
+    let (pattern, entry) = (binding.pattern(), binding.entry());
+    (
+        pattern.resource_type().code(),
+        pattern.name(),
+        pattern.pattern_type().code(),
+        entry.principal(),
+        entry.host(),
+        entry.operation().code(),
+        entry.permission_type().code(),
+    )
+}
+
+/// [`acl_binding_sort_key`] for a filter, whose three strings are nullable
+/// (`None` is Java's match-any and sorts first).
+fn acl_binding_filter_sort_key(
+    filter: &AclBindingFilter,
+) -> (i8, Option<&str>, i8, Option<&str>, Option<&str>, i8, i8) {
+    let (pattern, entry) = (filter.pattern_filter(), filter.entry_filter());
+    (
+        pattern.resource_type().code(),
+        pattern.name(),
+        pattern.pattern_type().code(),
+        entry.principal(),
+        entry.host(),
+        entry.operation().code(),
+        entry.permission_type().code(),
+    )
+}
+
 /// Flattens the per-binding `createAcls` outcomes into the C handle.
 fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_CreateAclsResult_t {
-    let mut rows: Vec<(AclBindingInner, Option<ErrorInner>)> = outcomes
+    let mut rows: Vec<(AclBinding, Option<ErrorInner>)> = outcomes
         .into_iter()
-        .map(|(binding, outcome)| (AclBindingInner::new(&binding), outcome.err().map(error_inner)))
+        .map(|(binding, outcome)| (binding, outcome.err().map(error_inner)))
         .collect();
-    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
-    let (bindings, errors) = rows.into_iter().unzip();
+    rows.sort_by(|a, b| acl_binding_sort_key(&a.0).cmp(&acl_binding_sort_key(&b.0)));
+    let (bindings, errors) = rows.into_iter().map(|(b, e)| (AclBindingInner::new(b), e)).unzip();
     Box::into_raw(Box::new(CreateAclsResultInner { bindings, errors })) as *mut kafka_admin_CreateAclsResult_t
 }
 
@@ -12625,7 +12287,7 @@ struct DescribeAclsResultInner {
 /// Flattens the described bindings into the C handle.
 fn box_describe_acls_result(bindings: Vec<AclBinding>) -> *mut kafka_admin_DescribeAclsResult_t {
     Box::into_raw(Box::new(DescribeAclsResultInner {
-        bindings: bindings.iter().map(AclBindingInner::new).collect(),
+        bindings: bindings.into_iter().map(AclBindingInner::new).collect(),
     })) as *mut kafka_admin_DescribeAclsResult_t
 }
 
@@ -12710,7 +12372,7 @@ struct DeleteAclsResultInner {
 
 /// Flattens the per-filter `deleteAcls` outcomes into the C handle.
 fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_DeleteAclsResult_t {
-    type Row = (AclBindingFilterInner, (Option<ErrorInner>, Vec<DeleteAclsFilterResultInner>));
+    type Row = (AclBindingFilter, (Option<ErrorInner>, Vec<DeleteAclsFilterResultInner>));
     let mut rows: Vec<Row> = outcomes
         .into_iter()
         .map(|(filter, outcome)| {
@@ -12721,23 +12383,23 @@ fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_Dele
                         .values()
                         .iter()
                         .map(|r| DeleteAclsFilterResultInner {
-                            binding: r.binding().map(AclBindingInner::new),
+                            binding: r.binding().cloned().map(AclBindingInner::new),
                             error: r.error().cloned().map(error_inner),
                         })
                         .collect(),
                 ),
                 Err(e) => (Some(error_inner(e)), Vec::new()),
             };
-            (AclBindingFilterInner::new(&filter), flattened)
+            (filter, flattened)
         })
         .collect();
-    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    rows.sort_by(|a, b| acl_binding_filter_sort_key(&a.0).cmp(&acl_binding_filter_sort_key(&b.0)));
 
     let mut filters = Vec::with_capacity(rows.len());
     let mut errors = Vec::with_capacity(rows.len());
     let mut results = Vec::with_capacity(rows.len());
     for (filter, (error, filter_results)) in rows {
-        filters.push(filter);
+        filters.push(AclBindingFilterInner::new(filter));
         errors.push(error);
         results.push(filter_results);
     }
@@ -12778,7 +12440,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
         return std::ptr::null();
     }
     match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
-        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t,
+        Some(filter) => filter.as_ptr(),
         None => std::ptr::null(),
     }
 }
@@ -13227,9 +12889,8 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 ///
 /// # Parameters
 ///
-/// - `resource_types`: `ResourceType` codes; see
-///   [`kafka_common_acl_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
-///   `ResourcePattern` constructor rejects it.
+/// - `resource_types`: `ResourceType` codes (`kafka_common_resource_ResourceType_code`);
+///   ANY (1) is rejected, as Java's `ResourcePattern` constructor rejects it.
 /// - `resource_names`: resource names; a NULL entry is rejected.
 /// - `pattern_types`: `PatternType` codes; ANY (1) and MATCH (2) are rejected,
 ///   as Java's `ResourcePattern` constructor rejects them.
@@ -18562,7 +18223,13 @@ mod tests {
     use crate::common::ClassicGroupState;
     use crate::common::protocol::Errors;
     use crate::common::security::token::delegation::TokenInformation;
+    use crate::ffi::common::acl::access_control_entry::kafka_common_acl_AccessControlEntry_principal;
+    use crate::ffi::common::acl::acl_binding::kafka_common_acl_AclBinding_entry;
+    use crate::ffi::common::acl::acl_binding::kafka_common_acl_AclBinding_pattern;
+    use crate::ffi::common::acl::acl_binding_filter::kafka_common_acl_AclBindingFilter_pattern_filter;
     use crate::ffi::common::quota::client_quota_entity::client_quota_entity_ref;
+    use crate::ffi::common::resource::resource_pattern::kafka_common_resource_ResourcePattern_name;
+    use crate::ffi::common::resource::resource_pattern_filter::kafka_common_resource_ResourcePatternFilter_name;
     use crate::ffi::common::security::auth::kafka_principal::{
         kafka_common_security_auth_KafkaPrincipal_name, kafka_common_security_auth_KafkaPrincipal_principal_type,
         kafka_common_security_auth_KafkaPrincipal_t, kafka_common_security_auth_KafkaPrincipal_token_authenticated,
@@ -20334,6 +20001,37 @@ mod tests {
 
     /// Builds a binding whose seven fields are all distinct, so that a
     /// transposition of any two of them fails an assertion.
+    /// `pattern().name()` of a binding handle, through the two-level getters
+    /// the shared `kafka_common_acl_AclBinding_t` exposes.
+    unsafe fn binding_resource_name<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a str {
+        unsafe {
+            CStr::from_ptr(kafka_common_resource_ResourcePattern_name(kafka_common_acl_AclBinding_pattern(
+                binding,
+            )))
+        }
+        .to_str()
+        .unwrap()
+    }
+
+    /// `entry().principal()` of a binding handle.
+    unsafe fn binding_principal<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a str {
+        unsafe {
+            CStr::from_ptr(kafka_common_acl_AccessControlEntry_principal(
+                kafka_common_acl_AclBinding_entry(binding),
+            ))
+        }
+        .to_str()
+        .unwrap()
+    }
+
+    /// `patternFilter().name()` of a filter handle; `None` is Java's null.
+    unsafe fn filter_resource_name<'a>(filter: *const kafka_common_acl_AclBindingFilter_t) -> Option<&'a str> {
+        let name = unsafe {
+            kafka_common_resource_ResourcePatternFilter_name(kafka_common_acl_AclBindingFilter_pattern_filter(filter))
+        };
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_str().unwrap())
+    }
+
     fn acl_binding(name: &str, principal: &str) -> AclBinding {
         AclBinding::new(
             ResourcePattern::new(ResourceType::Topic, name, PatternType::Prefixed).expect("valid pattern"),
@@ -20391,138 +20089,6 @@ mod tests {
         let options = alter_client_quotas_options(-1, false);
         assert_eq!(options.timeout_ms(), None);
         assert!(!options.validate_only());
-    }
-
-    // -- AclBinding / AclBindingFilter value handles -------------------------
-
-    #[test]
-    fn acl_binding_exposes_all_seven_java_fields_with_their_code_values() {
-        let inner = AclBindingInner::new(&acl_binding("orders-", "User:alice"));
-        let b = inner.as_ptr();
-        unsafe {
-            assert_eq!(
-                kafka_common_acl_AclBinding_resource_type(b),
-                i32::from(ResourceType::Topic.code())
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(b)).to_str(),
-                Ok("orders-")
-            );
-            assert_eq!(
-                kafka_common_acl_AclBinding_pattern_type(b),
-                i32::from(PatternType::Prefixed.code())
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_principal(b)).to_str(),
-                Ok("User:alice")
-            );
-            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
-            assert_eq!(kafka_common_acl_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
-            assert_eq!(
-                kafka_common_acl_AclBinding_permission_type(b),
-                i32::from(AclPermissionType::Deny.code())
-            );
-        }
-    }
-
-    #[test]
-    fn acl_binding_codes_are_javas_and_are_pairwise_distinct() {
-        // The four enums cross as `code()` values because Java defines one for
-        // each; these are the constants a C caller compares against. Asserted
-        // as literals so a renumbering is caught here rather than on the wire.
-        assert_eq!(
-            (
-                ResourceType::Unknown.code(),
-                ResourceType::Any.code(),
-                ResourceType::Topic.code(),
-                ResourceType::Group.code(),
-                ResourceType::Cluster.code(),
-                ResourceType::TransactionalId.code(),
-                ResourceType::DelegationToken.code(),
-                ResourceType::User.code(),
-            ),
-            (0, 1, 2, 3, 4, 5, 6, 7)
-        );
-        assert_eq!(
-            (
-                PatternType::Unknown.code(),
-                PatternType::Any.code(),
-                PatternType::Match.code(),
-                PatternType::Literal.code(),
-                PatternType::Prefixed.code(),
-            ),
-            (0, 1, 2, 3, 4)
-        );
-        assert_eq!(
-            (
-                AclPermissionType::Unknown.code(),
-                AclPermissionType::Any.code(),
-                AclPermissionType::Deny.code(),
-                AclPermissionType::Allow.code(),
-            ),
-            (0, 1, 2, 3)
-        );
-        assert_eq!(
-            (
-                AclOperation::Unknown.code(),
-                AclOperation::Any.code(),
-                AclOperation::All.code(),
-                AclOperation::Read.code(),
-                AclOperation::Write.code(),
-                AclOperation::Describe.code(),
-                AclOperation::TwoPhaseCommit.code(),
-            ),
-            (0, 1, 2, 3, 4, 8, 15)
-        );
-    }
-
-    #[test]
-    fn acl_binding_filter_distinguishes_a_null_string_from_an_empty_one() {
-        // Java's filter strings are nullable: null means "match any". The empty
-        // string is a real, different filter, which is why a null pointer is a
-        // sufficient encoding and no extra discriminant is needed.
-        let any = AclBindingFilterInner::new(&AclBindingFilter::any());
-        let empty = AclBindingFilterInner::new(&AclBindingFilter::new(
-            ResourcePatternFilter::new(ResourceType::Topic, Some(String::new()), PatternType::Literal),
-            AccessControlEntryFilter::new(
-                Some(String::new()),
-                Some(String::new()),
-                AclOperation::Read,
-                AclPermissionType::Allow,
-            ),
-        ));
-        unsafe {
-            let a = &any as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
-            assert!(kafka_common_acl_AclBindingFilter_resource_name(a).is_null());
-            assert!(kafka_common_acl_AclBindingFilter_principal(a).is_null());
-            assert!(kafka_common_acl_AclBindingFilter_host(a).is_null());
-            // `AclBindingFilter::any()` is ANY on all four enums.
-            assert_eq!(
-                kafka_common_acl_AclBindingFilter_resource_type(a),
-                i32::from(ResourceType::Any.code())
-            );
-            assert_eq!(
-                kafka_common_acl_AclBindingFilter_pattern_type(a),
-                i32::from(PatternType::Any.code())
-            );
-            assert_eq!(
-                kafka_common_acl_AclBindingFilter_operation(a),
-                i32::from(AclOperation::Any.code())
-            );
-            assert_eq!(
-                kafka_common_acl_AclBindingFilter_permission_type(a),
-                i32::from(AclPermissionType::Any.code())
-            );
-
-            let e = &empty as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
-            assert!(!kafka_common_acl_AclBindingFilter_resource_name(e).is_null());
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(e)).to_str(),
-                Ok("")
-            );
-            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_principal(e)).to_str(), Ok(""));
-            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_host(e)).to_str(), Ok(""));
-        }
     }
 
     // -- ACL request marshaling ---------------------------------------------
@@ -20745,17 +20311,11 @@ mod tests {
             assert_eq!(kafka_admin_CreateAclsResult_count(result), 2);
             // Sorted by resource name, so "a-topic" comes first.
             let first = kafka_admin_CreateAclsResult_get_binding(result, 0);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(first)).to_str(),
-                Ok("a-topic")
-            );
+            assert_eq!(binding_resource_name(first), "a-topic");
             assert!(kafka_admin_CreateAclsResult_get_error(result, 0).is_null());
 
             let second = kafka_admin_CreateAclsResult_get_binding(result, 1);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_principal(second)).to_str(),
-                Ok("User:zoe")
-            );
+            assert_eq!(binding_principal(second), "User:zoe");
             assert_eq!(
                 common::kafka_common_Error_code(kafka_admin_CreateAclsResult_get_error(result, 1)) as i32,
                 Errors::SecurityDisabled.code() as i32
@@ -20777,18 +20337,12 @@ mod tests {
         unsafe {
             assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
             assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
-                    kafka_admin_DescribeAclsResult_get_binding(result, 0)
-                ))
-                .to_str(),
-                Ok("z-topic")
+                binding_resource_name(kafka_admin_DescribeAclsResult_get_binding(result, 0)),
+                "z-topic"
             );
             assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
-                    kafka_admin_DescribeAclsResult_get_binding(result, 1)
-                ))
-                .to_str(),
-                Ok("a-topic")
+                binding_resource_name(kafka_admin_DescribeAclsResult_get_binding(result, 1)),
+                "a-topic"
             );
             assert!(kafka_admin_DescribeAclsResult_get_binding(result, 2).is_null());
             assert!(kafka_admin_DescribeAclsResult_get_binding(result, -1).is_null());
@@ -20830,19 +20384,13 @@ mod tests {
 
             // Sorted by the filter's fields, so "a-filter" is index 0.
             let f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f0)).to_str(),
-                Ok("a-filter")
-            );
+            assert_eq!(filter_resource_name(f0), Some("a-filter"));
             assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
             assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 0), 2);
             // Entry 0: a binding, no exception.
             assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
-                    kafka_admin_DeleteAclsResult_get_binding(result, 0, 0)
-                ))
-                .to_str(),
-                Ok("deleted-topic")
+                binding_resource_name(kafka_admin_DeleteAclsResult_get_binding(result, 0, 0)),
+                "deleted-topic"
             );
             assert!(kafka_admin_DeleteAclsResult_get_result_error(result, 0, 0).is_null());
             // Entry 1: an exception, no binding. The two are complementary.
@@ -20855,10 +20403,7 @@ mod tests {
             // Filter 2 failed outright: its error is set and it has no results,
             // which is a different thing from a filter that matched nothing.
             let f2 = kafka_admin_DeleteAclsResult_get_filter(result, 2);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f2)).to_str(),
-                Ok("z-filter")
-            );
+            assert_eq!(filter_resource_name(f2), Some("z-filter"));
             assert_eq!(
                 common::kafka_common_Error_code(kafka_admin_DeleteAclsResult_get_error(result, 2)) as i32,
                 Errors::ClusterAuthorizationFailed.code() as i32

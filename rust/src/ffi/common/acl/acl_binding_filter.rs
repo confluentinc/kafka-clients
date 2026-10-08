@@ -49,6 +49,12 @@ impl AclBindingFilterInner {
         let entry_filter = AccessControlEntryFilterInner::new(filter.entry_filter().clone());
         Self { filter, pattern_filter, entry_filter }
     }
+
+    /// A borrowed handle on this filter, valid as long as `self` stays where
+    /// it is: a result handle keeps its filters in place and hands this out.
+    pub(crate) fn as_ptr(&self) -> *const kafka_common_acl_AclBindingFilter_t {
+        self as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t
+    }
 }
 
 unsafe fn inner_ref<'a>(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'a AclBindingFilterInner {

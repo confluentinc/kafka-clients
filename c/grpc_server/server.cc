@@ -4427,29 +4427,44 @@ class AdminServiceImpl final : public AdminService::Service {
     const char* const* names;
   };
 
+  // The binding keeps Java's object graph: strings and enums sit on its
+  // `pattern()` and `entry()`, and each enum crosses the wire as its Java code.
   static void acl_binding_to_proto(const kafka_common_acl_AclBinding_t* binding, AclBinding* dst) {
-    dst->set_resource_type(kafka_common_acl_AclBinding_resource_type(binding));
-    dst->set_resource_name(cstr(kafka_common_acl_AclBinding_resource_name(binding)));
-    dst->set_pattern_type(kafka_common_acl_AclBinding_pattern_type(binding));
-    dst->set_principal(cstr(kafka_common_acl_AclBinding_principal(binding)));
-    dst->set_host(cstr(kafka_common_acl_AclBinding_host(binding)));
-    dst->set_operation(kafka_common_acl_AclBinding_operation(binding));
-    dst->set_permission_type(kafka_common_acl_AclBinding_permission_type(binding));
+    const kafka_common_resource_ResourcePattern_t* pattern = kafka_common_acl_AclBinding_pattern(binding);
+    const kafka_common_acl_AccessControlEntry_t* entry = kafka_common_acl_AclBinding_entry(binding);
+    dst->set_resource_type(
+        kafka_common_resource_ResourceType_code(kafka_common_resource_ResourcePattern_resource_type(pattern)));
+    dst->set_resource_name(cstr(kafka_common_resource_ResourcePattern_name(pattern)));
+    dst->set_pattern_type(
+        kafka_common_resource_PatternType_code(kafka_common_resource_ResourcePattern_pattern_type(pattern)));
+    dst->set_principal(cstr(kafka_common_acl_AccessControlEntry_principal(entry)));
+    dst->set_host(cstr(kafka_common_acl_AccessControlEntry_host(entry)));
+    dst->set_operation(kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntry_operation(entry)));
+    dst->set_permission_type(
+        kafka_common_acl_AclPermissionType_code(kafka_common_acl_AccessControlEntry_permission_type(entry)));
   }
 
   // The three nullable strings stay absent when the C accessor returns NULL:
   // that is Java's match-any, and `cstr` would turn it into "".
   static void acl_filter_to_proto(const kafka_common_acl_AclBindingFilter_t* filter,
                                   AclBindingFilter* dst) {
-    dst->set_resource_type(kafka_common_acl_AclBindingFilter_resource_type(filter));
-    dst->set_pattern_type(kafka_common_acl_AclBindingFilter_pattern_type(filter));
-    dst->set_operation(kafka_common_acl_AclBindingFilter_operation(filter));
-    dst->set_permission_type(kafka_common_acl_AclBindingFilter_permission_type(filter));
-    const char* name = kafka_common_acl_AclBindingFilter_resource_name(filter);
+    const kafka_common_resource_ResourcePatternFilter_t* pattern =
+        kafka_common_acl_AclBindingFilter_pattern_filter(filter);
+    const kafka_common_acl_AccessControlEntryFilter_t* entry =
+        kafka_common_acl_AclBindingFilter_entry_filter(filter);
+    dst->set_resource_type(kafka_common_resource_ResourceType_code(
+        kafka_common_resource_ResourcePatternFilter_resource_type(pattern)));
+    dst->set_pattern_type(kafka_common_resource_PatternType_code(
+        kafka_common_resource_ResourcePatternFilter_pattern_type(pattern)));
+    dst->set_operation(
+        kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntryFilter_operation(entry)));
+    dst->set_permission_type(kafka_common_acl_AclPermissionType_code(
+        kafka_common_acl_AccessControlEntryFilter_permission_type(entry)));
+    const char* name = kafka_common_resource_ResourcePatternFilter_name(pattern);
     if (name != nullptr) dst->set_resource_name(std::string(name));
-    const char* principal = kafka_common_acl_AclBindingFilter_principal(filter);
+    const char* principal = kafka_common_acl_AccessControlEntryFilter_principal(entry);
     if (principal != nullptr) dst->set_principal(std::string(principal));
-    const char* host = kafka_common_acl_AclBindingFilter_host(filter);
+    const char* host = kafka_common_acl_AccessControlEntryFilter_host(entry);
     if (host != nullptr) dst->set_host(std::string(host));
   }
 

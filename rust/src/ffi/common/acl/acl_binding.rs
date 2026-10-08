@@ -48,6 +48,12 @@ impl AclBindingInner {
         let entry = AccessControlEntryInner::new(binding.entry().clone());
         Self { binding, pattern, entry }
     }
+
+    /// A borrowed handle on this binding, valid as long as `self` stays where
+    /// it is: a result handle keeps its bindings in place and hands this out.
+    pub(crate) fn as_ptr(&self) -> *const kafka_common_acl_AclBinding_t {
+        self as *const AclBindingInner as *const kafka_common_acl_AclBinding_t
+    }
 }
 
 unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a AclBindingInner {

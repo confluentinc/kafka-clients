@@ -46,30 +46,33 @@ pub struct kafka_common_metrics_MetricsReporter_t {
 /// `const kafka_common_metrics_KafkaMetric_t *` elements borrowed for the
 /// call.
 pub type kafka_common_metrics_MetricsReporter_init_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, metrics: *const kafka_List_t);
+    Option<unsafe extern "C" fn(self_: *mut c_void, metrics: *const kafka_List_t)>;
 
 /// `metricChange(KafkaMetric metric)` of a C implementation: `metric` is
 /// borrowed for the call.
 pub type kafka_common_metrics_MetricsReporter_metric_change_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, metric: *const kafka_common_metrics_KafkaMetric_t);
+    Option<unsafe extern "C" fn(self_: *mut c_void, metric: *const kafka_common_metrics_KafkaMetric_t)>;
 
 /// `metricRemoval(KafkaMetric metric)` of a C implementation: `metric` is
 /// borrowed for the call.
 pub type kafka_common_metrics_MetricsReporter_metric_removal_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, metric: *const kafka_common_metrics_KafkaMetric_t);
+    Option<unsafe extern "C" fn(self_: *mut c_void, metric: *const kafka_common_metrics_KafkaMetric_t)>;
 
 /// `close()` of a C implementation.
-pub type kafka_common_metrics_MetricsReporter_close_fn_t = unsafe extern "C" fn(self_: *mut c_void);
+pub type kafka_common_metrics_MetricsReporter_close_fn_t = Option<unsafe extern "C" fn(self_: *mut c_void)>;
 
 /// A C implementation of [`MetricsReporter`] registered through
-/// [`kafka_common_metrics_MetricsReporter_new`]; a `None` method is the Java
-/// default.
+/// [`kafka_common_metrics_MetricsReporter_new`]; a null method is the Java
+/// default. Every method of the Java interface has a default, so each
+/// typedef is `Option<..>`: the nullable form cbindgen emits as a plain C
+/// function pointer, while an `Option<alias>` in the exported signature
+/// would reach the header verbatim.
 struct CMetricsReporter {
     self_: *mut c_void,
-    init: Option<kafka_common_metrics_MetricsReporter_init_fn_t>,
-    metric_change: Option<kafka_common_metrics_MetricsReporter_metric_change_fn_t>,
-    metric_removal: Option<kafka_common_metrics_MetricsReporter_metric_removal_fn_t>,
-    close: Option<kafka_common_metrics_MetricsReporter_close_fn_t>,
+    init: kafka_common_metrics_MetricsReporter_init_fn_t,
+    metric_change: kafka_common_metrics_MetricsReporter_metric_change_fn_t,
+    metric_removal: kafka_common_metrics_MetricsReporter_metric_removal_fn_t,
+    close: kafka_common_metrics_MetricsReporter_close_fn_t,
 }
 
 // SAFETY: `self_` is what the C caller registered, whose thread-safety is
@@ -143,10 +146,10 @@ pub(crate) unsafe fn take_metrics_reporter(
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
     self_: *mut c_void,
-    init: Option<kafka_common_metrics_MetricsReporter_init_fn_t>,
-    metric_change: Option<kafka_common_metrics_MetricsReporter_metric_change_fn_t>,
-    metric_removal: Option<kafka_common_metrics_MetricsReporter_metric_removal_fn_t>,
-    close: Option<kafka_common_metrics_MetricsReporter_close_fn_t>,
+    init: kafka_common_metrics_MetricsReporter_init_fn_t,
+    metric_change: kafka_common_metrics_MetricsReporter_metric_change_fn_t,
+    metric_removal: kafka_common_metrics_MetricsReporter_metric_removal_fn_t,
+    close: kafka_common_metrics_MetricsReporter_close_fn_t,
 ) -> *mut kafka_common_metrics_MetricsReporter_t {
     let reporter: Arc<dyn MetricsReporter> =
         Arc::new(CMetricsReporter { self_, init, metric_change, metric_removal, close });

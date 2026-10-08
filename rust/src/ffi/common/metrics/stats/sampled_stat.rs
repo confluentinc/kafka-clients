@@ -178,23 +178,24 @@ pub type kafka_common_metrics_stats_SampledStatKind_combine_fn_t = unsafe extern
 
 /// `isWindowedCount()`: whether this kind counts events like
 /// `WindowedCount`, which `Meter` consults; a Java default (`false`) when
-/// the pointer is null.
+/// the pointer is null, hence the `Option<..>` typedef (the form cbindgen
+/// emits as a plain C function pointer).
 pub type kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void) -> i8;
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> i8>;
 
 /// `isWindowedSum()`: whether this kind is a `WindowedSum`, which `Meter`
 /// requires of its rate stat; a Java default (`false`) when the pointer is
 /// null.
 pub type kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void) -> i8;
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> i8>;
 
 /// A kind implemented in C.
 struct CSampledStatKind {
     self_: *mut c_void,
     update: kafka_common_metrics_stats_SampledStatKind_update_fn_t,
     combine: kafka_common_metrics_stats_SampledStatKind_combine_fn_t,
-    is_windowed_count: Option<kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t>,
-    is_windowed_sum: Option<kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t>,
+    is_windowed_count: kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t,
+    is_windowed_sum: kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t,
 }
 
 // SAFETY: `self_` is owned by the C caller, who keeps it alive and
@@ -284,8 +285,8 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
     self_: *mut c_void,
     update: kafka_common_metrics_stats_SampledStatKind_update_fn_t,
     combine: kafka_common_metrics_stats_SampledStatKind_combine_fn_t,
-    is_windowed_count: Option<kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t>,
-    is_windowed_sum: Option<kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t>,
+    is_windowed_count: kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t,
+    is_windowed_sum: kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t,
 ) -> *mut kafka_common_metrics_stats_SampledStatKind_t {
     Interface::owned(
         Arc::new(CSampledStatKind { self_, update, combine, is_windowed_count, is_windowed_sum })
