@@ -1346,6 +1346,112 @@ Phase 4 completion notes (agent 94):
   `KafkaConsumerTest` / `FetchRequestManagerTest` hunks.
 - DoD #10 applies (`CompletedFetch` / `FetchCollector` are on the per-record receive path; §27).
 
+#### Phase 10 completion notes (agent 100)
+
+- **Commits** (on 3a2b116f):
+  - e75bcf8a KAFKA-20187: `OffsetsRequestManager::current_lag` with a one-shot `LIST_OFFSETS`; the AEP delegates. Also
+    a39e714c6f (KAFKA-20449, classified Doc, same file): the "Not updating high watermark" logs are DEBUG;
+  - 2c002ab8 KAFKA-20312: `regroup_partition_map_by_node` reports leaderless partitions for retry;
+  - 679f2243 KAFKA-20780 + the AKC half of 0fd8327920;
+  - 1e9d18a4 KAFKA-15529;
+  - db8c6d17 KAFKA-18812;
+  - 488ba4cd KAFKA-20570;
+  - eda231a4 KAFKA-20575 with the C and Python bindings;
+  - ac1506c4 the test-only commits (7c010c7583, 624ca392ef, 36aab4fddd, 40e9fcd742, a5137f7c38);
+  - 55cc35be Critic 96 F3;
+  - 65d785c4 b69c07c816 (partial);
+  - 354e41a4 check-java-name markers + the Java line-cite refresh (comment-only, ~140 cites).
+- **Behaviour beyond the Java diff:**
+  - KAFKA-20187: Java chains the flag clear with `.whenComplete` on the returned future. A `oneshot::Receiver` cannot
+    carry a continuation, so the action (`WhenComplete`) travels with `ListOffsetsRequestState` and runs right after the
+    waiters on every completion path (success, result-so-far, failure, empty input).
+  - KAFKA-20312: before, the Rust regroup silently dropped a leaderless partition and `fetchOffsets` completed without
+    it (`None`); it is now searched again after a metadata update, as in Java.
+  - KAFKA-15529 (DoD #7): the Rust collector moves the next-in-line fetch out of the `FetchBuffer` while it works on it,
+    so for that window the partition read as unbuffered and the background task could re-fetch it at the stale position,
+    the duplicate fetch KAFKA-15529 fixes, in a wider window. `FetchBufferInner::checked_out_next_in_line` keeps an
+    unconsumed checked-out fetch's partition in `buffered_partitions` until it is put back.
+  - KAFKA-18812: Java's `Thread.isAlive()` is the closed event channel (the background task owns the receiver). Java's
+    `catch (Throwable)` around `process()` is `catch_unwind` (the Sender idiom): the Rust processor cannot return an
+    error, so its "throw" is a panic. `CompletableEventErasedHandle::fail_with_timeout` is renamed
+    `complete_with_error` (it now has a non-timeout caller). The old `LocalIllegalState` "Background task is shut down;
+    cannot enqueue ..." is replaced by Java's bare `KafkaException` text, with "thread" → "task".
+  - KAFKA-20570: `Error::Schema` replaces the `Error::Serialization` this file used for `SchemaException` before
+    `Error::Schema` existed (header, unsupported version, body). The reader's `io::Error` (no Java class) is the cause,
+    as an `Error::schema` carrying its diagnostic.
+  - F3: `AsyncKafkaConsumer::new` passed `None` as the membership rack id, so a KIP-848 heartbeat never carried the
+    consumer's rack; it now passes Java's `GroupRebalanceConfig.rackId`. The `CommonClientConfigs` hunk is byte-identical
+    to the producer track's Phase 6 (d0171254); `ConsumerConfig` adds `DEFAULT_CLIENT_RACK` next to the line Phase 6 also
+    changes (identically), so expect at most a trivial adjacent-line merge.
+  - b69c07c816: the negative-size text is Java's at all four sites (Java checks only the stream readers).
+    `AbstractRecords::SOFT_MAX_ARRAY_LENGTH` hosts Java's `Records` constant, like `LOG_OVERHEAD`. a4b3311e's D4
+    buffer-sizing test now declares `SOFT_MAX_ARRAY_LENGTH` (`i32::MAX` is refused by the new bound before the read).
+- **Bindings added:** C `kafka_consumer_MockConsumer_lose_partitions` (rebalance pattern); Python
+  `py_MockConsumer_lose_partitions` / `MockConsumer.lose_partitions`. The rebalance docs no longer say the mock never
+  fires `on_partitions_lost`. Tests: 3 C (`test_consumer_callbacks.c`, including the NULL-lost delegation the file
+  used to call untestable through the mock), 5 Python. cmake is missing, so the C suite was hand-built (`cc` against
+  `target/debug/libconfluent_kafka.a` + Unity): 26/26 pass. Python `test_consumer_callbacks.py` 47 passed;
+  `check-static` 29 passed.
+- **Test seams (cfg(test), DoD #12 noted at each):** `before_regroup_for_test` (Java stubs `metadata.fetch()`; here
+  the real metadata is updated in the window), `on_drain_for_test` (Java's `spy(...).drain()`),
+  `fail_process_for_test` (Java's `doThrow(...).when(processor).process(any())`).
+- **Skips, with reasons:**
+  - Classic-only (§20): every KafkaConsumerTest hunk of 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (comments,
+    CLASSIC-only tests; `testAutoCommitSentBeforePositionUpdate` was opened to both protocols by c75e10d229 and closed
+    again by 159d696005); the CLASSIC arms of 7c010c7583, 36aab4fddd (`...AcrossRebalance` with a cooperative assignor)
+    and 40e9fcd742; the classic `OffsetFetcher` / `OffsetFetcherTest` half of KAFKA-20312.
+  - Share (§20): `ShareConsumerImplTest` half of 0fd8327920.
+  - Broker side: the group-coordinator tests of KAFKA-20570; b69c07c816's broker paths.
+  - No Rust counterpart: `readPartiallyFrom` and its two `DefaultRecordTest` tests, the `skipKeyValueIterator` /
+    `streamingIterator(.., maxRecordBodySize)` overloads, `AbstractLegacyRecordBatch`.
+  - `KafkaConsumerTest.testUnsubscribingNonExistingMetricsDoesntCauseError` (renamed by 1a46339e90): untranslated
+    KIP-714 row; the old name in `kafka_consumer_metrics.rs`'s skip list was left for Phase 11, which owns that file.
+- **Deviations in the test translations (DoD #7):** the KafkaConsumerTest currentLag tests run against the
+  `OffsetsRequestManager` (Java drives a whole consumer over `MockClient`); the AKC KAFKA-20780 / KAFKA-20315 tests use
+  real time bounded at `retry.backoff.ms` where Java mocks `awaitWakeup` over `MockTime`;
+  `testPollSurfacesInflightPollErrorAndResumes` completes the event between two polls (Java's mock completes inside
+  `add()`).
+- **DoD #10:** the receive-path allocation tests are unchanged against the pre-change tree (checked by re-running them
+  with the three fetch files checked out at HEAD~1): §27 budget 338 allocs / 100 records, Bytes zero-copy 138 / 100,
+  M8 metrics guard 2 / 200, `handle_fetch_success` 64 / 8 partitions. The checked-out marker clones an
+  `Arc<str>`-backed `TopicPartition` once per collect pass, not per record. No throughput run.
+- **Gates (HEAD 354e41a4):**
+  - `cargo build` passes; `cargo xtask format-check` clean.
+  - `cargo test`: lib 4452 / 3 ignored, consumer 42, producer 0, 8, and 5 / 7 ignored.
+  - `cargo xtask lint --keep-going`: lint-custom exactly the 14 §5.1 rows; clippy, doc-hygiene, module-path clean.
+- **Broker runs** (modules `plaintext_consumer consumer_test base_consumer_test consumer_bounce_test
+  consumer_topic_creation_test ssl_consumer_test sasl_plain_plaintext_consumer_test sasl_ssl_consumer_test
+  bootstrap_resolution_test`):
+  - default 4.2.0: 107 passed / 0 failed / 2 ignored (includes the new
+    `test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commit_enabled`). `--lib integration_tests::`:
+    35/35.
+  - `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`: 106 / 1 failed / 2 ignored. The failure is the known pre-existing
+    `consumer_bounce_test::test_async_consumer_receives_fatal_exception_when_group_passes_max_size` (Critic 99).
+  - The first two attempts at the new integration test timed out starting containers while another worktree's
+    integration run saturated the Docker VM; they are not counted.
+- **`make -k verify`:** fails only in `build-c` (`cmake: command not found`, environment; the new C tests were
+    hand-built and run, above) and `lint` (the 14 §5.1 rows). `test-rust-all-features`: lib 4702 / 3 ignored, consumer
+    42, integration 309 / 0 failed / 2 ignored, 8, 5 / 7 ignored. Python: 371 passed / 2 skipped, 156, 29 + 29.
+- `git status --ignored` shows no new files from this phase (the rebuilt Python `.so` is ignored, as before).
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Min |
+  |---|---|---|---|
+  | 0 reading (plan, rules, Java diffs, Rust counterparts) | 15:34 | 15:44 | 10 |
+  | 1 KAFKA-20187 + a39e714c6f (e75bcf8a) | 15:44 | 15:50 | 6 |
+  | 2 KAFKA-20312 (2c002ab8) | 15:50 | 15:54 | 4 |
+  | 3 KAFKA-20780 + 0fd8327920 (679f2243) | 15:54 | 15:58 | 4 |
+  | 4 KAFKA-15529 + DoD #10 baseline (1e9d18a4) | 15:58 | 16:03 | 5 |
+  | 5 KAFKA-18812 (db8c6d17) | 16:03 | 16:07 | 4 |
+  | 6 KAFKA-20570 (488ba4cd) | 16:07 | 16:09 | 2 |
+  | 7 KAFKA-20575 + C/Python bindings, hand-built C suite (eda231a4) | 16:09 | 16:16 | 7 |
+  | 8 test-only commits + 2 failed broker attempts (ac1506c4) | 16:16 | 16:26 | 10 |
+  | 9 F3 client.rack (55cc35be) | 16:26 | 16:29 | 3 |
+  | 10 b69c07c816 (65d785c4) | 16:29 | 16:32 | 3 |
+  | 11 lint, full test, markers + cite refresh (delegated) (354e41a4) | 16:32 | 16:38 | 6 |
+  | 12 broker runs (default, 4.4.0-rc4, lib) | 16:36 | 16:41 | 5 |
+  | 13 `make -k verify`, notes | 16:41 | 16:51 | 10 |
+
 ### Phase 11 — Consumer metrics: sensor lifecycle (agent 101)
 
 - KAFKA-19542 (9a28bd23ad):
