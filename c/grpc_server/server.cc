@@ -1665,9 +1665,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
         consumers_.erase(it);
       }
       // log_states_ is deliberately NOT erased — see LogState's comment.
-      // `Consumer_destroy` step 1 is `runtime.shutdown_background()`, which
-      // cancels the task awaiting a `dispatch_and_wait` job while leaving the
-      // already-queued job to run later.
+      // `Consumer_destroy` calls `runtime.shutdown_background()` (after joining
+      // any `_async` operation's task), which cancels a task awaiting a
+      // `dispatch_and_wait` job while leaving the already-queued job to run later.
     }
     if (consumer == nullptr) {
       return grpc::Status::OK;  // idempotent
