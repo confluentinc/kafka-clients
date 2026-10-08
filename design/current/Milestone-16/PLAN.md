@@ -2622,3 +2622,117 @@ bootstrap-window spin.)
   - `-- admin`: 82/82.
   - Everything passed on the first run.
 - `make verify` was skipped (no cmake). `git status --ignored` shows no new untracked or ignored files.
+
+### Pre-close-out merges (agent 103)
+
+- **`30763681`: `milestone-16-producer` (tip `d2b7dd0e`, Phases 5-8) merged in.** The merge base is the
+  producer track's own merge of this branch, `75be908e`, so only two files conflicted:
+  - `consumer/consumer_config.rs`: Phase 10 F3's `DEFAULT_CLIENT_RACK` line next to `CLIENT_RACK_CONFIG`,
+    which the producer side does not have. Kept ours.
+  - PLAN §5.1: both sides had deleted their own rows. The table is now empty, and the header is removed.
+  - `sender.rs`, `kafka_producer.rs`, `producer_config.rs` and `common_client_configs.rs` auto-merged.
+    Each differs from the producer tip only by this branch's Phase 4 lines (the `NetworkClient.java` cite
+    refresh and `metadata.cluster.check.enable`). `record_accumulator.rs`, `producer_batch.rs` and the
+    rest of `producer/` are byte-identical to `d2b7dd0e`, so the get-first DashMap path, the
+    `#[inline(always)]` helpers, the 40 B `RecordAppendResult`, `build_accumulator` and the chunked
+    dispatch are as they were on the producer branch. `rules-errata.md` auto-merged.
+  - Gates:
+    - build and format-check are clean;
+    - `cargo test`: 4641 passed, 0 failed, 10 ignored (lib 4585 / 3);
+    - `cargo xtask lint --keep-going` is fully green, with **0 §5.1 rows**.
+  - Broker runs:
+    - on 4.2.0: lib `integration_tests::` 35/35; producer modules (`producer_test`,
+      `producer_send_while_deletion_test`, `producer_transactions_test`, `transactions_bounce_test`)
+      100/100; consumer modules (`plaintext_consumer*`, `consumer_test`, `base_consumer_test`,
+      `consumer_topic_creation_test`, `consumer_bounce_test`) 105/105;
+    - `producer_transactions_test` on 4.4.0-rc4: 40/40.
+- **`5c207c9f`: `origin/master` merged in.** The tip is `1f4afc36`, "Implement FFI & language-binding
+  memory safety (#207)"; master did not move past it.
+  - What #207 adds:
+    - `rust/ffi-macros`, whose `#[ffi_guard]` must sit directly above every `#[unsafe(no_mangle)]`.
+      It is enforced by the source scan `ffi::tests::test_every_exported_function_is_guarded`.
+    - Clippy `undocumented_unsafe_blocks` and `unnecessary_safety_comment`, denied crate-wide, tests
+      included.
+  - Conflicts:
+    - Textual: one, the `use` block of `ffi/common.rs`. Master's `use crate::ffi::ffi_guard;` sits next
+      to this branch's 162 → 166 enumerator count. Kept both.
+    - `selector.rs` (comment punctuation only), `mock_client.rs` (one comment word), `xtask/src/main.rs`,
+      `cbindgen.toml`, `_confluentkafka.c`, `test_mock_producer.c` and `test_admin.py` auto-merged.
+      Phase 3's fired-queue drain and `a4b3311e`'s `InvalidReceiveError` routing are intact.
+      `lint --keep-going` sits beside master's `package-check` / `strip_ffi_macros` changes.
+  - **FFI port** (old → new: an unguarded export with bare `unsafe {}` → `#[ffi_guard]` plus a
+    `// SAFETY:` on every block). Each takes the guard form and SAFETY wording of its nearest pre-existing
+    sibling:
+
+    | Function | Phase | Guard | Sibling it mirrors |
+    |---|---|---|---|
+    | `kafka_common_Error_is_unsupported_version_error` | 1 | `#[ffi_guard]` (false on panic) | `is_invalid_configuration_error` |
+    | `kafka_consumer_MockConsumer_lose_partitions` | 10 | `#[ffi_guard]` (error handle) | `MockConsumer_rebalance` |
+    | `kafka_admin_MockAdminClient_set_using_raft_controller` | 12 | `#[ffi_guard]` (error handle) | `MockAdminClient_timeout_next_request` |
+    | `kafka_admin_AdminClient_unregister_controller` | 12 | `#[ffi_guard]` (error handle) | `abort_transaction` |
+    | `kafka_admin_AdminClient_unregister_controller_async` | 12 | `#[ffi_guard(on_panic = ..)]`, fires `callback(box_error(err), user_data)` once | `abort_transaction_async` |
+
+    - The three Rust tests over these exports now carry SAFETY comments, and the test callback
+      `record_unregister_controller` has a `# Safety` section.
+    - Merged with no change:
+      - error codes 134-136 and `BOOTSTRAP_RESOLUTION = -29`, and `_error_code.py`;
+      - the `cbindgen.toml` callback typedef;
+      - `py_MockConsumer_lose_partitions`, `py_MockAdminClient_set_using_raft_controller` and
+        `py_Admin_unregister_controller_async`. They have no byte-length casts, so master's
+        `int32` overflow fix does not apply.
+    - Nothing else in `git diff 7ccc9ffb..30bd9ecc -- rust/src/ffi python c rust/cbindgen.toml` needs a
+      port: the other hunks are doc cites, the `ProducerIdAndEpoch` import path and test-count constants.
+  - Gates:
+    - `cargo build` and `--features ffi` are clean; `format-check` and `check-generated` are clean.
+    - `cargo test`: 4641 / 0 / 10.
+    - `cargo test --features ffi --lib`: 4835 passed, 0 failed, 3 ignored, guard scan included.
+    - `cargo test -p ffi-macros`: 12 unit tests and 2 doctests.
+    - `cargo test -p xtask`: 30.
+    - `cargo xtask lint --keep-going`: fully green, 0 §5.1 rows.
+    - Teeth: deleting the new SAFETY comment on `is_unsupported_version_error` makes clippy fail
+      ("unsafe block missing a safety comment"); the comment was then restored.
+    - `cargo xtask package-check` passes, and Cargo.toml / Cargo.lock are restored afterwards.
+  - **C** (cmake is missing, so each suite was hand-built with `cc` against
+    `target/debug/libconfluent_kafka.a` + Unity): `test_mock_producer` 61/61, including master's new
+    negative-count `send_batch` case and our `is_unsupported_version_error` asserts; `test_mock_consumer`
+    20/20; `test_consumer_callbacks` 26/26 (the `lose_partitions` cases); `test_mock_admin` 160/160
+    (`unregister_controller`). 267/267 in total.
+  - **Python** (root `venv`, setuptools + pytest from PyPI): `pytest test/unit` 375 passed, 4 skipped.
+    - 2 skips are the pre-existing MockConsumer blocking-poll ones.
+    - 2 are master's new allocation-failure tests, which need `_testcapi`; this Python build does not
+      ship it.
+    - `check-static`: 29 passed.
+  - **Broker, after `5c207c9f`, on 4.2.0:** lib `integration_tests::` 35/35, `-- admin` 82/82, and the
+    producer modules 99/100.
+    - The one failure, `transactions_bounce_test::test_with_group_metadata`, is "failed to stop broker
+      1: … hyper legacy client: client error (SendRequest)": Docker Desktop's backend died during the
+      run.
+    - Every later suite then failed on the dead daemon, so the consumer modules on 4.2.0 and
+      `cluster_check_test` / `producer_transactions_test` on 4.4.0-rc4 are **not yet run on
+      `5c207c9f`**.
+    - Restarting Docker Desktop was not permitted in this session, so these reruns are owed.
+  - **`make -k verify`** (Docker down):
+    - `build-c`: no cmake, an environment issue;
+    - `test-rust-all-features`: lib 4844 passed, 21 failed, 3 ignored. All 21 are Docker-backed
+      `integration_tests::` cases (`api_versions` 4, `cluster_check` 3, `connection` 3,
+      `describe_features` 1, `metadata` 4, `ssl_sasl` 5, `kafka_cluster` reap 1);
+    - format-check, check-generated, lint, test-python (375 / 4 skipped) and check-bindings (29) pass.
+  - **Production perf** (Critic 98's method: release example, fat LTO, system allocator; 3 runs of 8
+    interleaved best-of-9 rounds at load 3.4-4.2; medians over all 24 rounds in ns/record).
+    - Binaries: `7ccc9ffb` is Actor 98's binary; `d2b7dd0e` and `5c207c9f` were rebuilt from
+      `git archive` with `add.py … time`.
+
+    | | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
+    |---|---|---|---|---|
+    | `7ccc9ffb` | 87.35 | 93.47 | 98.88 | 106.56 |
+    | `d2b7dd0e` (producer tip) | 83.81 | 92.27 | 95.28 | 108.96 |
+    | `5c207c9f` (both merges) | 84.85 | 92.36 | 96.27 | 110.12 |
+    | merged vs `7ccc9ffb` | −2.9 % | −1.2 % | −2.6 % | +3.3 % |
+    | merged vs producer tip | +1.2 % | +0.1 % | +1.0 % | +1.1 % |
+
+    - Keyed is +3.3 % on `7ccc9ffb`. The producer tip measured +2.3 % in the same runs, against Phase
+      8's +2.1 %.
+    - The merged build runs about 1 % behind the producer tip on three of the four columns. The
+      per-run medians overlap: run 3 has it 1.5-2 % behind, run 2 ahead on keyed.
+    - No producer file differs between the two, so this is consistent with code-layout noise from the
+      rest of the crate. It is reported, not fixed.
