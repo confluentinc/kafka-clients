@@ -2639,4 +2639,84 @@ mod tests {
             time.sleep(50);
         }
     }
+
+    /// COMMENTS.93 Issue 2: `run_once` Phase 5 consults the commit manager
+    /// (Java's `entries()` includes it; `RequestManagers::entries()` skips the
+    /// `Arc`-shared slot). Here it is the binding minimum: no heartbeat or
+    /// fetch manager, and the offsets manager reports `i64::MAX`. With the
+    /// coordinator known, the published bound is the auto-commit timer's
+    /// remainder; with it unknown, `retry.backoff.ms` (KAFKA-20970 /
+    /// KAFKA-21010). Without the consult the bound would be `i64::MAX`.
+    #[tokio::test]
+    async fn run_once_maximum_time_to_wait_includes_the_commit_manager() {
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 300;
+        let retry_backoff_ms = config.retry_backoff_ms();
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        coordinator.set_coordinator_for_test(Node::new(1, "localhost".to_string(), 9092));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+
+        // Coordinator known: the auto-commit timer's remainder.
+        thread.run_once().await;
+        assert_eq!(300, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+        time.sleep(120);
+        thread.run_once().await;
+        assert_eq!(180, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+
+        // Coordinator unknown: the retry backoff, even once the timer expires.
+        coordinator.mark_coordinator_unknown("test", time.milliseconds());
+        time.sleep(500);
+        thread.run_once().await;
+        assert_eq!(retry_backoff_ms, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+    }
 }
