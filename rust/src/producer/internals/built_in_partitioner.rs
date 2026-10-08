@@ -392,12 +392,14 @@ impl BuiltInPartitioner {
     /// Check if partition is changed by a concurrent thread. NOTE this function
     /// needs to be called under the partition's batch queue lock.
     ///
-    /// In the Rust implementation, since we use `&mut self` for partition changes,
-    /// this always returns `false`. The method is kept for API compatibility.
+    /// Compares `partition_info` by identity with the current sticky info, as Java does. A
+    /// concurrent switch *is* possible: the accumulator drops the partitioner lock between its
+    /// peek and the deque lock, and between its two locked blocks. The accumulator does not call
+    /// this today, though — its `partition_changed` re-reads the partition instead, so it cannot see
+    /// such a switch (Critic 98 S2, deferred to a human decision).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#isPartitionChanged")]
     pub fn is_partition_changed(&self, partition_info: &StickyPartitionInfo) -> bool {
-        // In Rust, since we use &mut self for modifications, there's no concurrent
-        // race condition possible. We check pointer identity as in Java.
+        // Pointer identity, as in Java.
         match &self.sticky_partition_info {
             Some(current) => !std::ptr::eq(current, partition_info),
             None => true,
