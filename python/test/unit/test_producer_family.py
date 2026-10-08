@@ -1508,6 +1508,20 @@ def test_producer_record_rejects_a_2_gib_buffer(two_gib_bytes: bytes) -> None:
         p.close(timeout=0)
 
 
+def test_producer_record_rejects_a_2_gib_header_value(two_gib_bytes: bytes) -> None:
+    # The ninth int32_t length of the C extension, which only this branch has:
+    # a header value of a ProducerRecord. A plain cast turned 2**31 into a
+    # negative length, which the C API reads as a null header value. The
+    # record keeps its header values as views, so the buffer is not copied.
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        with pytest.raises(OverflowError, match=r"^header value exceeds 2 GiB$"):
+            p.send(record=ProducerRecord(topic=TOPIC, partition=None, key=None, value=b"v",
+                                         headers=[("k", two_gib_bytes)]))
+    finally:
+        p.close(timeout=0)
+
+
 # `_testcapi.set_nomemory` makes every CPython allocation fail, including the
 # PyMem_Raw* calls the extension makes with the GIL released. Each check runs
 # in a child interpreter, as CPython's own tests of it do, because an

@@ -211,8 +211,12 @@ static int producer_record_build_headers(ProducerRecordObject* self, PyObject* h
             rc = -1;
             break;
         }
+        // views[i] is held from here: clear() releases it with the others.
+        if (checked_len_to_int32(views[i].len, "header value", &entries[i].value_len) < 0) {
+            rc = -1;
+            break;
+        }
         entries[i].value = (const uint8_t*)views[i].buf;
-        entries[i].value_len = (int32_t)views[i].len;
     }
     if (rc == 0) {
         self->record_struct.headers = entries;
