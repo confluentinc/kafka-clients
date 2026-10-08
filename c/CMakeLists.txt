@@ -66,7 +66,10 @@ target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUS
 
 add_executable(test_mock_consumer tests/test_mock_consumer.c)
 target_include_directories(test_mock_consumer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_mock_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The `_cb` tests pump the callbacks vector through the condvar helper in
+# tests/test_support.h, so pthread is needed explicitly in addition to
+# ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_mock_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_kafka_consumer tests/test_kafka_consumer.c)
 target_include_directories(test_kafka_consumer PRIVATE ${RUST_INCLUDE_DIR})

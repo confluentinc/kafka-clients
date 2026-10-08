@@ -19,7 +19,7 @@
 //! three strings the borrowed getters hand out.
 
 use std::collections::BTreeMap;
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 
 use crate::common::MetricName;
 use crate::ffi::util::{box_string_map, c_str_to_string, into_c_string, kafka_Map_t, map_strings, owned_c_string};
@@ -163,6 +163,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_destroy(self_: *mut kafka_commo
     if !self_.is_null() {
         drop(unsafe { Box::from_raw(self_ as *mut MetricNameInner) });
     }
+}
+
+/// Key equality for `kafka_Map_t`s keyed by `kafka_common_MetricName_t`
+/// (`metrics()` on the producer and the consumer).
+pub(crate) unsafe fn metric_name_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    unsafe { metric_name_ref(a as *const _) == metric_name_ref(b as *const _) }
 }
 
 #[cfg(test)]

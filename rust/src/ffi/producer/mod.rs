@@ -102,7 +102,7 @@ use tokio::task::JoinHandle;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_destroy, metric_name_ref};
+use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_destroy, metric_name_eq};
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_destroy};
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
@@ -958,10 +958,6 @@ unsafe fn destroy_metric_name(element: *mut c_void) {
 
 unsafe fn destroy_kafka_metric(element: *mut c_void) {
     unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut _) }
-}
-
-unsafe fn metric_name_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    unsafe { metric_name_ref(a as *const _) == metric_name_ref(b as *const _) }
 }
 
 /// `Producer.close()`, blocking: `close(Duration.ofMillis(Long.MAX_VALUE))`,

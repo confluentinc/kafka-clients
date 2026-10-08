@@ -26,8 +26,9 @@ class KafkaError(Exception):
     def _from_c(_id: int):
         """Build a KafkaError from an OWNED C error handle and destroy it.
 
-        Used by the consumer binding, whose completion trampolines still hand
-        error handles to Python as ints."""
+        Used by the admin binding, whose completion trampolines still hand
+        error handles to Python as ints; the producer and consumer bindings
+        hand error tuples (see :meth:`_from_tuple`)."""
         ret = KafkaError.__new__(KafkaError)
         ret._code = _lib.KafkaError_code(_id)
         ret._message = _lib.KafkaError_message(_id)

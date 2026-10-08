@@ -392,8 +392,8 @@ class SoakRecord(object):
         """
         if binstr is None:
             raise ValueError("empty payload (None)")
-        # `record.value` is a zero-copy memoryview over the fetch batch; copy
-        # before parsing so nothing is retained past the poll loop.
+        # `record.value` is `bytes` (copied out of the fetch batch by the
+        # binding); `bytes(...)` also accepts a memoryview from other callers.
         data = bytes(binstr)
         parts = data.split(b"|", 3)
         if len(parts) != 4:

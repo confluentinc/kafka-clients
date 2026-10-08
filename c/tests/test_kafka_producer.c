@@ -596,7 +596,9 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     /* The real-producer arm of send_offsets_to_transaction: the map copy, the
      * group-metadata read and the blocking call all run here. Nothing else in
      * the suite reaches it — the mock tests take the other arm. */
-    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
+    kafka_consumer_MockConsumer_t *mock_consumer = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &mock_consumer));
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer__as_Consumer(mock_consumer);
     kafka_consumer_ConsumerGroupMetadata_t *group_metadata = kafka_consumer_Consumer_group_metadata(consumer);
     TEST_ASSERT_NOT_NULL(group_metadata);
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("input-topic", 0);
@@ -626,7 +628,7 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     kafka_common_Error_destroy(err);
 
     kafka_consumer_ConsumerGroupMetadata_destroy(group_metadata);
-    kafka_consumer_Consumer_destroy(consumer);
+    kafka_consumer_MockConsumer_destroy(mock_consumer); /* the view dies with the mock */
     close_and_destroy(producer);
 }
 

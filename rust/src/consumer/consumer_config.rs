@@ -56,7 +56,7 @@ static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---

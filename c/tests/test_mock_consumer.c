@@ -20,235 +20,468 @@
 #include <time.h>
 #include <pthread.h>
 #include "unity.h"
+#include "test_support.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Fixtures
+//
+// The mock is a `kafka_consumer_MockConsumer_t`; the `Consumer` interface is
+// reached through the borrowed `__as_Consumer` view, which stays valid until
+// the mock is destroyed and is never passed to `Consumer_destroy`
+// (CLAUDE.md §4, "Traits"). The mock has no deserializers, so a record's key
+// and value are opaque `void *`s it never reads: the tests pass
+// `kafka_Bytes_t` views the way a deserializer-less KafkaConsumer would.
+//
+// No callback ever runs on a Rust thread: `_cb` completions and the listener
+// invocations a `_cb` operation triggers are queued on the consumer's callback
+// vector and run on the thread that calls
+// `kafka_consumer_Consumer_execute_callbacks` (`callback_pump_t`,
+// test_support.h). A blocking entry point runs everything on the calling
+// thread instead.
 // ---------------------------------------------------------------------------
 
-/* Captures the result delivered to an async poll callback. */
 typedef struct {
-    atomic_int fired;
-    int had_records;
-    int had_error;
-    int32_t record_count;
-    int32_t error_code;
-    pthread_t thread_id;
-} async_poll_result_t;
+    kafka_consumer_MockConsumer_t *mock;
+    kafka_consumer_Consumer_t *consumer;
+    callback_pump_t pump;
+} fixture_t;
 
-/* Spins up to ~5s for `*flag` to reach `expected`. Returns 1 on success. */
-static int wait_for(atomic_int *flag, int expected) {
-    for (int i = 0; i < 5000; i++) {
-        if (atomic_load(flag) >= expected) {
-            return 1;
-        }
-        struct timespec ts = {0, 1000000}; /* 1ms */
-        nanosleep(&ts, NULL);
-    }
-    return atomic_load(flag) >= expected;
+static void fixture_init(fixture_t *f) {
+    f->mock = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &f->mock));
+    TEST_ASSERT_NOT_NULL(f->mock);
+    f->consumer = kafka_consumer_MockConsumer__as_Consumer(f->mock);
+    TEST_ASSERT_NOT_NULL(f->consumer);
+    consumer_callback_pump_install(&f->pump, f->consumer);
 }
 
-/* Async poll completion callback: takes ownership of the non-null handle. */
-static void on_poll(kafka_consumer_ConsumerRecords_t *records,
-                    kafka_common_Error_t *error,
-                    void *user_data) {
-    async_poll_result_t *r = (async_poll_result_t *)user_data;
+static void fixture_destroy(fixture_t *f) {
+    kafka_consumer_MockConsumer_destroy(f->mock);
+    callback_pump_destroy(&f->pump);
+}
+
+/* A one-element list of the (topic, partition) pair; the caller owns both the
+ * list and `*out_tp` (a C-built list borrows its elements). */
+static kafka_List_t *tp_list(const char *topic, int32_t partition, kafka_common_TopicPartition_t **out_tp) {
+    *out_tp = kafka_common_TopicPartition_new(topic, partition);
+    TEST_ASSERT_NOT_NULL(*out_tp);
+    kafka_List_t *list = kafka_List_new();
+    kafka_List_add(list, *out_tp);
+    return list;
+}
+
+/* `assign(Collections.singleton(new TopicPartition(topic, partition)))`. */
+static kafka_common_Error_t *assign_one(kafka_consumer_Consumer_t *c, const char *topic, int32_t partition) {
+    kafka_common_TopicPartition_t *tp = NULL;
+    kafka_List_t *list = tp_list(topic, partition, &tp);
+    kafka_common_Error_t *err = kafka_consumer_Consumer_assign(c, list);
+    kafka_List_destroy(list);
+    kafka_common_TopicPartition_destroy(tp);
+    return err;
+}
+
+/* Builds the `Map<TopicPartition, Long>` the mock's `update*Offsets` take and
+ * hands it to `update`; the map borrows the pair, which is freed here. */
+static void update_offset(kafka_consumer_MockConsumer_t *mock,
+                          void (*update)(kafka_consumer_MockConsumer_t *, const kafka_Map_t *),
+                          const char *topic, int32_t partition, int64_t offset) {
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new(topic, partition);
+    kafka_Map_t *map = kafka_Map_new();
+    kafka_Map_put(map, tp, &offset);
+    update(mock, map);
+    kafka_Map_destroy(map);
+    kafka_common_TopicPartition_destroy(tp);
+}
+
+/* A one-(topic,partition) assigned, earliest-positioned mock consumer. */
+static void make_assigned_mock(fixture_t *f, const char *topic, int32_t partition) {
+    fixture_init(f);
+    TEST_ASSERT_NULL(assign_one(f->consumer, topic, partition));
+    // EARLIEST reset uses the beginning offset to position the partition.
+    update_offset(f->mock, kafka_consumer_MockConsumer_update_beginning_offsets, topic, partition, 0);
+}
+
+/* `addRecord(new ConsumerRecord<>(topic, partition, offset, key, value))`:
+ * the record is copied by the mock, its `void *` key and value shared with
+ * the caller. */
+static void add_record(kafka_consumer_MockConsumer_t *mock, const char *topic, int32_t partition,
+                       int64_t offset, const kafka_Bytes_t *key, const kafka_Bytes_t *value) {
+    kafka_consumer_ConsumerRecord_t *record =
+        kafka_consumer_ConsumerRecord_new(topic, partition, offset, key, value);
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(mock, record));
+    kafka_consumer_ConsumerRecord_destroy(record);
+}
+
+/* Polls, asserting success; the caller owns the records. */
+static kafka_consumer_ConsumerRecords_t *poll_ok(kafka_consumer_Consumer_t *c, int64_t timeout_ms) {
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(c, timeout_ms, &records);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(records);
+    return records;
+}
+
+/* The first record of `records` for `tp`: a BORROWED pointer valid until the
+ * records handle is destroyed (the list is freed here). */
+static const kafka_consumer_ConsumerRecord_t *first_record(const kafka_consumer_ConsumerRecords_t *records,
+                                                           const kafka_common_TopicPartition_t *tp) {
+    kafka_List_t *list = kafka_consumer_ConsumerRecords_records_with_partition(records, tp);
+    TEST_ASSERT_NOT_NULL(list);
+    TEST_ASSERT_TRUE(kafka_List_size(list) >= 1);
+    const kafka_consumer_ConsumerRecord_t *rec = (const kafka_consumer_ConsumerRecord_t *)kafka_List_get(list, 0);
+    TEST_ASSERT_NOT_NULL(rec);
+    kafka_List_destroy(list);
+    return rec;
+}
+
+/* Asserts `err` is Java's `ConcurrentModificationException` translation —
+ * class and message — then frees it. */
+static void assert_concurrent_modification(kafka_common_Error_t *err) {
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_concurrent_modification_error(err));
+    TEST_ASSERT_EQUAL_STRING("KafkaConsumer is not safe for multi-threaded access.",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+}
+
+static const uint8_t KEY_BYTES[] = {0x6b, 0x65, 0x79};   /* "key" */
+static const uint8_t VALUE_BYTES[] = {0x76, 0x61, 0x6c}; /* "val" */
+static const kafka_Bytes_t KEY = { KEY_BYTES, (int32_t)sizeof(KEY_BYTES) };
+static const kafka_Bytes_t VALUE = { VALUE_BYTES, (int32_t)sizeof(VALUE_BYTES) };
+
+// ---------------------------------------------------------------------------
+// Completions and the listener probe used by the `_cb` tests
+// ---------------------------------------------------------------------------
+
+/* What a `_cb` completion observed. */
+typedef struct {
+    atomic_int fired;
+    int had_error;
+    kafka_common_Error_t *error;   /* kept for the test to classify and free */
+    int32_t record_count;          /* poll completions */
+    pthread_t thread_id;
+} completion_t;
+
+static void completion_init(completion_t *r) {
+    memset(r, 0, sizeof(*r));
+    atomic_init(&r->fired, 0);
+}
+
+static void completion_free(completion_t *r) {
+    kafka_common_Error_destroy(r->error);
+    r->error = NULL;
+}
+
+/* `kafka_consumer_Consumer_poll_cb_t`: takes ownership of both handles. */
+static void on_poll(kafka_consumer_ConsumerRecords_t *records, kafka_common_Error_t *error, void *opaque) {
+    completion_t *r = (completion_t *)opaque;
+    r->thread_id = pthread_self();
     if (records != NULL) {
-        r->had_records = 1;
         r->record_count = kafka_consumer_ConsumerRecords_count(records);
         kafka_consumer_ConsumerRecords_destroy(records);
     }
     if (error != NULL) {
         r->had_error = 1;
-        r->error_code = kafka_common_Error_code(error);
-        kafka_common_Error_destroy(error);
+        r->error = error;
     }
-    r->thread_id = pthread_self();
     atomic_fetch_add(&r->fired, 1);
 }
 
-/* Assigns a single (topic, partition) to the consumer. */
-static kafka_common_Error_t *assign_one(kafka_consumer_Consumer_t *c,
-                                             const char *topic,
-                                             int32_t partition) {
-    const char *topics[1] = {topic};
-    int32_t partitions[1] = {partition};
-    return kafka_consumer_Consumer_assign(c, topics, partitions, 1);
+/* The completion of every void `_cb` operation. */
+static void on_void_op(kafka_common_Error_t *error, void *opaque) {
+    completion_t *r = (completion_t *)opaque;
+    r->thread_id = pthread_self();
+    if (error != NULL) {
+        r->had_error = 1;
+        r->error = error;
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* The `self` of a C `ConsumerRebalanceListener` that does NOT report from
+ * inside its methods: it leaves the `callback_id` for the test, which keeps
+ * the operation that invoked it in flight for as long as the test wants
+ * (the deterministic way to hold the single-owner flag). */
+typedef struct {
+    const kafka_consumer_Consumer_t *consumer;
+    atomic_int assigned_calls;
+    atomic_int revoked_calls;
+    _Atomic(int64_t) pending_id;
+} holding_listener_t;
+
+static void holding_listener_init(holding_listener_t *l, const kafka_consumer_Consumer_t *consumer) {
+    l->consumer = consumer;
+    atomic_init(&l->assigned_calls, 0);
+    atomic_init(&l->revoked_calls, 0);
+    atomic_init(&l->pending_id, 0);
+}
+
+static void holding_on_revoked(void *self_, const kafka_List_t *partitions, int64_t callback_id) {
+    (void)partitions;
+    holding_listener_t *l = (holding_listener_t *)self_;
+    atomic_fetch_add(&l->revoked_calls, 1);
+    atomic_store(&l->pending_id, callback_id);
+}
+
+static void holding_on_assigned(void *self_, const kafka_List_t *partitions, int64_t callback_id) {
+    (void)partitions;
+    holding_listener_t *l = (holding_listener_t *)self_;
+    atomic_fetch_add(&l->assigned_calls, 1);
+    atomic_store(&l->pending_id, callback_id);
+}
+
+/* Reports the held invocation as a success. */
+static void holding_listener_release(holding_listener_t *l) {
+    int64_t id = atomic_exchange(&l->pending_id, 0);
+    TEST_ASSERT_NOT_EQUAL(0, id);
+    kafka_consumer_Consumer_set_callback_result(l->consumer, id, NULL);
+}
+
+/* Subscribes `f` to `topic` with a holding listener; the listener handle is
+ * destroyed at once, its registration having been copied. */
+static void subscribe_holding(fixture_t *f, const char *topic, holding_listener_t *l) {
+    holding_listener_init(l, f->consumer);
+    kafka_consumer_ConsumerRebalanceListener_t *listener =
+        kafka_consumer_ConsumerRebalanceListener_new(l, holding_on_revoked, holding_on_assigned, NULL);
+    TEST_ASSERT_NOT_NULL(listener);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)topic);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics_listener(f->consumer, topics, listener));
+    kafka_List_destroy(topics);
+    kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+}
+
+/* Starts a `rebalance_cb` to {topic-0} whose listener invocation is queued and,
+ * once pumped, held until `holding_listener_release`: from the return of this
+ * function until the completion is pumped the consumer has an operation in
+ * flight. The caller owns `*out_list` / `*out_tp`. */
+static void start_held_rebalance(fixture_t *f, const char *topic, holding_listener_t *l,
+                                 completion_t *completion, kafka_List_t **out_list,
+                                 kafka_common_TopicPartition_t **out_tp) {
+    subscribe_holding(f, topic, l);
+    completion_init(completion);
+    *out_list = tp_list(topic, 0, out_tp);
+    kafka_consumer_MockConsumer_rebalance_cb(f->mock, *out_list, on_void_op, completion);
 }
 
 // ---------------------------------------------------------------------------
-// Sync poll: add_record -> poll -> iterate -> assert bytes
+// Sync poll: add_record -> poll -> records_with_partition -> assert bytes
+//
+// With no deserializer the record's `void *`s are exactly the `kafka_Bytes_t *`
+// pointers `add_record` was given (zero-copy: the mock copies nothing).
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_sync_poll_returns_record(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NOT_NULL(c);
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    add_record(f.mock, "test", 0, 0, &KEY, &VALUE);
 
-    // assign -> add_record -> update_beginning_offsets -> poll (mirrors the Rust
-    // MockConsumerTest "poll returns records" flow).
-    kafka_common_Error_t *err = assign_one(c, "test", 0);
-    TEST_ASSERT_NULL(err);
-
-    const uint8_t key[] = {0x6b, 0x65, 0x79};       /* "key" */
-    const uint8_t value[] = {0x76, 0x61, 0x6c};     /* "val" */
-    err = kafka_consumer_MockConsumer_add_record(c, "test", 0, 0,
-                                                 key, (int32_t)sizeof(key),
-                                                 value, (int32_t)sizeof(value));
-    TEST_ASSERT_NULL(err);
-
-    // EARLIEST reset uses the beginning offset to position the partition.
-    err = kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0);
-    TEST_ASSERT_NULL(err);
-
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(c, 100, &poll_err);
-    TEST_ASSERT_NULL(poll_err);
-    TEST_ASSERT_NOT_NULL(records);
-    TEST_ASSERT_FALSE(kafka_consumer_ConsumerRecords_is_empty(records));
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 100);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_ConsumerRecords_is_empty(records));
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
 
-    const kafka_consumer_ConsumerRecord_t *rec =
-        kafka_consumer_ConsumerRecords_get(records, 0);
-    TEST_ASSERT_NOT_NULL(rec);
+    /* `partitions()`: an owned list of owned TopicPartitions. */
+    kafka_List_t *partitions = kafka_consumer_ConsumerRecords_partitions(records);
+    TEST_ASSERT_NOT_NULL(partitions);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(partitions));
+    const kafka_common_TopicPartition_t *seen = (const kafka_common_TopicPartition_t *)kafka_List_get(partitions, 0);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_common_TopicPartition_topic(seen));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(seen));
+    kafka_List_destroy(partitions);
+
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
+    const kafka_consumer_ConsumerRecord_t *rec = first_record(records, tp);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_consumer_ConsumerRecord_topic(rec));
     TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_ConsumerRecord_partition(rec));
     TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_ConsumerRecord_offset(rec));
 
-    int32_t topic_len = 0;
-    const char *topic = kafka_consumer_ConsumerRecord_topic(rec, &topic_len);
-    TEST_ASSERT_EQUAL_INT32(4, topic_len);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(topic, "test", 4));
+    /* The very same pointers, not copies. */
+    TEST_ASSERT_EQUAL_PTR(&KEY, kafka_consumer_ConsumerRecord_key(rec));
+    TEST_ASSERT_EQUAL_PTR(&VALUE, kafka_consumer_ConsumerRecord_value(rec));
+    const kafka_Bytes_t *got_key = (const kafka_Bytes_t *)kafka_consumer_ConsumerRecord_key(rec);
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(KEY_BYTES), got_key->len);
+    TEST_ASSERT_EQUAL_MEMORY(KEY_BYTES, got_key->data, sizeof(KEY_BYTES));
+    const kafka_Bytes_t *got_value = (const kafka_Bytes_t *)kafka_consumer_ConsumerRecord_value(rec);
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(VALUE_BYTES), got_value->len);
+    TEST_ASSERT_EQUAL_MEMORY(VALUE_BYTES, got_value->data, sizeof(VALUE_BYTES));
 
-    int32_t key_len = 0;
-    const uint8_t *got_key = kafka_consumer_ConsumerRecord_key(rec, &key_len);
-    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(key), key_len);
-    TEST_ASSERT_EQUAL_MEMORY(key, got_key, sizeof(key));
+    /* `records(topic)` sees the same record; a partition nobody produced to
+     * yields an empty list. */
+    kafka_List_t *by_topic = kafka_consumer_ConsumerRecords_records_with_topic(records, "test");
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(by_topic));
+    TEST_ASSERT_NULL(kafka_List_get(by_topic, 5)); /* out of range */
+    kafka_List_destroy(by_topic);
+    kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("test", 7);
+    kafka_List_t *none = kafka_consumer_ConsumerRecords_records_with_partition(records, other);
+    TEST_ASSERT_NOT_NULL(none);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(none));
+    kafka_List_destroy(none);
+    kafka_common_TopicPartition_destroy(other);
 
-    int32_t value_len = 0;
-    const uint8_t *got_value = kafka_consumer_ConsumerRecord_value(rec, &value_len);
-    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(value), value_len);
-    TEST_ASSERT_EQUAL_MEMORY(value, got_value, sizeof(value));
+    /* `nextOffsets()`: the position after the offset-0 record is 1 (Java's
+     * MockConsumer.poll fills `nextOffsetAndMetadata` per partition). */
+    kafka_Map_t *next = kafka_consumer_ConsumerRecords_next_offsets(records);
+    TEST_ASSERT_NOT_NULL(next);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(next));
+    const kafka_consumer_OffsetAndMetadata_t *next_oam =
+        (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_get(next, tp);
+    TEST_ASSERT_NOT_NULL(next_oam);
+    TEST_ASSERT_EQUAL_INT64(1, kafka_consumer_OffsetAndMetadata_offset(next_oam));
+    kafka_Map_destroy(next);
 
     kafka_consumer_ConsumerRecords_destroy(records);
 
-    // An out-of-range get returns null.
-    records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    TEST_ASSERT_NOT_NULL(records);
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecords_get(records, 5));
+    /* Nothing left: an empty, non-null batch. */
+    records = poll_ok(f.consumer, 10);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_ConsumerRecords_is_empty(records));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_ConsumerRecords_count(records));
     kafka_consumer_ConsumerRecords_destroy(records);
 
-    kafka_consumer_Consumer_destroy(c);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// Null key/value round-trips as (null, -1)
+// Null key/value round-trip as NULL
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_null_key_value(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NULL(assign_one(c, "t", 0));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "t", 0, 0,
-                                                            NULL, -1, NULL, -1));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "t", 0, 0));
+    fixture_t f;
+    make_assigned_mock(&f, "t", 0);
+    add_record(f.mock, "t", 0, 0, NULL, NULL);
 
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(c, 100, &poll_err);
-    TEST_ASSERT_NULL(poll_err);
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 100);
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
 
-    const kafka_consumer_ConsumerRecord_t *rec =
-        kafka_consumer_ConsumerRecords_get(records, 0);
-    int32_t key_len = 0, value_len = 0;
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_key(rec, &key_len));
-    TEST_ASSERT_EQUAL_INT32(-1, key_len);
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_value(rec, &value_len));
-    TEST_ASSERT_EQUAL_INT32(-1, value_len);
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("t", 0);
+    const kafka_consumer_ConsumerRecord_t *rec = first_record(records, tp);
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_key(rec));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_value(rec));
+    /* `ConsumerRecord(topic, partition, offset, key, value)` leaves both
+     * serialized sizes at NULL_SIZE (-1). */
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_serialized_key_size(rec));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_serialized_value_size(rec));
 
+    kafka_common_TopicPartition_destroy(tp);
     kafka_consumer_ConsumerRecords_destroy(records);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// Async poll: callback fires on the dispatcher thread
+// poll_cb: the completion is queued and runs on the pumping thread
 // ---------------------------------------------------------------------------
 
-static void test_mock_consumer_async_poll(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NULL(assign_one(c, "test", 0));
-    const uint8_t value[] = {0x01, 0x02, 0x03};
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "test", 0, 0,
-                                                            NULL, -1,
-                                                            value, (int32_t)sizeof(value)));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0));
+static void test_mock_consumer_poll_cb(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    add_record(f.mock, "test", 0, 0, NULL, &VALUE);
 
-    async_poll_result_t result;
-    memset(&result, 0, sizeof(result));
-    atomic_init(&result.fired, 0);
+    completion_t result;
+    completion_init(&result);
+    kafka_consumer_Consumer_poll_cb(f.consumer, 100, on_poll, &result);
 
-    kafka_consumer_Consumer_poll_async(c, 100, on_poll, &result);
+    /* Nothing runs until this thread pumps. */
+    TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
 
-    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
-    TEST_ASSERT_TRUE(result.had_records);
     TEST_ASSERT_FALSE(result.had_error);
     TEST_ASSERT_EQUAL_INT32(1, result.record_count);
-    // Callback ran on the dispatcher thread, not the caller.
-    TEST_ASSERT_NOT_EQUAL(pthread_self(), result.thread_id);
+    /* The completion ran on the pumping thread: this one. */
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
 
-    kafka_consumer_Consumer_destroy(c);
+    completion_free(&result);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency guard: a second op is rejected while one op is in flight
+// Single-owner guard: a blocking call while an operation is in flight is
+// Java's ConcurrentModificationException
 //
-// The guard is held from submission until the in-flight op completes (just
-// before its callback fires). We exploit this deterministically by submitting
-// two async polls back-to-back: when the second is submitted the first is
-// still in flight (its completion needs several thread hops through the runtime
-// and dispatcher), so the second is rejected inline with LocalConcurrentModification
-// — its callback fires synchronously before poll_async returns. This covers
-// both (a) cross-call rejection and (b) one-op-in-flight, without relying on
-// when the guard is released relative to the callback.
+// A `rebalance_cb` whose listener holds its report keeps the operation in
+// flight deterministically. Meanwhile a blocking call is rejected with
+// LocalConcurrentModification, a `_cb` call delivers the same rejection
+// through its completion, the sync getters answer empty / -1 / NULL, and the
+// always-allowed functions still work. Once the listener reports and the
+// completion is pumped the consumer is free again.
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_concurrency_guard(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NULL(assign_one(c, "test", 0));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0));
+    fixture_t f;
+    fixture_init(&f);
 
-    async_poll_result_t first, second;
-    memset(&first, 0, sizeof(first));
-    memset(&second, 0, sizeof(second));
-    atomic_init(&first.fired, 0);
-    atomic_init(&second.fired, 0);
+    holding_listener_t listener;
+    completion_t completion;
+    kafka_List_t *assignment = NULL;
+    kafka_common_TopicPartition_t *tp = NULL;
+    start_held_rebalance(&f, "test", &listener, &completion, &assignment, &tp);
 
-    // First acquires the guard and spawns; second is submitted while the first
-    // is still in flight.
-    kafka_consumer_Consumer_poll_async(c, 50, on_poll, &first);
-    kafka_consumer_Consumer_poll_async(c, 50, on_poll, &second);
+    /* In flight from the submission on (the flag is taken before anything is
+     * spawned): rejected at once, with the exact Java message. */
+    assert_concurrent_modification(kafka_consumer_Consumer_commit_sync(f.consumer));
+    assert_concurrent_modification(kafka_consumer_Consumer_unsubscribe(f.consumer));
+    kafka_consumer_ConsumerRecords_t *records = (kafka_consumer_ConsumerRecords_t *)&f; /* sentinel */
+    assert_concurrent_modification(kafka_consumer_Consumer_poll(f.consumer, 10, &records));
+    TEST_ASSERT_EQUAL_PTR(&f, records); /* the out-param is untouched on failure */
+    assert_concurrent_modification(kafka_consumer_MockConsumer_rebalance(f.mock, assignment));
+    assert_concurrent_modification(kafka_consumer_MockConsumer_set_max_poll_records(f.mock, 5));
 
-    // The second was rejected inline (callback fired synchronously) with
-    // LocalConcurrentModification.
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
-    TEST_ASSERT_TRUE(second.had_error);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION, second.error_code);
+    /* The sync getters have no error slot: empty containers, -1, NULL. */
+    kafka_List_t *asg = kafka_consumer_Consumer_assignment(f.consumer);
+    TEST_ASSERT_NOT_NULL(asg);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(asg));
+    kafka_List_destroy(asg);
+    kafka_List_t *sub = kafka_consumer_Consumer_subscription(f.consumer);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(sub));
+    kafka_List_destroy(sub);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_group_metadata(f.consumer));
+    TEST_ASSERT_EQUAL_INT8(-1, kafka_consumer_MockConsumer_closed(f.mock));
+    TEST_ASSERT_EQUAL_INT8(-1, kafka_consumer_MockConsumer_should_rebalance(f.mock));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
 
-    // The first eventually completes successfully (empty batch).
-    TEST_ASSERT_TRUE(wait_for(&first.fired, 1));
-    TEST_ASSERT_TRUE(first.had_records);
+    /* Always allowed. */
+    TEST_ASSERT_NOT_NULL(kafka_consumer_Consumer_client_id(f.consumer));
+    kafka_consumer_ConsumerHandle_t *handle = kafka_consumer_Consumer_handle(f.consumer);
+    TEST_ASSERT_NOT_NULL(handle);
+    kafka_consumer_ConsumerHandle_destroy(handle);
 
-    // After the in-flight op completed, a normal sync poll succeeds again.
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *recs =
-        kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    TEST_ASSERT_NULL(poll_err);
-    TEST_ASSERT_NOT_NULL(recs);
-    kafka_consumer_ConsumerRecords_destroy(recs);
+    /* A `_cb` call is rejected through its completion, queued like any other. */
+    completion_t rejected;
+    completion_init(&rejected);
+    kafka_consumer_Consumer_commit_sync_cb(f.consumer, on_void_op, &rejected);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &rejected.fired, 1));
+    TEST_ASSERT_TRUE(rejected.had_error);
+    assert_concurrent_modification(rejected.error);
+    rejected.error = NULL;
 
-    kafka_consumer_Consumer_destroy(c);
+    /* The queued listener invocation runs on the pump too (it may be queued
+     * after the rejection: the rebalance task runs concurrently with this
+     * thread); once it ran it holds the operation, so the completion cannot
+     * have fired. */
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &listener.assigned_calls, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&listener.assigned_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&completion.fired));
+
+    holding_listener_release(&listener);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &completion.fired, 1));
+    TEST_ASSERT_FALSE(completion.had_error);
+
+    /* Free again, and the rebalance did apply. */
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_sync(f.consumer));
+    asg = kafka_consumer_Consumer_assignment(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(asg));
+    kafka_List_destroy(asg);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_closed(f.mock));
+
+    kafka_List_destroy(assignment);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,43 +489,45 @@ static void test_mock_consumer_concurrency_guard(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_wakeup_bypasses_guard(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NULL(assign_one(c, "test", 0));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0));
+    fixture_t f;
+    fixture_init(&f);
+    /* The rebalance below assigns test-0; its EARLIEST position needs a
+     * beginning offset once the polls reach the fetch-position update. */
+    update_offset(f.mock, kafka_consumer_MockConsumer_update_beginning_offsets, "test", 0, 0);
 
-    // wakeup() does not acquire the guard, so it works even while an async op
-    // holds it. Submit an async poll and fire wakeup from this thread.
-    async_poll_result_t result;
-    memset(&result, 0, sizeof(result));
-    atomic_init(&result.fired, 0);
-    kafka_consumer_Consumer_poll_async(c, 50, on_poll, &result);
+    holding_listener_t listener;
+    completion_t completion;
+    kafka_List_t *assignment = NULL;
+    kafka_common_TopicPartition_t *tp = NULL;
+    start_held_rebalance(&f, "test", &listener, &completion, &assignment, &tp);
 
-    // Not rejected (returns void; the call simply completes). It sets the mock
-    // wakeup flag observed by a subsequent poll.
-    kafka_consumer_Consumer_wakeup(c);
+    /* An operation is in flight (control), yet wakeup() is not rejected: it
+     * returns void and arms the mock's wakeup flag. */
+    assert_concurrent_modification(kafka_consumer_Consumer_commit_sync(f.consumer));
+    kafka_consumer_Consumer_wakeup(f.consumer);
 
-    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &listener.assigned_calls, 1));
+    holding_listener_release(&listener);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &completion.fired, 1));
+    TEST_ASSERT_FALSE(completion.had_error);
 
-    // The mock wakeup flag set above causes the NEXT poll to return Wakeup.
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *recs =
-        kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    // Which of the two outcomes occurs is a genuine race: the async poll above
-    // may already have consumed the wakeup flag. But each outcome is now fully
-    // pinned -- either the poll returned a batch with no error, or it was
-    // interrupted and the error is exactly Wakeup (never, say, a
-    // LocalConcurrentModification from a guard the async op failed to release).
-    if (recs != NULL) {
-        TEST_ASSERT_NULL(poll_err);
-        kafka_consumer_ConsumerRecords_destroy(recs);
-    } else {
-        TEST_ASSERT_NOT_NULL(poll_err);
-        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
-                                kafka_common_Error_code(poll_err));
-        kafka_common_Error_destroy(poll_err);
-    }
+    /* The rebalance never polls, so nothing consumed the flag: the next poll
+     * is interrupted with exactly Wakeup — never a LocalConcurrentModification
+     * from a guard the `_cb` operation failed to release. */
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(f.consumer, 10, &records);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(records);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(err));
+    kafka_common_Error_destroy(err);
 
-    kafka_consumer_Consumer_destroy(c);
+    /* The flag was consumed. */
+    records = poll_ok(f.consumer, 10);
+    kafka_consumer_ConsumerRecords_destroy(records);
+
+    kafka_List_destroy(assignment);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -301,44 +536,59 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_add_record_unassigned_errors(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    fixture_t f;
+    fixture_init(&f);
 
     // No assignment yet -> add_record fails with LocalIllegalState, the same
-    // class the Rust twin asserts. The code is what lets C tell it apart from
-    // its JDK sibling LocalIllegalArgument below: both are outside the
-    // KafkaException tree, so every hierarchy predicate answers false for each
-    // and they are otherwise indistinguishable to a C caller.
-    kafka_common_Error_t *err =
-        kafka_consumer_MockConsumer_add_record(c, "test", 0, 0, NULL, -1, NULL, -1);
+    // class the Rust twin asserts (Java throws IllegalStateException).
+    kafka_consumer_ConsumerRecord_t *record = kafka_consumer_ConsumerRecord_new("test", 0, 0, NULL, NULL);
+    kafka_common_Error_t *err = kafka_consumer_MockConsumer_add_record(f.mock, record);
+    kafka_consumer_ConsumerRecord_destroy(record);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE,
-                            kafka_common_Error_code(err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("Cannot add records for a partition that is not assigned to the consumer",
+                             kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
 
     // `position` on the same unassigned partition fails with the sibling
-    // LocalIllegalArgument instead ("You can only check the position for
-    // partitions assigned to this consumer."), matching the granularity the
-    // Rust tests assert with `matches!(err, Error::LocalIllegalArgument(_))`.
-    int64_t pos = -1;
-    kafka_common_Error_t *pos_err =
-        kafka_consumer_Consumer_position(c, "test", 0, &pos);
+    // LocalIllegalArgument instead, matching the granularity the Rust tests
+    // assert with `matches!(err, Error::LocalIllegalArgument(_))`.
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
+    int64_t pos = -7;
+    kafka_common_Error_t *pos_err = kafka_consumer_Consumer_position(f.consumer, tp, &pos);
     TEST_ASSERT_NOT_NULL(pos_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT,
-                            kafka_common_Error_code(pos_err));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(pos_err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_local_illegal_state_error(pos_err));
+    TEST_ASSERT_EQUAL_STRING("You can only check the position for partitions assigned to this consumer.",
+                             kafka_common_Error_message(pos_err));
+    TEST_ASSERT_EQUAL_INT64(-7, pos); /* untouched on failure */
     kafka_common_Error_destroy(pos_err);
 
-    kafka_consumer_Consumer_destroy(c);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// Helper: a one-(topic,partition) assigned, earliest-positioned mock consumer.
+// A negative Duration is rejected before anything runs
 // ---------------------------------------------------------------------------
 
-static kafka_consumer_Consumer_t *make_assigned_mock(const char *topic, int32_t partition) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    TEST_ASSERT_NULL(assign_one(c, topic, partition));
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, topic, partition, 0));
-    return c;
+static void test_mock_consumer_negative_timeout_rejected(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(f.consumer, -1, &records);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(records);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("Timeout must not be negative", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    /* The mock never saw the call. */
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
+
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,29 +596,56 @@ static kafka_consumer_Consumer_t *make_assigned_mock(const char *topic, int32_t 
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_subscribe_subscription(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    const char *topics[2] = {"alpha", "beta"};
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe(c, topics, 2));
+    fixture_t f;
+    fixture_init(&f);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"beta");
+    kafka_List_add(topics, (void *)"alpha");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(f.consumer, topics));
+    kafka_List_destroy(topics);
 
-    kafka_consumer_StringList_t *subs = kafka_consumer_Consumer_subscription(c);
+    /* An owned, sorted list of owned strings. */
+    kafka_List_t *subs = kafka_consumer_Consumer_subscription(f.consumer);
     TEST_ASSERT_NOT_NULL(subs);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_StringList_count(subs));
-    // Set ordering is unspecified; just assert both topics appear.
-    int saw_alpha = 0, saw_beta = 0;
-    for (int i = 0; i < kafka_consumer_StringList_count(subs); i++) {
-        const char *s = kafka_consumer_StringList_get(subs, i);
-        if (strcmp(s, "alpha") == 0) saw_alpha = 1;
-        if (strcmp(s, "beta") == 0) saw_beta = 1;
-    }
-    TEST_ASSERT_TRUE(saw_alpha && saw_beta);
-    kafka_consumer_StringList_destroy(subs);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(subs));
+    TEST_ASSERT_EQUAL_STRING("alpha", (const char *)kafka_List_get(subs, 0));
+    TEST_ASSERT_EQUAL_STRING("beta", (const char *)kafka_List_get(subs, 1));
+    kafka_List_destroy(subs);
 
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_unsubscribe(c));
-    subs = kafka_consumer_Consumer_subscription(c);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(subs));
-    kafka_consumer_StringList_destroy(subs);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_unsubscribe(f.consumer));
+    subs = kafka_consumer_Consumer_subscription(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(subs));
+    kafka_List_destroy(subs);
 
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// subscribe_with_pattern: the SubscriptionPattern round-trips
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_subscribe_with_pattern(void) {
+    fixture_t f;
+    fixture_init(&f);
+
+    kafka_consumer_SubscriptionPattern_t *pattern = kafka_consumer_SubscriptionPattern_new("topic-.*");
+    TEST_ASSERT_NOT_NULL(pattern);
+    TEST_ASSERT_EQUAL_STRING("topic-.*", kafka_consumer_SubscriptionPattern_pattern(pattern));
+    char *s = kafka_consumer_SubscriptionPattern_to_string(pattern);
+    TEST_ASSERT_NOT_NULL(s);
+    kafka_string_destroy(s);
+
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_pattern(f.consumer, pattern));
+    kafka_consumer_SubscriptionPattern_destroy(pattern);
+
+    /* A pattern subscription names no topics until the broker resolves it. */
+    kafka_List_t *subs = kafka_consumer_Consumer_subscription(f.consumer);
+    TEST_ASSERT_NOT_NULL(subs);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(subs));
+    kafka_List_destroy(subs);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_unsubscribe(f.consumer));
+
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,15 +653,16 @@ static void test_mock_consumer_subscribe_subscription(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_assignment(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 3);
-    kafka_common_TopicPartitionList_t *as = kafka_consumer_Consumer_assignment(c);
+    fixture_t f;
+    make_assigned_mock(&f, "test", 3);
+    kafka_List_t *as = kafka_consumer_Consumer_assignment(f.consumer);
     TEST_ASSERT_NOT_NULL(as);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(as));
-    const kafka_common_TopicPartition_t *tp = kafka_common_TopicPartitionList_get(as, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartition_topic(tp), "test"));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(as));
+    const kafka_common_TopicPartition_t *tp = (const kafka_common_TopicPartition_t *)kafka_List_get(as, 0);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_common_TopicPartition_topic(tp));
     TEST_ASSERT_EQUAL_INT32(3, kafka_common_TopicPartition_partition(tp));
-    kafka_common_TopicPartitionList_destroy(as);
-    kafka_consumer_Consumer_destroy(c);
+    kafka_List_destroy(as);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,58 +670,99 @@ static void test_mock_consumer_assignment(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_seek_position(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek(c, "test", 0, 42));
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
 
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset(f.consumer, tp, 42));
     int64_t pos = -1;
-    kafka_common_Error_t *err =
-        kafka_consumer_Consumer_position(c, "test", 0, &pos);
-    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_position(f.consumer, tp, &pos));
     TEST_ASSERT_EQUAL_INT64(42, pos);
 
-    // seek_with_metadata also sets position.
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_metadata(c, "test", 0, 100, -1, "meta"));
-    err = kafka_consumer_Consumer_position(c, "test", 0, &pos);
-    TEST_ASSERT_NULL(err);
+    // seek(TopicPartition, OffsetAndMetadata) also sets the position.
+    kafka_consumer_OffsetAndMetadata_t *oam = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_metadata(100, "meta", &oam));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset_and_metadata(f.consumer, tp, oam));
+    kafka_consumer_OffsetAndMetadata_destroy(oam);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_position_with_timeout(f.consumer, tp, 100, &pos));
     TEST_ASSERT_EQUAL_INT64(100, pos);
 
-    kafka_consumer_Consumer_destroy(c);
+    /* seekToBeginning / seekToEnd use the offsets the mock was given. */
+    kafka_List_t *list = kafka_List_new();
+    kafka_List_add(list, tp);
+    update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 0, 55);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_to_end(f.consumer, list));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_position(f.consumer, tp, &pos));
+    TEST_ASSERT_EQUAL_INT64(55, pos);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_to_beginning(f.consumer, list));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_position(f.consumer, tp, &pos));
+    TEST_ASSERT_EQUAL_INT64(0, pos);
+    kafka_List_destroy(list);
+
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// commit_sync_offsets + committed round-trip
+// commit_sync_with_offsets + committed round-trip
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_commit_committed(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    kafka_common_TopicPartition_t *tp = NULL;
+    kafka_List_t *list = tp_list("test", 0, &tp);
 
-    const char *topics[1] = {"test"};
-    int32_t partitions[1] = {0};
-    int64_t offsets[1] = {7};
-    const char *metas[1] = {"checkpoint"};
-    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync_offsets(
-        c, topics, partitions, offsets, NULL, metas, 1);
-    TEST_ASSERT_NULL(err);
+    /* A C-built offsets map borrows its elements. */
+    kafka_consumer_OffsetAndMetadata_t *oam = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_OffsetAndMetadata_with_metadata(7, "checkpoint", &oam));
+    kafka_Map_t *offsets = kafka_Map_new();
+    kafka_Map_put(offsets, tp, oam);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_sync_with_offsets(f.consumer, offsets));
+    kafka_Map_destroy(offsets);
+    kafka_consumer_OffsetAndMetadata_destroy(oam);
 
-    kafka_consumer_OffsetMap_t *map = NULL;
-    err = kafka_consumer_Consumer_committed(c, topics, partitions, 1, &map);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(map);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_OffsetMap_count(map));
-    const kafka_common_TopicPartition_t *k = kafka_consumer_OffsetMap_get_key(map, 0);
-    const kafka_consumer_OffsetAndMetadata_t *v = kafka_consumer_OffsetMap_get_value(map, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartition_topic(k), "test"));
+    /* `committed(Set)`: an owned map of owned TopicPartition -> owned
+     * OffsetAndMetadata, whose `get` compares keys by content. */
+    kafka_Map_t *committed = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed(f.consumer, list, &committed));
+    TEST_ASSERT_NOT_NULL(committed);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(committed));
+    const kafka_common_TopicPartition_t *k = (const kafka_common_TopicPartition_t *)kafka_Map_key(committed, 0);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_common_TopicPartition_topic(k));
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(k));
+    const kafka_consumer_OffsetAndMetadata_t *v =
+        (const kafka_consumer_OffsetAndMetadata_t *)kafka_Map_get(committed, tp);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_PTR(kafka_Map_value(committed, 0), v);
     TEST_ASSERT_EQUAL_INT64(7, kafka_consumer_OffsetAndMetadata_offset(v));
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_consumer_OffsetAndMetadata_metadata(v), "checkpoint"));
-    int32_t epoch = 999;
-    TEST_ASSERT_FALSE(kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch));
-    kafka_consumer_OffsetMap_destroy(map);
+    TEST_ASSERT_EQUAL_STRING("checkpoint", kafka_consumer_OffsetAndMetadata_metadata(v));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_OffsetAndMetadata_leader_epoch(v)); /* none */
+    char *s = kafka_consumer_OffsetAndMetadata_to_string(v);
+    TEST_ASSERT_NOT_NULL(s);
+    kafka_string_destroy(s);
+    kafka_Map_destroy(committed);
 
-    // commit_sync (no offsets) just succeeds on the mock.
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_sync(c));
+    /* The timed forms and the no-offsets commits just succeed on the mock. */
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_committed_with_timeout(f.consumer, list, 100, &committed));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(committed));
+    kafka_Map_destroy(committed);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_sync(f.consumer));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_sync_with_timeout(f.consumer, 100));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_commit_async(f.consumer));
 
-    kafka_consumer_Consumer_destroy(c);
+    /* A negative offset is rejected when the OffsetAndMetadata is built. */
+    kafka_consumer_OffsetAndMetadata_t *bad = NULL;
+    kafka_common_Error_t *err = kafka_consumer_OffsetAndMetadata_new(-5, &bad);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(bad);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "negative offset"));
+    kafka_common_Error_destroy(err);
+
+    kafka_List_destroy(list);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,27 +770,44 @@ static void test_mock_consumer_commit_committed(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_beginning_end_offsets(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_end_offsets(c, "test", 0, 55));
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 0, 55);
+    kafka_common_TopicPartition_t *tp = NULL;
+    kafka_List_t *list = tp_list("test", 0, &tp);
 
-    const char *topics[1] = {"test"};
-    int32_t partitions[1] = {0};
+    /* Owned maps of owned TopicPartition -> owned int64_t. */
+    kafka_Map_t *begin = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_beginning_offsets(f.consumer, list, &begin));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(begin));
+    const int64_t *b = (const int64_t *)kafka_Map_get(begin, tp);
+    TEST_ASSERT_NOT_NULL(b);
+    TEST_ASSERT_EQUAL_INT64(0, *b);
+    kafka_Map_destroy(begin);
 
-    kafka_consumer_LongOffsetMap_t *begin = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_beginning_offsets(c, topics, partitions, 1, &begin));
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_LongOffsetMap_count(begin));
-    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_LongOffsetMap_get_value(begin, 0));
-    kafka_consumer_LongOffsetMap_destroy(begin);
-
-    kafka_consumer_LongOffsetMap_t *end = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_end_offsets(c, topics, partitions, 1, &end));
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_LongOffsetMap_count(end));
-    TEST_ASSERT_EQUAL_INT64(55, kafka_consumer_LongOffsetMap_get_value(end, 0));
-    const kafka_common_TopicPartition_t *k = kafka_consumer_LongOffsetMap_get_key(end, 0);
+    kafka_Map_t *end = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_end_offsets_with_timeout(f.consumer, list, 100, &end));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(end));
+    const kafka_common_TopicPartition_t *k = (const kafka_common_TopicPartition_t *)kafka_Map_key(end, 0);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartition_partition(k));
-    kafka_consumer_LongOffsetMap_destroy(end);
+    TEST_ASSERT_EQUAL_INT64(55, *(const int64_t *)kafka_Map_value(end, 0));
+    kafka_Map_destroy(end);
 
-    kafka_consumer_Consumer_destroy(c);
+    /* `setOffsetsException`: the next offsets query fails with the injected
+     * error, which the mock takes over and consumes. */
+    kafka_consumer_MockConsumer_set_offsets_error(f.mock, kafka_common_Error_kafka_message("offsets boom"));
+    begin = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_beginning_offsets(f.consumer, list, &begin);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(begin);
+    TEST_ASSERT_EQUAL_STRING("offsets boom", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_beginning_offsets(f.consumer, list, &begin));
+    kafka_Map_destroy(begin);
+
+    kafka_List_destroy(list);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,21 +815,24 @@ static void test_mock_consumer_beginning_end_offsets(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_pause_resume(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    const char *topics[1] = {"test"};
-    int32_t partitions[1] = {0};
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    kafka_common_TopicPartition_t *tp = NULL;
+    kafka_List_t *list = tp_list("test", 0, &tp);
 
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_pause(c, topics, partitions, 1));
-    kafka_common_TopicPartitionList_t *paused = kafka_consumer_Consumer_paused(c);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(paused));
-    kafka_common_TopicPartitionList_destroy(paused);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_pause(f.consumer, list));
+    kafka_List_t *paused = kafka_consumer_Consumer_paused(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(paused));
+    kafka_List_destroy(paused);
 
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_resume(c, topics, partitions, 1));
-    paused = kafka_consumer_Consumer_paused(c);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionList_count(paused));
-    kafka_common_TopicPartitionList_destroy(paused);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_resume(f.consumer, list));
+    paused = kafka_consumer_Consumer_paused(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(paused));
+    kafka_List_destroy(paused);
 
-    kafka_consumer_Consumer_destroy(c);
+    kafka_List_destroy(list);
+    kafka_common_TopicPartition_destroy(tp);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -501,31 +840,55 @@ static void test_mock_consumer_pause_resume(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_group_metadata(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(c);
+    fixture_t f;
+    fixture_init(&f);
+    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(f.consumer);
     TEST_ASSERT_NOT_NULL(meta);
     // The group id is a non-null C string; member id is too.
     TEST_ASSERT_NOT_NULL(kafka_consumer_ConsumerGroupMetadata_group_id(meta));
     TEST_ASSERT_NOT_NULL(kafka_consumer_ConsumerGroupMetadata_member_id(meta));
     kafka_consumer_ConsumerGroupMetadata_destroy(meta);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
 }
 
-// The group-metadata handle's four accessors read back the consumer's values:
+// The group-metadata handle's four invokers read back the consumer's values:
 // MockConsumer reports Java's MockConsumer.groupMetadata() fields, a dynamic
-// member with no group instance id (null). The C API has no constructor (Java
-// deprecated ConsumerGroupMetadata's), so the consumer is the only source. The
-// handle shares the consumer's metadata, so it stays readable after the
-// consumer is destroyed.
+// member with no group instance id (null). The handle caches NUL-terminated
+// copies of the strings, so it stays readable after the consumer is destroyed.
 static void test_consumer_group_metadata_accessors(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(c);
+    fixture_t f;
+    fixture_init(&f);
+    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_Consumer_group_metadata(f.consumer);
     TEST_ASSERT_NOT_NULL(meta);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
 
     TEST_ASSERT_EQUAL_STRING("dummy.group.id", kafka_consumer_ConsumerGroupMetadata_group_id(meta));
-    TEST_ASSERT_EQUAL_INT(1, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
     TEST_ASSERT_EQUAL_STRING("1", kafka_consumer_ConsumerGroupMetadata_member_id(meta));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta));
+    kafka_consumer_ConsumerGroupMetadata_destroy(meta);
+}
+
+/* A C implementation of the interface (rule 3): the invokers call its
+ * function pointers with `self`. */
+typedef struct {
+    const char *group_id;
+    int32_t generation_id;
+} c_group_metadata_t;
+
+static const char *c_group_id(void *self_) { return ((c_group_metadata_t *)self_)->group_id; }
+static int32_t c_generation_id(void *self_) { return ((c_group_metadata_t *)self_)->generation_id; }
+static const char *c_member_id(void *self_) { (void)self_; return "member-7"; }
+static const char *c_group_instance_id(void *self_) { (void)self_; return NULL; }
+
+static void test_consumer_group_metadata_c_implementation(void) {
+    c_group_metadata_t impl = { "c-group", 9 };
+    kafka_consumer_ConsumerGroupMetadata_t *meta = kafka_consumer_ConsumerGroupMetadata_new(
+        &impl, c_group_id, c_generation_id, c_member_id, c_group_instance_id);
+    TEST_ASSERT_NOT_NULL(meta);
+    TEST_ASSERT_EQUAL_STRING("c-group", kafka_consumer_ConsumerGroupMetadata_group_id(meta));
+    TEST_ASSERT_EQUAL_INT32(9, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
+    TEST_ASSERT_EQUAL_STRING("member-7", kafka_consumer_ConsumerGroupMetadata_member_id(meta));
     TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta));
     kafka_consumer_ConsumerGroupMetadata_destroy(meta);
 }
@@ -535,41 +898,68 @@ static void test_consumer_group_metadata_accessors(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_partitions_and_topics(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    // 2 partitions for "test", leader node id=1 host="broker1" port=9092.
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_partitions(
-        c, "test", 2, 1, "broker1", 9092));
+    fixture_t f;
+    fixture_init(&f);
 
-    kafka_common_PartitionInfoList_t *infos = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_partitions_for(c, "test", &infos));
-    TEST_ASSERT_NOT_NULL(infos);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_PartitionInfoList_count(infos));
-
-    const kafka_common_PartitionInfo_t *p0 = kafka_common_PartitionInfoList_get(infos, 0);
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_PartitionInfo_topic(p0), "test"));
-    const kafka_common_Node_t *leader = kafka_common_PartitionInfo_leader(p0);
-    TEST_ASSERT_NOT_NULL(leader);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(leader));
-    TEST_ASSERT_EQUAL_INT32(9092, kafka_common_Node_port(leader));
-    TEST_ASSERT_EQUAL_STRING("broker1", kafka_common_Node_host(leader));
-    kafka_List_t *replicas = kafka_common_PartitionInfo_replicas(p0);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(replicas));
-    TEST_ASSERT_NOT_NULL(kafka_List_get(replicas, 0));
-    TEST_ASSERT_NULL(kafka_List_get(replicas, 5));
+    // 2 partitions for "test", leader node id=1 host="broker1" port=9092. The
+    // PartitionInfos are copied by `updatePartitions`, so they (and the nodes
+    // they borrow) are freed right after.
+    kafka_common_Node_t *leader = kafka_common_Node_new(1, "broker1", 9092);
+    kafka_List_t *replicas = kafka_List_new();
+    kafka_List_add(replicas, leader);
+    kafka_List_t *infos = kafka_List_new();
+    for (int32_t p = 0; p < 2; p++) {
+        kafka_List_add(infos, kafka_common_PartitionInfo_new("test", p, leader, replicas, replicas));
+    }
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_partitions(f.mock, "test", infos));
+    for (int32_t i = 0; i < kafka_List_size(infos); i++) {
+        kafka_common_PartitionInfo_destroy((kafka_common_PartitionInfo_t *)kafka_List_get(infos, i));
+    }
+    kafka_List_destroy(infos);
     kafka_List_destroy(replicas);
-    kafka_common_PartitionInfoList_destroy(infos);
+    kafka_common_Node_destroy(leader);
 
-    kafka_common_TopicPartitionInfoMap_t *map = NULL;
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_list_topics(c, &map));
+    /* `partitionsFor`: an owned list of owned PartitionInfos. */
+    kafka_List_t *got = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_partitions_for(f.consumer, "test", &got));
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(got));
+    const kafka_common_PartitionInfo_t *p0 = (const kafka_common_PartitionInfo_t *)kafka_List_get(got, 0);
+    TEST_ASSERT_EQUAL_STRING("test", kafka_common_PartitionInfo_topic(p0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_PartitionInfo_partition(p0));
+    const kafka_common_Node_t *got_leader = kafka_common_PartitionInfo_leader(p0);
+    TEST_ASSERT_NOT_NULL(got_leader);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(got_leader));
+    TEST_ASSERT_EQUAL_INT32(9092, kafka_common_Node_port(got_leader));
+    TEST_ASSERT_EQUAL_STRING("broker1", kafka_common_Node_host(got_leader));
+    kafka_List_t *got_replicas = kafka_common_PartitionInfo_replicas(p0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(got_replicas));
+    TEST_ASSERT_NOT_NULL(kafka_List_get(got_replicas, 0));
+    TEST_ASSERT_NULL(kafka_List_get(got_replicas, 5));
+    kafka_List_destroy(got_replicas);
+    kafka_List_destroy(got);
+
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_partitions_for_with_timeout(f.consumer, "test", 100, &got));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(got));
+    kafka_List_destroy(got);
+
+    /* `listTopics`: an owned map of owned string -> owned list, keyed by
+     * content. */
+    kafka_Map_t *map = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_list_topics(f.consumer, &map));
     TEST_ASSERT_NOT_NULL(map);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionInfoMap_count(map));
-    TEST_ASSERT_EQUAL_INT(0, strcmp(kafka_common_TopicPartitionInfoMap_get_topic(map, 0), "test"));
-    const kafka_common_PartitionInfoList_t *plist =
-        kafka_common_TopicPartitionInfoMap_get_partitions(map, 0);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_PartitionInfoList_count(plist));
-    kafka_common_TopicPartitionInfoMap_destroy(map);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(map));
+    TEST_ASSERT_EQUAL_STRING("test", (const char *)kafka_Map_key(map, 0));
+    const kafka_List_t *plist = (const kafka_List_t *)kafka_Map_get(map, (void *)"test");
+    TEST_ASSERT_NOT_NULL(plist);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(plist));
+    kafka_Map_destroy(map);
 
-    kafka_consumer_Consumer_destroy(c);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_list_topics_with_timeout(f.consumer, 100, &map));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(map));
+    kafka_Map_destroy(map);
+
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,39 +967,104 @@ static void test_mock_consumer_partitions_and_topics(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_record_metadata_getters(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    const uint8_t value[] = {0xAA, 0xBB};
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "test", 0, 0,
-                                                            NULL, -1,
-                                                            value, (int32_t)sizeof(value)));
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(c, 100, &poll_err);
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    add_record(f.mock, "test", 0, 0, NULL, &VALUE);
+
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 100);
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
-    const kafka_consumer_ConsumerRecord_t *rec = kafka_consumer_ConsumerRecords_get(records, 0);
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
+    const kafka_consumer_ConsumerRecord_t *rec = first_record(records, tp);
 
-    // No headers were attached.
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_ConsumerRecord_header_count(rec));
-    int32_t hlen = 0;
-    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_header_key(rec, 0, &hlen));
-    TEST_ASSERT_EQUAL_INT32(-1, hlen);
+    // No headers were attached: a borrowed, empty RecordHeaders.
+    const kafka_common_header_internals_RecordHeaders_t *headers = kafka_consumer_ConsumerRecord_headers(rec);
+    TEST_ASSERT_NOT_NULL(headers);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_common_header_internals_RecordHeaders_is_read_only(headers));
 
-    // Mock records are built via ConsumerRecord::new, which leaves both
-    // serialized sizes at NULL_SIZE (-1); the broker fetch path sets them.
+    // Mock records are built via ConsumerRecord(topic, partition, offset, key,
+    // value), which leaves both serialized sizes at NULL_SIZE (-1), the
+    // timestamp at NO_TIMESTAMP (-1) with NO_TIMESTAMP_TYPE, and no leader
+    // epoch / delivery count; the broker fetch path sets them.
     TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_serialized_key_size(rec));
     TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_serialized_value_size(rec));
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_ConsumerRecord_timestamp(rec));
+    const kafka_common_record_TimestampType_t *tt = kafka_consumer_ConsumerRecord_timestamp_type(rec);
+    TEST_ASSERT_NOT_NULL(tt);
+    TEST_ASSERT_EQUAL_PTR(kafka_common_record_TimestampType_no_timestamp_type(), tt); /* a singleton */
+    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_e_no_timestamp_type,
+                          kafka_common_record_TimestampType__enum(tt));
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_consumer_ConsumerRecord_leader_epoch(rec));
+    TEST_ASSERT_EQUAL_INT16(-1, kafka_consumer_ConsumerRecord_delivery_count(rec));
 
-    // timestamp_type is a valid id (-1, 0, or 1).
-    int32_t tt = kafka_consumer_ConsumerRecord_timestamp_type(rec);
-    TEST_ASSERT_TRUE(tt >= -1 && tt <= 1);
+    char *s = kafka_consumer_ConsumerRecord_to_string(rec);
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_NOT_NULL(strstr(s, "test"));
+    kafka_string_destroy(s);
 
-    // leader_epoch / delivery_count absent for a plain mock record.
-    int32_t epoch = 0, dc = 0;
-    TEST_ASSERT_FALSE(kafka_consumer_ConsumerRecord_leader_epoch(rec, &epoch));
-    TEST_ASSERT_FALSE(kafka_consumer_ConsumerRecord_delivery_count(rec, &dc));
-
+    kafka_common_TopicPartition_destroy(tp);
     kafka_consumer_ConsumerRecords_destroy(records);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// ConsumerRecord built through the options builder keeps every field
+// ---------------------------------------------------------------------------
+
+static void test_consumer_record_with_options(void) {
+    kafka_consumer_ConsumerRecordOptionsBuilder_t *b = kafka_consumer_ConsumerRecordOptionsBuilder_new();
+    TEST_ASSERT_NOT_NULL(b);
+
+    /* The builder requires topic, partition, offset, key and value: a build
+     * with a missing mandatory field is an IllegalArgument naming it. A build
+     * consumes the builder (a second one is an IllegalState), so the
+     * successful build below uses a fresh one. */
+    kafka_consumer_ConsumerRecordOptions_t *options = NULL;
+    kafka_common_Error_t *err = kafka_consumer_ConsumerRecordOptionsBuilder_build(b, &options);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(options);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("ConsumerRecordOptionsBuilder::build: mandatory parameter `topic` was not set",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = kafka_consumer_ConsumerRecordOptionsBuilder_build(b, &options);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
+    TEST_ASSERT_EQUAL_STRING("ConsumerRecordOptionsBuilder already built", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    kafka_consumer_ConsumerRecordOptionsBuilder_destroy(b);
+
+    b = kafka_consumer_ConsumerRecordOptionsBuilder_new();
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(b, "opts");
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_partition(b, 3);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(b, 77);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp(b, 123456);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp_type(b, kafka_common_record_TimestampType_create_time());
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_key_size(b, 3);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_value_size(b, 3);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_key(b, &KEY);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_value(b, NULL); /* Java null */
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch(b, 5);
+    kafka_consumer_ConsumerRecordOptionsBuilder_set_delivery_count(b, 2);
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecordOptionsBuilder_build(b, &options));
+    TEST_ASSERT_NOT_NULL(options);
+    kafka_consumer_ConsumerRecordOptionsBuilder_destroy(b);
+
+    kafka_consumer_ConsumerRecord_t *rec = kafka_consumer_ConsumerRecord_with_options(options);
+    kafka_consumer_ConsumerRecordOptions_destroy(options);
+    TEST_ASSERT_NOT_NULL(rec);
+    TEST_ASSERT_EQUAL_STRING("opts", kafka_consumer_ConsumerRecord_topic(rec));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_partition(rec));
+    TEST_ASSERT_EQUAL_INT64(77, kafka_consumer_ConsumerRecord_offset(rec));
+    TEST_ASSERT_EQUAL_INT64(123456, kafka_consumer_ConsumerRecord_timestamp(rec));
+    TEST_ASSERT_EQUAL_INT(kafka_common_record_TimestampType_e_create_time,
+                          kafka_common_record_TimestampType__enum(kafka_consumer_ConsumerRecord_timestamp_type(rec)));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_serialized_key_size(rec));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_consumer_ConsumerRecord_serialized_value_size(rec));
+    TEST_ASSERT_EQUAL_PTR(&KEY, kafka_consumer_ConsumerRecord_key(rec));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerRecord_value(rec));
+    TEST_ASSERT_EQUAL_INT32(5, kafka_consumer_ConsumerRecord_leader_epoch(rec));
+    TEST_ASSERT_EQUAL_INT16(2, kafka_consumer_ConsumerRecord_delivery_count(rec));
+    kafka_consumer_ConsumerRecord_destroy(rec);
 }
 
 // ---------------------------------------------------------------------------
@@ -617,94 +1072,256 @@ static void test_mock_consumer_record_metadata_getters(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_poll_error(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(c, "boom"));
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    /* Ownership of the error moves to the mock. */
+    kafka_consumer_MockConsumer_set_poll_error(f.mock, kafka_common_Error_kafka_message("boom"));
 
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *poll_err = kafka_consumer_Consumer_poll(f.consumer, 10, &records);
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(poll_err));
+    TEST_ASSERT_EQUAL_STRING("boom", kafka_common_Error_message(poll_err));
     kafka_common_Error_destroy(poll_err);
 
     // The error is consumed; a subsequent poll succeeds.
-    records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    TEST_ASSERT_NOT_NULL(records);
+    records = poll_ok(f.consumer, 10);
     kafka_consumer_ConsumerRecords_destroy(records);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// async void op (subscribe_async): callback fires on the dispatcher thread
+// setMaxPollRecords caps a poll; lastPollTimeout records what poll was given
 // ---------------------------------------------------------------------------
 
-typedef struct {
-    atomic_int fired;
-    int had_error;
-} async_op_result_t;
-
-static void on_op(kafka_common_Error_t *error, void *user_data) {
-    async_op_result_t *r = (async_op_result_t *)user_data;
-    if (error != NULL) {
-        r->had_error = 1;
-        kafka_common_Error_destroy(error);
+static void test_mock_consumer_max_poll_records_and_last_poll_timeout(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_MockConsumer_last_poll_timeout(f.mock)); /* never polled */
+    for (int64_t offset = 0; offset < 3; offset++) {
+        add_record(f.mock, "test", 0, offset, NULL, &VALUE);
     }
-    atomic_fetch_add(&r->fired, 1);
-}
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_max_poll_records(f.mock, 2));
 
-static void test_mock_consumer_subscribe_async(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    const char *topics[1] = {"async-topic"};
-    async_op_result_t result;
-    memset(&result, 0, sizeof(result));
-    atomic_init(&result.fired, 0);
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 250);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_consumer_ConsumerRecords_count(records));
+    kafka_consumer_ConsumerRecords_destroy(records);
+    TEST_ASSERT_EQUAL_INT64(250, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
 
-    kafka_consumer_Consumer_subscribe_async(c, topics, 1, on_op, &result);
-    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
-    TEST_ASSERT_FALSE(result.had_error);
+    records = poll_ok(f.consumer, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
+    kafka_consumer_ConsumerRecords_destroy(records);
+    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
 
-    kafka_consumer_StringList_t *subs = kafka_consumer_Consumer_subscription(c);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_StringList_count(subs));
-    kafka_consumer_StringList_destroy(subs);
-    kafka_consumer_Consumer_destroy(c);
+    /* shouldRebalance is a plain flag the test code drives. */
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_should_rebalance(f.mock));
+    kafka_consumer_MockConsumer_reset_should_rebalance(f.mock);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_should_rebalance(f.mock));
+
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// client_id returns an owned string freed by kafka_consumer_string_destroy
+// subscribe_with_topics_cb: the completion is queued for the pump
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_subscribe_cb(void) {
+    fixture_t f;
+    fixture_init(&f);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"cb-topic");
+
+    completion_t result;
+    completion_init(&result);
+    kafka_consumer_Consumer_subscribe_with_topics_cb(f.consumer, topics, on_void_op, &result);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
+    kafka_List_destroy(topics);
+
+    kafka_List_t *subs = kafka_consumer_Consumer_subscription(f.consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
+    TEST_ASSERT_EQUAL_STRING("cb-topic", (const char *)kafka_List_get(subs, 0));
+    kafka_List_destroy(subs);
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// The notify hook fires once per empty -> non-empty transition and
+// execute_callbacks returns how many ran
+//
+// The shared queue's "several completions queued while non-empty fire one
+// notify" case is pinned by test_mock_producer.c's
+// `test_callbacks_notify_fires_once_per_transition`; here each poll_cb is
+// pumped before the next, so every submission is its own transition.
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_callbacks_notify_once_per_transition(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&f.pump.notified));
+
+    completion_t first, second;
+    completion_init(&first);
+    completion_init(&second);
+
+    kafka_consumer_Consumer_poll_cb(f.consumer, 10, on_poll, &first);
+    TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&f.pump.notified));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&first.fired)); /* announced, not run */
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&first.fired));
+    TEST_ASSERT_EQUAL_INT32(0, callback_pump_execute(&f.pump)); /* drained */
+
+    /* Empty -> non-empty again: a second notify. */
+    kafka_consumer_Consumer_poll_cb(f.consumer, 10, on_poll, &second);
+    TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&f.pump.notified));
+    TEST_ASSERT_EQUAL_INT32(1, callback_pump_execute(&f.pump));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
+    TEST_ASSERT_EQUAL_INT(2, atomic_load(&f.pump.executed));
+
+    completion_free(&first);
+    completion_free(&second);
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// destroy runs a never-pumped completion exactly once
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_destroy_runs_pending_completion_once(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+
+    completion_t result;
+    completion_init(&result);
+    kafka_consumer_Consumer_poll_cb(f.consumer, 10, on_poll, &result);
+    TEST_ASSERT_TRUE(callback_pump_wait_notify(&f.pump));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    /* Never pumped: `destroy` runs it, on the destroying thread. */
+    fixture_destroy(&f);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), result.thread_id));
+    completion_free(&result);
+}
+
+// ---------------------------------------------------------------------------
+// client_id is a borrowed string that lives with the handle
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_client_id(void) {
-    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    char *id = kafka_consumer_Consumer_client_id(c);
+    fixture_t f;
+    fixture_init(&f);
+    const char *id = kafka_consumer_Consumer_client_id(f.consumer);
     TEST_ASSERT_NOT_NULL(id);
-    kafka_consumer_string_destroy(id);
-    kafka_consumer_Consumer_destroy(c);
+    TEST_ASSERT_TRUE(strlen(id) > 0);
+    fixture_destroy(&f);
 }
 
 // ---------------------------------------------------------------------------
-// close then destroy
+// current_lag is -1 when unknown; metrics is a map
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_current_lag_and_metrics(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
+    /* The Rust MockConsumer's documented model: an assigned partition with
+     * no end offset known is "caught up" (0); with one it is end - position;
+     * an unassigned partition has no lag (-1 for Java's empty OptionalLong). */
+    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_Consumer_current_lag(f.consumer, tp));
+    update_offset(f.mock, kafka_consumer_MockConsumer_update_end_offsets, "test", 0, 55);
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 10); /* positions test-0 at 0 */
+    kafka_consumer_ConsumerRecords_destroy(records);
+    TEST_ASSERT_EQUAL_INT64(55, kafka_consumer_Consumer_current_lag(f.consumer, tp));
+    kafka_common_TopicPartition_destroy(tp);
+    kafka_common_TopicPartition_t *other = kafka_common_TopicPartition_new("test", 9);
+    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_Consumer_current_lag(f.consumer, other));
+    kafka_common_TopicPartition_destroy(other);
+
+    kafka_Map_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
+    TEST_ASSERT_NOT_NULL(metrics);
+    kafka_Map_destroy(metrics);
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
+// close then destroy; CloseOptions
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_close(void) {
-    kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_close(c));
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_closed(f.mock));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_close(f.consumer));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_MockConsumer_closed(f.mock));
+
     // After close, a mock driver op (update_partitions) errors.
-    kafka_common_Error_t *err = kafka_consumer_MockConsumer_update_partitions(
-        c, "test", 1, 1, "h", 1);
+    kafka_List_t *infos = kafka_List_new();
+    kafka_common_Error_t *err = kafka_consumer_MockConsumer_update_partitions(f.mock, "test", infos);
+    kafka_List_destroy(infos);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_state_error(err));
+    TEST_ASSERT_EQUAL_STRING("This consumer has already been closed.", kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
-    kafka_consumer_Consumer_destroy(c);
+    fixture_destroy(&f);
+}
+
+static void test_mock_consumer_close_with_options(void) {
+    kafka_consumer_CloseOptions_t *options = kafka_consumer_CloseOptions_new_with_timeout(100);
+    TEST_ASSERT_NOT_NULL(options);
+    TEST_ASSERT_EQUAL_INT64(100, kafka_consumer_CloseOptions_timeout(options));
+    /* The enum singletons compare with `==`. */
+    TEST_ASSERT_EQUAL_PTR(kafka_consumer_CloseOptions_GroupMembershipOperation_default(),
+                          kafka_consumer_CloseOptions_group_membership_operation(options));
+    kafka_consumer_CloseOptions_with_group_membership_operation(
+        options, kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group());
+    TEST_ASSERT_EQUAL_INT(kafka_consumer_CloseOptions_GroupMembershipOperation_e_leave_group,
+                          kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
+                              kafka_consumer_CloseOptions_group_membership_operation(options)));
+
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_close_with_options(f.consumer, options));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_MockConsumer_closed(f.mock));
+    kafka_consumer_CloseOptions_destroy(options);
+    fixture_destroy(&f);
+
+    /* The operation-first constructor. */
+    options = kafka_consumer_CloseOptions_with_operation(
+        kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group());
+    TEST_ASSERT_EQUAL_PTR(kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group(),
+                          kafka_consumer_CloseOptions_group_membership_operation(options));
+    kafka_consumer_CloseOptions_with_timeout(options, 5);
+    TEST_ASSERT_EQUAL_INT64(5, kafka_consumer_CloseOptions_timeout(options));
+    kafka_consumer_CloseOptions_destroy(options);
+
+    /* A `_cb` close completes through the pump too. */
+    make_assigned_mock(&f, "test", 0);
+    completion_t result;
+    completion_init(&result);
+    kafka_consumer_Consumer_close_cb(f.consumer, on_void_op, &result);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_MockConsumer_closed(f.mock));
+    fixture_destroy(&f);
 }
 
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mock_consumer_sync_poll_returns_record);
     RUN_TEST(test_mock_consumer_null_key_value);
-    RUN_TEST(test_mock_consumer_async_poll);
+    RUN_TEST(test_mock_consumer_poll_cb);
     RUN_TEST(test_mock_consumer_concurrency_guard);
     RUN_TEST(test_mock_consumer_wakeup_bypasses_guard);
     RUN_TEST(test_mock_consumer_add_record_unassigned_errors);
+    RUN_TEST(test_mock_consumer_negative_timeout_rejected);
     RUN_TEST(test_mock_consumer_subscribe_subscription);
+    RUN_TEST(test_mock_consumer_subscribe_with_pattern);
     RUN_TEST(test_mock_consumer_assignment);
     RUN_TEST(test_mock_consumer_seek_position);
     RUN_TEST(test_mock_consumer_commit_committed);
@@ -712,11 +1329,18 @@ int main(void) {
     RUN_TEST(test_mock_consumer_pause_resume);
     RUN_TEST(test_mock_consumer_group_metadata);
     RUN_TEST(test_consumer_group_metadata_accessors);
+    RUN_TEST(test_consumer_group_metadata_c_implementation);
     RUN_TEST(test_mock_consumer_partitions_and_topics);
     RUN_TEST(test_mock_consumer_record_metadata_getters);
+    RUN_TEST(test_consumer_record_with_options);
     RUN_TEST(test_mock_consumer_poll_error);
-    RUN_TEST(test_mock_consumer_subscribe_async);
+    RUN_TEST(test_mock_consumer_max_poll_records_and_last_poll_timeout);
+    RUN_TEST(test_mock_consumer_subscribe_cb);
+    RUN_TEST(test_mock_consumer_callbacks_notify_once_per_transition);
+    RUN_TEST(test_mock_consumer_destroy_runs_pending_completion_once);
     RUN_TEST(test_mock_consumer_client_id);
+    RUN_TEST(test_mock_consumer_current_lag_and_metrics);
     RUN_TEST(test_mock_consumer_close);
+    RUN_TEST(test_mock_consumer_close_with_options);
     return UNITY_END();
 }

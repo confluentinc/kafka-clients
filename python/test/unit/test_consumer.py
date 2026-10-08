@@ -104,29 +104,45 @@ def test_poll_multiple_records_offsets():
         assert [bytes(r.value) for r in recs] == [b"v0", b"v1", b"v2"]
 
 
-def test_value_is_memoryview():
+def test_value_is_bytes():
+    # Records come out of the FFI as kafka_Bytes_t views owned by the record
+    # batch; the binding copies them into immutable bytes when the record
+    # object is created, so a record never dangles into a freed batch.
     with MockConsumer("earliest") as c:
         _seed(c, records=[(b"k", b"value")])
         (r,) = list(c.poll(POLL_TIMEOUT))
-        assert isinstance(r.value, memoryview)
-        assert isinstance(r.key, memoryview)
+        assert isinstance(r.value, bytes)
+        assert isinstance(r.key, bytes)
+        assert r.headers == []
 
 
-def test_memoryview_zero_copy_lifetime():
-    """A memoryview must keep the underlying batch alive after the
-    ConsumerRecords / ConsumerRecord that produced it are dropped."""
+def test_bytes_lifetime_independent_of_batch():
+    """The key/value bytes stay valid after the ConsumerRecords /
+    ConsumerRecord that produced them are dropped."""
     with MockConsumer("earliest") as c:
         _seed(c, records=[(b"k", b"the-value")])
         recs = c.poll(POLL_TIMEOUT)
         rec = next(iter(recs))
-        mv = rec.value
-        assert bytes(mv) == b"the-value"
-        # Drop every Python-visible owner except the memoryview itself.
+        value = rec.value
+        assert value == b"the-value"
+        # Drop every Python-visible owner except the bytes themselves.
         del rec
         del recs
         gc.collect()
-        # The exporter still holds the batch alive: bytes remain valid.
-        assert bytes(mv) == b"the-value"
+        # The batch is gone, the copied bytes remain valid.
+        assert value == b"the-value"
+
+
+def test_records_batch_views():
+    with MockConsumer("earliest") as c:
+        tp = _seed(c, records=[(b"k0", b"v0"), (b"k1", b"v1")])
+        recs = c.poll(POLL_TIMEOUT)
+        assert recs.partitions() == {tp}
+        assert [r.offset for r in recs.records(tp)] == [0, 1]
+        assert [r.offset for r in recs.records("t")] == [0, 1]
+        assert recs.records(TopicPartition("other", 0)) == []
+        # nextOffsets(): the position to resume from after this batch.
+        assert recs.next_offsets()[tp].offset == 2
 
 
 # -- commit / position / committed -------------------------------------------
@@ -157,10 +173,10 @@ def test_commit_current_positions():
 
 # -- seek --------------------------------------------------------------------
 #
-# seek goes through the async FFI op like every other operation that blocks in
-# Rust, so it is a plain method on Consumer and a coroutine on AsyncConsumer.
-# See test_consumer_callbacks.test_seek_uses_the_async_ffi_entry_point for why
-# the synchronous entry point must not be used.
+# seek awaits the consumer's background task in Rust like every other operation
+# that blocks there, so it is a blocking method on Consumer (GIL released) and a
+# coroutine over the `_cb` twin on AsyncConsumer. See
+# test_consumer_callbacks.test_seek_uses_the_blocking_and_cb_entry_points.
 
 def test_seek_int_offset():
     with MockConsumer("earliest") as c:

@@ -132,15 +132,13 @@ pub(crate) unsafe fn deserializer_ref<'a>(
 }
 
 /// Takes the implementation a `*mut` parameter received (see
-/// [`Interface::take`]). The consumer is `KafkaConsumer_new` (CLAUDE.md §4
-/// rule 6), which lands with the consumer bindings; until then only the
-/// tests exercise it.
+/// [`Interface::take`]); the consumer is `kafka_consumer_KafkaConsumer_new`
+/// (CLAUDE.md §4 rule 6).
 ///
 /// # Safety
 ///
 /// `deserializer` must be a valid deserializer handle, not used again by
 /// the caller when it was owned.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) unsafe fn take_deserializer(
     deserializer: *mut kafka_common_serialization_Deserializer_t,
 ) -> Arc<SharedDeserializer> {

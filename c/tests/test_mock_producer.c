@@ -1207,12 +1207,15 @@ void test_callbacks_notify_fires_once_per_transition(void) {
  * `send_offsets_to_transaction`, as in Java's
  * `producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata())`. */
 typedef struct {
-    kafka_consumer_Consumer_t *consumer;
+    kafka_consumer_MockConsumer_t *mock;    /* the class handle, which owns ... */
+    kafka_consumer_Consumer_t *consumer;    /* ... this borrowed `__as_Consumer` view */
     kafka_consumer_ConsumerGroupMetadata_t *group_metadata;
 } group_fixture_t;
 
 static void group_init(group_fixture_t *g) {
-    g->consumer = kafka_consumer_MockConsumer_new("earliest");
+    g->mock = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_new("earliest", &g->mock));
+    g->consumer = kafka_consumer_MockConsumer__as_Consumer(g->mock);
     TEST_ASSERT_NOT_NULL(g->consumer);
     g->group_metadata = kafka_consumer_Consumer_group_metadata(g->consumer);
     TEST_ASSERT_NOT_NULL(g->group_metadata);
@@ -1220,9 +1223,9 @@ static void group_init(group_fixture_t *g) {
 
 static void group_destroy(group_fixture_t *g) {
     /* The metadata handle is borrowed by the producer calls, not consumed:
-     * still ours to destroy. */
+     * still ours to destroy. The view is never destroyed on its own. */
     kafka_consumer_ConsumerGroupMetadata_destroy(g->group_metadata);
-    kafka_consumer_Consumer_destroy(g->consumer);
+    kafka_consumer_MockConsumer_destroy(g->mock);
 }
 
 /* A C-built offsets map: `kafka_common_TopicPartition_t *` ->
@@ -1285,14 +1288,8 @@ static void assert_committed(kafka_producer_MockProducer_t *mock, const char *gr
     kafka_consumer_OffsetAndMetadata_t *oam = committed_offset(mock, group, topic, partition);
     TEST_ASSERT_NOT_NULL(oam);
     TEST_ASSERT_EQUAL_INT64(offset, kafka_consumer_OffsetAndMetadata_offset(oam));
-    int32_t got_epoch = -99;
-    bool has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(oam, &got_epoch);
-    if (leader_epoch < 0) {
-        TEST_ASSERT_FALSE(has_epoch);
-    } else {
-        TEST_ASSERT_TRUE(has_epoch);
-        TEST_ASSERT_EQUAL_INT32(leader_epoch, got_epoch);
-    }
+    /* `leaderEpoch()` is an `Optional<Integer>`: -1 stands for empty. */
+    TEST_ASSERT_EQUAL_INT32(leader_epoch < 0 ? -1 : leader_epoch, kafka_consumer_OffsetAndMetadata_leader_epoch(oam));
     TEST_ASSERT_EQUAL_STRING(metadata, kafka_consumer_OffsetAndMetadata_metadata(oam));
     kafka_consumer_OffsetAndMetadata_destroy(oam);
 }

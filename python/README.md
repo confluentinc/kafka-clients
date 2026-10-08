@@ -6,12 +6,63 @@ links the Rust library's C API (`../rust`, feature `ffi`).
 
 - **Modules:** `producer.py`, `consumer.py` and `admin.py`, mirroring the Java
   client's producer, consumer and admin APIs.
-- **Two shapes of each client:** a synchronous class whose operations return
-  `concurrent.futures.Future` (`KafkaProducer`, `KafkaConsumer`,
-  `AdminClient`), and an asyncio class whose methods are coroutines
-  (`AsyncKafkaProducer`, `AsyncKafkaConsumer`, `AsyncAdminClient`).
+- **Two shapes of each client:** a synchronous class (`KafkaProducer`, whose
+  sends return `concurrent.futures.Future`; `KafkaConsumer`, whose operations
+  block like Java's; `AdminClient`), and an asyncio class whose methods are
+  coroutines (`AsyncKafkaProducer`, `AsyncKafkaConsumer`, `AsyncAdminClient`).
 - **Mocks:** `MockProducer`, `MockConsumer`, `MockAdminClient` and their async
   variants, backed by the Rust client's in-memory mocks.
+
+## Consumer threading model
+
+The consumer binding sits directly over the C API's two entry-point families
+and has no thread of its own:
+
+- **`KafkaConsumer` / `MockConsumer` (sync)** call the *blocking* C functions
+  with the GIL released. Every method that blocks in Java blocks here
+  (`poll`, `commit`, `position`, `committed`, `seek`, `subscribe`, `close`,
+  ...). A rebalance listener (`subscribe(topics, listener=...)`) or a
+  `commit_async(callback=...)` completion callback runs **on the calling
+  thread, inside the call that triggers it**, and that call does not return
+  until the callback has -- Java's "callbacks run on the polling thread"
+  guarantee. A callback that raises fails the triggering operation with a
+  `KafkaError` carrying its message. The Rust consumer is single-owner: a
+  second thread calling into the consumer while an operation is in flight gets
+  a `KafkaError` (LocalConcurrentModification), and the non-blocking state
+  reads (`assignment()`, `subscription()`, `paused()`) return empty
+  collections meanwhile. Use `wakeup()` from another thread to abort a
+  blocking call (it fails with a `Wakeup` error); `Ctrl-C` only takes effect
+  once the native call returns.
+- **`AsyncKafkaConsumer` / `AsyncMockConsumer` (asyncio)** call the `_cb`
+  twins. The operation runs on the Rust runtime and queues its completion --
+  and every listener / commit-callback invocation it triggers -- on the
+  client's callback queue. The client's notify hook fires once each time that
+  queue goes from empty to non-empty, and the binding schedules the pump
+  (`Consumer_execute_callbacks`) on the event loop with
+  `call_soon_threadsafe`, so **every callback runs on the loop thread**.
+  Listener methods and commit callbacks may therefore be coroutines: a
+  coroutine listener method is scheduled as a task and the rebalance does not
+  advance until it finishes (its exception, if any, is reported to the client
+  as the listener's failure). `commit_async` and `seek` are coroutines too,
+  because the Rust consumer awaits its background task for them.
+- **Re-entrancy.** A callback that must reach back into its consumer (e.g.
+  `commit_sync` from `on_partitions_revoked`) does so through a
+  `ConsumerHandle` obtained beforehand from `consumer.handle()`
+  (`AsyncConsumerHandle`, with coroutine methods, on the asyncio consumer).
+  Handle operations bypass the single-owner guard; the consumer's own methods
+  would be rejected as concurrent access. On a mock-derived handle only
+  `wakeup()` works -- drive the `MockConsumer` directly.
+- **Records.** `record.key` / `record.value` are `bytes` (or `None`), copied
+  out of the record batch when the record object is created, so they outlive
+  the `ConsumerRecords` that produced them. `record.headers` is a
+  `list[(str, bytes | None)]`.
+- **Mock usage.** `MockConsumer` mirrors Java's: `add_record`,
+  `update_beginning_offsets` / `update_end_offsets` / `update_duration_offsets`,
+  `update_partitions`, `set_poll_error` / `set_offsets_error`,
+  `set_max_poll_records`, `should_rebalance` / `reset_should_rebalance`,
+  `last_poll_timeout`, and `rebalance(partitions)`, which drives the registered
+  listener (a topic subscription is required). `AsyncMockConsumer.rebalance`
+  is a coroutine.
 
 ## Status
 

@@ -48,7 +48,6 @@ pub(crate) mod admin;
 pub(crate) mod callback_queue;
 pub(crate) mod common;
 pub(crate) mod consumer;
-pub(crate) mod consumer_handle;
 mod error_predicates;
 pub(crate) mod kafka_future;
 pub(crate) mod producer;

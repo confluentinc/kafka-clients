@@ -12,40 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// End-to-end smoke tests for the real (broker-backed) KafkaConsumer C FFI.
-//
-// These run without a reachable broker: KafkaConsumer construction only spawns
-// the background task (it does not connect synchronously), subscribe just
-// records intent, and a wakeup-interrupted poll returns promptly. They mirror
-// the no-broker handling pattern of test_kafka_producer.c (localhost:9092 is
-// expected to be unreachable; we never assert a successful round-trip).
+// KafkaConsumer through the C API, without a broker: the bootstrap server is
+// unreachable, so only construction, configuration, subscription and the
+// wakeup path are exercised. `kafka_consumer_KafkaConsumer_new` hands back an
+// OWNED `kafka_consumer_Consumer_t` (Java's constructor returns the delegate),
+// freed with `kafka_consumer_Consumer_destroy`.
 
 #include <confluent_kafka.h>
 #include <pthread.h>
-#include <string.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 #include "unity.h"
+#include "test_support.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Helper: build ConsumerProperties for the new (KIP-848) group protocol. */
-static kafka_consumer_Consumer_t *create_consumer(const char *bootstrap,
-                                                  const char *group_id,
-                                                  const char *group_protocol,
-                                                  kafka_common_Error_t **out_err) {
-    const char *configs[] = {
-        "bootstrap.servers", bootstrap,
-        "group.id",          group_id,
-        "group.protocol",    group_protocol,
-        NULL
-    };
-    kafka_consumer_ConsumerProperties_t *props =
-        kafka_consumer_ConsumerProperties_from_configs(configs);
-    kafka_consumer_Consumer_t *consumer =
-        kafka_consumer_KafkaConsumer_new(props, out_err);
-    kafka_consumer_ConsumerProperties_destroy(props);
+static void sleep_ms(long ms) {
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* A `ConsumerConfig` from the three properties every test needs; the C-built
+ * map borrows the strings and is freed here. */
+static kafka_consumer_ConsumerConfig_t *create_config(const char *group_protocol) {
+    kafka_Map_t *props = kafka_Map_new();
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
+    kafka_Map_put(props, (void *)"group.id", (void *)"test-group");
+    kafka_Map_put(props, (void *)"group.protocol", (void *)group_protocol);
+    kafka_consumer_ConsumerConfig_t *config = NULL;
+    kafka_common_Error_t *err = kafka_consumer_ConsumerConfig_new(props, &config);
+    kafka_Map_destroy(props);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(config);
+    return config;
+}
+
+/* A KIP-848 consumer with no deserializers: records would carry
+ * `kafka_Bytes_t *` keys and values. */
+static kafka_consumer_Consumer_t *create_consumer(void) {
+    kafka_consumer_ConsumerConfig_t *config = create_config("consumer");
+    kafka_consumer_Consumer_t *consumer = NULL;
+    kafka_common_Error_t *err = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &consumer);
+    kafka_consumer_ConsumerConfig_destroy(config); /* copied by the constructor */
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(consumer);
     return consumer;
 }
 
@@ -53,181 +66,232 @@ static kafka_consumer_Consumer_t *create_consumer(const char *bootstrap,
 // Construction
 // ---------------------------------------------------------------------------
 
-void test_kafka_consumer_new_succeeds(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "consumer", &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
-
+static void test_kafka_consumer_new_succeeds(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    TEST_ASSERT_NOT_NULL(kafka_consumer_Consumer_client_id(consumer));
     kafka_consumer_Consumer_destroy(consumer);
 }
 
-void test_kafka_consumer_new_via_put(void) {
-    kafka_consumer_ConsumerProperties_t *props =
-        kafka_consumer_ConsumerProperties_new();
-    TEST_ASSERT_NOT_NULL(props);
-    kafka_consumer_ConsumerProperties_put(props, "bootstrap.servers", "localhost:9092");
-    kafka_consumer_ConsumerProperties_put(props, "group.id", "test-group");
-    kafka_consumer_ConsumerProperties_put(props, "group.protocol", "consumer");
-
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        kafka_consumer_KafkaConsumer_new(props, &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
-
-    kafka_consumer_ConsumerProperties_destroy(props);
-    kafka_consumer_Consumer_destroy(consumer);
-}
-
-// ---------------------------------------------------------------------------
-// Classic-protocol rejection (Java parity: unsupported_version)
-// ---------------------------------------------------------------------------
-
-void test_kafka_consumer_classic_protocol_rejected(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "classic", &err);
-
-    /* Construction must fail: classic protocol is not supported (KIP-848 only). */
-    TEST_ASSERT_NULL(consumer);
+// The config's setters are the typed twins of the property map. Only
+// `bootstrap.servers` has no default, so it alone must come from the map.
+static void test_kafka_consumer_new_via_setters(void) {
+    kafka_Map_t *props = kafka_Map_new();
+    kafka_consumer_ConsumerConfig_t *config = NULL;
+    kafka_common_Error_t *err = kafka_consumer_ConsumerConfig_new(props, &config);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION,
-                            kafka_common_Error_code(err));
+    TEST_ASSERT_NULL(config);
+    TEST_ASSERT_EQUAL_STRING("Missing required configuration \"bootstrap.servers\" which has no default value.",
+                             kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"ignored:1");
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerConfig_new(props, &config));
+    kafka_Map_destroy(props);
+
+    kafka_List_t *servers = kafka_List_new();
+    kafka_List_add(servers, (void *)"localhost:9092");
+    kafka_consumer_ConsumerConfig_set_bootstrap_servers(config, servers);
+    kafka_List_destroy(servers);
+    kafka_consumer_ConsumerConfig_set_group_id(config, "setter-group");
+    kafka_consumer_ConsumerConfig_set_group_protocol(config, "consumer");
+    kafka_consumer_ConsumerConfig_set_client_id(config, "setter-client");
+
+    TEST_ASSERT_EQUAL_STRING("setter-group", kafka_consumer_ConsumerConfig_group_id(config));
+    TEST_ASSERT_EQUAL_STRING("consumer", kafka_consumer_ConsumerConfig_group_protocol(config));
+    TEST_ASSERT_EQUAL_STRING("setter-client", kafka_consumer_ConsumerConfig_client_id(config));
+    kafka_List_t *got = kafka_consumer_ConsumerConfig_bootstrap_servers(config); /* owned list of owned strings */
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(got));
+    TEST_ASSERT_EQUAL_STRING("localhost:9092", (const char *)kafka_List_get(got, 0));
+    kafka_List_destroy(got);
+
+    kafka_consumer_Consumer_t *consumer = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &consumer));
+    kafka_consumer_ConsumerConfig_destroy(config);
+    TEST_ASSERT_EQUAL_STRING("setter-client", kafka_consumer_Consumer_client_id(consumer));
+    kafka_consumer_Consumer_destroy(consumer);
+}
+
+// Deserializer interfaces are passed as borrowed `Deserializer_t` views of
+// the concrete class handles, which the constructor takes over.
+static void test_kafka_consumer_new_with_string_deserializers(void) {
+    kafka_consumer_ConsumerConfig_t *config = create_config("consumer");
+    kafka_common_serialization_StringDeserializer_t *key = kafka_common_serialization_StringDeserializer_new();
+    kafka_common_serialization_StringDeserializer_t *value = kafka_common_serialization_StringDeserializer_new();
+    kafka_consumer_Consumer_t *consumer = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_KafkaConsumer_new(config,
+                                                      kafka_common_serialization_StringDeserializer__as_Deserializer(key),
+                                                      kafka_common_serialization_StringDeserializer__as_Deserializer(value),
+                                                      &consumer));
+    kafka_consumer_ConsumerConfig_destroy(config);
+    TEST_ASSERT_NOT_NULL(consumer);
+    kafka_consumer_Consumer_destroy(consumer);
+    kafka_common_serialization_StringDeserializer_destroy(key);
+    kafka_common_serialization_StringDeserializer_destroy(value);
+}
+
+// The classic group protocol is not supported by this client (see
+// consumer-threading.md §20): the constructor fails with UnsupportedVersion.
+static void test_kafka_consumer_classic_protocol_rejected(void) {
+    kafka_consumer_ConsumerConfig_t *config = create_config("classic");
+    kafka_consumer_Consumer_t *consumer = (kafka_consumer_Consumer_t *)&config; /* sentinel */
+    kafka_common_Error_t *err = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &consumer);
+    kafka_consumer_ConsumerConfig_destroy(config);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_PTR(&config, consumer); /* untouched on failure */
+    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "Classic group protocol"));
+    kafka_common_Error_destroy(err);
+
+    /* GroupProtocol is a rule-3 enum: `of` round-trips both names. */
+    const kafka_consumer_GroupProtocol_t *protocol = NULL;
+    TEST_ASSERT_NULL(kafka_consumer_GroupProtocol_of("classic", &protocol));
+    TEST_ASSERT_EQUAL_PTR(kafka_consumer_GroupProtocol_classic(), protocol);
+    TEST_ASSERT_EQUAL_INT(kafka_consumer_GroupProtocol_e_classic, kafka_consumer_GroupProtocol__enum(protocol));
+    TEST_ASSERT_NULL(kafka_consumer_GroupProtocol_of("CONSUMER", &protocol)); /* case-insensitive, as Java */
+    TEST_ASSERT_EQUAL_PTR(kafka_consumer_GroupProtocol_consumer(), protocol);
+    TEST_ASSERT_EQUAL_STRING("CONSUMER", kafka_consumer_GroupProtocol_name(protocol));
 }
 
 // ---------------------------------------------------------------------------
-// Subscribe
+// Subscription
 // ---------------------------------------------------------------------------
 
-void test_kafka_consumer_subscribe(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "consumer", &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
+static void test_kafka_consumer_subscribe(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"test-topic");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(consumer, topics));
+    kafka_List_destroy(topics);
 
-    const char *topics[] = { "test-topic" };
-    kafka_common_Error_t *sub_err =
-        kafka_consumer_Consumer_subscribe(consumer, topics, 1);
-    TEST_ASSERT_NULL(sub_err);
-
+    kafka_List_t *subs = kafka_consumer_Consumer_subscription(consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
+    TEST_ASSERT_EQUAL_STRING("test-topic", (const char *)kafka_List_get(subs, 0));
+    kafka_List_destroy(subs);
     kafka_consumer_Consumer_destroy(consumer);
 }
 
 // ---------------------------------------------------------------------------
-// wakeup-interrupted poll (no reachable broker: must return cleanly, no hang)
+// Wakeup
 // ---------------------------------------------------------------------------
 
-void test_kafka_consumer_wakeup_before_poll(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "consumer", &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
+// wakeup() before poll() makes that poll return Wakeup at once.
+static void test_kafka_consumer_wakeup_before_poll(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"test-topic");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(consumer, topics));
+    kafka_List_destroy(topics);
 
-    const char *topics[] = { "test-topic" };
-    kafka_consumer_Consumer_subscribe(consumer, topics, 1);
-
-    /* Pre-arm the wakeup so the next poll returns immediately with Wakeup
-       rather than blocking on the (unreachable) broker for the full timeout. */
     kafka_consumer_Consumer_wakeup(consumer);
-
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(consumer, 5000, &poll_err);
-
-    /* On a pre-armed wakeup, poll returns no records and exactly the Wakeup
-       error (well before the 5s timeout), never a connection-related failure
-       against the unreachable broker. */
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(consumer, 1000, &records);
+    TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(records);
-    TEST_ASSERT_NOT_NULL(poll_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
-                            kafka_common_Error_code(poll_err));
-    kafka_common_Error_destroy(poll_err);
-
+    TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(err));
+    kafka_common_Error_destroy(err);
     kafka_consumer_Consumer_destroy(consumer);
 }
 
-/* Thread body: sleep briefly, then wakeup the consumer from another thread. */
-typedef struct {
-    kafka_consumer_Consumer_t *consumer;
-} wakeup_arg_t;
-
-static void *wakeup_thread_body(void *arg) {
-    wakeup_arg_t *wa = (wakeup_arg_t *)arg;
-    struct timespec ts = { 0, 200 * 1000 * 1000 }; /* 200 ms */
-    nanosleep(&ts, NULL);
-    kafka_consumer_Consumer_wakeup(wa->consumer);
+static void *wakeup_after_delay(void *arg) {
+    sleep_ms(200);
+    kafka_consumer_Consumer_wakeup((kafka_consumer_Consumer_t *)arg);
     return NULL;
 }
 
-void test_kafka_consumer_wakeup_from_other_thread(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "consumer", &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
+// wakeup() from another thread interrupts a blocking poll (the broker is
+// unreachable, so the poll would otherwise run out its 10s timeout).
+static void test_kafka_consumer_wakeup_from_other_thread(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"test-topic");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(consumer, topics));
+    kafka_List_destroy(topics);
 
-    const char *topics[] = { "test-topic" };
-    kafka_consumer_Consumer_subscribe(consumer, topics, 1);
-
-    /* Spawn a thread that wakes us up after 200ms. wakeup() bypasses the
-       access guard, so it interrupts an in-flight poll held by this thread. */
-    wakeup_arg_t wa = { consumer };
-    pthread_t tid;
-    TEST_ASSERT_EQUAL_INT(0, pthread_create(&tid, NULL, wakeup_thread_body, &wa));
-
-    /* Poll with a long timeout; the wakeup from the other thread must cut it
-       short well before 30s, returning cleanly (no hang, no crash). */
-    kafka_common_Error_t *poll_err = NULL;
-    kafka_consumer_ConsumerRecords_t *records =
-        kafka_consumer_Consumer_poll(consumer, 30000, &poll_err);
-
-    pthread_join(tid, NULL);
-
-    /* The wakeup from the other thread is what cut the poll short, so the
-       error is exactly Wakeup -- not a timeout or a connection failure. */
+    pthread_t thread;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&thread, NULL, wakeup_after_delay, consumer));
+    kafka_consumer_ConsumerRecords_t *records = NULL;
+    kafka_common_Error_t *err = kafka_consumer_Consumer_poll(consumer, 10000, &records);
+    pthread_join(thread, NULL);
+    TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(records);
-    TEST_ASSERT_NOT_NULL(poll_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
-                            kafka_common_Error_code(poll_err));
-    kafka_common_Error_destroy(poll_err);
-
+    TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(err));
+    kafka_common_Error_destroy(err);
     kafka_consumer_Consumer_destroy(consumer);
 }
 
-// ---------------------------------------------------------------------------
-// Destroy without explicit close
-// ---------------------------------------------------------------------------
+typedef struct {
+    atomic_int fired;
+    kafka_common_Error_t *error;
+    pthread_t thread;
+} poll_completion_t;
 
-void test_kafka_consumer_destroy_without_close(void) {
-    kafka_common_Error_t *err = NULL;
-    kafka_consumer_Consumer_t *consumer =
-        create_consumer("localhost:9092", "test-group", "consumer", &err);
-    TEST_ASSERT_NULL(err);
-    TEST_ASSERT_NOT_NULL(consumer);
+static void on_poll(kafka_consumer_ConsumerRecords_t *records, kafka_common_Error_t *error, void *opaque) {
+    poll_completion_t *c = (poll_completion_t *)opaque;
+    kafka_consumer_ConsumerRecords_destroy(records); /* NULL on failure */
+    c->error = error;
+    c->thread = pthread_self();
+    atomic_fetch_add(&c->fired, 1);
+}
 
-    /* Destroy without close -- Drop impl handles cleanup. */
+// A `poll_cb` runs the poll off the calling thread; `wakeup()` interrupts
+// it and its completion is queued for the pump, on this thread.
+static void test_kafka_consumer_poll_cb_interrupted_by_wakeup(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    callback_pump_t pump;
+    consumer_callback_pump_install(&pump, consumer);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"test-topic");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_topics(consumer, topics));
+    kafka_List_destroy(topics);
+
+    poll_completion_t completion;
+    memset(&completion, 0, sizeof(completion));
+    atomic_init(&completion.fired, 0);
+    kafka_consumer_Consumer_poll_cb(consumer, 10000, on_poll, &completion);
+
+    /* In flight: a blocking call is Java's ConcurrentModificationException. */
+    sleep_ms(100);
+    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync(consumer);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_concurrent_modification_error(err));
+    TEST_ASSERT_EQUAL_STRING("KafkaConsumer is not safe for multi-threaded access.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&completion.fired));
+
+    kafka_consumer_Consumer_wakeup(consumer); /* always allowed */
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &completion.fired, 1));
+    TEST_ASSERT_NOT_NULL(completion.error);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_wakeup_error(completion.error));
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), completion.thread));
+    kafka_common_Error_destroy(completion.error);
+
+    /* Free again. */
+    kafka_List_t *subs = kafka_consumer_Consumer_subscription(consumer);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(subs));
+    kafka_List_destroy(subs);
     kafka_consumer_Consumer_destroy(consumer);
+    callback_pump_destroy(&pump);
 }
 
 // ---------------------------------------------------------------------------
-// main
+// Lifecycle
 // ---------------------------------------------------------------------------
+
+// destroy() without close() releases the consumer without hanging.
+static void test_kafka_consumer_destroy_without_close(void) {
+    kafka_consumer_Consumer_t *consumer = create_consumer();
+    kafka_consumer_Consumer_destroy(consumer);
+}
 
 int main(void) {
     UNITY_BEGIN();
-
     RUN_TEST(test_kafka_consumer_new_succeeds);
-    RUN_TEST(test_kafka_consumer_new_via_put);
+    RUN_TEST(test_kafka_consumer_new_via_setters);
+    RUN_TEST(test_kafka_consumer_new_with_string_deserializers);
     RUN_TEST(test_kafka_consumer_classic_protocol_rejected);
     RUN_TEST(test_kafka_consumer_subscribe);
     RUN_TEST(test_kafka_consumer_wakeup_before_poll);
     RUN_TEST(test_kafka_consumer_wakeup_from_other_thread);
+    RUN_TEST(test_kafka_consumer_poll_cb_interrupted_by_wakeup);
     RUN_TEST(test_kafka_consumer_destroy_without_close);
-
     return UNITY_END();
 }

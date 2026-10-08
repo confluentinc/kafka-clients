@@ -16,7 +16,10 @@
 callbacks, and the :class:`ConsumerHandle` reentrancy path.
 
 Driven by ``MockConsumer.rebalance``, which invokes the registered listener
-inline — the deterministic, broker-free equivalent of a real rebalance. Its
+inline — the deterministic, broker-free equivalent of a real rebalance. On the
+synchronous consumer the listener runs on the thread calling ``rebalance``,
+inside that call; on the asyncio consumer ``rebalance`` is a coroutine over the
+``_cb`` twin and the listener invocation is pumped on the event loop. Its
 semantics constrain what can be asserted here:
 
 * it requires a **topic subscription** (a manually assigned consumer fails);
@@ -147,16 +150,35 @@ def test_listener_lost_defaults_to_revoked():
     ``onPartitionsRevoked``. The FFI always passes all three trampolines, but
     MockConsumer never fires ``lost``, so the delegation is asserted against the
     adapter directly — ``_on_lost`` is exactly what the C trampoline calls, with
-    the same already-converted ``list[(topic, partition)]`` payload."""
+    the same already-converted ``list[(topic, partition)]`` payload and the
+    client's ``callback_id``. A ``None`` return means "report success now"."""
     import consumer as _cons
 
     without_lost = RecordingListener()
-    _cons._ListenerAdapter(without_lost)._on_lost([("t", 3)])
+    assert _cons._ListenerAdapter(without_lost)._on_lost([("t", 3)], 0) is None
     assert without_lost.events == [("revoked", [("t", 3)])]
 
     with_lost = RecordingListenerWithLost()
-    _cons._ListenerAdapter(with_lost)._on_lost([("t", 3)])
+    assert _cons._ListenerAdapter(with_lost)._on_lost([("t", 3)], 0) is None
     assert with_lost.events == [("lost", [("t", 3)])]
+
+
+def test_coroutine_listener_is_rejected_on_the_sync_consumer():
+    """The synchronous consumer has no event loop to run a coroutine listener
+    on, so an ``async def`` listener method fails the rebalance (reported to the
+    client like any listener exception) instead of being silently dropped."""
+
+    class CoroListener:
+        async def on_partitions_revoked(self, partitions):
+            pass  # pragma: no cover
+
+        async def on_partitions_assigned(self, partitions):
+            pass  # pragma: no cover
+
+    with MockConsumer("earliest") as c:
+        c.subscribe(["t"], CoroListener())
+        with pytest.raises(KafkaError, match="requires an AsyncConsumer"):
+            c.rebalance([TopicPartition("t", 0)])
 
 
 # -- rebalance listener: error propagation -----------------------------------
@@ -235,9 +257,10 @@ def test_rebalance_blocks_until_listener_returns():
 
 def test_listener_can_use_handle_without_deadlock():
     """A listener reaching back into the consumer through ``handle()`` must not
-    deadlock: the callback runs on the dispatcher thread, whose handle ops bypass
-    the consumer's access guard. On a MockConsumer the getters are empty and the
-    commit is unsupported — what matters is that the calls return at all."""
+    deadlock: the callback runs on the thread driving the rebalance, inside the
+    blocking ``rebalance`` call, and the handle ops bypass the consumer's access
+    guard. On a MockConsumer the getters are empty and the commit is
+    unsupported — what matters is that the calls return at all."""
     with MockConsumer("earliest") as c:
         handle = c.handle()
         seen = {}
@@ -268,28 +291,28 @@ def test_listener_can_use_handle_without_deadlock():
         assert "not supported on a MockConsumer handle" in seen["commit_error"]
 
 
-# -- seek must not hold the GIL across a blocking FFI call --------------------
+# -- seek is a blocking op (sync) / a `_cb` coroutine (async), like the rest ---
 
-def test_seek_uses_the_async_ffi_entry_point():
-    """``seek`` must go through the async FFI op plus ``_run_sync`` /
-    ``_run_async``, like every other operation that blocks in Rust.
+def test_seek_uses_the_blocking_and_cb_entry_points():
+    """``seek`` goes through the blocking C entry point on ``Consumer`` and the
+    ``_cb`` twin on ``AsyncConsumer``, like every other operation that blocks in
+    Rust.
 
     Java's ``seek`` does not block, but ``AsyncKafkaConsumer::seek`` submits a
     ``SeekUnvalidatedEvent`` and drains background events, so it can invoke the
-    rebalance listener (`consumer-threading.md` §31). A synchronous FFI call would
-    then sit in ``block_on`` holding the GIL while the listener trampoline tries
-    to acquire it on the dispatcher thread — an unrecoverable deadlock of the
-    whole interpreter. On the asyncio consumer it would additionally occupy the
-    very loop a coroutine listener has to run on.
-
-    The synchronous entry points are therefore not exposed to Python at all, and
-    ``seek`` is per-class (plain on ``Consumer``, a coroutine on
-    ``AsyncConsumer``) rather than a shared method on ``_ConsumerBase``.
+    rebalance listener (`consumer-threading.md` §31). The blocking entry point
+    releases the GIL and the listener trampoline reacquires it on the same
+    thread, so the synchronous consumer cannot deadlock on itself; the asyncio
+    consumer must not block its loop (a coroutine listener has to run there), so
+    it uses the ``_cb`` twin and the pump. Hence ``seek`` is per-class (plain on
+    ``Consumer``, a coroutine on ``AsyncConsumer``) rather than a shared method
+    on ``_ConsumerBase``, and the old ``*_async`` C entry points are gone.
     """
-    assert not hasattr(_lib, "Consumer_seek")
-    assert not hasattr(_lib, "Consumer_seek_with_metadata")
-    assert hasattr(_lib, "Consumer_seek_async")
-    assert hasattr(_lib, "Consumer_seek_with_metadata_async")
+    for name in ("Consumer_seek", "Consumer_seek_cb",
+                 "Consumer_seek_with_metadata", "Consumer_seek_with_metadata_cb"):
+        assert hasattr(_lib, name), name
+    assert not hasattr(_lib, "Consumer_seek_async")
+    assert not hasattr(_lib, "Consumer_seek_with_metadata_async")
     assert "seek" not in vars(kc._ConsumerBase)
     assert not inspect.iscoroutinefunction(kc.Consumer.seek)
     assert inspect.iscoroutinefunction(kc.AsyncConsumer.seek)
@@ -297,20 +320,20 @@ def test_seek_uses_the_async_ffi_entry_point():
 
 def test_seek_while_a_listener_callback_is_being_dispatched():
     """Seek from a third thread while a listener callback is parked on the
-    dispatcher thread.
+    thread driving the rebalance.
 
     This is as close to Issue 1's deadlock as ``MockConsumer`` can get, and it is
     a **liveness check, not a discriminator**: the real reproduction needs the §31
     background-event machinery — a pending ``RebalanceListenerCallbackNeeded``
     drained by ``seek`` itself — which only the real ``AsyncKafkaConsumer`` has.
-    On the mock the access guard rejects the concurrent seek before it can enter
-    ``block_on``, so the pre-fix code did not hang here either; the broker-backed
-    reproduction lives in the integration / multilanguage suites.
+    On the mock the single-owner guard rejects the concurrent seek, so the
+    broker-backed reproduction lives in the integration / multilanguage suites.
 
-    What this does pin is that the new routing stays live in that window: the
-    guard-rejection completion fires inline on the caller's own thread inside
-    ``submit``, and ``_run_sync`` must neither hang on it nor lose the error,
-    while Python keeps running on both other threads.
+    What this does pin is that the blocking routing stays live in that window:
+    the parked listener has released the GIL (``Event.wait``), the seek enters
+    the C call with the GIL released, and the guard rejection comes back as a
+    plain ``KafkaError`` return -- neither hanging nor losing the error -- while
+    Python keeps running on both other threads.
     """
     entered = threading.Event()
     release = threading.Event()
@@ -707,13 +730,20 @@ def test_handle_after_consumer_closed_raises():
 
 
 # -- async consumer ----------------------------------------------------------
+#
+# AsyncMockConsumer.rebalance is a coroutine over the `_cb` twin: the mock
+# invokes the listener on the Rust runtime, the invocation is queued on the
+# client's callback queue, and the consumer's notify hook schedules the pump on
+# the event loop. A coroutine listener method is scheduled there as a task and
+# the rebalance completes only after its result has been reported back.
 
-async def _rebalance_off_loop(consumer, partitions):
-    """Drive MockConsumer.rebalance from an executor: it is a blocking call that
-    parks until the listener returns, so it must not run on the event loop (a
-    coroutine listener has to be scheduled onto that loop)."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, consumer.rebalance, partitions)
+async def _settle(predicate, rounds=50):
+    """Yield to the loop until ``predicate()`` holds (bounded)."""
+    for _ in range(rounds):
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
 
 
 async def test_async_coroutine_listener():
@@ -728,20 +758,20 @@ async def test_async_coroutine_listener():
             events.append(("assigned", _tps(partitions)))
 
     await c.subscribe(["t"], CoroListener())
-    await _rebalance_off_loop(c, [TopicPartition("t", 0)])
+    await c.rebalance([TopicPartition("t", 0)])
     assert events == [("assigned", [("t", 0)])]
-    await _rebalance_off_loop(c, [TopicPartition("t", 1)])
+    await c.rebalance([TopicPartition("t", 1)])
     assert events[1:] == [("revoked", [("t", 0)]), ("assigned", [("t", 1)])]
     await c.close()
 
 
 async def test_async_plain_callable_listener():
-    # A non-coroutine listener works on the async consumer too; it just runs
-    # directly on the dispatcher thread.
+    # A non-coroutine listener works on the async consumer too; the pump just
+    # runs it directly on the event loop thread.
     c = AsyncMockConsumer("earliest")
     listener = RecordingListener()
     await c.subscribe(["t"], listener)
-    await _rebalance_off_loop(c, [TopicPartition("t", 0)])
+    await c.rebalance([TopicPartition("t", 0)])
     assert listener.events == [("assigned", [("t", 0)])]
     await c.close()
 
@@ -758,9 +788,41 @@ async def test_async_coroutine_listener_exception_propagates():
 
     await c.subscribe(["t"], CoroBoom())
     with pytest.raises(KafkaError) as exc_info:
-        await _rebalance_off_loop(c, [TopicPartition("t", 0)])
+        await c.rebalance([TopicPartition("t", 0)])
     assert str(exc_info.value) == "coro-boom"
+    assert exc_info.value.code == UNKNOWN_SERVER_ERROR
     await c.close()
+
+
+async def test_async_rebalance_waits_for_the_coroutine_listener():
+    """The rebalance must not complete before the coroutine listener has
+    (consumer-threading.md §31 #2): hold the listener on an asyncio.Event and
+    check the rebalance coroutine is still pending until it is released."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    c = AsyncMockConsumer("earliest")
+
+    class Blocking:
+        async def on_partitions_revoked(self, partitions):
+            pass
+
+        async def on_partitions_assigned(self, partitions):
+            entered.set()
+            await asyncio.wait_for(release.wait(), WAIT * 5)
+
+    await c.subscribe(["t"], Blocking())
+    task = asyncio.ensure_future(c.rebalance([TopicPartition("t", 0)]))
+    try:
+        await asyncio.wait_for(entered.wait(), WAIT)
+        await asyncio.sleep(0.2)
+        assert not task.done(), \
+            "rebalance must not complete while the listener is still running"
+        release.set()
+        await asyncio.wait_for(task, WAIT)
+        assert c.assignment() == {TopicPartition("t", 0)}
+    finally:
+        release.set()
+        await c.close()
 
 
 async def test_async_coroutine_listener_can_use_handle():
@@ -774,24 +836,28 @@ async def test_async_coroutine_listener_can_use_handle():
 
         async def on_partitions_assigned(self, partitions):
             seen["subscription"] = handle.subscription()
+            try:
+                await handle.commit_sync()
+                seen["commit_error"] = None
+            except KafkaError as exc:
+                seen["commit_error"] = str(exc)
 
     try:
         await c.subscribe(["t"], CoroUsesHandle())
-        await _rebalance_off_loop(c, [TopicPartition("t", 0)])
+        await c.rebalance([TopicPartition("t", 0)])
     finally:
         handle.destroy()
+    assert isinstance(handle, kc.AsyncConsumerHandle)
     assert seen["subscription"] == set()
+    assert "not supported on a MockConsumer handle" in seen["commit_error"]
     await c.close()
 
 
 async def test_async_coroutine_commit_callback():
-    """A coroutine commit callback is scheduled onto the consumer's loop and
-    awaited there, exactly like a coroutine rebalance listener — the completion
-    must not be silently dropped (CLAUDE.md §11.5).
-
-    ``commit_async`` is driven from an executor for the same reason
-    ``_rebalance_off_loop`` exists: the mock delivers the completion inline inside
-    the call, so the loop has to be free to run the coroutine."""
+    """A coroutine commit callback is scheduled onto the consumer's loop by the
+    pumped invocation -- the completion must not be silently dropped (CLAUDE.md
+    §11.5). Java's ``onComplete`` is void, so nothing waits for the coroutine:
+    yield to the loop until it has run."""
     c = AsyncMockConsumer("earliest")
     tp = TopicPartition("t", 0)
     await c.assign([tp])
@@ -803,8 +869,8 @@ async def test_async_coroutine_commit_callback():
     async def callback(offsets, exception):
         seen.append((offsets, exception))
 
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: c.commit_async(callback=callback))
+    await c.commit_async(callback=callback)
+    assert await _settle(lambda: seen), "the coroutine callback never ran"
     (offsets, exc), = seen
     assert exc is None
     assert offsets == {tp: OffsetAndMetadata(1, "", None)}
@@ -819,9 +885,36 @@ async def test_async_commit_async_callback():
     c.update_beginning_offsets("t", 0, 0)
     await c.poll(1.0)
     seen = []
-    # commitAsync does not block in Java, so it stays a plain method here.
-    c.commit_async(callback=lambda offsets, exc: seen.append((offsets, exc)))
+    # A coroutine (the Rust commitAsync awaits the background task), completing
+    # once the commit is initiated. The mock delivers the completion callback
+    # within the same call, ahead of the completion itself, so the pump has run
+    # it by the time the await returns.
+    await c.commit_async(callback=lambda offsets, exc: seen.append((offsets, exc)))
     (offsets, exc), = seen
     assert exc is None
     assert offsets == {tp: OffsetAndMetadata(1, "", None)}
+    await c.close()
+
+
+async def test_async_callbacks_run_on_the_event_loop_thread():
+    """Every pumped callback -- listener methods and commit callbacks alike --
+    runs on the event loop thread, never on a Rust task."""
+    c = AsyncMockConsumer("earliest")
+    main = threading.get_ident()
+    threads = []
+
+    class Recording:
+        def on_partitions_revoked(self, partitions):
+            threads.append(threading.get_ident())
+
+        def on_partitions_assigned(self, partitions):
+            threads.append(threading.get_ident())
+
+    await c.subscribe(["t"], Recording())
+    await c.rebalance([TopicPartition("t", 0)])
+    tp = TopicPartition("t", 0)
+    await c.commit_async({tp: OffsetAndMetadata(1)},
+                         callback=lambda o, e: threads.append(threading.get_ident()))
+    assert len(threads) == 2
+    assert set(threads) == {main}
     await c.close()

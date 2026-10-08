@@ -373,6 +373,61 @@ MetadataFields read_metadata(const kafka_producer_RecordMetadata_t* metadata) {
   return out;
 }
 
+// Copies an OWNED `metrics()` map of owned `kafka_common_MetricName_t *` ->
+// owned `kafka_common_metrics_KafkaMetric_t *` (the shape both the producer
+// and the consumer return) into the proto list, then destroys the map, which
+// frees both sides of every entry.
+void metrics_map_to_proto(kafka_Map_t* map, MetricList* out) {
+  const int32_t n = kafka_Map_size(map);
+  for (int32_t i = 0; i < n; i++) {
+    Metric* m = out->add_metrics();
+    const auto* name = static_cast<const kafka_common_MetricName_t*>(kafka_Map_key(map, i));
+    const auto* metric =
+        static_cast<const kafka_common_metrics_KafkaMetric_t*>(kafka_Map_value(map, i));
+    const char* metric_name = kafka_common_MetricName_name(name);
+    const char* group = kafka_common_MetricName_group(name);
+    const char* desc = kafka_common_MetricName_description(name);
+    m->set_name(metric_name ? metric_name : "");
+    m->set_group(group ? group : "");
+    m->set_description(desc ? desc : "");
+    // tags(): an owned map of `char *` -> `char *`.
+    kafka_Map_t* tags = kafka_common_MetricName_tags(name);
+    const int32_t tn = kafka_Map_size(tags);
+    for (int32_t t = 0; t < tn; t++) {
+      const char* k = static_cast<const char*>(kafka_Map_key(tags, t));
+      const char* v = static_cast<const char*>(kafka_Map_value(tags, t));
+      (*m->mutable_tags())[k ? k : ""] = v ? v : "";
+    }
+    kafka_Map_destroy(tags);
+    // metricValue(): an owned snapshot of the reading, taken through the
+    // metric's `Metric` view (borrowed from the KafkaMetric handle).
+    kafka_common_MetricValue_t* value =
+        kafka_common_Metric_metric_value(kafka_common_metrics_KafkaMetric__as_Metric(metric));
+    // One typed accessor per variant, selected by `__enum` (each accessor
+    // returns a sentinel for the other variants, so the switch comes first).
+    switch (kafka_common_MetricValue__enum(value)) {
+      case kafka_common_MetricValue_e_string: {
+        // Borrowed until the value handle is destroyed below.
+        const char* s = kafka_common_MetricValue_as_string(value);
+        m->set_string_value(s ? s : "");
+        break;
+      }
+      case kafka_common_MetricValue_e_long_:
+        m->set_long_value(kafka_common_MetricValue_as_long(value));
+        break;
+      case kafka_common_MetricValue_e_int_:
+        m->set_int_value(kafka_common_MetricValue_as_int(value));
+        break;
+      case kafka_common_MetricValue_e_double_:
+      default:
+        m->set_double_value(kafka_common_MetricValue_as_double(value));
+        break;
+    }
+    kafka_common_MetricValue_destroy(value);
+  }
+  kafka_Map_destroy(map);
+}
+
 // Defined in the consumer section below; reused by the producer PartitionsFor.
 void node_to_proto(const kafka_common_Node_t* node, Node* dst);
 void partition_info_to_proto(const kafka_common_PartitionInfo_t* info, PartitionInfo* dst);
@@ -405,10 +460,12 @@ std::string offset_key(const std::string& topic, int32_t partition) {
 // Thread-safe per-client log of user-callback invocations.
 //
 // The mutex is mandatory, not defensive: every FFI callback here runs on the
-// client's own dispatcher thread, while GetCallbackLog is served on a gRPC
-// worker thread. It is deliberately a *separate* mutex from the service's
-// id-map `mu_`, so a callback firing mid-poll never has to wait behind an
-// in-flight CreateX / Close.
+// gRPC worker thread that is inside the blocking C call driving it (the
+// consumer's poll / close / unsubscribe for the listener and commit callbacks,
+// the producer's `execute_callbacks` pump for delivery reports), while
+// GetCallbackLog is served on another worker thread. It is deliberately a
+// *separate* mutex from the service's id-map `mu_`, so a callback firing
+// mid-poll never has to wait behind an in-flight CreateX / Close.
 class CallbackLog {
  public:
   void append(uint64_t client_id, CallbackLogEntry entry) {
@@ -423,18 +480,17 @@ class CallbackLog {
   // grpc_server.py / grpc_server_async.py, whose service-level CallbackLog is
   // likewise never popped on Close.
   //
-  // Post-close reads of the *consumer* log are *eventually* consistent on this
-  // backend, though: an FFI callback is enqueued on the client's dispatcher
-  // thread and appended when that job runs, and neither `..._close` nor
-  // `..._destroy` joins the dispatcher. The Python servers append synchronously
-  // in-process and so have no such window. Callers that assert on entry counts
-  // must therefore poll (`wait_for_kind` / `wait_for_kind_settled` /
-  // `poll_until_kind` on the Rust side) rather than read once. The *producer*
-  // log has no such window any more: its delivery callbacks are queued on the
-  // producer's callback vector and this server pumps them on the RPC thread
-  // (after a Send's future resolved, in Flush / Close, and in GetCallbackLog
-  // itself), so an entry is appended before the RPC that completed the record
-  // returns.
+  // Reads are consistent with the RPC that drove the callback, for both
+  // clients. The consumer uses only the BLOCKING C entry points, which invoke
+  // the listener / commit callback directly on the calling thread (CLAUDE.md
+  // §4 rule 5) — the entry is appended, and the result reported, before the
+  // poll / commit / close RPC returns. (Before the Phase 3 FFI rewrite the
+  // consumer's callbacks were jobs on a detached dispatcher thread, and
+  // post-close reads had to poll.) The producer's delivery callbacks are queued
+  // on the producer's callback vector and this server pumps them on the RPC
+  // thread (after a Send's future resolved, in Flush / Close, and in
+  // GetCallbackLog itself), so an entry is appended before the RPC that
+  // completed the record returns.
   void fill(uint64_t client_id, CallbackLogResponse* resp) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = entries_.find(client_id);
@@ -447,146 +503,159 @@ class CallbackLog {
   std::unordered_map<uint64_t, std::vector<CallbackLogEntry>> entries_;
 };
 
-// What a C callback needs in order to find its log: the `user_data` for every
-// callback this server registers.
+// What a C callback needs in order to find its log: the `self` of every
+// interface registration this server makes (`kafka_producer_Callback_t`,
+// `kafka_consumer_ConsumerRebalanceListener_t`,
+// `kafka_consumer_OffsetCommitCallback_t`).
 //
 // Exactly one heap instance per client, allocated in CreateProducer /
 // CreateConsumer and owned by the service's `log_states_` map — NOT by any
-// individual callback registration. That is what makes every `user_data_destroy`
-// argument below `nullptr`, and it is deliberate:
+// individual registration. The C interfaces have no destroy hook for `self`
+// (CLAUDE.md §4 rule 3: the caller owns it and keeps it alive until the
+// registration is released), and the release points differ per interface:
 //
-//   - a rebalance listener is released only by a *replacing* subscribe or by
-//     consumer destroy (never by unsubscribe), and a later re-subscribe must be
-//     able to reuse the same state;
-//   - a `kafka_producer_Callback_t` (the delivery callback's registration) has
-//     no destroy hook for its `self` either: the caller owns `self` and must
-//     keep it alive until the callback fired, so a per-send allocation would
-//     have to be freed by the callback itself — and then leak on the
-//     validation-failure path where the callback is documented not to fire.
+//   - a rebalance listener's `self` must live until the next `subscribe_*`,
+//     `unsubscribe` or the consumer's destruction, and a later re-subscribe
+//     must be able to reuse the same state;
+//   - a commit callback's `self` must live until `onComplete` fired (or the
+//     consumer was destroyed);
+//   - a delivery callback's `self` must live until the callback fired, so a
+//     per-send allocation would have to be freed by the callback itself — and
+//     then leak on the validation-failure path where the callback is
+//     documented not to fire.
 //
 // The state is **never freed before the service is destroyed** — it is
 // session-lifetime, held by `log_states_` as a `unique_ptr` that `Close` does
-// not erase.
-//
-// It used to be `delete`d in Close right after `..._destroy(client)` returned,
-// on the premise that destroying the client drops the listener / commit
-// adapters so no callback could still reference it. That premise is false for
-// the consumer: its destroy does not *join* the dispatcher thread that actually
-// runs the C callback, it deliberately detaches it (`src/ffi/consumer.rs`),
-// and the Rust-side callback only *enqueues* the C callback as a dispatcher
-// job. A queued `log_commit_complete(..., state)` could therefore still
-// dereference `state->log` after the `delete` — a use-after-free. (The
-// producer's callbacks are different since the Phase 2 FFI rewrite: they are
-// queued on the producer's callback vector and run only when this server pumps
-// `kafka_producer_Producer_execute_callbacks`, and `_destroy` runs the ones
-// still pending before returning — but the state is kept session-long for both
-// clients for uniformity.) Keeping the state alive for the whole session also
+// not erase. `_destroy` on either client runs the callbacks still pending
+// before returning (so each fires exactly once), which would make freeing the
+// state right after Close safe today; keeping it for the whole session also
 // removes the `log_state_for()`-returns-nullptr-after-Close race in Send /
 // CommitAsync and the leak for a client that is never Closed (neither service
 // impl has a destructor).
 struct LogState {
   CallbackLog* log;
   uint64_t client_id;
+  // The consumer's `Consumer` view, for `kafka_consumer_Consumer_set_callback_result`
+  // (informational there — the lookup is by callback_id — but named anyway).
+  // nullptr for a producer's state.
+  const kafka_consumer_Consumer_t* consumer = nullptr;
 };
 
-// Shared body of the three rebalance trampolines. The callee owns the delivered
-// TopicPartitionList and must destroy it; returning NULL means the listener
-// succeeded (a non-null error would fail the rebalance, like a throwing Java
-// listener).
-kafka_common_Error_t* log_rebalance(kafka_common_TopicPartitionList_t* partitions,
-                                        void* user_data, const char* kind) {
-  auto* state = static_cast<LogState*>(user_data);
+// Shared body of the three rebalance trampolines, the C implementation of a
+// ConsumerRebalanceListener method (CLAUDE.md §4 rule 3). `partitions` is
+// BORROWED for the call (a `kafka_List_t` of `kafka_common_TopicPartition_t *`,
+// never destroyed here). The method is `async` in Rust, so it returns void and
+// MUST report its result exactly once through
+// `kafka_consumer_Consumer_set_callback_result`: NULL for success (an owned
+// `kafka_common_Error_t *` would fail the rebalance, like a throwing Java
+// listener). This server reports synchronously from inside the method, the
+// model for a blocking-entry-point caller: the method runs on the gRPC worker
+// thread that is inside the consumer's poll() / close() / unsubscribe(), and
+// the membership state machine does not advance until the report
+// (consumer-threading.md §31).
+void log_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_id,
+                   const char* kind) {
+  auto* state = static_cast<LogState*>(self);
   CallbackLogEntry entry;
   entry.set_kind(kind);
   if (partitions != nullptr) {
-    int32_t n = kafka_common_TopicPartitionList_count(partitions);
+    const int32_t n = kafka_List_size(partitions);
     for (int32_t i = 0; i < n; i++) {
-      const kafka_common_TopicPartition_t* tp =
-          kafka_common_TopicPartitionList_get(partitions, i);
+      const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
       CallbackLogPartition* p = entry.add_partitions();
       const char* topic = kafka_common_TopicPartition_topic(tp);
       p->set_topic(topic ? topic : "");
       p->set_partition(kafka_common_TopicPartition_partition(tp));
     }
-    kafka_common_TopicPartitionList_destroy(partitions);
   }
   state->log->append(state->client_id, std::move(entry));
-  return nullptr;
+  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
 }
 
-extern "C" kafka_common_Error_t* log_partitions_assigned(
-    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
-  return log_rebalance(partitions, user_data, KIND_ASSIGNED);
+extern "C" void log_partitions_assigned(void* self, const kafka_List_t* partitions,
+                                        int64_t callback_id) {
+  log_rebalance(self, partitions, callback_id, KIND_ASSIGNED);
 }
 
-extern "C" kafka_common_Error_t* log_partitions_revoked(
-    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
-  return log_rebalance(partitions, user_data, KIND_REVOKED);
+extern "C" void log_partitions_revoked(void* self, const kafka_List_t* partitions,
+                                       int64_t callback_id) {
+  log_rebalance(self, partitions, callback_id, KIND_REVOKED);
 }
 
-// Passed explicitly rather than left NULL (which would make the adapter
+// Passed explicitly rather than left NULL (which would make the registration
 // reproduce Java's "onPartitionsLost delegates to onPartitionsRevoked" default),
 // so a lost callback is distinguishable from a revoke in the log.
-extern "C" kafka_common_Error_t* log_partitions_lost(
-    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
-  return log_rebalance(partitions, user_data, KIND_LOST);
+extern "C" void log_partitions_lost(void* self, const kafka_List_t* partitions,
+                                    int64_t callback_id) {
+  log_rebalance(self, partitions, callback_id, KIND_LOST);
 }
 
-// Move the error message into `entry` and destroy the handle (the callee owns
-// every non-null handle delivered to a callback).
-void take_error_into(CallbackLogEntry* entry, kafka_common_Error_t* error) {
+// Copies a BORROWED error's message into `entry`; nothing is destroyed.
+void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error) {
   if (error == nullptr) return;
   const char* msg = kafka_common_Error_message(error);
   entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
-  kafka_common_Error_destroy(error);
 }
 
-// Copy an owned OffsetMap into `entry`'s partitions + offsets, then destroy it.
-void take_offsets_into(CallbackLogEntry* entry, kafka_consumer_OffsetMap_t* offsets) {
+// Copies a BORROWED offsets map (`kafka_common_TopicPartition_t *` ->
+// `kafka_consumer_OffsetAndMetadata_t *`) into `entry`'s partitions + offsets;
+// nothing is destroyed.
+void copy_offsets_into(CallbackLogEntry* entry, const kafka_Map_t* offsets) {
   if (offsets == nullptr) return;
-  int32_t n = kafka_consumer_OffsetMap_count(offsets);
+  const int32_t n = kafka_Map_size(offsets);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_common_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
+    const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, i));
     const char* raw_topic = kafka_common_TopicPartition_topic(tp);
     const std::string topic = raw_topic ? raw_topic : "";
     const int32_t partition = kafka_common_TopicPartition_partition(tp);
     CallbackLogPartition* p = entry->add_partitions();
     p->set_topic(topic);
     p->set_partition(partition);
-    const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(offsets, i);
+    const auto* v = static_cast<const kafka_consumer_OffsetAndMetadata_t*>(kafka_Map_value(offsets, i));
     (*entry->mutable_offsets())[offset_key(topic, partition)] =
         kafka_consumer_OffsetAndMetadata_offset(v);
   }
-  kafka_consumer_OffsetMap_destroy(offsets);
 }
 
-extern "C" void log_commit_complete(kafka_consumer_OffsetMap_t* offsets,
-                                    kafka_common_Error_t* error, void* user_data) {
-  auto* state = static_cast<LogState*>(user_data);
+// The `on_complete` of the kafka_consumer_OffsetCommitCallback_t CommitAsync
+// registers with with_callback; `self` is the consumer's LogState. Both
+// `offsets` and `error` are BORROWED for the call (the FFI frees its copies
+// after it returns), so nothing is destroyed here. Java's onComplete is void,
+// so the mandatory report is always NULL: the result is ignored, the report
+// tells the consumer the callback finished. It runs on the gRPC worker thread
+// inside the blocking consumer call that drove the callback (the next poll /
+// commit / close after the commit completed).
+extern "C" void log_commit_complete(void* self, const kafka_Map_t* offsets,
+                                    const kafka_common_Error_t* error, int64_t callback_id) {
+  auto* state = static_cast<LogState*>(self);
   CallbackLogEntry entry;
   entry.set_kind(KIND_COMMIT);
-  take_offsets_into(&entry, offsets);
-  take_error_into(&entry, error);
+  copy_offsets_into(&entry, offsets);
+  copy_error_into(&entry, error);
   state->log->append(state->client_id, std::move(entry));
+  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
 }
 
 // Java's commitAsync(offsets, null) is legal, but
-// kafka_consumer_Consumer_commit_async_offsets_with_callback's `callback`
-// parameter is not nullable and there is no plain `..._commit_async_offsets`.
+// kafka_consumer_Consumer_commit_async_with_offsets_callback's `callback`
+// parameter is not nullable and there is no plain `..._commit_async_with_offsets`.
 // So an explicit-offsets CommitAsync without with_callback gets this no-op,
-// which still has to free the handles it is given.
-extern "C" void discard_commit_complete(kafka_consumer_OffsetMap_t* offsets,
-                                        kafka_common_Error_t* error, void* /*user_data*/) {
-  if (offsets != nullptr) kafka_consumer_OffsetMap_destroy(offsets);
-  if (error != nullptr) kafka_common_Error_destroy(error);
+// which still has to report completion (an implementation that never reports
+// hangs the consumer's next blocking call, as a Java callback that never
+// returns would).
+extern "C" void discard_commit_complete(void* self, const kafka_Map_t* /*offsets*/,
+                                        const kafka_common_Error_t* /*error*/,
+                                        int64_t callback_id) {
+  auto* state = static_cast<LogState*>(self);
+  kafka_consumer_Consumer_set_callback_result(state->consumer, callback_id, nullptr);
 }
 
 // The `on_completion` of the kafka_producer_Callback_t registered by Send with
-// with_callback; `self` is the producer's LogState. Unlike the consumer
-// callbacks above, both arguments are BORROWED for the call (the FFI frees
-// them after it returns), so nothing is destroyed here. It runs on whichever
-// gRPC worker thread pumps kafka_producer_Producer_execute_callbacks (see
-// pump_callbacks below), never on a Rust thread.
+// with_callback; `self` is the producer's LogState. Both arguments are BORROWED
+// for the call (the FFI frees them after it returns), so nothing is destroyed
+// here. It runs on whichever gRPC worker thread pumps
+// kafka_producer_Producer_execute_callbacks (see pump_callbacks below), never
+// on a Rust thread.
 extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* metadata,
                              const kafka_common_Error_t* error) {
   auto* state = static_cast<LogState*>(self);
@@ -603,25 +672,24 @@ extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* 
     p->set_partition(fields.partition);
     (*entry.mutable_offsets())[offset_key(fields.topic, fields.partition)] = fields.offset;
   }
-  if (error != nullptr) {
-    const char* msg = kafka_common_Error_message(error);
-    entry.set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
-  }
+  copy_error_into(&entry, error);
   state->log->append(state->client_id, std::move(entry));
 }
 
 // Server-side group-metadata handles, by id. ConsumerService.GroupMetadata
-// adds the handle kafka_consumer_Consumer_group_metadata returns, and
-// ProducerService.SendOffsetsToTransaction passes it back to the FFI: the C API
-// has no ConsumerGroupMetadata constructor, so a handle the consumer handed out
-// is the only one the producer can take. ConsumerService.ReleaseGroupMetadata
-// removes it, when the Rust client drops its last reference.
+// adds the OWNED handle kafka_consumer_Consumer_group_metadata returns, and
+// ProducerService.SendOffsetsToTransaction passes it back to the FFI, so the
+// producer gets exactly the metadata the consumer handed out (the C API's own
+// kafka_consumer_ConsumerGroupMetadata_new builds a C-implemented interface,
+// which would make this server, not the consumer, the source of the fields).
+// ConsumerService.ReleaseGroupMetadata removes it, when the Rust client drops
+// its last reference.
 //
 // Handles sit in shared_ptrs whose deleter is
 // kafka_consumer_ConsumerGroupMetadata_destroy, so a release that races a
 // send_offsets_to_transaction destroys the handle only after the FFI call
-// returns. The handle holds its own reference to the metadata, so it stays
-// valid after its consumer closes.
+// returns. The handle caches its own copy of the metadata, so it stays valid
+// after its consumer closes or is destroyed.
 class GroupMetadataStore {
  public:
   uint64_t add(kafka_consumer_ConsumerGroupMetadata_t* handle) {
@@ -995,7 +1063,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     // A C-built map holds borrowed elements: the FFI copies what it needs
     // during the call, and we free the entries and the map afterwards. The
-    // marshaling matches kafka_consumer_Consumer_commit_sync_offsets via
+    // marshaling matches kafka_consumer_Consumer_commit_sync_with_offsets via
     // read_offset_map: an absent leader_epoch is -1 ("no epoch"), and an
     // absent metadata entry means the empty string.
     kafka_Map_t* offsets = kafka_Map_new();
@@ -1108,55 +1176,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("no metrics for producer " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    MetricList* out = resp->mutable_metrics();
-    const int32_t n = kafka_Map_size(map);
-    for (int32_t i = 0; i < n; i++) {
-      Metric* m = out->add_metrics();
-      const auto* name = static_cast<const kafka_common_MetricName_t*>(kafka_Map_key(map, i));
-      const auto* metric =
-          static_cast<const kafka_common_metrics_KafkaMetric_t*>(kafka_Map_value(map, i));
-      const char* metric_name = kafka_common_MetricName_name(name);
-      const char* group = kafka_common_MetricName_group(name);
-      const char* desc = kafka_common_MetricName_description(name);
-      m->set_name(metric_name ? metric_name : "");
-      m->set_group(group ? group : "");
-      m->set_description(desc ? desc : "");
-      // tags(): an owned map of `char *` -> `char *`.
-      kafka_Map_t* tags = kafka_common_MetricName_tags(name);
-      const int32_t tn = kafka_Map_size(tags);
-      for (int32_t t = 0; t < tn; t++) {
-        const char* k = static_cast<const char*>(kafka_Map_key(tags, t));
-        const char* v = static_cast<const char*>(kafka_Map_value(tags, t));
-        (*m->mutable_tags())[k ? k : ""] = v ? v : "";
-      }
-      kafka_Map_destroy(tags);
-      // metricValue(): an owned snapshot of the reading, taken through the
-      // metric's `Metric` view (borrowed from the KafkaMetric handle).
-      kafka_common_MetricValue_t* value =
-          kafka_common_Metric_metric_value(kafka_common_metrics_KafkaMetric__as_Metric(metric));
-      // One typed accessor per variant, selected by `__enum` (each accessor
-      // returns a sentinel for the other variants, so the switch comes first).
-      switch (kafka_common_MetricValue__enum(value)) {
-        case kafka_common_MetricValue_e_string: {
-          // Borrowed until the value handle is destroyed below.
-          const char* s = kafka_common_MetricValue_as_string(value);
-          m->set_string_value(s ? s : "");
-          break;
-        }
-        case kafka_common_MetricValue_e_long_:
-          m->set_long_value(kafka_common_MetricValue_as_long(value));
-          break;
-        case kafka_common_MetricValue_e_int_:
-          m->set_int_value(kafka_common_MetricValue_as_int(value));
-          break;
-        case kafka_common_MetricValue_e_double_:
-        default:
-          m->set_double_value(kafka_common_MetricValue_as_double(value));
-          break;
-      }
-      kafka_common_MetricValue_destroy(value);
-    }
-    kafka_Map_destroy(map);
+    metrics_map_to_proto(map, resp->mutable_metrics());
     return grpc::Status::OK;
   }
 
@@ -1263,7 +1283,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
 // Build parallel (topics, partitions) C arrays from a repeated TopicPartition.
 // The char* point into the proto strings, which outlive the synchronous FFI
-// call, and the FFI copies them into owned Rust data before returning.
+// call, and the FFI copies them into owned Rust data before returning. Used by
+// the admin service's still-old-style entry points (the consumer ones take
+// `kafka_List_t`s now, see TpList below).
 struct TpArrays {
   std::vector<const char*> topics;
   std::vector<int32_t> partitions;
@@ -1282,43 +1304,10 @@ TpArrays tp_arrays(
   return a;
 }
 
-// The five parallel arrays the commit_*_offsets FFI entry points take. Same
-// pointer-lifetime rule as TpArrays: the char* point into the proto, which
-// outlives the synchronous FFI call.
-//
-// Shared by CommitSync and CommitAsync — the offsets shape is identical (the
-// CommitAsyncRequest.offsets field deliberately reuses OffsetMapEntry).
-struct OffsetArrays {
-  std::vector<const char*> topics;
-  std::vector<int32_t> partitions;
-  std::vector<int64_t> offsets;
-  std::vector<int32_t> leader_epochs;
-  std::vector<const char*> metadata;
-  int32_t count() const { return static_cast<int32_t>(topics.size()); }
-};
-
-OffsetArrays offset_arrays(
-    const ::google::protobuf::RepeatedPtrField<OffsetMapEntry>& entries) {
-  OffsetArrays a;
-  a.topics.reserve(entries.size());
-  a.partitions.reserve(entries.size());
-  a.offsets.reserve(entries.size());
-  a.leader_epochs.reserve(entries.size());
-  a.metadata.reserve(entries.size());
-  for (const auto& e : entries) {
-    a.topics.push_back(e.partition().topic().c_str());
-    a.partitions.push_back(e.partition().partition());
-    a.offsets.push_back(e.offset().offset());
-    a.leader_epochs.push_back(e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1);
-    a.metadata.push_back(e.offset().metadata().c_str());
-  }
-  return a;
-}
-
-// Borrows a `repeated string` field as the `const char* const*` array the C
-// entry points take. The pointers alias the protobuf-owned strings, which
-// outlive the call, so nothing is copied; an empty field yields a null pointer
-// with count 0, which every entry point reads as "no values".
+// Borrows a `repeated string` field as the `const char* const*` array the
+// admin C entry points take. The pointers alias the protobuf-owned strings,
+// which outlive the call, so nothing is copied; an empty field yields a null
+// pointer with count 0, which every entry point reads as "no values".
 struct StringArray {
   explicit StringArray(const ::google::protobuf::RepeatedPtrField<std::string>& values) {
     ptrs.reserve(values.size());
@@ -1328,6 +1317,164 @@ struct StringArray {
   int32_t count() const { return static_cast<int32_t>(ptrs.size()); }
 
   std::vector<const char*> ptrs;
+};
+
+// A consumer as CreateConsumer built it. `view` is the `Consumer` interface
+// handle (`kafka_consumer_Consumer_t`, Rust's `Box<dyn Consumer>`) every
+// operation takes. For a MockConsumer it is the `__as_Consumer` view BORROWED
+// from the class handle `mock`, valid until that handle is destroyed and never
+// passed to `kafka_consumer_Consumer_destroy`. For a KafkaConsumer there is no
+// class handle at all — `kafka_consumer_KafkaConsumer_new` delivers the boxed
+// `Consumer` itself — so `view` is OWNED and freed with
+// `kafka_consumer_Consumer_destroy`. Exactly one of the two shapes applies,
+// selected by `mock != nullptr`.
+struct ConsumerEntry {
+  kafka_consumer_MockConsumer_t* mock = nullptr;
+  kafka_consumer_Consumer_t* view = nullptr;
+
+  // Frees whichever handle owns the consumer; the view is invalid afterwards.
+  // Both destroys close the consumer if close() never ran and run the
+  // callbacks still queued on it — none here, since this server only uses the
+  // blocking entry points, whose listener / commit callbacks fire inline.
+  void destroy() {
+    if (mock != nullptr) {
+      kafka_consumer_MockConsumer_destroy(mock);
+    } else if (view != nullptr) {
+      kafka_consumer_Consumer_destroy(view);
+    }
+    mock = nullptr;
+    view = nullptr;
+  }
+};
+
+// C-built containers hold BORROWED elements: the FFI copies what it needs
+// during the call and the builder frees the elements and the container
+// afterwards (the rule SendOffsetsToTransaction applies by hand). The RAII
+// wrappers below do that freeing in their destructors, so every early return
+// in a handler releases them.
+
+// A `kafka_List_t` of owned `kafka_common_TopicPartition_t *` built from a
+// repeated TopicPartition — the shape `assign`, `seek_to_*`, `pause`,
+// `resume`, `committed`, `beginning_offsets` and `end_offsets` take.
+struct TpList {
+  explicit TpList(const ::google::protobuf::RepeatedPtrField<TopicPartition>& tps)
+      : list(kafka_List_new()) {
+    handles.reserve(tps.size());
+    for (const auto& tp : tps) {
+      kafka_common_TopicPartition_t* handle =
+          kafka_common_TopicPartition_new(tp.topic().c_str(), tp.partition());
+      handles.push_back(handle);
+      kafka_List_add(list, handle);
+    }
+  }
+  ~TpList() {
+    for (auto* handle : handles) kafka_common_TopicPartition_destroy(handle);
+    kafka_List_destroy(list);
+  }
+  TpList(const TpList&) = delete;
+  TpList& operator=(const TpList&) = delete;
+
+  kafka_List_t* list;
+  std::vector<kafka_common_TopicPartition_t*> handles;
+};
+
+// A `kafka_List_t` of `char *` aliasing a `repeated string` field, for
+// `subscribe_with_topics`. The pointers alias the protobuf-owned strings,
+// which outlive the synchronous call, and the FFI copies them, so nothing is
+// copied here and only the list itself is freed.
+struct BorrowedStringList {
+  explicit BorrowedStringList(const ::google::protobuf::RepeatedPtrField<std::string>& values)
+      : list(kafka_List_new()) {
+    for (const std::string& value : values) {
+      kafka_List_add(list, const_cast<char*>(value.c_str()));
+    }
+  }
+  ~BorrowedStringList() { kafka_List_destroy(list); }
+  BorrowedStringList(const BorrowedStringList&) = delete;
+  BorrowedStringList& operator=(const BorrowedStringList&) = delete;
+
+  kafka_List_t* list;
+};
+
+// A `kafka_Map_t` of owned `kafka_common_TopicPartition_t *` to owned
+// `kafka_consumer_OffsetAndMetadata_t *` built from repeated OffsetMapEntry —
+// the offsets `commit_sync_with_offsets` and
+// `commit_async_with_offsets_callback` take. Shared by CommitSync and
+// CommitAsync (CommitAsyncRequest.offsets deliberately reuses OffsetMapEntry).
+// The marshaling matches SendOffsetsToTransaction: an absent leader_epoch is
+// -1 ("no epoch"), the metadata string is passed as is.
+//
+// `error` is non-null when an entry failed Java's OffsetAndMetadata
+// constructor validation (negative offset), surfacing the
+// IllegalArgumentException it is; the map is then incomplete and must not be
+// passed on. The handler takes it with `take_error()`.
+struct OffsetMapHandles {
+  explicit OffsetMapHandles(const ::google::protobuf::RepeatedPtrField<OffsetMapEntry>& entries)
+      : map(kafka_Map_new()) {
+    partitions.reserve(entries.size());
+    offsets.reserve(entries.size());
+    for (const auto& e : entries) {
+      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
+      error = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+          e.offset().offset(), e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1,
+          e.offset().metadata().c_str(), &oam);
+      if (error != nullptr) return;
+      kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartition_new(e.partition().topic().c_str(), e.partition().partition());
+      partitions.push_back(tp);
+      offsets.push_back(oam);
+      kafka_Map_put(map, tp, oam);
+    }
+  }
+  ~OffsetMapHandles() {
+    for (auto* tp : partitions) kafka_common_TopicPartition_destroy(tp);
+    for (auto* oam : offsets) kafka_consumer_OffsetAndMetadata_destroy(oam);
+    kafka_Map_destroy(map);
+    if (error != nullptr) kafka_common_Error_destroy(error);
+  }
+  OffsetMapHandles(const OffsetMapHandles&) = delete;
+  OffsetMapHandles& operator=(const OffsetMapHandles&) = delete;
+
+  // Hands the construction error (owned) to the caller.
+  kafka_common_Error_t* take_error() {
+    kafka_common_Error_t* out = error;
+    error = nullptr;
+    return out;
+  }
+
+  kafka_Map_t* map;
+  kafka_common_Error_t* error = nullptr;
+  std::vector<kafka_common_TopicPartition_t*> partitions;
+  std::vector<kafka_consumer_OffsetAndMetadata_t*> offsets;
+};
+
+// A `kafka_Map_t` of owned `kafka_common_TopicPartition_t *` to `int64_t *`
+// (the timestamps to search) for `offsets_for_times`. `timestamps` is
+// reserved up front so the addresses handed to the map stay stable.
+struct TimestampMapHandles {
+  explicit TimestampMapHandles(
+      const ::google::protobuf::RepeatedPtrField<confluent::kafka::test::TimestampSpecEntry>& entries)
+      : map(kafka_Map_new()) {
+    partitions.reserve(entries.size());
+    timestamps.reserve(entries.size());
+    for (const auto& e : entries) {
+      kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartition_new(e.partition().topic().c_str(), e.partition().partition());
+      partitions.push_back(tp);
+      timestamps.push_back(e.timestamp());
+      kafka_Map_put(map, tp, &timestamps.back());
+    }
+  }
+  ~TimestampMapHandles() {
+    for (auto* tp : partitions) kafka_common_TopicPartition_destroy(tp);
+    kafka_Map_destroy(map);
+  }
+  TimestampMapHandles(const TimestampMapHandles&) = delete;
+  TimestampMapHandles& operator=(const TimestampMapHandles&) = delete;
+
+  kafka_Map_t* map;
+  std::vector<kafka_common_TopicPartition_t*> partitions;
+  std::vector<int64_t> timestamps;
 };
 
 void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
@@ -1366,10 +1513,33 @@ void partition_info_to_proto(const kafka_common_PartitionInfo_t* info,
                      [dst] { return dst->add_offline_replicas(); });
 }
 
+// Converts every `kafka_common_PartitionInfo_t *` of an owned list into the
+// proto returned by `add()`, then frees the list (which frees its elements).
+template <typename Add>
+void partition_info_list_to_proto(kafka_List_t* infos, Add add) {
+  if (infos == nullptr) return;
+  const int32_t n = kafka_List_size(infos);
+  for (int32_t i = 0; i < n; i++) {
+    partition_info_to_proto(
+        static_cast<const kafka_common_PartitionInfo_t*>(kafka_List_get(infos, i)), add());
+  }
+  kafka_List_destroy(infos);
+}
+
 void tp_to_proto(const kafka_common_TopicPartition_t* tp, TopicPartition* dst) {
   const char* topic = kafka_common_TopicPartition_topic(tp);
   dst->set_topic(topic ? topic : "");
   dst->set_partition(kafka_common_TopicPartition_partition(tp));
+}
+
+// Copies an OffsetAndMetadata handle into its proto. leader_epoch is -1 for
+// Java's Optional.empty(), in which case the optional proto field stays unset.
+void oam_to_proto(const kafka_consumer_OffsetAndMetadata_t* v, OffsetAndMetadata* dst) {
+  dst->set_offset(kafka_consumer_OffsetAndMetadata_offset(v));
+  const char* meta = kafka_consumer_OffsetAndMetadata_metadata(v);  // borrowed
+  dst->set_metadata(meta ? meta : "");
+  const int32_t epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v);
+  if (epoch >= 0) dst->set_leader_epoch(epoch);
 }
 
 class ConsumerServiceImpl final : public ConsumerService::Service {
@@ -1380,19 +1550,42 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   grpc::Status CreateConsumer(grpc::ServerContext*,
                               const CreateConsumerRequest* req,
                               CreateConsumerResponse* resp) override {
-    kafka_consumer_Consumer_t* consumer = nullptr;
+    ConsumerEntry entry;
     if (req->config().empty()) {
-      consumer = kafka_consumer_MockConsumer_new("earliest");
-    } else {
-      kafka_consumer_ConsumerProperties_t* props =
-          kafka_consumer_ConsumerProperties_new();
-      for (const auto& kv : req->config()) {
-        kafka_consumer_ConsumerProperties_put(props, kv.first.c_str(), kv.second.c_str());
+      // Empty config selects MockConsumer for client-side smoke testing. The
+      // mock has no deserializers: a record's key / value `void *` are the
+      // pointers add_record was given (this server never adds any).
+      kafka_common_Error_t* err = kafka_consumer_MockConsumer_new("earliest", &entry.mock);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
       }
-      kafka_common_Error_t* err = nullptr;
-      consumer = kafka_consumer_KafkaConsumer_new(props, &err);
-      kafka_consumer_ConsumerProperties_destroy(props);
-      if (consumer == nullptr) {
+      entry.view = kafka_consumer_MockConsumer__as_Consumer(entry.mock);
+    } else {
+      // ConsumerConfig takes a C-built map of `char *` -> `char *`, borrowed
+      // for the call (the config copies and validates them), so the proto
+      // strings can be handed over without copying and the map destroyed
+      // right after.
+      kafka_Map_t* props = kafka_Map_new();
+      for (const auto& kv : req->config()) {
+        kafka_Map_put(props, const_cast<char*>(kv.first.c_str()),
+                      const_cast<char*>(kv.second.c_str()));
+      }
+      kafka_consumer_ConsumerConfig_t* config = nullptr;
+      kafka_common_Error_t* err = kafka_consumer_ConsumerConfig_new(props, &config);
+      kafka_Map_destroy(props);
+      if (err != nullptr) {
+        // Validation happens here, not in KafkaConsumer_new: an invalid value
+        // fails the creation with the ConfigException Java would throw.
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      // NULL deserializers: keys and values cross as `kafka_Bytes_t *` owned by
+      // the records that delivered them (see record_to_proto). The config stays
+      // ours and can be destroyed right after the consumer was built from it.
+      err = kafka_consumer_KafkaConsumer_new(config, nullptr, nullptr, &entry.view);
+      kafka_consumer_ConsumerConfig_destroy(config);
+      if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
@@ -1400,11 +1593,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     const uint64_t id = next_id_.fetch_add(1);
     {
       std::lock_guard<std::mutex> lock(mu_);
-      consumers_[id] = consumer;
+      consumers_[id] = entry;
       // One stable LogState per consumer, shared by the rebalance listener and
       // every commit callback — see the struct's comment (session-lifetime; not
-      // freed at Close).
-      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
+      // freed at Close). It carries the consumer view the callbacks report to.
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id, entry.view});
     }
     resp->set_consumer_id(id);
     std::cerr << "c server: created consumer " << id << std::endl;
@@ -1415,25 +1608,23 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                          StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    std::vector<const char*> topics;
-    topics.reserve(req->topics_size());
-    for (const auto& t : req->topics()) topics.push_back(t.c_str());
+    BorrowedStringList topics(req->topics());
     kafka_common_Error_t* err = nullptr;
     if (req->with_listener()) {
       // A real ConsumerRebalanceListener whose invocations land in the callback
-      // log. user_data_destroy is NULL because the LogState is owned by
-      // log_states_, not by this registration (which a replacing subscribe
-      // releases while the state must survive). subscribe_with_listener consumes
-      // the listener handle even when it fails, so there is nothing to free here.
+      // log. Its `self` is the consumer's LogState, which lives for the whole
+      // session and so outlives every release point of the registration (the
+      // next subscribe_*, unsubscribe, or the consumer's destruction). The
+      // registration is COPIED by subscribe, success or failure, so the handle
+      // is destroyed right after.
       kafka_consumer_ConsumerRebalanceListener_t* listener =
           kafka_consumer_ConsumerRebalanceListener_new(
-              log_partitions_revoked, log_partitions_assigned, log_partitions_lost,
-              log_state_for(req->consumer_id()), /*user_data_destroy=*/nullptr);
-      err = kafka_consumer_Consumer_subscribe_with_listener(
-          c, topics.data(), static_cast<int32_t>(topics.size()), listener);
+              log_state_for(req->consumer_id()), log_partitions_revoked,
+              log_partitions_assigned, log_partitions_lost);
+      err = kafka_consumer_Consumer_subscribe_with_topics_listener(c, topics.list, listener);
+      kafka_consumer_ConsumerRebalanceListener_destroy(listener);
     } else {
-      err = kafka_consumer_Consumer_subscribe(
-          c, topics.data(), static_cast<int32_t>(topics.size()));
+      err = kafka_consumer_Consumer_subscribe_with_topics(c, topics.list);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1452,9 +1643,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                       StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    TpArrays a = tp_arrays(req->partitions());
-    kafka_common_Error_t* err =
-        kafka_consumer_Consumer_assign(c, a.topics.data(), a.partitions.data(), a.count());
+    TpList partitions(req->partitions());
+    kafka_common_Error_t* err = kafka_consumer_Consumer_assign(c, partitions.list);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1467,20 +1657,36 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_Error_t* err = nullptr;
-    kafka_consumer_ConsumerRecords_t* records =
-        kafka_consumer_Consumer_poll(c, req->timeout_ms(), &err);
-    if (records == nullptr) {
+    // Blocking poll: it runs on this gRPC worker thread, and any rebalance
+    // listener callback it drives is invoked inline (see log_rebalance), so
+    // the log entry is appended before this RPC answers.
+    kafka_consumer_ConsumerRecords_t* records = nullptr;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_poll(c, req->timeout_ms(), &records);
+    if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     ConsumerRecordList* list = resp->mutable_records();
-    int32_t n = kafka_consumer_ConsumerRecords_count(records);
-    for (int32_t i = 0; i < n; i++) {
-      const kafka_consumer_ConsumerRecord_t* rec =
-          kafka_consumer_ConsumerRecords_get(records, i);
-      record_to_proto(rec, list->add_records());
+    // Java's iterator order: partition by partition, in fetch order.
+    // partitions() is an owned list of owned TopicPartition handles;
+    // records(tp) an owned list of records BORROWED from the records handle
+    // (valid until it is destroyed, never passed to ConsumerRecord_destroy).
+    kafka_List_t* partitions = kafka_consumer_ConsumerRecords_partitions(records);
+    const int32_t pn = kafka_List_size(partitions);
+    for (int32_t p = 0; p < pn; p++) {
+      const auto* tp =
+          static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, p));
+      kafka_List_t* recs = kafka_consumer_ConsumerRecords_records_with_partition(records, tp);
+      const int32_t n = kafka_List_size(recs);
+      for (int32_t i = 0; i < n; i++) {
+        record_to_proto(static_cast<const kafka_consumer_ConsumerRecord_t*>(kafka_List_get(recs, i)),
+                        list->add_records());
+      }
+      kafka_List_destroy(recs);
     }
+    kafka_List_destroy(partitions);
+    // Also releases the fetch buffer the records' key / value bytes point into,
+    // which is why every record was copied out above.
     kafka_consumer_ConsumerRecords_destroy(records);
     return grpc::Status::OK;
   }
@@ -1493,10 +1699,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (req->offsets().empty()) {
       err = kafka_consumer_Consumer_commit_sync(c);
     } else {
-      OffsetArrays a = offset_arrays(req->offsets());
-      err = kafka_consumer_Consumer_commit_sync_offsets(
-          c, a.topics.data(), a.partitions.data(), a.offsets.data(), a.leader_epochs.data(),
-          a.metadata.data(), a.count());
+      OffsetMapHandles offsets(req->offsets());
+      if (offsets.error != nullptr) {
+        fill_proto_error(resp->mutable_error(), offsets.take_error());
+        return grpc::Status::OK;
+      }
+      err = kafka_consumer_Consumer_commit_sync_with_offsets(c, offsets.map);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1507,21 +1715,29 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
-    LogState* state = log_state_for(req->consumer_id());
-    // user_data_destroy is NULL for the same reason as in Subscribe: the
-    // LogState belongs to log_states_, not to this one registration.
-    if (req->offsets().empty()) {
-      err = req->with_callback()
-                ? kafka_consumer_Consumer_commit_async_with_callback(
-                      c, log_commit_complete, state, /*user_data_destroy=*/nullptr)
-                : kafka_consumer_Consumer_commit_async(c);
+    if (req->offsets().empty() && !req->with_callback()) {
+      err = kafka_consumer_Consumer_commit_async(c);
     } else {
-      OffsetArrays a = offset_arrays(req->offsets());
-      err = kafka_consumer_Consumer_commit_async_offsets_with_callback(
-          c, a.topics.data(), a.partitions.data(), a.offsets.data(), a.leader_epochs.data(),
-          a.metadata.data(), a.count(),
-          req->with_callback() ? log_commit_complete : discard_commit_complete, state,
-          /*user_data_destroy=*/nullptr);
+      // A real OffsetCommitCallback (or the reporting no-op, see
+      // discard_commit_complete) whose `self` is the consumer's LogState: it
+      // lives for the whole session, as required until onComplete fired. The
+      // registration is COPIED by commit_async_*, so the handle is destroyed
+      // right after the call, success or failure.
+      kafka_consumer_OffsetCommitCallback_t* callback = kafka_consumer_OffsetCommitCallback_new(
+          log_state_for(req->consumer_id()),
+          req->with_callback() ? log_commit_complete : discard_commit_complete);
+      if (req->offsets().empty()) {
+        err = kafka_consumer_Consumer_commit_async_with_callback(c, callback);
+      } else {
+        OffsetMapHandles offsets(req->offsets());
+        if (offsets.error != nullptr) {
+          kafka_consumer_OffsetCommitCallback_destroy(callback);
+          fill_proto_error(resp->mutable_error(), offsets.take_error());
+          return grpc::Status::OK;
+        }
+        err = kafka_consumer_Consumer_commit_async_with_offsets_callback(c, offsets.map, callback);
+      }
+      kafka_consumer_OffsetCommitCallback_destroy(callback);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1535,28 +1751,25 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    TpArrays a = tp_arrays(req->partitions());
-    kafka_consumer_OffsetMap_t* map = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_committed(
-        c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    TpList partitions(req->partitions());
+    // An owned map of owned TopicPartition -> owned OffsetAndMetadata handles;
+    // destroying the map frees both sides of every entry.
+    kafka_Map_t* map = nullptr;
+    kafka_common_Error_t* err = kafka_consumer_Consumer_committed(c, partitions.list, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     OffsetMap* out = resp->mutable_offsets();
-    int32_t n = kafka_consumer_OffsetMap_count(map);
+    const int32_t n = kafka_Map_size(map);
     for (int32_t i = 0; i < n; i++) {
       OffsetMapEntry* entry = out->add_entries();
-      tp_to_proto(kafka_consumer_OffsetMap_get_key(map, i), entry->mutable_partition());
-      const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(map, i);
-      OffsetAndMetadata* oam = entry->mutable_offset();
-      oam->set_offset(kafka_consumer_OffsetAndMetadata_offset(v));
-      const char* meta = kafka_consumer_OffsetAndMetadata_metadata(v);
-      oam->set_metadata(meta ? meta : "");
-      int32_t epoch = 0;
-      if (kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch)) oam->set_leader_epoch(epoch);
+      tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(map, i)),
+                  entry->mutable_partition());
+      oam_to_proto(static_cast<const kafka_consumer_OffsetAndMetadata_t*>(kafka_Map_value(map, i)),
+                   entry->mutable_offset());
     }
-    kafka_consumer_OffsetMap_destroy(map);
+    kafka_Map_destroy(map);
     return grpc::Status::OK;
   }
 
@@ -1568,9 +1781,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
+    kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(
+        req->partition().topic().c_str(), req->partition().partition());
     int64_t out = 0;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_position(
-        c, req->partition().topic().c_str(), req->partition().partition(), &out);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_position(c, tp, &out);
+    kafka_common_TopicPartition_destroy(tp);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     } else {
@@ -1583,16 +1798,25 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                     StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
+    kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(
+        req->partition().topic().c_str(), req->partition().partition());
     kafka_common_Error_t* err = nullptr;
     if (req->has_metadata() || req->has_leader_epoch()) {
-      err = kafka_consumer_Consumer_seek_with_metadata(
-          c, req->partition().topic().c_str(), req->partition().partition(),
+      // seek(TopicPartition, OffsetAndMetadata): the handle is borrowed for the
+      // call. Its constructor validation (negative offset) surfaces as the
+      // IllegalArgumentException it is; an absent leader_epoch is -1.
+      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
+      err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
           req->offset(), req->has_leader_epoch() ? req->leader_epoch() : -1,
-          req->has_metadata() ? req->metadata().c_str() : "");
+          req->has_metadata() ? req->metadata().c_str() : "", &oam);
+      if (err == nullptr) {
+        err = kafka_consumer_Consumer_seek_with_offset_and_metadata(c, tp, oam);
+        kafka_consumer_OffsetAndMetadata_destroy(oam);
+      }
     } else {
-      err = kafka_consumer_Consumer_seek(
-          c, req->partition().topic().c_str(), req->partition().partition(), req->offset());
+      err = kafka_consumer_Consumer_seek_with_offset(c, tp, req->offset());
     }
+    kafka_common_TopicPartition_destroy(tp);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -1631,36 +1855,31 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    std::vector<const char*> topics;
-    std::vector<int32_t> partitions;
-    std::vector<int64_t> timestamps;
-    for (const auto& e : req->timestamps()) {
-      topics.push_back(e.partition().topic().c_str());
-      partitions.push_back(e.partition().partition());
-      timestamps.push_back(e.timestamp());
-    }
-    kafka_consumer_OffsetAndTimestampMap_t* map = nullptr;
-    kafka_common_Error_t* err = kafka_consumer_Consumer_offsets_for_times(
-        c, topics.data(), partitions.data(), timestamps.data(),
-        static_cast<int32_t>(topics.size()), &map);
+    TimestampMapHandles timestamps(req->timestamps());
+    // An owned map of owned TopicPartition -> owned OffsetAndTimestamp handles;
+    // partitions the broker could not resolve are absent (Java's null values).
+    kafka_Map_t* map = nullptr;
+    kafka_common_Error_t* err =
+        kafka_consumer_Consumer_offsets_for_times(c, timestamps.map, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     OffsetAndTimestampMap* out = resp->mutable_offsets();
-    int32_t n = kafka_consumer_OffsetAndTimestampMap_count(map);
+    const int32_t n = kafka_Map_size(map);
     for (int32_t i = 0; i < n; i++) {
       OffsetAndTimestampMapEntry* entry = out->add_entries();
-      tp_to_proto(kafka_consumer_OffsetAndTimestampMap_get_key(map, i), entry->mutable_partition());
-      const kafka_consumer_OffsetAndTimestamp_t* v =
-          kafka_consumer_OffsetAndTimestampMap_get_value(map, i);
+      tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(map, i)),
+                  entry->mutable_partition());
+      const auto* v = static_cast<const kafka_consumer_OffsetAndTimestamp_t*>(kafka_Map_value(map, i));
       OffsetAndTimestamp* oat = entry->mutable_offset();
       oat->set_offset(kafka_consumer_OffsetAndTimestamp_offset(v));
       oat->set_timestamp(kafka_consumer_OffsetAndTimestamp_timestamp(v));
-      int32_t epoch = 0;
-      if (kafka_consumer_OffsetAndTimestamp_leader_epoch(v, &epoch)) oat->set_leader_epoch(epoch);
+      // -1 for Java's Optional.empty(): the optional proto field stays unset.
+      const int32_t epoch = kafka_consumer_OffsetAndTimestamp_leader_epoch(v);
+      if (epoch >= 0) oat->set_leader_epoch(epoch);
     }
-    kafka_consumer_OffsetAndTimestampMap_destroy(map);
+    kafka_Map_destroy(map);
     return grpc::Status::OK;
   }
 
@@ -1672,18 +1891,16 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_PartitionInfoList_t* infos = nullptr;
+    // An owned list of owned PartitionInfo handles: destroying the list frees
+    // the elements.
+    kafka_List_t* infos = nullptr;
     kafka_common_Error_t* err =
         kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_common_PartitionInfoList_count(infos);
-    for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, i), resp->add_partitions());
-    }
-    kafka_common_PartitionInfoList_destroy(infos);
+    partition_info_list_to_proto(infos, [resp] { return resp->add_partitions(); });
     return grpc::Status::OK;
   }
 
@@ -1695,26 +1912,31 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_TopicPartitionInfoMap_t* map = nullptr;
+    // An owned map of owned `char *` topic -> owned `kafka_List_t *` of owned
+    // PartitionInfo handles. Destroying the map frees the keys and the lists
+    // (with their elements), so the inner lists are read in place, not
+    // destroyed on their own.
+    kafka_Map_t* map = nullptr;
     kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     TopicListing* listing = resp->mutable_topics();
-    int32_t n = kafka_common_TopicPartitionInfoMap_count(map);
+    const int32_t n = kafka_Map_size(map);
     for (int32_t i = 0; i < n; i++) {
       TopicPartitionInfoEntry* entry = listing->add_topics();
-      const char* topic = kafka_common_TopicPartitionInfoMap_get_topic(map, i);
+      const char* topic = static_cast<const char*>(kafka_Map_key(map, i));
       entry->set_topic(topic ? topic : "");
-      const kafka_common_PartitionInfoList_t* infos =
-          kafka_common_TopicPartitionInfoMap_get_partitions(map, i);
-      int32_t pn = kafka_common_PartitionInfoList_count(infos);
+      const auto* infos = static_cast<const kafka_List_t*>(kafka_Map_value(map, i));
+      const int32_t pn = infos == nullptr ? 0 : kafka_List_size(infos);
       for (int32_t j = 0; j < pn; j++) {
-        partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, j), entry->add_partitions());
+        partition_info_to_proto(
+            static_cast<const kafka_common_PartitionInfo_t*>(kafka_List_get(infos, j)),
+            entry->add_partitions());
       }
     }
-    kafka_common_TopicPartitionInfoMap_destroy(map);
+    kafka_Map_destroy(map);
     return grpc::Status::OK;
   }
 
@@ -1726,8 +1948,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
-    fill_tp_list(list, resp);
+    fill_tp_list(kafka_consumer_Consumer_assignment(c), resp);
     return grpc::Status::OK;
   }
 
@@ -1739,8 +1960,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
-    fill_tp_list(list, resp);
+    fill_tp_list(kafka_consumer_Consumer_paused(c), resp);
     return grpc::Status::OK;
   }
 
@@ -1752,49 +1972,16 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_MetricMap_t* map = kafka_consumer_Consumer_metrics(c);
+    // An owned map of owned MetricName -> KafkaMetric handles, the same shape
+    // the producer returns; EMPTY (not null) while another operation holds the
+    // consumer's single-owner flag.
+    kafka_Map_t* map = kafka_consumer_Consumer_metrics(c);
     if (map == nullptr) {
-      // Single-owner guard rejected the call (concurrent access).
       *resp->mutable_error() = make_synthetic_error(
-          "concurrent access to consumer " + std::to_string(req->consumer_id()));
+          "no metrics for consumer " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    MetricList* out = resp->mutable_metrics();
-    int32_t n = kafka_consumer_MetricMap_count(map);
-    for (int32_t i = 0; i < n; i++) {
-      Metric* m = out->add_metrics();
-      const char* name = kafka_consumer_MetricMap_get_name(map, i);
-      const char* group = kafka_consumer_MetricMap_get_group(map, i);
-      const char* desc = kafka_consumer_MetricMap_get_description(map, i);
-      m->set_name(name ? name : "");
-      m->set_group(group ? group : "");
-      m->set_description(desc ? desc : "");
-      int32_t tn = kafka_consumer_MetricMap_get_tag_count(map, i);
-      for (int32_t t = 0; t < tn; t++) {
-        const char* k = kafka_consumer_MetricMap_get_tag_key(map, i, t);
-        const char* v = kafka_consumer_MetricMap_get_tag_value(map, i, t);
-        (*m->mutable_tags())[k ? k : ""] = v ? v : "";
-      }
-      // Kind constants mirror the Rust MetricValue variants; see
-      // METRIC_VALUE_* in src/ffi/common.rs.
-      switch (kafka_consumer_MetricMap_get_value_kind(map, i)) {
-        case 1: {
-          const char* s = kafka_consumer_MetricMap_get_value_string(map, i);
-          m->set_string_value(s ? s : "");
-          break;
-        }
-        case 2:
-          m->set_long_value(kafka_consumer_MetricMap_get_value_long(map, i));
-          break;
-        case 3:
-          m->set_int_value(kafka_consumer_MetricMap_get_value_int(map, i));
-          break;
-        default:
-          m->set_double_value(kafka_consumer_MetricMap_get_value_double(map, i));
-          break;
-      }
-    }
-    kafka_consumer_MetricMap_destroy(map);
+    metrics_map_to_proto(map, resp->mutable_metrics());
     return grpc::Status::OK;
   }
 
@@ -1806,15 +1993,16 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_StringList_t* list = kafka_consumer_Consumer_subscription(c);
+    // An owned, sorted list of owned `char *`; destroying the list frees them.
+    kafka_List_t* list = kafka_consumer_Consumer_subscription(c);
     StringList* out = resp->mutable_topics();
     if (list != nullptr) {
-      int32_t n = kafka_consumer_StringList_count(list);
+      const int32_t n = kafka_List_size(list);
       for (int32_t i = 0; i < n; i++) {
-        const char* s = kafka_consumer_StringList_get(list, i);
+        const char* s = static_cast<const char*>(kafka_List_get(list, i));
         out->add_values(s ? s : "");
       }
-      kafka_consumer_StringList_destroy(list);
+      kafka_List_destroy(list);
     }
     return grpc::Status::OK;
   }
@@ -1830,13 +2018,26 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
+    // An OWNED handle (its deleter is the GroupMetadataStore's), or NULL while
+    // another operation holds the consumer's single-owner flag — the
+    // ConcurrentModificationException Java would throw, which the sync getter
+    // has no error slot to return.
     kafka_consumer_ConsumerGroupMetadata_t* handle =
         kafka_consumer_Consumer_group_metadata(c);
+    if (handle == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "KafkaConsumer is not safe for multi-threaded access (consumer " +
+              std::to_string(req->consumer_id()) + " is busy)",
+          kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION);
+      return grpc::Status::OK;
+    }
     ConsumerGroupMetadata* fields = resp->mutable_group_metadata();
-    fields->set_group_id(kafka_consumer_ConsumerGroupMetadata_group_id(handle));
+    const char* group_id = kafka_consumer_ConsumerGroupMetadata_group_id(handle);
+    fields->set_group_id(group_id ? group_id : "");
     fields->set_generation_id(
         kafka_consumer_ConsumerGroupMetadata_generation_id(handle));
-    fields->set_member_id(kafka_consumer_ConsumerGroupMetadata_member_id(handle));
+    const char* member_id = kafka_consumer_ConsumerGroupMetadata_member_id(handle);
+    fields->set_member_id(member_id ? member_id : "");
     if (const char* instance =
             kafka_consumer_ConsumerGroupMetadata_group_instance_id(handle)) {
       fields->set_group_instance_id(instance);
@@ -1854,6 +2055,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   grpc::Status Wakeup(grpc::ServerContext*, const ConsumerIdRequest* req,
                       StatusResponse*) override {
+    // Always allowed, even while a blocking poll holds the consumer on another
+    // worker thread — that is its purpose.
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c != nullptr) kafka_consumer_Consumer_wakeup(c);
     return grpc::Status::OK;
@@ -1861,46 +2064,47 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   grpc::Status Close(grpc::ServerContext*, const ConsumerCloseRequest* req,
                      StatusResponse* resp) override {
-    kafka_consumer_Consumer_t* consumer = nullptr;
+    ConsumerEntry entry;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = consumers_.find(req->consumer_id());
       if (it != consumers_.end()) {
-        consumer = it->second;
+        entry = it->second;
         consumers_.erase(it);
       }
       // log_states_ is deliberately NOT erased — see LogState's comment.
-      // `Consumer_destroy` step 1 is `runtime.shutdown_background()`, which
-      // cancels the task awaiting a `dispatch_and_wait` job while leaving the
-      // already-queued job to run later.
     }
-    if (consumer == nullptr) {
+    if (entry.view == nullptr) {
       return grpc::Status::OK;  // idempotent
     }
-    // close() drains pending commit callbacks and fires on_partitions_lost, so
-    // the Rust side of those callbacks has run by the time this returns — i.e.
-    // their C callbacks have been enqueued on the dispatcher. It does not
-    // guarantee the dispatcher has run them; see CallbackLog's comment.
-    kafka_common_Error_t* err = kafka_consumer_Consumer_close(consumer);
+    // close() is a blocking entry point: the commit callbacks it drains and
+    // the on_partitions_lost / revoked it fires are invoked inline on this
+    // thread (reporting synchronously, see log_rebalance), so their log
+    // entries are appended before this returns and GetCallbackLog is
+    // consistent right after Close.
+    kafka_common_Error_t* err = kafka_consumer_Consumer_close(entry.view);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
-    // The log entries stay in callback_log_ and the LogState stays in
-    // log_states_, so GetCallbackLog still works post-close and a late
-    // dispatcher job still has valid user_data.
-    kafka_consumer_Consumer_destroy(consumer);
+    // Frees the class handle (mock) or the owned Consumer (KafkaConsumer); the
+    // view is invalid afterwards. The log entries stay in callback_log_ and the
+    // LogState stays in log_states_, so GetCallbackLog still works post-close.
+    entry.destroy();
     return grpc::Status::OK;
   }
 
   grpc::Status GetCallbackLog(grpc::ServerContext*, const CallbackLogRequest* req,
                               CallbackLogResponse* resp) override {
+    // Nothing to pump: the consumer's callbacks all fired inline on the RPC
+    // thread that drove them (blocking entry points only on this server).
     callback_log_.fill(req->consumer_id(), resp);
     return grpc::Status::OK;
   }
 
  private:
+  // The consumer's `Consumer` view, or nullptr for an unknown (or closed) id.
   kafka_consumer_Consumer_t* consumer_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = consumers_.find(id);
-    return it == consumers_.end() ? nullptr : it->second;
+    return it == consumers_.end() ? nullptr : it->second.view;
   }
 
   LogState* log_state_for(uint64_t id) {
@@ -1915,20 +2119,21 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
-  using TpListFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
-                                                  const char* const*, const int32_t*, int32_t);
+  // The void operations over a partition list (seek_to_*, pause, resume).
+  using TpListFn = kafka_common_Error_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*);
   grpc::Status tp_list_op(const TopicPartitionListRequest* req, StatusResponse* resp, TpListFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    TpArrays a = tp_arrays(req->partitions());
-    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
+    TpList partitions(req->partitions());
+    kafka_common_Error_t* err = fn(c, partitions.list);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
 
-  using LongOffFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
-                                                   const char* const*, const int32_t*, int32_t,
-                                                   kafka_consumer_LongOffsetMap_t**);
+  // beginning_offsets / end_offsets: an owned map of owned TopicPartition ->
+  // owned `int64_t *`; destroying the map frees both sides of every entry.
+  using LongOffFn = kafka_common_Error_t* (*)(kafka_consumer_Consumer_t*, const kafka_List_t*,
+                                              kafka_Map_t**);
   grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
                             LongOffFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
@@ -1937,68 +2142,102 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    TpArrays a = tp_arrays(req->partitions());
-    kafka_consumer_LongOffsetMap_t* map = nullptr;
-    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    TpList partitions(req->partitions());
+    kafka_Map_t* map = nullptr;
+    kafka_common_Error_t* err = fn(c, partitions.list, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     LongOffsetMap* out = resp->mutable_offsets();
-    int32_t n = kafka_consumer_LongOffsetMap_count(map);
+    const int32_t n = kafka_Map_size(map);
     for (int32_t i = 0; i < n; i++) {
       LongOffsetMapEntry* entry = out->add_entries();
-      tp_to_proto(kafka_consumer_LongOffsetMap_get_key(map, i), entry->mutable_partition());
-      entry->set_offset(kafka_consumer_LongOffsetMap_get_value(map, i));
+      tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(map, i)),
+                  entry->mutable_partition());
+      entry->set_offset(*static_cast<const int64_t*>(kafka_Map_value(map, i)));
     }
-    kafka_consumer_LongOffsetMap_destroy(map);
+    kafka_Map_destroy(map);
     return grpc::Status::OK;
   }
 
-  void fill_tp_list(kafka_common_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
+  // Copies an owned list of owned TopicPartition handles (assignment() /
+  // paused(): sorted, EMPTY while another operation holds the consumer) into
+  // the response and frees it.
+  void fill_tp_list(kafka_List_t* list, TopicPartitionListResponse* resp) {
     TopicPartitionList* out = resp->mutable_partitions();
     if (list != nullptr) {
-      int32_t n = kafka_common_TopicPartitionList_count(list);
+      const int32_t n = kafka_List_size(list);
       for (int32_t i = 0; i < n; i++) {
-        tp_to_proto(kafka_common_TopicPartitionList_get(list, i), out->add_partitions());
+        tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(list, i)),
+                    out->add_partitions());
       }
-      kafka_common_TopicPartitionList_destroy(list);
+      kafka_List_destroy(list);
     }
   }
 
+  // The record is BORROWED from the records handle (see Poll). The consumers
+  // here are built with NULL deserializers, so key() / value() are
+  // `kafka_Bytes_t *` owned by that handle and pointing into its fetch buffer
+  // (zero-copy); NULL is Java's null. Every byte is copied into the proto
+  // while the handle is alive, since destroying it releases the buffer.
   static void record_to_proto(const kafka_consumer_ConsumerRecord_t* rec, ConsumerRecord* dst) {
-    int32_t topic_len = 0;
-    const char* topic = kafka_consumer_ConsumerRecord_topic(rec, &topic_len);
-    if (topic != nullptr) dst->set_topic(std::string(topic, topic_len));
+    const char* topic = kafka_consumer_ConsumerRecord_topic(rec);  // borrowed, NUL-terminated
+    dst->set_topic(topic ? topic : "");
     dst->set_partition(kafka_consumer_ConsumerRecord_partition(rec));
     dst->set_offset(kafka_consumer_ConsumerRecord_offset(rec));
     dst->set_timestamp(kafka_consumer_ConsumerRecord_timestamp(rec));
-    dst->set_timestamp_type(kafka_consumer_ConsumerRecord_timestamp_type(rec));
-    int32_t key_len = 0;
-    const uint8_t* key = kafka_consumer_ConsumerRecord_key(rec, &key_len);
-    if (key != nullptr) dst->set_key(std::string(reinterpret_cast<const char*>(key), key_len));
-    int32_t val_len = 0;
-    const uint8_t* value = kafka_consumer_ConsumerRecord_value(rec, &val_len);
-    if (value != nullptr) dst->set_value(std::string(reinterpret_cast<const char*>(value), val_len));
-    int32_t epoch = 0;
-    if (kafka_consumer_ConsumerRecord_leader_epoch(rec, &epoch)) dst->set_leader_epoch(epoch);
-    int32_t hn = kafka_consumer_ConsumerRecord_header_count(rec);
-    for (int32_t i = 0; i < hn; i++) {
-      Header* h = dst->add_headers();
-      int32_t hk_len = 0;
-      const char* hk = kafka_consumer_ConsumerRecord_header_key(rec, i, &hk_len);
-      if (hk != nullptr) h->set_key(std::string(hk, hk_len));
-      int32_t hv_len = 0;
-      const uint8_t* hv = kafka_consumer_ConsumerRecord_header_value(rec, i, &hv_len);
-      if (hv != nullptr) h->set_value(std::string(reinterpret_cast<const char*>(hv), hv_len));
+    // The proto carries Java's TimestampType.id (-1 none, 0 create, 1 append);
+    // the accessor returns the borrowed enum singleton.
+    dst->set_timestamp_type(
+        kafka_common_record_TimestampType_id(kafka_consumer_ConsumerRecord_timestamp_type(rec)));
+    const auto* key = static_cast<const kafka_Bytes_t*>(kafka_consumer_ConsumerRecord_key(rec));
+    if (key != nullptr && key->data != nullptr) {
+      dst->set_key(std::string(reinterpret_cast<const char*>(key->data), key->len));
+    }
+    const auto* value = static_cast<const kafka_Bytes_t*>(kafka_consumer_ConsumerRecord_value(rec));
+    if (value != nullptr && value->data != nullptr) {
+      dst->set_value(std::string(reinterpret_cast<const char*>(value->data), value->len));
+    }
+    // -1 for Java's Optional.empty(): the optional proto field stays unset.
+    const int32_t epoch = kafka_consumer_ConsumerRecord_leader_epoch(rec);
+    if (epoch >= 0) dst->set_leader_epoch(epoch);
+    // headers(): BORROWED from the record. The RecordHeaders handle is only
+    // enumerable through its `Headers` view, whose accessor takes a mutable
+    // pointer although nothing below writes, hence the const_cast; the view
+    // itself is borrowed and never destroyed. toArray() is an owned list of
+    // BORROWED RecordHeader handles (never destroyed on their own).
+    const kafka_common_header_internals_RecordHeaders_t* headers =
+        kafka_consumer_ConsumerRecord_headers(rec);
+    if (headers != nullptr) {
+      kafka_common_header_Headers_t* headers_view =
+          kafka_common_header_internals_RecordHeaders__as_Headers(
+              const_cast<kafka_common_header_internals_RecordHeaders_t*>(headers));
+      kafka_List_t* all = kafka_common_header_Headers_to_array(headers_view);
+      const int32_t hn = kafka_List_size(all);
+      for (int32_t i = 0; i < hn; i++) {
+        const auto* record_header =
+            static_cast<const kafka_common_header_internals_RecordHeader_t*>(kafka_List_get(all, i));
+        const kafka_common_header_Header_t* header =
+            kafka_common_header_internals_RecordHeader__as_Header(record_header);
+        Header* h = dst->add_headers();
+        const char* hk = kafka_common_header_Header_key(header);  // borrowed
+        h->set_key(hk ? hk : "");
+        // A view over the header's bytes; `data` is null for Java's null value.
+        const kafka_Bytes_t hv = kafka_common_header_Header_value(header);
+        if (hv.data != nullptr) {
+          h->set_value(std::string(reinterpret_cast<const char*>(hv.data), hv.len));
+        }
+      }
+      kafka_List_destroy(all);
     }
   }
 
   // Shared with ProducerServiceImpl; owned by main().
   GroupMetadataStore* group_metadata_;
   std::mutex mu_;
-  std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
-  // user_data for the rebalance-listener and commit callbacks; owned here, one
+  std::unordered_map<uint64_t, ConsumerEntry> consumers_;
+  // `self` for the rebalance-listener and commit callbacks; owned here, one
   // per consumer, for the whole session (never erased by Close — see LogState).
   std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
   // Has its own mutex; see CallbackLog.

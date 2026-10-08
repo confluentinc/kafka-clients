@@ -18,11 +18,14 @@
  * Helpers shared between the C binding test binaries.
  *
  * No Rust thread ever runs a C callback (CLAUDE.md §4, "Async variants of
- * blocking methods"): the `_cb` completions and the delivery callbacks are
- * queued on the client's callback vector, and `<Client>_execute_callbacks`
- * runs them on the thread that calls it. A test therefore pumps the vector
- * itself; `callback_pump_t` below does that, woken by the notify hook the
- * client fires once each time the vector goes from empty to non-empty.
+ * blocking methods"): the `_cb` completions, the delivery callbacks and the
+ * interface methods a `_cb` operation triggers (a consumer's rebalance
+ * listener, say) are queued on the client's callback vector, and
+ * `<Client>_execute_callbacks` runs them on the thread that calls it. A test
+ * therefore pumps the vector itself; `callback_pump_t` below does that, woken
+ * by the notify hook the client fires once each time the vector goes from
+ * empty to non-empty. The pump is client-agnostic: `callback_pump_install`
+ * binds it to a producer, `consumer_callback_pump_install` to a consumer.
  */
 
 #ifndef CONFLUENT_KAFKA_TEST_SUPPORT_H
@@ -49,13 +52,14 @@ static inline int wait_for(atomic_int *flag, int expected) {
 /* The bound every wait below uses, in milliseconds. */
 #define CALLBACK_PUMP_TIMEOUT_MS 5000
 
-/* A producer's callback pump: the notify hook installed by
- * `callback_pump_install` only signals the condition variable (the hook may
- * schedule, never run callbacks); `callback_pump_until` waits on it and
- * drains the vector with `kafka_producer_Producer_execute_callbacks` on the
- * calling thread. */
+/* A client's callback pump: the notify hook installed by
+ * `callback_pump_install` / `consumer_callback_pump_install` only signals the
+ * condition variable (the hook may schedule, never run callbacks);
+ * `callback_pump_until` waits on it and drains the vector with the client's
+ * `_execute_callbacks` on the calling thread. */
 typedef struct {
-    const kafka_producer_Producer_t *producer;
+    const void *client;                        /* the producer or consumer handle */
+    int32_t (*execute)(const void *client);    /* its `_execute_callbacks` */
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int signalled;        /* notify firings not yet consumed by a pump */
@@ -63,7 +67,8 @@ typedef struct {
     atomic_int executed;  /* sum of what execute_callbacks returned */
 } callback_pump_t;
 
-/* The `kafka_producer_Producer_callbacks_notify_fn_t` of a pump. */
+/* The `<Client>_callbacks_notify_fn_t` of a pump (both clients share the
+ * `void (*)(void *opaque)` shape). */
 static inline void callback_pump_notify(void *opaque) {
     callback_pump_t *pump = (callback_pump_t *)opaque;
     pthread_mutex_lock(&pump->mutex);
@@ -73,17 +78,40 @@ static inline void callback_pump_notify(void *opaque) {
     pthread_mutex_unlock(&pump->mutex);
 }
 
-/* Initializes `pump` and installs its notify hook on `producer`. `pump` must
- * outlive the producer handle (or be uninstalled with a different hook). */
-static inline void callback_pump_install(callback_pump_t *pump,
-                                         const kafka_producer_Producer_t *producer) {
-    pump->producer = producer;
+static inline int32_t callback_pump_execute_producer(const void *client) {
+    return kafka_producer_Producer_execute_callbacks((const kafka_producer_Producer_t *)client);
+}
+
+static inline int32_t callback_pump_execute_consumer(const void *client) {
+    return kafka_consumer_Consumer_execute_callbacks((const kafka_consumer_Consumer_t *)client);
+}
+
+static inline void callback_pump_init(callback_pump_t *pump, const void *client,
+                                      int32_t (*execute)(const void *client)) {
+    pump->client = client;
+    pump->execute = execute;
     pthread_mutex_init(&pump->mutex, NULL);
     pthread_cond_init(&pump->cond, NULL);
     pump->signalled = 0;
     atomic_init(&pump->notified, 0);
     atomic_init(&pump->executed, 0);
+}
+
+/* Initializes `pump` and installs its notify hook on `producer`. `pump` must
+ * outlive the producer handle (or be uninstalled with a different hook). */
+static inline void callback_pump_install(callback_pump_t *pump,
+                                         const kafka_producer_Producer_t *producer) {
+    callback_pump_init(pump, producer, callback_pump_execute_producer);
     kafka_producer_Producer_set_callbacks_notify(producer, callback_pump_notify, pump);
+}
+
+/* The consumer twin of `callback_pump_install`: `consumer` is any
+ * `kafka_consumer_Consumer_t` (an owned one from `KafkaConsumer_new` or a
+ * mock's `__as_Consumer` view). */
+static inline void consumer_callback_pump_install(callback_pump_t *pump,
+                                                  const kafka_consumer_Consumer_t *consumer) {
+    callback_pump_init(pump, consumer, callback_pump_execute_consumer);
+    kafka_consumer_Consumer_set_callbacks_notify(consumer, callback_pump_notify, pump);
 }
 
 static inline void callback_pump_destroy(callback_pump_t *pump) {
@@ -115,7 +143,7 @@ static inline int callback_pump_wait_notify(callback_pump_t *pump) {
 
 /* Runs `execute_callbacks` once, accumulating the returned count. */
 static inline int32_t callback_pump_execute(callback_pump_t *pump) {
-    int32_t executed = kafka_producer_Producer_execute_callbacks(pump->producer);
+    int32_t executed = pump->execute(pump->client);
     atomic_fetch_add(&pump->executed, executed);
     pthread_mutex_lock(&pump->mutex);
     pump->signalled = 0;

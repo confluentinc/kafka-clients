@@ -264,7 +264,7 @@ mod tests {
 
     use super::*;
     use crate::ffi::common::{box_error, kafka_common_Error_destroy};
-    use crate::ffi::consumer::kafka_consumer_OffsetAndMetadata_offset;
+    use crate::ffi::consumer::offset_and_metadata::kafka_consumer_OffsetAndMetadata_offset;
     use crate::ffi::util::{kafka_List_destroy, kafka_List_size, kafka_Map_destroy, kafka_Map_size, kafka_Map_value};
 
     #[test]

@@ -407,8 +407,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Maps ConsumerService RPCs onto python/consumer.py. The sync
-    consumer API blocks the gRPC worker thread on its threading.Event, which
-    is fine in the thread-pool server."""
+    consumer API makes blocking C calls (GIL released) on the gRPC worker
+    thread, which is fine in the thread-pool server."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
@@ -417,8 +417,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         self._next_id = 1
         self._lock = threading.Lock()
         # Rebalance-listener / commit-callback log, keyed by consumer_id. Both
-        # callback families are invoked from the Rust dispatcher thread, never
-        # the gRPC worker that serves GetCallbackLog — hence CallbackLog's lock.
+        # callback families are invoked on the gRPC worker thread inside the
+        # consumer call that triggers them (poll/commit/close), never the
+        # worker that serves GetCallbackLog — hence CallbackLog's lock.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -509,9 +510,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
 
         def do(c):
-            # commit_async is non-blocking in both clients (a local op on the
-            # shared _ConsumerBase, not a coroutine) — the callback fires on a
-            # later poll/commit/close, exactly as in Java.
+            # commit_async only *initiates* the commit (a blocking call that
+            # awaits the Rust background task enqueueing it) — the callback
+            # fires inside a later poll/commit/close, exactly as in Java.
             c.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
         return self._run_status(request.consumer_id, do)
 

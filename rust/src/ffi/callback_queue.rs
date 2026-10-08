@@ -35,6 +35,8 @@ use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
+use tokio::sync::Notify;
+
 /// A queued callback invocation: the C function pointer, its arguments and the
 /// ownership transfers it implies, baked into one closure so the queue holds
 /// one element type.
@@ -69,6 +71,10 @@ unsafe impl Sync for SendPtr {}
 pub(crate) struct CallbackQueue {
     pending: Mutex<VecDeque<CallbackJob>>,
     notify: Mutex<Option<(NotifyFn, SendPtr)>>,
+    /// Signalled on every push, for a client's `_destroy` that must drain
+    /// the queue while it awaits the `_cb` tasks still running (one of them
+    /// may be waiting for a queued interface invocation to be reported).
+    pushed: Notify,
     /// Held for the whole of [`execute`](Self::execute), so two drains of one
     /// queue never run callbacks concurrently.
     running: Mutex<()>,
@@ -95,6 +101,7 @@ impl CallbackQueue {
         Self {
             pending: Mutex::new(VecDeque::new()),
             notify: Mutex::new(None),
+            pushed: Notify::new(),
             running: Mutex::new(()),
             owner: Mutex::new(None),
         }
@@ -108,6 +115,7 @@ impl CallbackQueue {
             pending.push_back(job);
             was_empty
         };
+        self.pushed.notify_one();
         if was_empty && let Some((notify, opaque)) = *lock(&self.notify) {
             // SAFETY: the hook and its opaque pointer were registered together
             // by the C caller, who keeps the opaque alive until it replaces the
@@ -146,9 +154,14 @@ impl CallbackQueue {
         i32::try_from(count).unwrap_or(i32::MAX)
     }
 
+    /// Resolves once a job has been pushed since the last call (a permit is
+    /// stored, so a push between a drain and this call is not lost).
+    pub(crate) async fn pushed(&self) {
+        self.pushed.notified().await;
+    }
+
     /// Whether anything is queued.
-    // wired by the first client `_destroy`, which drains what is pending (Phase 2)
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         lock(&self.pending).is_empty()
     }
