@@ -1440,6 +1440,8 @@ notes commit.
     | after the fixup | 93.92 (+0.6 %) | 99.81 (+1.1 %) | 109.27 (+1.2 %) | 124.38 (+1.4 %) |
 
     Allocations per steady send are still 2 at the producer and 1 at the accumulator.
+    After the fix: `producer::` lib tests 793 passed; producer broker tests in both strategies 105 of
+    105 passed, including all 11 incremental ones; lint shows the 11 §5.1 rows; format-check is clean.
 - **Cites.** `KafkaProducer.java`, `RecordAccumulator.java` and `ProducerBatch.java` cites across
   `rust/src` refreshed to rc4 by content (204 cites in 13 files, `1daace6b`), including the bare
   `:1056` / `:1072` in `buffer_pool.rs` (now `KafkaProducer.java:1130` / `:1147`). One historical
