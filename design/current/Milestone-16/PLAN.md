@@ -1258,9 +1258,10 @@ Phase 4 completion notes (agent 94):
   - The `onHeartbeatSuccess` IllegalArgument message names the error the way Java's `%s` does
     (`UNKNOWN_MEMBER_ID`), not the Rust Debug name.
   - KAFKA-20765 in Rust. The retry driver re-enqueues its retry directly, so Java's spin cannot happen.
-    But the same window exists: the forwarder completes the sender before it removes the request from
-    `inflight_offset_fetches`, and a `fetch_offsets` arriving in between chained onto a driver that might
-    already have fanned its result out. The `!is_done()` filter closes it.
+    The `!is_done()` filter is ported for faithfulness and is defensive: a completed request cannot be
+    seen in a buffer today, because the forwarder completes and removes it with no `.await` in between,
+    on the single-threaded bg runtime that also runs every `fetch_offsets` caller. (Corrected after
+    Critic 99 L1; the first wording claimed the window was reachable.)
   - Heartbeat wake: the forwarder pokes `event_notify` (the application-event `Notify`, never
     `WakeupTrigger`) after it queues a completion. Before, while a request was in flight, a response
     could wait up to the heartbeat interval to be drained.
@@ -1334,6 +1335,34 @@ Phase 4 completion notes (agent 94):
   | 10 format-check, full test, lint | 15:12 | 15:16 | 4 |
   | 11 4.4.0-rc4 broker run, re-runs, baseline bisect | 15:16 | 15:20 | 4 |
   | 12 `make -k verify`, re-run, notes | 15:20 | 15:33 | 13 |
+
+#### Phase 9 fix round (agent 99, Critic 99 findings)
+
+On branch `milestone-16-p9fix`, to be merged back with a merge commit.
+
+- **M1** (1fe5f144): the OffsetFetch drain loop now copies the current member info at send, as the
+  commit loop does. This bug predates the milestone (since M8). Java reads the shared `MemberInfo` in
+  `toUnsentRequest()` (`CommitRequestManager.java:986`, `:1198-1201`).
+  - Tests: `offset_fetch_uses_member_epoch_at_send_time`, in Java's order, plus the leave-before-send
+    case; and `offset_fetch_retry_picks_up_epoch_updated_during_backoff`. Both fail without the fix.
+- **L1** (5f9efd51): the KAFKA-20765 filter stays, but its stated reason is corrected. The window is
+  not reachable today: complete and remove share the single-threaded bg runtime, with no `.await`
+  between them.
+- **L2** (1e8a11a0): the §31 callback doc moves onto `invoke_rebalance_callback`, the function it
+  describes. Its cite is narrowed to `ConsumerMembershipManager.java:320-341` (Revoked and Lost; the
+  assigned path always enqueues since KAFKA-20106).
+- **L3** (33513466): the KAFKA-20761 capture records the log level, and the test asserts INFO.
+- **Max-size bounce test** (e653e8ac): this fixes the "pre-existing on a 4.4 broker" failure above. It was
+  a test assumption, not a client divergence.
+  - The arms are now picked at runtime from `INTEGRATION_TEST_BROKER_TAG`. Below 4.3, the default-config
+    test runs. From 4.3, Java's `0` and `1000` arms run, no longer `#[ignore]`d.
+  - That is the option closest to Java's intent: Java has exactly those two arms.
+  - Deviation: the `1000` arm's assignment bound is 20 s (Java's is 10 s). Under KIP-848 batching the join
+    needs two heartbeat rounds, measured at 10.1–10.5 s for the Java client too.
+  - The module docs record that Java's "async" test runs classic.
+- **Open question for the human:** Java's `ConsumerBounceTest.testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
+  never sets `group.protocol=consumer`, so its KIP-1263 assignment-interval arms run the classic protocol,
+  for which the interval is inert. Should we file an upstream JIRA? Not done.
 
 ### Phase 10 — Consumer: fetch, offsets, poll, MockConsumer (agent 100)
 

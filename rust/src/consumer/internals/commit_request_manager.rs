@@ -1230,12 +1230,16 @@ impl CommitRequestManager {
         // buffers while its completion callbacks run (removal from the buffer is itself one of those
         // callbacks). Chaining onto it would complete the new request immediately with the stale outcome
         // instead of sending it (e.g. re-failing the retry of a STALE_MEMBER_EPOCH error in a tight loop).
-        // (KAFKA-20765.) In Rust the forwarder completes the request's sender
-        // and only then takes the state lock to remove it from
-        // `inflight_offset_fetches`, so a completed request is visible here in
-        // that window; chaining onto it would hand this caller's sender to a
-        // driver that may already have fanned its result out, and the dropped
-        // sender would fail this caller instead of sending its request.
+        // (KAFKA-20765.) The filter is Java's, kept for faithfulness. In Rust
+        // the case is not reachable today: the response forwarder completes the
+        // request's sender and removes it from `inflight_offset_fetches` with no
+        // `.await` in between, and the forwarder, the retry driver and every
+        // production `fetch_offsets` caller run on the consumer's single-threaded
+        // bg runtime, so no `fetch_offsets` can observe a completed request in a
+        // buffer. Should either of those change, chaining onto a completed
+        // request would hand this caller's sender to a driver that may already
+        // have fanned its result out, and the dropped sender would fail the
+        // caller; the filter keeps the dedup correct then.
         let chained_public_senders = {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             let existing = guard
@@ -1531,6 +1535,15 @@ impl CommitRequestManager {
         for mut fetch in fetches.drain(..) {
             if fetch.state.can_send_request(current_time_ms) {
                 fetch.state.on_send_attempt(current_time_ms);
+                // Refresh the request's member id/epoch at SEND time, as the
+                // commit loop above does. Java's `OffsetFetchRequestState` holds
+                // a reference to the manager's one mutable `MemberInfo`
+                // (`CommitRequestManager.java:986`) and `toUnsentRequest()` reads
+                // it when the request is drained (`:1198-1201`), so an epoch
+                // update between creation and send — e.g. a retry whose new
+                // epoch lands during its backoff, KAFKA-20765's "picking up the
+                // current member epoch at send time" — goes on the wire.
+                fetch.member_info = guard.member_info.clone();
                 let unsent = build_offset_fetch_unsent_request(&inner, &mut fetch);
                 to_send.push(unsent);
                 inflight_to_add.push(fetch);
@@ -5921,6 +5934,86 @@ mod tests {
         }
     }
 
+    /// The OffsetFetch wire request carries the member epoch current at SEND
+    /// time, not the one at `fetch_offsets` (Critic 99 M1). Java's
+    /// `OffsetFetchRequestState` reads the manager's shared `MemberInfo` in
+    /// `toUnsentRequest()` (`CommitRequestManager.java:986`, `:1198-1201`).
+    /// Java's order: epoch 1, fetch, epoch 2, poll. Then a leave (no epoch)
+    /// before send: Java sends no member id / epoch, so the fields keep their
+    /// defaults.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_uses_member_epoch_at_send_time() {
+        fn group_member(unsent: &mut UnsentRequest) -> (Option<String>, i32) {
+            let req = unsent.request_builder_mut().expect("builder present").build().expect("build");
+            match req {
+                crate::common::requests::AbstractRequest::OffsetFetch(fetch) => {
+                    let group = &fetch.data().groups[0];
+                    (group.member_id.clone(), group.member_epoch)
+                },
+                _ => panic!("expected an OffsetFetch request"),
+            }
+        }
+
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let _result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        manager.on_member_epoch_updated(Some(2), "member1".to_string());
+        let mut unsent = poll_one_unsent(&manager, &coordinator, 0);
+        assert_eq!((Some("member1".to_string()), 2), group_member(&mut unsent));
+
+        let manager = make_manager(0, false);
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let _result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        manager.on_member_epoch_updated(None, "member1".to_string());
+        let mut unsent = poll_one_unsent(&manager, &coordinator, 0);
+        let default_group = crate::offset_fetch_request_data::OffsetFetchRequestGroup::new();
+        assert_eq!(
+            (default_group.member_id.clone(), default_group.member_epoch),
+            group_member(&mut unsent),
+            "a member that left sends no member id / epoch"
+        );
+    }
+
+    /// A STALE_MEMBER_EPOCH retry whose new epoch lands DURING its backoff
+    /// (the response arrived before the heartbeat that bumps the epoch) is
+    /// sent with the new epoch, as Java's retry picks it up at send time
+    /// (Critic 99 M1; KAFKA-20765's "picking up the current member epoch at
+    /// send time").
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_retry_picks_up_epoch_updated_during_backoff() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let mut result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::StaleMemberEpoch));
+        // The retry is queued (built while the member still has epoch 1).
+        yield_until(
+            || (manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.len() == 1).then_some(()),
+            "the stale-epoch failure did not queue a retry",
+        )
+        .await;
+        assert!(
+            manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty(),
+            "the retry waits out its backoff"
+        );
+        assert_still_pending(&mut result).await;
+
+        // The heartbeat raising the epoch lands during the backoff.
+        manager.on_member_epoch_updated(Some(2), "member1".to_string());
+        let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+        let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
+        let req = retried.request_builder_mut().expect("builder present").build().expect("build");
+        if let crate::common::requests::AbstractRequest::OffsetFetch(fetch) = req {
+            assert_eq!(2, fetch.data().groups[0].member_epoch);
+        } else {
+            panic!("expected an OffsetFetch request");
+        }
+    }
+
     /// `testDuplicatedOffsetFetchFailsWithStaleEpochAndRetriesWithNewEpoch`
     /// (KAFKA-20765): same as the test above, but with a duplicated fetch for
     /// the same partitions chained onto the in-flight request when the
@@ -6011,9 +6104,11 @@ mod tests {
     }
 
     /// KAFKA-20765's dedup guard on its own: a request whose future already
-    /// completed but that is still in `inflight_offset_fetches` (the window
-    /// between the forwarder completing it and removing it) is not a
-    /// duplicate. A new fetch for the same partitions is enqueued as its own
+    /// completed but that is still in `inflight_offset_fetches` is not a
+    /// duplicate. Production cannot reach that state today (the forwarder
+    /// completes and removes the request with no `.await` in between, on the
+    /// single-threaded bg runtime), so the test builds it by hand to pin
+    /// Java's filter. A new fetch for the same partitions is enqueued as its own
     /// request rather than chained onto the completed one, whose driver may
     /// already have fanned its result out (Java's `!r.future.isDone()` filter,
     /// `CommitRequestManager.java:1431-1434`).

@@ -130,9 +130,11 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// Every "received heartbeat interval" message [`Self::on_successful_response`]
     /// logged, in order. The Rust stand-in for the `LogCaptureAppender` in
     /// `AbstractHeartbeatRequestManagerTest#testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged`:
-    /// it is appended at the log site, with the string that was logged.
+    /// it is appended at the log site, with the level and the string that
+    /// were logged (Java's appender is set to `Level.INFO`, so a regression
+    /// to a lower level fails its test too).
     #[cfg(test)]
-    pub(crate) logged_heartbeat_interval_messages: Vec<String>,
+    pub(crate) logged_heartbeat_interval_messages: Vec<(log::Level, String)>,
 }
 
 impl AbstractHeartbeatRequestManager {
@@ -489,10 +491,11 @@ impl AbstractHeartbeatRequestManager {
         // The heartbeat interval is a group config owned by the broker, so log it when it changes to give
         // visibility into the value the coordinator is applying (it is not derivable from client config).
         if new_heartbeat_interval_ms != previous_heartbeat_interval_ms {
+            const LEVEL: log::Level = log::Level::Info;
             let message = Self::heartbeat_interval_received_message(member_id, new_heartbeat_interval_ms);
-            log::info!("{message}");
+            log::log!(LEVEL, "{message}");
             #[cfg(test)]
-            self.logged_heartbeat_interval_messages.push(message);
+            self.logged_heartbeat_interval_messages.push((LEVEL, message));
         }
         self.heartbeat_request_state
             .update_heartbeat_interval_ms(current_time_ms, new_heartbeat_interval_ms);

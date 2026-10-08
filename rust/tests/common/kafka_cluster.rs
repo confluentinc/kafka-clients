@@ -100,6 +100,15 @@ static KAFKA_TAG: std::sync::LazyLock<String> =
         _ => DEFAULT_KAFKA_TAG.to_string(),
     });
 
+/// The `(major, minor)` release of the broker image this run uses
+/// ([`KAFKA_TAG`]): `4.4.0-rc4` is `(4, 4)`. A component that does not parse
+/// counts as 0. Lets a test skip itself at runtime on a broker that predates a
+/// config it needs.
+pub fn broker_release() -> (u32, u32) {
+    let mut parts = KAFKA_TAG.split(['.', '-']).map(|part| part.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
 /// Container port for the PLAINTEXT listener.
 const PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9092);
 /// PLAINTEXT listener exposed only on the inter-broker network — used by

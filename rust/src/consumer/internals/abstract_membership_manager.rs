@@ -961,30 +961,6 @@ impl AbstractMembershipManager {
         guard.state == MemberState::Unsubscribed
     }
 
-    /// Invokes a rebalance listener callback per §31.
-    ///
-    /// Mechanism:
-    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
-    ///    registered on the subscription state. Java's
-    ///    `invokeOnPartitions{Revoked,Assigned,Lost}Callback` all check
-    ///    `subscriptions.rebalanceListener().isPresent()` and return a
-    ///    completed future without enqueueing anything. Without this
-    ///    guard the bg task would hang forever awaiting an ack that no
-    ///    one will send (Phase 10's app-side drain only invokes the
-    ///    listener when one exists). See `ConsumerMembershipManager.java:320-352`.
-    /// 2. Create a fresh `oneshot::channel`.
-    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
-    ///    carrying the sender half.
-    /// 4. **Await** the receiver. The membership state machine does NOT
-    ///    advance until this resolves.
-    ///
-    /// `MutexGuard`s are NEVER held across this `.await`.
-    ///
-    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
-    ///
-    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
-    /// (defined on `ConsumerMembershipManager`, but the contract is
-    /// shared across all subclasses).
     /// Non-blocking sibling of [`Self::invoke_rebalance_callback`]
     /// (Phase 41b). Enqueues the §31 `RebalanceListenerCallbackNeeded`
     /// event and returns the ack [`oneshot::Receiver`] **without awaiting
@@ -1054,6 +1030,32 @@ impl AbstractMembershipManager {
         Ok(ack_rx)
     }
 
+    /// Invokes a rebalance listener callback per §31.
+    ///
+    /// Mechanism:
+    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
+    ///    registered on the subscription state. Java's
+    ///    `invokeOnPartitions{Revoked,Lost}Callback` both check
+    ///    `subscriptions.rebalanceListener().isPresent()` and return a
+    ///    completed future without enqueueing anything. Without this
+    ///    guard the bg task would hang forever awaiting an ack that no
+    ///    one will send (Phase 10's app-side drain only invokes the
+    ///    listener when one exists). See `ConsumerMembershipManager.java:320-341`.
+    ///    (The assigned path has no such check since KAFKA-20106: it always
+    ///    enqueues, see [`Self::enqueue_partitions_assigned_event`].)
+    /// 2. Create a fresh `oneshot::channel`.
+    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
+    ///    carrying the sender half.
+    /// 4. **Await** the receiver. The membership state machine does NOT
+    ///    advance until this resolves.
+    ///
+    /// `MutexGuard`s are NEVER held across this `.await`.
+    ///
+    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
+    ///
+    /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
+    /// (defined on `ConsumerMembershipManager`, but the contract is
+    /// shared across all subclasses).
     pub(crate) async fn invoke_rebalance_callback(
         &self,
         method: ConsumerRebalanceListenerMethodName,
