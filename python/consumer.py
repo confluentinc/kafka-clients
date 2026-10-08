@@ -878,7 +878,8 @@ class _MockConsumerMixin:
         partitions (only when something was removed), then
         ``on_partitions_assigned`` with the *added* partitions — which fires even
         when nothing was added, as long as a listener is registered.
-        ``on_partitions_lost`` is never fired by the mock.
+        ``on_partitions_lost`` is never fired by a rebalance; see
+        :meth:`lose_partitions`.
 
         Requires a topic subscription; a manually assigned consumer fails with
         "manual assignment in use". A listener exception surfaces here as a
@@ -886,6 +887,25 @@ class _MockConsumerMixin:
         """
         _raise_if_error(
             _lib.MockConsumer_rebalance(self._h, _tp_to_spec(partitions)))
+
+    def lose_partitions(self, partitions):
+        """Simulate losing ``partitions`` (Java ``MockConsumer.losePartitions``).
+
+        Invokes the registered rebalance listener's ``on_partitions_lost``
+        inline with the lost partitions (falling back to
+        ``on_partitions_revoked`` when the listener does not define it, Java's
+        default method) and removes them from the assignment. Unlike
+        :meth:`rebalance`, which fires ``on_partitions_revoked``, this models
+        losing partitions without a graceful revoke. Only the buffered records
+        of the lost partitions are cleared.
+
+        Every partition must be currently assigned; otherwise a
+        :class:`KafkaError` "Cannot lose partitions that are not currently
+        assigned: [...]" is raised and nothing changes. A listener exception
+        surfaces here as a :class:`KafkaError` carrying its message.
+        """
+        _raise_if_error(
+            _lib.MockConsumer_lose_partitions(self._h, _tp_to_spec(partitions)))
 
     def add_record(self, topic, partition, offset, key=None, value=None):
         e = _lib.MockConsumer_add_record(self._h, topic, partition, offset, key, value)

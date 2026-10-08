@@ -1379,7 +1379,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 /// (`on_partitions_revoked` with the removed partitions if any were removed, then
 /// `on_partitions_assigned` with the *added* partitions — which fires even when
 /// nothing was added), and the assignment is replaced. `on_partitions_lost` is
-/// never fired by the mock, matching Java.
+/// never fired by a rebalance, matching Java; see
+/// [`kafka_consumer_MockConsumer_lose_partitions`] for that.
 ///
 /// The consumer must have a topic subscription (Java throws
 /// `IllegalArgumentException` when a manual assignment is in use). Buffered
@@ -1415,6 +1416,56 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     // The core `rebalance` is `async fn` (the listener methods are async),
     // unlike the other mock driver methods, so it needs the runtime.
     match h.runtime.block_on(mock.rebalance(&tps)) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Simulates a partition loss on a mock consumer (mock only), mirroring Java's
+/// `MockConsumer.losePartitions(Collection<TopicPartition>)` (KAFKA-20575).
+///
+/// `topics` and `partitions` are parallel arrays of length `count` naming the
+/// partitions to lose; all must be currently assigned. The registered
+/// [`kafka_consumer_ConsumerRebalanceListener_t`]'s `on_partitions_lost` is
+/// invoked with them (deduplicated, in the order given; with a NULL
+/// `on_partitions_lost` the listener falls back to `on_partitions_revoked`,
+/// Java's default method), and then they are removed from the assignment.
+/// Unlike [`kafka_consumer_MockConsumer_rebalance`], which fires
+/// `on_partitions_revoked`, this models losing partitions without a graceful
+/// revoke. Only the buffered records of the lost partitions are cleared.
+///
+/// This call does not return until the listener callback has returned, and an
+/// error returned by the callback is propagated as this function's return value
+/// (the assignment is then left unchanged).
+///
+/// Returns null on success, or a non-null error handle on failure:
+/// `illegal_state` with "Cannot lose partitions that are not currently
+/// assigned: [...]" when a partition is not assigned (nothing changes), or when
+/// `consumer` wraps an async consumer.
+///
+/// # Safety
+///
+/// `topics` must point to `count` valid C strings and `partitions` to `count`
+/// `i32` values; `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    count: i32,
+) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if let Err(e) = acquire(h) {
+        return box_error(e);
+    }
+    let _g = ReleaseGuard(h);
+    let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    let mock = match unsafe { mock_mut(h) } {
+        Ok(m) => m,
+        Err(e) => return box_error(e),
+    };
+    // Async in the core (the listener methods are async), like `rebalance`.
+    match h.runtime.block_on(mock.lose_partitions(&tps)) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
     }

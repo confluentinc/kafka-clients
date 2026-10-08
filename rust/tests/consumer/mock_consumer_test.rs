@@ -429,3 +429,160 @@ async fn enforce_rebalance_overloads_both_set_the_pending_flag() {
         .expect("enforce_rebalance_with_reason");
     assert!(consumer.should_rebalance(), "enforce_rebalance_with_reason(..) sets the flag");
 }
+
+// ─── KAFKA-20575: `MockConsumer::lose_partitions` ───────────────────────────
+
+/// Records `on_partitions_lost` and `on_partitions_revoked` separately — the
+/// listener in Java's `testLosePartitionsCallsOnPartitionsLost`, which overrides
+/// `onPartitionsLost` so the default (forwarding to revoked) is not taken.
+struct LostRecorderListener {
+    lost: Arc<Mutex<Vec<TopicPartition>>>,
+    revoked: Arc<Mutex<Vec<TopicPartition>>>,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for LostRecorderListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.revoked.lock().unwrap().extend_from_slice(partitions);
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.lost.lock().unwrap().extend_from_slice(partitions);
+        Ok(())
+    }
+}
+
+/// Records every `on_partitions_assigned` call, as the listener in Java's
+/// `testLosePartitionsThenRebalance` does (`assigned.addAll(partitions)`).
+struct AssignedRecorderListener {
+    assigned: Arc<Mutex<Vec<TopicPartition>>>,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for AssignedRecorderListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.assigned.lock().unwrap().extend_from_slice(partitions);
+        Ok(())
+    }
+}
+
+fn test_tp(partition: i32) -> TopicPartition {
+    TopicPartition::new("test".to_string(), partition)
+}
+
+/// Translated from `MockConsumerTest.testLosePartitionsCallsOnPartitionsLost`.
+#[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsCallsOnPartitionsLost")]
+async fn test_lose_partitions_calls_on_partitions_lost() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
+    let (tp0, tp1) = (test_tp(0), test_tp(1));
+
+    let lost = Arc::new(Mutex::new(Vec::new()));
+    let revoked = Arc::new(Mutex::new(Vec::new()));
+    let listener = Arc::new(LostRecorderListener { lost: lost.clone(), revoked: revoked.clone() });
+    consumer
+        .subscribe_with_topics_listener(vec!["test".to_string()], listener)
+        .await
+        .unwrap();
+
+    consumer.rebalance(&[tp0.clone(), tp1]).await.unwrap();
+    consumer.lose_partitions(std::slice::from_ref(&tp0)).await.unwrap();
+
+    assert_eq!(vec![tp0], *lost.lock().unwrap());
+    assert!(revoked.lock().unwrap().is_empty());
+}
+
+/// Translated from `MockConsumerTest.testLosePartitionsRemovesFromAssignment`.
+#[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsRemovesFromAssignment")]
+async fn test_lose_partitions_removes_from_assignment() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
+    let (tp0, tp1) = (test_tp(0), test_tp(1));
+
+    consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
+    consumer.rebalance(&[tp0.clone(), tp1.clone()]).await.unwrap();
+    consumer.lose_partitions(std::slice::from_ref(&tp0)).await.unwrap();
+
+    assert!(!consumer.assignment().contains(&tp0));
+    assert!(consumer.assignment().contains(&tp1));
+}
+
+/// Translated from `MockConsumerTest.testLosePartitionsThrowsIfNotAssigned`.
+#[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsThrowsIfNotAssigned")]
+async fn test_lose_partitions_throws_if_not_assigned() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
+    let (tp0, tp1) = (test_tp(0), test_tp(1));
+
+    consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
+    consumer.rebalance(std::slice::from_ref(&tp0)).await.unwrap();
+
+    let err = consumer.lose_partitions(&[tp1]).await.expect_err("tp1 is not assigned");
+    assert!(
+        matches!(err, Error::LocalIllegalState(_)),
+        "Java throws IllegalStateException: {err:?}"
+    );
+    assert_eq!(
+        "Cannot lose partitions that are not currently assigned: [test-1]",
+        err.message()
+    );
+    // Nothing changed.
+    assert_eq!(std::collections::HashSet::from([tp0]), consumer.assignment());
+}
+
+/// Translated from `MockConsumerTest.testLosePartitionsClearsOnlyLostRecords`.
+#[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsClearsOnlyLostRecords")]
+async fn test_lose_partitions_clears_only_lost_records() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
+    let (tp0, tp1) = (test_tp(0), test_tp(1));
+
+    consumer.subscribe_with_topics(vec!["test".to_string()]).await.unwrap();
+    consumer.rebalance(&[tp0.clone(), tp1.clone()]).await.unwrap();
+    consumer.update_beginning_offsets(HashMap::from([(tp0.clone(), 0), (tp1.clone(), 0)]));
+    consumer.seek_with_offset(tp0.clone(), 0).await.unwrap();
+    consumer.seek_with_offset(tp1.clone(), 0).await.unwrap();
+
+    consumer.add_record(build_null_record("test", 0, 0)).unwrap();
+    consumer.add_record(build_null_record("test", 1, 0)).unwrap();
+
+    consumer.lose_partitions(std::slice::from_ref(&tp0)).await.unwrap();
+
+    let records = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
+    assert_eq!(1, records.count());
+    let record = (&records).into_iter().next().unwrap();
+    assert_eq!(tp1, TopicPartition::new(record.topic().to_string(), record.partition()));
+}
+
+/// Translated from `MockConsumerTest.testLosePartitionsThenRebalance`.
+#[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsThenRebalance")]
+async fn test_lose_partitions_then_rebalance() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
+    let (tp0, tp1, tp2) = (test_tp(0), test_tp(1), test_tp(2));
+
+    let assigned = Arc::new(Mutex::new(Vec::new()));
+    let listener = Arc::new(AssignedRecorderListener { assigned: assigned.clone() });
+    consumer
+        .subscribe_with_topics_listener(vec!["test".to_string()], listener)
+        .await
+        .unwrap();
+
+    consumer.rebalance(&[tp0.clone(), tp1.clone()]).await.unwrap();
+    assigned.lock().unwrap().clear();
+
+    consumer.lose_partitions(std::slice::from_ref(&tp0)).await.unwrap();
+    consumer.rebalance(&[tp1.clone(), tp2.clone()]).await.unwrap();
+
+    assert_eq!(vec![tp2.clone()], *assigned.lock().unwrap());
+    assert_eq!(std::collections::HashSet::from([tp1, tp2]), consumer.assignment());
+}

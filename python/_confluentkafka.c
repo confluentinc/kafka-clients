@@ -3231,6 +3231,24 @@ static PyObject* py_MockConsumer_rebalance(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
+// Simulate a partition loss (Java's MockConsumer.losePartitions, KAFKA-20575):
+// invokes the registered listener's on_partitions_lost inline, so the GIL is
+// released for the same reason as in py_MockConsumer_rebalance.
+static PyObject* py_MockConsumer_lose_partitions(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* tps;
+    if (!PyArg_ParseTuple(args, "KO", &h, &tps)) return NULL;
+    const char** topics = NULL; int32_t* parts = NULL;
+    Py_ssize_t n = tp_to_arrays(tps, &topics, &parts);
+    if (n < 0) return NULL;
+    const kafka_consumer_Consumer_t* c = (const kafka_consumer_Consumer_t*)(uintptr_t)h;
+    kafka_common_Error_t* e;
+    Py_BEGIN_ALLOW_THREADS
+    e = kafka_consumer_MockConsumer_lose_partitions(c, topics, parts, (int32_t)n);
+    Py_END_ALLOW_THREADS
+    PyMem_Free(topics); PyMem_Free(parts);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+}
+
 static PyObject* py_MockConsumer_add_record(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition; long long offset;
     Py_buffer key = {0}, value = {0};
@@ -7153,6 +7171,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"PartitionInfoList_drain", py_PartitionInfoList_drain, METH_VARARGS, "Drain+destroy a PartitionInfoList handle into a list"},
     {"TopicPartitionInfoMap_drain", py_TopicPartitionInfoMap_drain, METH_VARARGS, "Drain+destroy a TopicPartitionInfoMap handle into a dict"},
     {"MockConsumer_rebalance", py_MockConsumer_rebalance, METH_VARARGS, "Mock: drive a rebalance to an assignment; returns error_int"},
+    {"MockConsumer_lose_partitions", py_MockConsumer_lose_partitions, METH_VARARGS, "Mock: lose assigned partitions (on_partitions_lost); returns error_int"},
     {"MockConsumer_add_record", py_MockConsumer_add_record, METH_VARARGS, "Mock: add a record; returns error_int"},
     {"MockConsumer_update_end_offsets", py_MockConsumer_update_end_offsets, METH_VARARGS, "Mock: set end offsets; returns error_int"},
     {"MockConsumer_update_beginning_offsets", py_MockConsumer_update_beginning_offsets, METH_VARARGS, "Mock: set beginning offsets; returns error_int"},

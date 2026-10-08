@@ -301,6 +301,62 @@ impl<K, V> MockConsumer<K, V> {
         Ok(())
     }
 
+    /// Simulates a partition loss event. Calls
+    /// [`ConsumerRebalanceListener::on_partitions_lost`] for the specified
+    /// partitions and removes them from the current assignment. Unlike
+    /// [`Self::rebalance`], which calls
+    /// [`ConsumerRebalanceListener::on_partitions_revoked`], this method models
+    /// the case where the consumer loses partitions without a graceful revoke.
+    ///
+    /// Only records belonging to the lost partitions are cleared; records for
+    /// retained partitions are unaffected.
+    ///
+    /// Translates Java's `losePartitions(Collection<TopicPartition>)`
+    /// (KAFKA-20575). Async for the same reason as [`Self::rebalance`]: the
+    /// Rust listener methods are `async fn`. Java hands the listener a `Set`;
+    /// the lost partitions are passed deduplicated, in the order given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalState`] (Java's `IllegalStateException`)
+    /// if any partition is not currently assigned, before any state changes,
+    /// and propagates an error returned by the listener (the assignment is
+    /// then left unchanged, as when Java's listener throws).
+    ///
+    /// [`ConsumerRebalanceListener::on_partitions_lost`]: crate::consumer::ConsumerRebalanceListener::on_partitions_lost
+    /// [`ConsumerRebalanceListener::on_partitions_revoked`]: crate::consumer::ConsumerRebalanceListener::on_partitions_revoked
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#losePartitions")]
+    pub async fn lose_partitions(&mut self, partitions_lost: &[TopicPartition]) -> Result<(), Error> {
+        let current_assignment = self.subscriptions.assigned_partitions();
+        let mut lost: Vec<TopicPartition> = Vec::with_capacity(partitions_lost.len());
+        for tp in partitions_lost {
+            if !lost.contains(tp) {
+                lost.push(tp.clone());
+            }
+        }
+        let not_assigned: Vec<String> = lost
+            .iter()
+            .filter(|tp| !current_assignment.contains(*tp))
+            .map(ToString::to_string)
+            .collect();
+        if !not_assigned.is_empty() {
+            // Java formats the `List` with `toString()`: `[test-1, test-2]`.
+            return Err(Error::local_illegal_state(format!(
+                "Cannot lose partitions that are not currently assigned: [{}]",
+                not_assigned.join(", ")
+            )));
+        }
+        for tp in &lost {
+            self.records.remove(tp);
+        }
+        // Clone the listener `Arc` out before awaiting (§16).
+        if let Some(listener) = self.subscriptions.rebalance_listener() {
+            listener.on_partitions_lost(&lost).await?;
+        }
+        let remaining: Vec<TopicPartition> = current_assignment.into_iter().filter(|tp| !lost.contains(tp)).collect();
+        self.subscriptions.assign_from_subscribed(&remaining)
+    }
+
     /// Schedule a task to run on the next
     /// [`Consumer::poll`] call. One task
     /// is consumed per `poll` invocation, in FIFO order.

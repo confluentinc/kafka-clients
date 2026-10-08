@@ -27,11 +27,11 @@
 // callback) -> back to the app thread. `kafka_consumer_MockConsumer_rebalance`
 // (Java's `MockConsumer.rebalance`) drives the rebalance callbacks the same way.
 //
-// Not covered here: `on_partitions_lost` with a NULL `lost` callback delegating
-// to `on_partitions_revoked` (Java's default method). The mock never fires
-// `on_partitions_lost` — neither does Java's — so the delegation is asserted in
-// the Rust unit tests of `src/ffi/consumer.rs`
-// (`on_partitions_lost_delegates_to_revoked_when_no_lost_callback`), which invoke
+// `kafka_consumer_MockConsumer_lose_partitions` (Java's
+// `MockConsumer.losePartitions`, KAFKA-20575) drives `on_partitions_lost`,
+// including a NULL `lost` callback delegating to `on_partitions_revoked` (Java's
+// default method); the Rust unit tests of `src/ffi/consumer.rs`
+// (`on_partitions_lost_delegates_to_revoked_when_no_lost_callback`) also invoke
 // the adapter directly.
 
 #include <confluent_kafka.h>
@@ -734,8 +734,10 @@ static void take_and_destroy_list(kafka_common_TopicPartitionList_t *list, tp_sn
 typedef struct {
     atomic_int revoked_calls;
     atomic_int assigned_calls;
+    atomic_int lost_calls;
     tp_snapshot_t revoked;
     tp_snapshot_t assigned;
+    tp_snapshot_t lost;
     pthread_t revoked_thread;
     pthread_t assigned_thread;
     /* Non-zero: the assigned callback returns an error handle. */
@@ -746,8 +748,10 @@ static void listener_result_init(listener_result_t *r) {
     memset(r, 0, sizeof(*r));
     atomic_init(&r->revoked_calls, 0);
     atomic_init(&r->assigned_calls, 0);
+    atomic_init(&r->lost_calls, 0);
     r->revoked.count = -1;
     r->assigned.count = -1;
+    r->lost.count = -1;
 }
 
 static kafka_common_Error_t *on_revoked(kafka_common_TopicPartitionList_t *partitions, void *user_data) {
@@ -839,6 +843,103 @@ static void test_rebalance_listener_assigned_then_revoked(void) {
     TEST_ASSERT_EQUAL_INT32(0, result.assigned.count);
 
     asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(asg));
+    kafka_common_TopicPartitionList_destroy(asg);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// ---------------------------------------------------------------------------
+// kafka_consumer_MockConsumer_lose_partitions — Java's
+// `MockConsumer.losePartitions` (KAFKA-20575)
+// ---------------------------------------------------------------------------
+
+static kafka_common_Error_t *on_lost(kafka_common_TopicPartitionList_t *partitions, void *user_data) {
+    listener_result_t *r = (listener_result_t *)user_data;
+    take_and_destroy_list(partitions, &r->lost);
+    atomic_fetch_add(&r->lost_calls, 1);
+    return NULL;
+}
+
+/* Losing a partition fires `on_partitions_lost`, not `on_partitions_revoked`,
+ * and removes it from the assignment (Java's
+ * `testLosePartitionsCallsOnPartitionsLost` / `...RemovesFromAssignment`). */
+static void test_lose_partitions_fires_lost_and_shrinks_the_assignment(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(c);
+    kafka_consumer_ConsumerRebalanceListener_t *listener =
+        kafka_consumer_ConsumerRebalanceListener_new(on_revoked, on_assigned, on_lost, &result, NULL);
+    TEST_ASSERT_NOT_NULL(listener);
+    const char *subscribed[1] = {"test"};
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_subscribe_with_listener(c, subscribed, 1, listener));
+
+    const char *topics2[2] = {"test", "test"};
+    int32_t partitions2[2] = {0, 1};
+    TEST_ASSERT_NULL(rebalance_to(c, topics2, partitions2, 2));
+
+    const char *topics1[1] = {"test"};
+    int32_t partitions1[1] = {0};
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_lose_partitions(c, topics1, partitions1, 1));
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.lost_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.revoked_calls));
+    TEST_ASSERT_EQUAL_INT32(1, result.lost.count);
+    TEST_ASSERT_EQUAL_STRING("test", result.lost.topics[0]);
+    TEST_ASSERT_EQUAL_INT32(0, result.lost.partitions[0]);
+
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_Consumer_assignment(c);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(asg));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartition_partition(kafka_common_TopicPartitionList_get(asg, 0)));
+    kafka_common_TopicPartitionList_destroy(asg);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+/* With a NULL `lost` callback the listener falls back to `on_partitions_revoked`
+ * with the lost partitions, as Java's default `onPartitionsLost` does. */
+static void test_lose_partitions_without_lost_callback_delegates_to_revoked(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    kafka_consumer_Consumer_t *c = make_subscribed_mock("test", &result);
+
+    const char *topics2[2] = {"test", "test"};
+    int32_t partitions2[2] = {0, 1};
+    TEST_ASSERT_NULL(rebalance_to(c, topics2, partitions2, 2));
+
+    const char *topics1[1] = {"test"};
+    int32_t partitions1[1] = {1};
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_lose_partitions(c, topics1, partitions1, 1));
+
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.revoked_calls));
+    TEST_ASSERT_EQUAL_INT32(1, result.revoked.count);
+    TEST_ASSERT_EQUAL_INT32(1, result.revoked.partitions[0]);
+
+    kafka_consumer_Consumer_destroy(c);
+}
+
+/* A partition that is not assigned is rejected with Java's
+ * `IllegalStateException` text, and nothing changes
+ * (`testLosePartitionsThrowsIfNotAssigned`). */
+static void test_lose_partitions_rejects_an_unassigned_partition(void) {
+    listener_result_t result;
+    listener_result_init(&result);
+    kafka_consumer_Consumer_t *c = make_subscribed_mock("test", &result);
+
+    const char *topics0[1] = {"test"};
+    int32_t partitions0[1] = {0};
+    TEST_ASSERT_NULL(rebalance_to(c, topics0, partitions0, 1));
+
+    int32_t partitions1[1] = {1};
+    kafka_common_Error_t *err = kafka_consumer_MockConsumer_lose_partitions(c, topics0, partitions1, 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Cannot lose partitions that are not currently assigned: [test-1]",
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.revoked_calls));
+
+    kafka_common_TopicPartitionList_t *asg = kafka_consumer_Consumer_assignment(c);
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_TopicPartitionList_count(asg));
     kafka_common_TopicPartitionList_destroy(asg);
 
@@ -1478,6 +1579,9 @@ int main(void) {
     RUN_TEST(test_consumer_handle_shares_state_with_real_consumer);
     RUN_TEST(test_rebalance_listener_assigned_then_revoked);
     RUN_TEST(test_rebalance_requires_a_subscription_and_a_mock);
+    RUN_TEST(test_lose_partitions_fires_lost_and_shrinks_the_assignment);
+    RUN_TEST(test_lose_partitions_without_lost_callback_delegates_to_revoked);
+    RUN_TEST(test_lose_partitions_rejects_an_unassigned_partition);
     RUN_TEST(test_rebalance_listener_runs_on_dispatcher_thread);
     RUN_TEST(test_rebalance_blocks_until_listener_returns);
     RUN_TEST(test_listener_calls_consumer_handle_no_deadlock);
