@@ -95,10 +95,18 @@ impl AdminClientConfig {
     pub const METADATA_MAX_AGE_MS_CONFIG: &'static str = "metadata.max.age.ms";
     /// `socket.connection.setup.timeout.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &'static str = "socket.connection.setup.timeout.ms";
-    /// `metadata.cluster.check.enable` (KIP-1242). Java's `AdminClientConfig.java:157`
-    /// declares it as its own public alias of
-    /// [`CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG`], whose doc
-    /// describes it. See [`Self::metadata_cluster_check_enable`].
+    /// `metadata.cluster.check.enable` (KIP-1242).
+    ///
+    /// Whether the client should send cluster and node information when
+    /// connecting to a broker to enable it to check for a misrouted
+    /// connection. This configuration is ignored if rebootstrapping is
+    /// disabled by setting the configuration `metadata.recovery.strategy=none`.
+    /// If the client is connecting to a broker older than Apache Kafka 4.4, no
+    /// checking is performed and this configuration has no effect.
+    ///
+    /// Java's `AdminClientConfig.java:157` declares it as its own public alias
+    /// of `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_CONFIG`, whose doc
+    /// (`CommonClientConfigs.java:268-271`) is the text above.
     pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &'static str =
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
