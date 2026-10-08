@@ -653,7 +653,7 @@ pub(crate) struct OffsetsRequestManager {
     /// Java: `defaultApiTimeoutMs`. Used by
     /// [`Self::init_with_committed_offsets_if_needed`] to compute the
     /// internal `fetchCommittedDeadlineMs` (Java
-    /// `OffsetsRequestManager.java:379`).
+    /// `OffsetsRequestManager.java:433`).
     default_api_timeout_ms: i64,
     api_versions: Arc<ApiVersions>,
     /// Optional handle to the commit manager — `None` when the consumer
@@ -1067,7 +1067,7 @@ impl OffsetsRequestManager {
         let now_ms = current_time_ms;
         // Build per-partition `ListOffsetsPartition` carrying the strategy's
         // wire timestamp and the current leader epoch. Mirrors Java's
-        // `groupListOffsetRequests` (OffsetsRequestManager.java:892-914):
+        // `groupListOffsetRequests` (OffsetsRequestManager.java:966-997):
         // for each partition look up the current leader — if it is unknown,
         // request a metadata update and skip the partition; otherwise stamp
         // the request with the partition's `currentLeaderEpoch`.
@@ -1402,7 +1402,7 @@ impl OffsetsRequestManager {
             Err(boxed) => {
                 let (tx, err) = *boxed;
                 // Java's outer `catch (Exception e)` in
-                // `updateFetchPositions` (`OffsetsRequestManager.java:260-262`)
+                // `updateFetchPositions` (`OffsetsRequestManager.java:314-316`)
                 // calls `result.completeExceptionally(maybeWrapAsKafkaException(e))`
                 // ONLY — it does NOT register a `whenComplete` cache hook.
                 // The `cacheExceptionIfEventExpired` hook is registered
@@ -1636,7 +1636,7 @@ impl OffsetsRequestManager {
     // Note: there is no shared `maybe_cache_update_positions_error`
     // helper. Java's `cacheExceptionIfEventExpired` hook (registered as a
     // `whenComplete` inside `updatePositionsWithOffsets` —
-    // `OffsetsRequestManager.java:283`) is inlined into the
+    // `OffsetsRequestManager.java:337`) is inlined into the
     // committed-offset spawned followup (see
     // [`Self::spawn_committed_offsets_followup`]). Synchronous errors
     // from the outer `updateFetchPositions` body are NOT cached
@@ -2790,7 +2790,7 @@ mod tests {
     /// Regression for COMMENTS R2-3: `update_fetch_positions` MUST NOT
     /// cache synchronous errors thrown from `validate_positions_if_needed`.
     /// Java's outer `catch (Exception e)` in `updateFetchPositions`
-    /// (`OffsetsRequestManager.java:260-262`) only calls
+    /// (`OffsetsRequestManager.java:314-316`) only calls
     /// `result.completeExceptionally(...)`; the
     /// `cacheExceptionIfEventExpired` hook is registered ONLY inside the
     /// committed-offset path's `whenComplete`. Caching here would
@@ -4554,7 +4554,7 @@ mod tests {
     /// `OffsetsRequestManager` fetch path does NOT re-park on a transport
     /// disconnect: `handle_fetch_offsets_response` routes a network error to
     /// `fail_request_state`, completing the global result exceptionally for
-    /// ALL waiters (Java `OffsetsRequestManager.java:586`/`:600`
+    /// ALL waiters (Java `OffsetsRequestManager.java:641`/`:600`
     /// `globalResult.completeExceptionally(error)`). So the in-scope ORM
     /// behavior is: a per-node disconnect FAILS the whole `fetch_offsets`
     /// future with `NetworkException`, leaving nothing parked for retry. This
@@ -5881,7 +5881,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest#testFetchOffsetsRegroupSkipsNullLeaderPartitionNoNPE"
     )]
-    async fn test_fetch_offsets_regroup_skips_null_leader_partition() {
+    async fn test_fetch_offsets_regroup_skips_null_leader_partition_no_npe() {
         let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
         // Partition 1 → node 1, partition 2 → node 0.
         bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
@@ -5964,7 +5964,6 @@ mod tests {
     /// (CONSUMER arm, enabled by KAFKA-20187): two `currentLag` calls with the
     /// end offset unknown issue a single `LIST_OFFSETS`.
     #[tokio::test(flavor = "current_thread")]
-    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testCurrentLagPreventsMultipleInFlightRequests")]
     async fn test_current_lag_prevents_multiple_in_flight_requests() {
         let tp = TopicPartition::new("t1", 0);
         let (mut mgr, subs) = current_lag_fixture(&tp);
@@ -6030,7 +6029,6 @@ mod tests {
     /// Translated from `KafkaConsumerTest.testCurrentLagClearsFlagOnFatalPartitionError`
     /// (CONSUMER arm, enabled by KAFKA-20187).
     #[tokio::test(flavor = "current_thread")]
-    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testCurrentLagClearsFlagOnFatalPartitionError")]
     async fn test_current_lag_clears_flag_on_fatal_partition_error() {
         assert_current_lag_clears_flag_on_partition_error(Errors::TopicAuthorizationFailed).await;
     }
@@ -6040,9 +6038,6 @@ mod tests {
     /// error parked the request for a metadata update, so the flag stayed set
     /// and every later lag lookup was blocked.
     #[tokio::test(flavor = "current_thread")]
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testCurrentLagClearsFlagOnRetriablePartitionError"
-    )]
     async fn test_current_lag_clears_flag_on_retriable_partition_error() {
         assert_current_lag_clears_flag_on_partition_error(Errors::OffsetNotAvailable).await;
     }

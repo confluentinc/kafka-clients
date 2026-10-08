@@ -252,9 +252,6 @@ mod tests {
     /// (KAFKA-18812). Java closes the handler, which stops its network thread;
     /// here the background task's end is the receiver being dropped.
     #[tokio::test]
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.ApplicationEventHandlerTest#testAddThrowsWhenBackgroundThreadDead"
-    )]
     async fn add_returns_error_when_receiver_dropped() {
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);

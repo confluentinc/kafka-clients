@@ -54,7 +54,7 @@
 //! # READ_COMMITTED
 //!
 //! Fully translated as of Milestone 11 Phase 8. `containsAbortMarker`
-//! (`CompletedFetch.java:352-359`) is [`CompletedFetch::contains_abort_marker`],
+//! (`CompletedFetch.java:381-391`) is [`CompletedFetch::contains_abort_marker`],
 //! which parses the first record of a control batch through
 //! [`ControlRecordType`], and an ABORT marker drops the producer id from
 //! `aborted_producer_ids` before `isBatchAborted` is consulted — Java's order
@@ -315,7 +315,7 @@ enum RecordSource {
 /// Java's cost too: `compressedIterator` wraps the records in a decompression
 /// stream but reads nothing through it until `RecordIterator`'s constructor
 /// has accepted the count (`DefaultRecordBatch.java:279-297, 579-588`), and
-/// a skipped batch never gets an iterator (`CompletedFetch.java:212-221`).
+/// a skipped batch never gets an iterator (`CompletedFetch.java:217-226`).
 #[derive(Debug)]
 enum PendingRecordSource {
     /// Uncompressed: the records section is `memory_records.buffer()[range]`,
@@ -570,7 +570,7 @@ impl CompletedFetch {
         //       if (records.isEmpty()) throw new KafkaException(
         //           "Received exception when fetching the next record from ...", e); }
         //   return records;
-        // (`CompletedFetch.java:266-301`). Three effects per arm: cache the
+        // (`CompletedFetch.java:271-306`). Three effects per arm: cache the
         // error, propagate ONLY when nothing was decoded, and — for the broad
         // arm — wrap in the "seek past the record" message with the original as
         // the cause. When records ARE in hand the error is swallowed and the
@@ -615,7 +615,7 @@ impl CompletedFetch {
     }
 
     /// The body of Java's `try` block inside `fetchRecords`
-    /// (`CompletedFetch.java:266-289`).
+    /// (`CompletedFetch.java:271-294`).
     ///
     /// Split out so the caller can apply Java's two `catch` arms once, with
     /// access to the records decoded so far — which is what decides between
@@ -1113,7 +1113,7 @@ impl CompletedFetch {
     /// Whether `batch` is a control batch whose first record is an ABORT marker.
     ///
     /// Translated from `CompletedFetch.containsAbortMarker(RecordBatch)`
-    /// (`CompletedFetch.java:352-359`): non-control batches are `false`, an empty
+    /// (`CompletedFetch.java:381-391`): non-control batches are `false`, an empty
     /// batch is `false`, and otherwise the first record's key is parsed as a
     /// [`ControlRecordType`].
     ///
@@ -1153,7 +1153,7 @@ impl CompletedFetch {
         };
         // Java's `batch.iterator()` reads the control batch on its own, apart from
         // the `streamingIterator` that `load_next_batch` installs afterwards
-        // (`DefaultRecordBatch.java:321-337`, `CompletedFetch.java:221`); so does
+        // (`DefaultRecordBatch.java:321-337`, `CompletedFetch.java:226`); so does
         // this, inflating a compressed control batch here and again at install.
         // The broker writes control batches uncompressed, so in practice neither
         // inflation happens.
@@ -1256,7 +1256,7 @@ impl CompletedFetch {
                 let unread = buffer.get(batch_start..).unwrap_or_default();
                 // A corrupt size or magic propagates as the stream's `CORRUPT_MESSAGE`
                 // error, unwrapped, as Java's `batches.hasNext()` throws it
-                // (`CompletedFetch.java:187`) — it is not "no batch".
+                // (`CompletedFetch.java:192`) — it is not "no batch".
                 let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX).next_batch_size()? {
                     Some(batch_size) if batch_size <= unread.len() => batch_size,
                     // `batchSize == null || remaining < batchSize` → no batch (`:44-46`):
@@ -1374,7 +1374,7 @@ impl CompletedFetch {
 
             // D3: Java's `RecordIterator` constructor rejects a
             // negative record count (`DefaultRecordBatch.java:584-587`) when
-            // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:221`),
+            // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:226`),
             // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
             // dropped without its count being looked at. Installing it instead would
             // treat the batch as empty. It also comes before the records are
@@ -1462,7 +1462,7 @@ impl From<DeserializationOrigin> for DeserializationErrorOrigin {
 
 /// Build Java's `RecordDeserializationException` for a failed key/value decode.
 ///
-/// Mirrors `newRecordDeserializationException` (`CompletedFetch.java:336-345`),
+/// Mirrors `newRecordDeserializationException` (`CompletedFetch.java:341-350`),
 /// which passes the full record context — origin, partition, offset, timestamp,
 /// timestamp type, raw key and value buffers, and headers — alongside the
 /// message, with the deserializer's exception as the **cause**. Those eight
@@ -1507,7 +1507,7 @@ fn wrap_deserialization_error(
     ))
 }
 
-/// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch.java:153-162`):
+/// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch.java:158-167`):
 /// `new KafkaException("Record batch for partition " + partition + " at offset " +
 /// batch.baseOffset() + " is invalid, cause: " + e.getMessage())`, a bare
 /// `KafkaException` carrying the cause's message and no cause.
@@ -2103,7 +2103,7 @@ mod tests {
 
         // The 3 real records decode first, THEN the premature-EOF fault is
         // raised while advancing. Java's `catch (KafkaException e)` swallows it
-        // because `records` is non-empty (`CompletedFetch.java:294-300`) and
+        // because `records` is non-empty (`CompletedFetch.java:299-305`) and
         // returns the prefix; the error is cached and `corruptLastRecord` stays
         // set, so the NEXT call raises. Propagating on this call instead would
         // discard 3 already-decoded records whose positions have advanced.
@@ -2119,7 +2119,7 @@ mod tests {
             .expect_err("the cached premature-EOF fault must surface on the next call");
         // Java: `throw new KafkaException("Received exception when fetching the
         // next record from " + partition + ". If needed, please seek past the
-        // record to continue consumption.", e)` (`CompletedFetch.java:257`).
+        // record to continue consumption.", e)` (`CompletedFetch.java:262`).
         // §2 bars that word from Rust message text, so ours says "an error";
         // the strings are otherwise identical.
         assert_eq!(
@@ -2173,7 +2173,7 @@ mod tests {
                     // Nothing decoded on THIS call, so Java's
                     // `catch (KafkaException e)` propagates — wrapped in the
                     // "seek past the record" message with the real fault as the
-                    // cause (`CompletedFetch.java:294-300`). Java's literal text is
+                    // cause (`CompletedFetch.java:299-305`). Java's literal text is
                     // "Received exception when fetching the next record from ..."
                     // (`:297`); §2 bars that word, so ours says "an error".
                     assert_eq!(
@@ -2758,7 +2758,7 @@ mod tests {
     ///
     /// The first call returns batch 1's records: Java's `catch (KafkaException e)`
     /// caches a fault and returns the records already in hand
-    /// (`CompletedFetch.java:294-300`). The second call raises the cached fault
+    /// (`CompletedFetch.java:299-305`). The second call raises the cached fault
     /// wrapped in the "seek past the record" message (`:256-259`).
     fn fault_after_first_batch(buf: Vec<u8>, check_crcs: bool) -> Error {
         let mut cf = new_completed_fetch(0, buf);
@@ -3040,7 +3040,7 @@ mod tests {
     /// The READ_COMMITTED skip comes before the records are inflated too: an
     /// aborted compressed batch is dropped without its stream being read, as
     /// Java never builds an iterator for a batch it skips
-    /// (`CompletedFetch.java:212-221`).
+    /// (`CompletedFetch.java:217-226`).
     #[test]
     fn test_aborted_compressed_batch_is_skipped_without_inflating() {
         let aborted_pid = 42;
@@ -3068,7 +3068,7 @@ mod tests {
 
     /// The cursor lets go of an exhausted batch before it inflates the next, as
     /// Java closes a batch's record stream before taking the next batch
-    /// (`maybeCloseRecordStream()`, `CompletedFetch.java:175-180, 185`), so a
+    /// (`maybeCloseRecordStream()`, `CompletedFetch.java:180-185, 190`), so a
     /// fetch never holds two inflated batches at once. The test keeps its own
     /// reference to the first batch's inflated buffer and makes the second batch
     /// fail to inflate: once that inflate has run, the test's reference must be
@@ -3153,7 +3153,7 @@ mod tests {
 
     /// The same for a control batch's first record, read under READ_COMMITTED by
     /// `contains_abort_marker` (Java's `batchIterator.next()`,
-    /// `CompletedFetch.java:384`).
+    /// `CompletedFetch.java:389`).
     #[test]
     fn test_malformed_control_record_is_reported_by_the_cause_message() {
         let mut buf = control_batch(2, 1, 1000);

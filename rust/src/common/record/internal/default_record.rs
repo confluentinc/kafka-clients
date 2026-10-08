@@ -336,7 +336,6 @@ impl DefaultRecord {
     /// configured maximum record size of M.".
     ///
     /// [`AbstractRecords::SOFT_MAX_ARRAY_LENGTH`]: crate::common::record::internal::AbstractRecords::SOFT_MAX_ARRAY_LENGTH
-    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#readFrom")]
     pub fn read_from_stream<R: Read>(
         input: &mut R,
         base_offset: i64,

@@ -458,7 +458,7 @@ impl OffsetFetcherUtils {
     }
 
     /// Java: `positionsValidator.maybeSetError(..)`
-    /// (`OffsetFetcherUtils.java:380,390`). Stores `error` for later
+    /// (`OffsetFetcherUtils.java:394,404`). Stores `error` for later
     /// propagation on the next call to
     /// [`Self::refresh_and_get_partitions_to_validate`].
     pub(crate) fn maybe_set_validate_error(&self, error: Error) {

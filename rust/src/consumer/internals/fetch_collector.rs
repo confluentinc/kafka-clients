@@ -728,7 +728,7 @@ where
 
         // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
         // throw new KafkaException("Failed to make progress reading messages at ...")`
-        // (`FetchCollector.java:265-270`). Brokers before KIP-74 could return a
+        // (`FetchCollector.java:270-275`). Brokers before KIP-74 could return a
         // non-empty payload containing no *complete* batch; without this check the
         // consumer re-fetches the same offset forever and reports nothing, because
         // no records are decoded so the position never advances.
@@ -2430,7 +2430,7 @@ mod tests {
     // `Fetch.isEmpty()` is `numRecords == 0 && !positionAdvanced`
     // (`Fetch.java:116-118`), and BOTH of `collectFetch`'s guards use it: the
     // one that decides whether to drop the offending entry from the buffer
-    // (`FetchCollector.java:116`) and the one that decides whether to rethrow
+    // (`FetchCollector.java:115`) and the one that decides whether to rethrow
     // (`:138-139`). A records-only spelling makes an all-aborted READ_COMMITTED
     // batch — zero records, position advanced — look empty, which loses BOTH
     // the position progress and the queued entry Java keeps on purpose.

@@ -2204,7 +2204,7 @@ mod tests {
     /// NOT consume the delegate's metadata error — Java's
     /// "Don't get-and-clear the metadata error if there are no events
     /// that will be notified" optimisation
-    /// (`ConsumerNetworkThread.java:447-449`). Subsequent runOnce
+    /// (`ConsumerNetworkThread.java:450-452`). Subsequent runOnce
     /// iterations (which DO register a notifiable event later) must
     /// still see the same metadata error.
     #[tokio::test]

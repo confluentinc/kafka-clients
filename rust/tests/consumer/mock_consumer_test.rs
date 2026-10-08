@@ -519,7 +519,7 @@ async fn test_lose_partitions_removes_from_assignment() {
 /// Translated from `MockConsumerTest.testLosePartitionsThrowsIfNotAssigned`.
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testLosePartitionsThrowsIfNotAssigned")]
-async fn test_lose_partitions_throws_if_not_assigned() {
+async fn test_lose_partitions_returns_if_not_assigned() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     let (tp0, tp1) = (test_tp(0), test_tp(1));
 

@@ -161,7 +161,7 @@ impl<K, V> MockConsumer<K, V> {
     /// assigned to the consumer.
     ///
     /// Translates Java's `addRecord(ConsumerRecord<K, V>)`
-    /// (`MockConsumer.java:322`). Returns
+    /// (`MockConsumer.java:358`). Returns
     /// [`Error::LocalIllegalState`] if the partition is not assigned —
     /// Java throws `IllegalStateException` in that case.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#addRecord")]
@@ -420,7 +420,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's private
     /// `subscribe(Collection<String>, Optional<ConsumerRebalanceListener>)`
-    /// (`MockConsumer.java:196-200`).
+    /// (`MockConsumer.java:226-230`).
     fn subscribe_internal_topics(
         &mut self,
         topics: Vec<String>,
@@ -442,7 +442,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's private
     /// `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`
-    /// (`MockConsumer.java:180-186`).
+    /// (`MockConsumer.java:210-216`).
     fn subscribe_internal_subscription_pattern(
         &mut self,
         pattern: SubscriptionPattern,
@@ -477,7 +477,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Mirrors Java's `resetOffsetPosition(TopicPartition)`
-    /// (`MockConsumer.java:633-652`). Picks the source map by the
+    /// (`MockConsumer.java:716-735`). Picks the source map by the
     /// partition's reset strategy and `seek`s to the configured offset.
     /// Returns [`Error::LocalIllegalState`] when the map does not have an
     /// entry for the partition (Java throws `IllegalStateException`), or
@@ -554,7 +554,7 @@ where
 
     /// Translates Java's
     /// `synchronized Map<MetricName, ? extends Metric> metrics()`
-    /// (`MockConsumer.java:496-499`).
+    /// (`MockConsumer.java:565-568`).
     ///
     /// Java: `ensureNotClosed(); return Collections.emptyMap();`. The mock
     /// has no metrics registry, so the Rust port returns an empty map,
@@ -568,7 +568,7 @@ where
 
     /// Translates Java's
     /// `OptionalLong currentLag(TopicPartition)`
-    /// (`MockConsumer.java:681-688`).
+    /// (`MockConsumer.java:764-771`).
     ///
     /// Behavior summary:
     /// - Returns `None` if the partition is **not assigned** to this
@@ -805,7 +805,7 @@ where
     // ── Commit ─────────────────────────────────────────────────────────
 
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        // Java's `commitSync()` (MockConsumer.java:378-380) reads
+        // Java's `commitSync()` (MockConsumer.java:424-426) reads
         // `allConsumed()` BEFORE the closed check —
         // `commitSync(allConsumed())` → line 362-364 →
         // `commitAsync(offsets, null)` at line 353-358 where
@@ -1139,7 +1139,7 @@ where
 
 impl<K, V> MockConsumer<K, V> {
     /// Shared implementation for all `commit_*` variants. Java's
-    /// `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:353-358`)
+    /// `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:399-404`)
     /// invokes the callback inline (synchronously) — the Rust translation
     /// awaits the callback before returning, matching that contract.
     async fn commit_async_impl(
@@ -1153,7 +1153,7 @@ impl<K, V> MockConsumer<K, V> {
         // required to satisfy both `extend(offsets)` (consumes the map) and
         // `on_complete(&offsets, ...)` (borrows the map).
         //
-        // Java's ordering (`MockConsumer.java:355-358`) is
+        // Java's ordering (`MockConsumer.java:401-404`) is
         // `committed.putAll(offsets); callback.onComplete(offsets, null);` —
         // the callback observes the post-merge state. Rust observes the
         // pre-merge state. The only practical divergence is a callback that
@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     /// Java `MockConsumer.metrics()` returns `Collections.emptyMap()`
-    /// (`MockConsumer.java:496-499`). The Rust port returns an empty map.
+    /// (`MockConsumer.java:565-568`). The Rust port returns an empty map.
     #[test]
     fn test_metrics_returns_empty_map() {
         let c: MockConsumer<String, String> =
@@ -1245,7 +1245,7 @@ mod tests {
 
     /// Java's `MockConsumer.offsetsForTimes` throws
     /// `UnsupportedOperationException("Not implemented yet.")`
-    /// (`MockConsumer.java:534-537`). The message text is part of the contract
+    /// (`MockConsumer.java:609-612`). The message text is part of the contract
     /// (DoD #3), and `admin-client.md` §9 sanctions the
     /// `UnsupportedOperationException` -> `unsupported_version` mapping only as
     /// a *faithful* translation — so the text must be Java's, not a Rust-side

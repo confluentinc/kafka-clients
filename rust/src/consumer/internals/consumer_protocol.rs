@@ -507,7 +507,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeSubscriptionThrowsSchemaExceptionForEveryTruncation"
     )]
-    fn deserialize_subscription_throws_schema_error_for_every_truncation() {
+    fn deserialize_subscription_returns_schema_error_for_every_truncation() {
         let serialized = ConsumerProtocol::serialize_subscription_versioned(
             &truncation_test_subscription(),
             ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
@@ -526,7 +526,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeAssignmentThrowsSchemaExceptionForEveryTruncation"
     )]
-    fn deserialize_assignment_throws_schema_error_for_every_truncation() {
+    fn deserialize_assignment_returns_schema_error_for_every_truncation() {
         let serialized = ConsumerProtocol::serialize_assignment_versioned(
             &truncation_test_assignment(),
             ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
@@ -541,7 +541,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeConsumerProtocolSubscriptionThrowsSchemaExceptionForEveryTruncation"
     )]
-    fn deserialize_consumer_protocol_subscription_throws_schema_error_for_every_truncation() {
+    fn deserialize_consumer_protocol_subscription_returns_schema_error_for_every_truncation() {
         let serialized = ConsumerProtocol::serialize_subscription_versioned(
             &truncation_test_subscription(),
             ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
@@ -560,7 +560,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerProtocolTest#deserializeConsumerProtocolAssignmentThrowsSchemaExceptionForEveryTruncation"
     )]
-    fn deserialize_consumer_protocol_assignment_throws_schema_error_for_every_truncation() {
+    fn deserialize_consumer_protocol_assignment_returns_schema_error_for_every_truncation() {
         let serialized = ConsumerProtocol::serialize_assignment_versioned(
             &truncation_test_assignment(),
             ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,

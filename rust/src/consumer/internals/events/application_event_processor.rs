@@ -1270,7 +1270,7 @@ impl ApplicationEventProcessor {
                 // reconciliations before moving on to update positions", and —
                 // crucially — `mark_reconciliation_check_complete()` below now
                 // fires WHILE the auto-commit is still in flight, matching Java
-                // `ApplicationEventProcessor.java:761-765`, so the app-thread
+                // `ApplicationEventProcessor.java:732-736`, so the app-thread
                 // `poll()` keeps returning records from RETAINED partitions
                 // during a slow commit instead of stalling until it resolves.
                 //
@@ -2375,7 +2375,7 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:246`), so
+        // `KafkaException` here (`ApplicationEventProcessor.java:251`), so
         // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
@@ -2497,7 +2497,7 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:264`), so
+        // `KafkaException` here (`ApplicationEventProcessor.java:269`), so
         // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
@@ -2573,7 +2573,7 @@ mod tests {
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:282`), so
+        // `KafkaException` here (`ApplicationEventProcessor.java:287`), so
         // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
