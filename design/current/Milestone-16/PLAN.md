@@ -1209,6 +1209,101 @@ Phase 4 completion notes (agent 94):
   `ConsumerMembershipManagerTest` (+44), `CommitRequestManagerTest` (+60), `CoordinatorRequestManagerTest`.
 - Check every change against the consumer-threading §31 reconcile / ack machinery (Phase 41 design).
 
+#### Phase 9 completion notes (agent 99)
+
+- **Commits** (on f545f372):
+  - 1cf59db1 KAFKA-20761: log the broker-owned heartbeat interval when it changes;
+  - 34c7fc7f b8429b93a7: drop the no-op skip call on GROUP_ID_NOT_FOUND while unsubscribed;
+  - 0d2e8766 KAFKA-20681: `on_heartbeat_success` moves to `AbstractMembershipManager`, with hooks
+    `error_code`, `member_epoch_with_response` and `extract_assignment`. b831ba72 deletes the §5.1 row;
+  - 1c199323 KAFKA-20145: acknowledge a partially resolved assignment once per target epoch;
+  - 26b89ae2 KAFKA-20765: do not chain an offset fetch onto a completed request;
+  - 42208cfb: heartbeat forwarder wakes the bg task (Critic 93's Phase 3 finding);
+  - 1e37d528 e7b0cb7908: mirror `AbstractHeartbeatRequestManagerTest`;
+  - 22d78389: refresh the Java line cites in the five files to 4.4.0-rc4 (comment-only, 116 cites).
+- **Behaviour fixes beyond the Java diff:**
+  - `extract_assignment` sorts and dedups each topic's partitions, as Java's `TreeSet` does. Before this,
+    a re-ordered broker assignment compared unequal in `LocalAssignment::update_with`.
+  - The `onHeartbeatSuccess` IllegalArgument message names the error the way Java's `%s` does
+    (`UNKNOWN_MEMBER_ID`), not the Rust Debug name.
+  - KAFKA-20765 in Rust. The retry driver re-enqueues its retry directly, so Java's spin cannot happen.
+    But the same window exists: the forwarder completes the sender before it removes the request from
+    `inflight_offset_fetches`, and a `fetch_offsets` arriving in between chained onto a driver that might
+    already have fanned its result out. The `!is_done()` filter closes it.
+  - Heartbeat wake: the forwarder pokes `event_notify` (the application-event `Notify`, never
+    `WakeupTrigger`) after it queues a completion. Before, while a request was in flight, a response
+    could wait up to the heartbeat interval to be drained.
+- **e7b0cb7908 mapping:**
+  - Rust keeps one in-module suite per file. The inherited tests run in
+    `consumer_heartbeat_request_manager.rs` on `AbstractFixture`, which uses the base class defaults:
+    interval 1000, backoff 80/1000, jitter 0, STABLE member `member-id` / epoch 1.
+  - New full translations: `testTimerNotDue`, `testHeartbeatOutsideInterval`, `testNoCoordinator`,
+    `testSuccessfulHeartbeatTiming` (previously "reduced"), `testLogsHeartbeatInterval…OnlyWhenChanged`,
+    `testGroupIdNotFoundExceptionWhileUnsubscribed` (full route), and `testHeartbeatResponseOnErrorHandling`
+    (all 14 rows, full route).
+  - The coverage notes list the 9 + 31 Java tests.
+- **Test fixes exposed by the port:** `same_assignment_reconciled_again_with_missing_topic` had skipped
+  Java's "extended assignment" step. It now receives that assignment, and reconciles from the bg path
+  as Java does.
+- **Skips:**
+  - All Share hunks (ShareMembershipManager, ShareHeartbeatRequestManager and their tests): §20.
+  - `testGroupIdNotFoundWhileStableIsFatal`: the Issue-9 deviation is kept.
+  - `onHeartbeatFailure(false)` verifications: they have no observable effect without a rebalance metrics
+    manager.
+  - `LogCaptureAppender` is replaced by a `cfg(test)` record of the exact logged strings.
+  - The `CoordinatorRequestManagerTest` hunks were already ported in Phases 3/4 (GroupCoordinatorNode
+    id assertions, `test_no_busy_poll_while_find_coordinator_request_in_flight`).
+  - KAFKA-20253 is still covered by Phase 3.
+- **Deviation (DoD #7):** `KAFKA-20765`'s test retries after the request's backoff. Java's chained fresh
+  request goes out on the next poll. The difference comes from Rust having one driver per logical fetch,
+  seeded with the failed attempt.
+- **Gates (HEAD 22d78389):**
+  - `cargo build` passes; `cargo xtask format-check` is clean.
+  - `cargo test`: lib 4424 / 3 ignored, plus 36, 8 and 5 / 7 ignored.
+  - `cargo xtask lint --keep-going`: exactly 14 §5.1 rows (Phase 5 2, Phases 7/8 2, Phase 11 10).
+    Clippy, doc-hygiene and module-path are clean.
+- **Broker runs:**
+  - Modules: `plaintext_consumer consumer_test base_consumer_test consumer_bounce_test
+    consumer_topic_creation_test ssl_consumer_test sasl_plain_plaintext_consumer_test sasl_ssl_consumer_test
+    bootstrap_resolution_test`.
+  - Default 4.2.0: 105 / 1 failed / 2 ignored. The failure was
+    `consumer_bounce_test::test_async_subscribe_when_topic_unavailable` (the known load flake). It passed
+    3/3 alone, and the whole `consumer_bounce_test` module passed 5 / 2 ignored. `--lib integration_tests::`:
+    35/35.
+  - `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`: 105 / 1 failed / 2 ignored.
+    `consumer_bounce_test::test_async_consumer_receives_fatal_exception_when_group_passes_max_size` fails
+    deterministically: "Did not get valid assignment", with only one of five consumers assigned within the
+    wait. It also fails 2/2 on the pre-Phase-9 baseline f545f372, so it is **pre-existing on a 4.4
+    broker, not caused by Phase 9**.
+    - The likely lead is 4.3+'s `group.consumer.assignment.interval.ms`. Its two arms are `#[ignore]`d,
+      "4.3 broker config".
+    - Left to the Manager. A 4.4 run of the consumer modules had not been done before.
+- **`make -k verify`** fails in three targets:
+  - `build-c` (no cmake);
+  - `lint` (the 14 rows);
+  - `test-rust-all-features`: lib 4674 passed. Integration was 307 / 1 failed / 2 ignored. The failure,
+    `producer_transactions_test::test_transactional_records_are_visible_only_after_commit__rust` (EndTxn
+    timeout under load), passes alone.
+  - Python: 366 / 2 skipped, 156, 29 + 29.
+- `git status --ignored` shows no new files from this phase.
+- **Timing log:**
+
+  | Step | Start | End | Min |
+  |---|---|---|---|
+  | Read plan / rules / Java diffs, scope | 14:30 | 14:43 | 13 |
+  | 1 KAFKA-20761 + fixture + test (1cf59db1) | 14:43 | 14:47 | 4 |
+  | 2 b8429b93a7 + full-route test (34c7fc7f) | 14:47 | 14:48 | 1 |
+  | 3 KAFKA-20681 consolidation (0d2e8766) | 14:48 | 14:52 | 4 |
+  | 4 KAFKA-20145 + test fix (1c199323) | 14:52 | 14:54 | 2 |
+  | 5 KAFKA-20765 + 2 tests (26b89ae2) | 14:54 | 14:57 | 3 |
+  | 6 heartbeat forwarder wake (42208cfb) | 14:57 | 14:59 | 2 |
+  | 7 e7b0cb7908 abstract-test family (1e37d528) | 14:59 | 15:02 | 3 |
+  | 8 §5.1 fixup, cite refresh (22d78389, delegated) | 15:02 | 15:11 | 9 |
+  | 9 default-broker run + bounce re-runs | 15:05 | 15:12 | 7 |
+  | 10 format-check, full test, lint | 15:12 | 15:16 | 4 |
+  | 11 4.4.0-rc4 broker run, re-runs, baseline bisect | 15:16 | 15:20 | 4 |
+  | 12 `make -k verify`, re-run, notes | 15:20 | 15:33 | 13 |
+
 ### Phase 10 — Consumer: fetch, offsets, poll, MockConsumer (agent 100)
 
 - KAFKA-20187 (65ffe10e3b): the `endOffsetRequested` flag in `OffsetsRequestManager` (+83) and
