@@ -19,7 +19,12 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// An offset commit could not be completed because the group rebalanced.
+/// An offset commit with [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync)
+/// failed with an unrecoverable error. This error is generated on the client
+/// side, typically when a group rebalance completes before the commit could be
+/// successfully applied. In this case, the commit cannot generally be retried
+/// because some of the partitions may have already been assigned to another
+/// member in the group.
 ///
 /// Corresponds to Java's `CommitFailedException`. It has no entry in `Errors`,
 /// so it carries no protocol code.

@@ -19,8 +19,13 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// An offset commit failed with a retriable error; committing the latest
-/// consumed offsets again may succeed.
+/// An offset commit failed with a retriable error. This error is generated
+/// on the client side upon receiving retriable error codes from the Group
+/// Coordinator in a commit response.
+///
+/// Unlike [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError), this
+/// error indicates that the commit can be retried. The consumer should attempt
+/// to commit the offsets again.
 ///
 /// Corresponds to Java's `RetriableCommitFailedException`. It has no entry in
 /// `Errors`, so it carries no protocol code.

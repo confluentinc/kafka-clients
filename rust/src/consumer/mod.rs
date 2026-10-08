@@ -137,11 +137,33 @@ where
 {
     // ── State reads (sync — Java: non-blocking accessors) ──
 
-    /// Translates Java's `Set<TopicPartition> assignment()`.
+    /// Get the set of partitions currently assigned to this consumer. If
+    /// subscription happened by directly assigning partitions using
+    /// [`Self::assign`] then this will simply return the same partitions that
+    /// were assigned. If topic subscription was used, then this will give the
+    /// set of topic partitions currently assigned to the consumer (which may
+    /// be none if the assignment hasn't happened yet, or the partitions are in
+    /// the process of getting reassigned).
+    ///
+    /// The returned set is a snapshot of the current assignment at the time of
+    /// the call. It will not be updated if the assignment changes afterward.
+    ///
+    /// Translates Java's `Set<TopicPartition> assignment()` (javadoc from
+    /// `KafkaConsumer`, KAFKA-20341).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assignment")]
     fn assignment(&self) -> HashSet<TopicPartition>;
 
-    /// Translates Java's `Set<String> subscription()`.
+    /// Get the current subscription. Will return the same topics used in the
+    /// most recent call to [`Self::subscribe_with_topics`] or
+    /// [`Self::subscribe_with_topics_listener`], or an empty set if no such
+    /// call has been made.
+    ///
+    /// The returned set is a snapshot of the current subscription at the time
+    /// of the call. It will not be updated if the subscription changes
+    /// afterward.
+    ///
+    /// Translates Java's `Set<String> subscription()` (javadoc from
+    /// `KafkaConsumer`, KAFKA-20341).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscription")]
     fn subscription(&self) -> HashSet<String>;
 
@@ -177,7 +199,12 @@ where
     ///
     /// Sync — Java's `metrics()` does not block. The returned map is a
     /// point-in-time snapshot taken under the registry lock (a cold,
-    /// monitoring-frequency call), not a live view.
+    /// monitoring-frequency call), not a live view: metrics registered or
+    /// removed afterwards are not reflected in it, so call again to observe
+    /// them. Each [`KafkaMetric`] in it is the registry's own shared entry, so
+    /// reading its value returns the current value. (Java's javadoc,
+    /// KAFKA-20341, documents its map as an unmodifiable *live* view of the
+    /// metrics; this is the one difference.)
     ///
     /// This trait method has **no default**: it is in Java's `Consumer`
     /// interface, so every implementation provides it, and adding it without
@@ -201,7 +228,7 @@ where
     // `subscribe(SubscriptionPattern)` sends the pattern to the broker for
     // **server-side** RE2/J evaluation
     // (`TopicRe2JPatternSubscriptionChangeEvent`) —
-    // `AsyncKafkaConsumer.java:2107,2131`.
+    // `AsyncKafkaConsumer.java:2246,2268`.
     //
     // **Only the `SubscriptionPattern` form is translated.** The two
     // `subscribe(Pattern ...)` overloads are deliberately NOT implemented in
@@ -394,6 +421,14 @@ where
 
     /// Translates Java's `List<PartitionInfo> partitionsFor(String topic)`.
     ///
+    /// Returns the list of partitions, which will be empty when the given topic
+    /// is not found. Note: when both the broker config
+    /// `auto.create.topics.enable` and the consumer config
+    /// `allow.auto.create.topics` are `true`, this method may return an empty
+    /// list even though the topic is being auto-created in the background.
+    /// Callers should not assume the topic does not exist based solely on an
+    /// empty result (javadoc from `KafkaConsumer`, KAFKA-20089).
+    ///
     /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
     /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
@@ -401,6 +436,10 @@ where
 
     /// Translates Java's
     /// `List<PartitionInfo> partitionsFor(String topic, Duration)`.
+    ///
+    /// Returns the list of partitions, which will be empty when the given topic
+    /// is not found; see [`Self::partitions_for`] for the auto-topic-creation
+    /// caveat on an empty result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
     async fn partitions_for_with_timeout(
         &mut self,

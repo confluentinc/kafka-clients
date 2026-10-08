@@ -204,15 +204,32 @@ impl FetchSessionHandler {
     #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#handleResponse")]
     pub fn handle_response(&mut self, response: &FetchResponse, version: i16) -> bool {
         if response.error() != Errors::None {
-            info!(
-                "Node {} was unable to process the fetch request with {}: {:?}.",
-                self.node,
-                self.next_metadata,
-                response.error()
-            );
+            // Both branches log at DEBUG since KAFKA-20713 (85b0e80272,
+            // `FetchSessionHandler.java:528-548`): every fetch-session error is
+            // recoverable and self-healing.
             if response.error() == Errors::FetchSessionIdNotFound {
+                // Session does not exist on the broker anymore. Recoverable and
+                // self-healing, the client re-sends a full fetch request.
+                debug!(
+                    "Node {} returned a {:?} error; the fetch session {} was likely evicted from the broker's \
+                     fetch session cache. Re-sending a full fetch request to establish a new session.",
+                    self.node,
+                    response.error(),
+                    self.next_metadata.session_id()
+                );
                 self.next_metadata = FetchMetadata::INITIAL;
             } else {
+                // Other fetch-session errors (e.g. INVALID_FETCH_SESSION_EPOCH,
+                // FETCH_SESSION_TOPIC_ID_ERROR) are also recoverable and
+                // self-healing: the existing session is closed and a new one is
+                // re-established with a full fetch.
+                debug!(
+                    "Node {} was unable to process the fetch request with {}: {:?}. Re-sending a full fetch \
+                     request, which closes the existing session on the broker and establishes a new one.",
+                    self.node,
+                    self.next_metadata,
+                    response.error()
+                );
                 self.next_metadata = self.next_metadata.next_close_existing_attempt_new();
             }
             return false;

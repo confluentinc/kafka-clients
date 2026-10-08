@@ -21,7 +21,11 @@ use std::str::FromStr;
 
 use crate::common::Error;
 
-/// The group protocol that the consumer uses.
+/// The supported consumer group protocols:
+///
+/// * [`Classic`](Self::Classic) - The Classic consumer group protocol (pre
+///   KIP-848)
+/// * [`Consumer`](Self::Consumer) - The Consumer rebalance protocol (KIP-848)
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
