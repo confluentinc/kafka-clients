@@ -224,10 +224,30 @@ pub(crate) struct CompletedFetch {
     /// Last partition-leader epoch we observed (used by Phase 7b's
     /// FetchCollector to update SubscriptionState).
     last_epoch: Option<i32>,
-    /// Whether `drain` has been called.
+    /// Whether `drain` has been called. Java declares it `volatile`
+    /// (KAFKA-15529) because the background thread reads it through
+    /// `FetchBuffer.bufferedPartitions()` while the application thread works on
+    /// the fetch. Here the background task reads it only under the
+    /// [`FetchBuffer`] mutex, and the collector puts the fetch back under that
+    /// mutex after the position update, so a plain `bool` suffices.
     is_consumed: bool,
+    /// Whether iteration reached the end of the records. Set where Java used to
+    /// call `drain()` directly; [`FetchCollector`] drains an exhausted fetch
+    /// only after it has advanced the subscription position, so `is_consumed`
+    /// never reads `true` next to a stale position (KAFKA-15529).
+    ///
+    /// [`FetchCollector`]: super::FetchCollector
+    exhausted: bool,
     /// Whether the cursor has been positioned at the first batch.
     initialized: bool,
+
+    /// Test seam standing in for Java's Mockito `spy(completedFetch)` +
+    /// `doAnswer(...).when(completedFetch).drain()`: runs at every
+    /// [`Self::drain`] call, before the real body, so a test can observe the
+    /// state at the moment of the drain (`FetchCollectorTest
+    /// .testPositionUpdatedBeforeDrainOnExhaustedFetch`).
+    #[cfg(test)]
+    pub(crate) on_drain_for_test: Option<Box<dyn FnMut() + Send>>,
 
     /// DIAGNOSTIC (not in Java): instant this `CompletedFetch` was constructed
     /// on the background task (when the fetch response was received). Logged
@@ -342,6 +362,9 @@ impl CompletedFetch {
             next_fetch_offset: fetch_offset,
             last_epoch: None,
             is_consumed: false,
+            exhausted: false,
+            #[cfg(test)]
+            on_drain_for_test: None,
             initialized: false,
             // DIAGNOSTIC: stamp construction time only when fetch_diag is on.
             created_at: log::log_enabled!(target: "fetch_diag", log::Level::Info).then(std::time::Instant::now),
@@ -371,6 +394,9 @@ impl CompletedFetch {
             next_fetch_offset: 0,
             last_epoch: None,
             is_consumed: false,
+            exhausted: false,
+            #[cfg(test)]
+            on_drain_for_test: None,
             initialized: false,
             created_at: None,
         }
@@ -419,9 +445,19 @@ impl CompletedFetch {
         self.is_consumed
     }
 
+    /// Returns whether iteration reached the end of the records (KAFKA-15529).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isExhausted")]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
     /// Drops iteration state and marks the fetch consumed. Idempotent.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#drain")]
     pub(crate) fn drain(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = self.on_drain_for_test.as_mut() {
+            hook();
+        }
         if self.is_consumed {
             return;
         }
@@ -835,9 +871,9 @@ impl CompletedFetch {
     ///
     /// Returns `Ok(true)` if a record is positioned at the cursor and
     /// ready to be read via [`Self::peek_current_record`]. Returns
-    /// `Ok(false)` when iteration is exhausted; in that case the cursor
-    /// is drained and `next_fetch_offset` is advanced to the end of the
-    /// last batch.
+    /// `Ok(false)` when iteration is exhausted; in that case the fetch is
+    /// marked exhausted (not drained: see [`Self::is_exhausted`]) and
+    /// `next_fetch_offset` is advanced to the end of the last batch.
     ///
     /// §27 zero-copy note: the previous version returned an owned
     /// `(DefaultRecord, BatchMetadata)` tuple, which forced a deep clone
@@ -873,7 +909,10 @@ impl CompletedFetch {
                     {
                         self.next_fetch_offset = batch_meta.next_offset;
                     }
-                    self.drain();
+                    // Java (KAFKA-15529, `CompletedFetch.java:200`): mark the
+                    // fetch exhausted; `FetchCollector` drains it after the
+                    // position update.
+                    self.exhausted = true;
                     return Ok(false);
                 }
                 // load_next_batch may have skipped the batch entirely for
@@ -1518,6 +1557,7 @@ impl std::fmt::Debug for CompletedFetch {
             .field("partition", &self.partition)
             .field("next_fetch_offset", &self.next_fetch_offset)
             .field("is_consumed", &self.is_consumed)
+            .field("exhausted", &self.exhausted)
             .field("initialized", &self.initialized)
             .field("records_read", &self.records_read)
             .field("bytes_read", &self.bytes_read)
@@ -1951,7 +1991,10 @@ mod tests {
             }
             // next_fetch_offset advanced past the last record of the last batch.
             assert_eq!(base_offset + total as i64, cf.next_fetch_offset());
-            assert!(cf.is_consumed());
+            // Exhausted, not drained: `FetchCollector` drains after the position
+            // update (KAFKA-15529).
+            assert!(cf.is_exhausted());
+            assert!(!cf.is_consumed());
         }
     }
 
@@ -2604,7 +2647,10 @@ mod tests {
         assert_eq!(2, records.len());
         // After full drain, next offset should equal last record offset + 1 (104+1=105).
         assert_eq!(105, cf.next_fetch_offset());
-        assert!(cf.is_consumed());
+        // Exhausted, not drained: `FetchCollector` drains after the position
+        // update (KAFKA-15529).
+        assert!(cf.is_exhausted());
+        assert!(!cf.is_consumed());
     }
 
     /// Counting deserializer: records how many times it was invoked so a test
@@ -3140,7 +3186,10 @@ mod tests {
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("a truncated batch is no batch, not an error");
         assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
-        assert!(cf.is_consumed());
+        // Exhausted, not drained: `FetchCollector` drains after the position
+        // update (KAFKA-15529).
+        assert!(cf.is_exhausted());
+        assert!(!cf.is_consumed());
         assert_eq!(2, cf.next_fetch_offset(), "the next fetch starts at the truncated batch");
         let rest = cf
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)

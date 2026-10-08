@@ -565,6 +565,14 @@ where
                     position_advanced = true;
                 }
 
+                // Drain after position update to ensure the background task sees
+                // the updated position before it sees is_consumed=true. This
+                // prevents duplicate fetch requests for the old offset
+                // (KAFKA-15529).
+                if cf.is_exhausted() {
+                    cf.drain();
+                }
+
                 // Record per-partition lag / lead, mirroring Java's
                 // `FetchCollector` (`subscriptions.partitionLag` /
                 // `partitionLead` → `metricsManager.recordPartitionLag/Lead`).
@@ -1099,6 +1107,55 @@ mod tests {
             aggregator,
             fetch_offset,
         )
+    }
+
+    /// Translated from `FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`
+    /// (KAFKA-15529). With `max.poll.records` one above the record count the
+    /// fetch is exhausted within one `collect_fetch`, and when it is drained the
+    /// subscription position has already advanced past every record, so the
+    /// background task never sees a consumed fetch next to the old position.
+    ///
+    /// Java spies on `drain()`; here the `on_drain_for_test` seam records the
+    /// position at the moment of the drain.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testPositionUpdatedBeforeDrainOnExhaustedFetch"
+    )]
+    fn test_position_updated_before_drain_on_exhausted_fetch() {
+        // DEFAULT_RECORD_COUNT + 1 makes the fetchRecords loop call
+        // nextFetchedRecord one extra time, triggering exhaustion and drain
+        // within the same collectFetch.
+        let h = build_harness(DEFAULT_RECORD_COUNT + 1, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+
+        let mut cf = build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None);
+        // Record the subscription position at the moment drain() is called.
+        let position_at_drain_time = Arc::new(std::sync::atomic::AtomicI64::new(-1));
+        let (subs, recorded, tp_in_hook) = (h.subs.clone(), position_at_drain_time.clone(), partition.clone());
+        cf.on_drain_for_test = Some(Box::new(move || {
+            let offset = subs.lock().unwrap().position(&tp_in_hook).unwrap().map_or(-1, |p| p.offset);
+            recorded.store(offset, std::sync::atomic::Ordering::SeqCst);
+        }));
+        h.fetch_buffer.add(cf);
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+        assert_eq!(DEFAULT_RECORD_COUNT as usize, fetch.count());
+        // Java: `assertTrue(completedFetch.isConsumed())`. The consumed fetch is
+        // discarded by the collector's next pass, so its drain is observed
+        // through the hook instead.
+        assert_ne!(
+            -1,
+            position_at_drain_time.load(std::sync::atomic::Ordering::SeqCst),
+            "drain() was called"
+        );
+        assert!(!h.fetch_buffer.has_next_in_line_fetch(), "the consumed fetch was discarded");
+
+        // When drain() was invoked, the position had already been advanced.
+        assert_eq!(
+            DEFAULT_RECORD_COUNT as i64,
+            position_at_drain_time.load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     /// Translated from `FetchCollectorTest.testFetchNormal`.
