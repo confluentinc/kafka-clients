@@ -1531,6 +1531,15 @@ impl CommitRequestManager {
         for mut fetch in fetches.drain(..) {
             if fetch.state.can_send_request(current_time_ms) {
                 fetch.state.on_send_attempt(current_time_ms);
+                // Refresh the request's member id/epoch at SEND time, as the
+                // commit loop above does. Java's `OffsetFetchRequestState` holds
+                // a reference to the manager's one mutable `MemberInfo`
+                // (`CommitRequestManager.java:986`) and `toUnsentRequest()` reads
+                // it when the request is drained (`:1198-1201`), so an epoch
+                // update between creation and send — e.g. a retry whose new
+                // epoch lands during its backoff, KAFKA-20765's "picking up the
+                // current member epoch at send time" — goes on the wire.
+                fetch.member_info = guard.member_info.clone();
                 let unsent = build_offset_fetch_unsent_request(&inner, &mut fetch);
                 to_send.push(unsent);
                 inflight_to_add.push(fetch);
@@ -5916,6 +5925,86 @@ mod tests {
             assert_eq!(groups.len(), 1);
             assert_eq!(groups[0].member_epoch, new_epoch);
             assert_eq!(groups[0].member_id.as_deref(), Some("member1"));
+        } else {
+            panic!("expected an OffsetFetch request");
+        }
+    }
+
+    /// The OffsetFetch wire request carries the member epoch current at SEND
+    /// time, not the one at `fetch_offsets` (Critic 99 M1). Java's
+    /// `OffsetFetchRequestState` reads the manager's shared `MemberInfo` in
+    /// `toUnsentRequest()` (`CommitRequestManager.java:986`, `:1198-1201`).
+    /// Java's order: epoch 1, fetch, epoch 2, poll. Then a leave (no epoch)
+    /// before send: Java sends no member id / epoch, so the fields keep their
+    /// defaults.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_uses_member_epoch_at_send_time() {
+        fn group_member(unsent: &mut UnsentRequest) -> (Option<String>, i32) {
+            let req = unsent.request_builder_mut().expect("builder present").build().expect("build");
+            match req {
+                crate::common::requests::AbstractRequest::OffsetFetch(fetch) => {
+                    let group = &fetch.data().groups[0];
+                    (group.member_id.clone(), group.member_epoch)
+                },
+                _ => panic!("expected an OffsetFetch request"),
+            }
+        }
+
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let _result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        manager.on_member_epoch_updated(Some(2), "member1".to_string());
+        let mut unsent = poll_one_unsent(&manager, &coordinator, 0);
+        assert_eq!((Some("member1".to_string()), 2), group_member(&mut unsent));
+
+        let manager = make_manager(0, false);
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let _result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        manager.on_member_epoch_updated(None, "member1".to_string());
+        let mut unsent = poll_one_unsent(&manager, &coordinator, 0);
+        let default_group = crate::offset_fetch_request_data::OffsetFetchRequestGroup::new();
+        assert_eq!(
+            (default_group.member_id.clone(), default_group.member_epoch),
+            group_member(&mut unsent),
+            "a member that left sends no member id / epoch"
+        );
+    }
+
+    /// A STALE_MEMBER_EPOCH retry whose new epoch lands DURING its backoff
+    /// (the response arrived before the heartbeat that bumps the epoch) is
+    /// sent with the new epoch, as Java's retry picks it up at send time
+    /// (Critic 99 M1; KAFKA-20765's "picking up the current member epoch at
+    /// send time").
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_retry_picks_up_epoch_updated_during_backoff() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        manager.on_member_epoch_updated(Some(1), "member1".to_string());
+        let mut result = manager.fetch_offsets(HashSet::from([topic_partition("t1", 0)]), i64::MAX, 0);
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        unsent
+            .handler()
+            .on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::StaleMemberEpoch));
+        // The retry is queued (built while the member still has epoch 1).
+        yield_until(
+            || (manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.len() == 1).then_some(()),
+            "the stale-epoch failure did not queue a retry",
+        )
+        .await;
+        assert!(
+            manager.poll_with_coordinator(&coordinator, 0).unsent_requests.is_empty(),
+            "the retry waits out its backoff"
+        );
+        assert_still_pending(&mut result).await;
+
+        // The heartbeat raising the epoch lands during the backoff.
+        manager.on_member_epoch_updated(Some(2), "member1".to_string());
+        let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+        let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
+        let req = retried.request_builder_mut().expect("builder present").build().expect("build");
+        if let crate::common::requests::AbstractRequest::OffsetFetch(fetch) = req {
+            assert_eq!(2, fetch.data().groups[0].member_epoch);
         } else {
             panic!("expected an OffsetFetch request");
         }
