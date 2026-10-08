@@ -1926,19 +1926,14 @@ where
         // M7 over THIS same registry — no re-plumb.
         let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
 
-        // M4: the consumer-level + heartbeat + offset-commit metrics managers
-        // all register against the SAME `Arc<Metrics>` registry. Java
-        // constructs each from `metrics` in the relevant constructor
-        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
-        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
-        // wired into their bg-task request managers post-construction (the
-        // request managers are built below), mirroring the coordinator/
-        // interceptor-hook setter pattern.
+        // M4: the consumer-level metrics register against the SAME
+        // `Arc<Metrics>` registry as every other manager. The heartbeat and
+        // offset-commit metrics managers are built below, only when their
+        // request manager is: Java builds each inside that request manager's
+        // constructor (`CommitRequestManager.java:172`,
+        // `ConsumerHeartbeatRequestManager.java:72`), so a consumer without a
+        // `group.id` never registers them, and nothing removes them on close.
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
-        let offset_commit_metrics_manager =
-            Arc::new(crate::consumer::internals::metrics::OffsetCommitMetricsManager::new(&metrics));
-        let heartbeat_metrics_manager =
-            Arc::new(crate::consumer::internals::metrics::HeartbeatMetricsManager::new(&metrics));
 
         // M6: the async-consumer background-task / event-queue metrics
         // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
@@ -2213,11 +2208,14 @@ where
                 as Arc<dyn crate::consumer::internals::AutoCommitInterceptorHook>);
         }
 
-        // M4: wire the OffsetCommitMetricsManager into the commit manager so
-        // the commit-response handler records per-commit request latency
-        // (`CommitRequestManager.java:767`).
+        // M4: build the OffsetCommitMetricsManager for the commit manager
+        // (Java: in the `CommitRequestManager` constructor,
+        // `CommitRequestManager.java:172`), so the commit-response handler
+        // records per-commit request latency (`CommitRequestManager.java:864`).
         if let Some(commit_arc) = commit.as_ref() {
-            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+            commit_arc.set_offset_commit_metrics_manager(Arc::new(
+                crate::consumer::internals::metrics::OffsetCommitMetricsManager::new(&metrics),
+            ));
         }
 
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
@@ -2278,10 +2276,14 @@ where
                         Arc::clone(membership),
                         Arc::clone(&background_event_handler),
                     );
-                    // M4: wire the HeartbeatMetricsManager so the send/response
-                    // paths record `last-heartbeat-seconds-ago` /
-                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
-                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    // M4: build the HeartbeatMetricsManager (Java: in the
+                    // `ConsumerHeartbeatRequestManager` constructor,
+                    // `ConsumerHeartbeatRequestManager.java:72`) so the
+                    // send/response paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:309,323,335`).
+                    hb.set_metrics_manager(Arc::new(
+                        crate::consumer::internals::metrics::HeartbeatMetricsManager::new(&metrics),
+                    ));
                     // Wake the bg task when the heartbeat response forwarder (a
                     // spawned task) has queued a completion, so a new
                     // assignment, fence or fatal error is applied at once
