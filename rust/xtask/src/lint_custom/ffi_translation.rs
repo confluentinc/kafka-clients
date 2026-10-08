@@ -69,18 +69,25 @@
 //!     `BoxFuture`): the blocking form above plus `<fn>_cb(.., cb, opaque)`
 //!     and the typedef `<fn>_cb_t = fn(value, error, opaque)`, value and
 //!     error slots present only when the method yields them;
-//!   - an enum with unit variants: `<prefix>_e` (a `#[repr(C)]` enum listing
-//!     every variant snake_cased), `<prefix>__enum(const <prefix>_t *)`, and
-//!     one `<prefix>_<variant>(void)` returning the borrowed singleton per
-//!     unit variant; data variants are built by the Java static factories,
-//!     which are ordinary methods;
+//!   - an enum with a handle: `<prefix>_e` (a `#[repr(C)]` enum listing
+//!     every variant snake_cased), `<prefix>__enum(const <prefix>_t *)`, one
+//!     `<prefix>_<variant>(void)` returning the borrowed singleton per unit
+//!     variant and one `<prefix>_<variant>(<fields>..)` returning an owned
+//!     handle per data variant (`MetricValue::Double(f64)`); the Java static
+//!     factory, when there is one (`OffsetSpec::for_timestamp`), is an
+//!     ordinary method beside it. `Error` is the exception: its constructors
+//!     are the `kafka_common_Error_<class>` factories and C classifies it
+//!     with the predicates, never by variant;
 //!   - a public trait some public method accepts or returns, or a public
 //!     struct with a handle implements: the interface handle `<prefix>_t` and
-//!     one invoker per method, shaped like an inherent method (a trait
-//!     nothing builds, such as `ClusterResourceListener`, expects
-//!     nothing); a trait some public method
-//!     accepts (`Box<dyn T>`, `Arc<dyn T>`, `&dyn T`, `impl T`, a bounded
-//!     type parameter) also `<prefix>_new(void *self, <prefix>_<m>_fn_t ..)`
+//!     one invoker per method, the public supertraits' methods included
+//!     (`MeasurableStat: Stat + Measurable` has `record` and `measure`, as
+//!     Java inherits interface methods), each shaped like an inherent method
+//!     (a trait nothing builds, such as `ClusterResourceListener`, expects
+//!     nothing); a trait some public method accepts (`Box<dyn T>`,
+//!     `Arc<dyn T>`, `&dyn T`, `impl T`, a bounded type parameter) or a
+//!     public enum's variant carries (`MetricValueProvider::Gauge(Box<dyn
+//!     Gauge>)`) also `<prefix>_new(void *self, <prefix>_<m>_fn_t ..)`
 //!     with one `_fn_t` per method, nullable (`Option<..>`) when the Rust
 //!     method has a default body (a Java default method); an async method's
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
@@ -90,7 +97,9 @@
 //!     method;
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
-//!     `*mut` on both sides when a trait method takes `&mut self`;
+//!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
+//!     `impl<T: A + B> Trait for T` counts for every struct implementing `A`
+//!     and `B`;
 //!   - an `Error` variant's payload struct with a handle:
 //!     `kafka_common_Error_<payload>(const kafka_common_Error_t *)` returning
 //!     the payload view.
@@ -109,7 +118,10 @@
 //! is the C caller's discriminator and has no Rust item behind it; a trait
 //! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
-//! associated consts expect nothing (cbindgen exports no constants).
+//! associated consts expect nothing (cbindgen exports no constants); a
+//! struct generic over a closure (`ClosureGauge<F>`, a Java lambda's
+//! stand-in) expects nothing, since C implements the trait's interface
+//! instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -712,12 +724,48 @@ enum Kind {
     Struct,
     Enum {
         unit: Vec<String>,
-        data: Vec<String>,
+        data: Vec<DataVariant>,
     },
     Trait {
         /// Whether some method takes `&mut self`.
         mutable: bool,
     },
+}
+
+/// An enum variant carrying data: what its constructor takes.
+struct DataVariant {
+    name: String,
+    /// The fields' names (positional ones are `value`, `value_1`, ..) and types.
+    fields: Vec<(String, syn::Type)>,
+}
+
+impl DataVariant {
+    fn new(v: &syn::Variant) -> Self {
+        let fields = match &v.fields {
+            syn::Fields::Named(n) => n
+                .named
+                .iter()
+                .map(|f| (f.ident.as_ref().map(ToString::to_string).unwrap_or_default(), f.ty.clone()))
+                .collect(),
+            syn::Fields::Unnamed(u) => u
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    (
+                        if i == 0 {
+                            "value".to_string()
+                        } else {
+                            format!("value_{i}")
+                        },
+                        f.ty.clone(),
+                    )
+                })
+                .collect(),
+            syn::Fields::Unit => Vec::new(),
+        };
+        DataVariant { name: v.ident.to_string(), fields }
+    }
 }
 
 /// A public method: an inherent `pub fn`, or a trait's method.
@@ -1017,11 +1065,14 @@ impl FfiTranslation {
     fn rust_surface(&self, krate: &Crate) -> Surface {
         let is_ffi = |module: &[String]| module.first().is_some_and(|m| m == "ffi");
         let public = krate.public_types();
-        let trait_names: BTreeSet<String> = public
+        let trait_items: BTreeMap<String, &syn::ItemTrait> = public
             .iter()
-            .filter(|(path, name)| matches!(krate.type_item(path, name), syn::Item::Trait(_)))
-            .map(|(_, name)| name.clone())
+            .filter_map(|(path, name)| match krate.type_item(path, name) {
+                syn::Item::Trait(t) => Some((name.clone(), t)),
+                _ => None,
+            })
             .collect();
+        let trait_names: BTreeSet<String> = trait_items.keys().cloned().collect();
 
         let mut surface = Surface::default();
         for (module, name) in &public {
@@ -1032,12 +1083,20 @@ impl FfiTranslation {
             let m = &krate.modules[module];
             let file = m.file.display().to_string();
             let (attrs, kind, generics, methods) = match item {
-                syn::Item::Struct(s) => (
-                    &s.attrs,
-                    Kind::Struct,
-                    type_params(&s.generics),
-                    inherent_methods(&m.items, name),
-                ),
+                syn::Item::Struct(s) => {
+                    // A struct generic over a closure (`ClosureGauge<F>`)
+                    // stands in for a Java lambda: C implements the trait's
+                    // interface instead, so the struct has no C type.
+                    if has_closure_bound(&s.generics) {
+                        continue;
+                    }
+                    (
+                        &s.attrs,
+                        Kind::Struct,
+                        type_params(&s.generics),
+                        inherent_methods(&m.items, name),
+                    )
+                },
                 syn::Item::Enum(e) => {
                     let (unit, data): (Vec<_>, Vec<_>) =
                         e.variants.iter().partition(|v| matches!(v.fields, syn::Fields::Unit));
@@ -1045,7 +1104,7 @@ impl FfiTranslation {
                         &e.attrs,
                         Kind::Enum {
                             unit: unit.iter().map(|v| v.ident.to_string()).collect(),
-                            data: data.iter().map(|v| v.ident.to_string()).collect(),
+                            data: data.into_iter().map(DataVariant::new).collect(),
                         },
                         type_params(&e.generics),
                         inherent_methods(&m.items, name),
@@ -1059,20 +1118,7 @@ impl FfiTranslation {
                             continue;
                         }
                     }
-                    let methods: Vec<RustMethod> = t
-                        .items
-                        .iter()
-                        .filter_map(|it| match it {
-                            syn::TraitItem::Fn(f) if !requires_sized(&f.sig.generics) && !is_hidden(&f.attrs) => {
-                                Some(RustMethod {
-                                    name: f.sig.ident.to_string(),
-                                    sig: f.sig.clone(),
-                                    has_default: f.default.is_some(),
-                                })
-                            },
-                            _ => None,
-                        })
-                        .collect();
+                    let methods = trait_methods(t, &trait_items, &mut BTreeSet::new());
                     let mutable = methods.iter().any(|m| receiver(&m.sig) == Receiver::Mut);
                     (&t.attrs, Kind::Trait { mutable }, type_params(&t.generics), methods)
                 },
@@ -1103,6 +1149,8 @@ impl FfiTranslation {
             }
         }
 
+        // Blanket impls, trait → the bounds a struct must implement.
+        let mut blanket: Vec<(String, BTreeSet<String>)> = Vec::new();
         for (module, m) in krate.modules.iter().filter(|(path, _)| !is_ffi(path)) {
             for item in &m.items {
                 match item {
@@ -1129,6 +1177,21 @@ impl FfiTranslation {
                         let Some(self_name) = type_ident(&i.self_ty) else {
                             continue;
                         };
+                        if type_params(&i.generics).contains(&self_name) {
+                            // `impl<T: Stat + Measurable> MeasurableStat for T`:
+                            // every public struct implementing the bounds
+                            // implements the trait.
+                            if trait_names.contains(&trait_name) {
+                                let bounds: BTreeSet<String> = bound_trait_names(&i.generics, &self_name)
+                                    .into_iter()
+                                    .filter(|b| trait_names.contains(b))
+                                    .collect();
+                                if !bounds.is_empty() {
+                                    blanket.push((trait_name, bounds));
+                                }
+                            }
+                            continue;
+                        }
                         if !public.contains(&(module.clone(), self_name.clone())) {
                             continue;
                         }
@@ -1139,6 +1202,23 @@ impl FfiTranslation {
                         }
                     },
                     _ => {},
+                }
+            }
+        }
+
+        // A blanket impl applies to every struct implementing its bounds —
+        // bounds another blanket impl may in turn satisfy.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let structs: BTreeSet<String> = surface.impls.iter().map(|(s, _)| s.clone()).collect();
+            for (trait_name, bounds) in &blanket {
+                for s in &structs {
+                    if bounds.iter().all(|b| surface.impls.contains(&(s.clone(), b.clone())))
+                        && surface.impls.insert((s.clone(), trait_name.clone()))
+                    {
+                        changed = true;
+                    }
                 }
             }
         }
@@ -1270,6 +1350,18 @@ impl FfiTranslation {
             }
         }
 
+        // A trait a public enum's variant carries
+        // (`MetricValueProvider::Gauge(Box<dyn Gauge>)`): the variant's
+        // constructor accepts an implementation.
+        for ty in &surface.types {
+            let Kind::Enum { data, .. } = &ty.kind else { continue };
+            for (_, fty) in data.iter().flat_map(|v| &v.fields) {
+                let mut names = BTreeSet::new();
+                collect_bound_traits(fty, &BTreeMap::new(), &mut names);
+                accepted.extend(names.into_iter().filter(|n| traits.contains_key(n.as_str())));
+            }
+        }
+
         // The traits some public struct with a handle implements: its
         // `__as_<Trait>` view builds an instance.
         let implemented: BTreeSet<&str> = surface
@@ -1355,8 +1447,16 @@ impl FfiTranslation {
             }
 
             if let Kind::Enum { unit, data } = &ty.kind {
-                if !unit.is_empty() {
-                    let variants: Vec<String> = unit.iter().chain(data).map(|v| java::snake_case(v)).collect();
+                // Not the error enum: C builds it through the
+                // `kafka_common_Error_<class>` factories and classifies it
+                // with the predicates (CLAUDE.md §12.4), never by variant.
+                let is_error = error_prefix.as_deref() == Some(prefix.as_str());
+                if has_handle && !is_error {
+                    let variants: Vec<String> = unit
+                        .iter()
+                        .chain(data.iter().map(|v| &v.name))
+                        .map(|v| java::snake_case(v))
+                        .collect();
                     out.add(format!("{prefix}_e"), Shape::CEnum(variants), file);
                     out.add(
                         format!("{prefix}__enum"),
@@ -1366,12 +1466,47 @@ impl FfiTranslation {
                         }),
                         file,
                     );
-                    for v in unit {
-                        out.add(
-                            format!("{prefix}_{}", java::snake_case(v)),
-                            Shape::Fn(Sig { params: Vec::new(), ret: Some(format!("*const {prefix}_t")) }),
-                            file,
-                        );
+                }
+                for v in unit {
+                    out.add(
+                        format!("{prefix}_{}", java::snake_case(v)),
+                        Shape::Fn(Sig { params: Vec::new(), ret: Some(format!("*const {prefix}_t")) }),
+                        file,
+                    );
+                }
+                // A variant carrying data is built from its fields and owned
+                // (§4 rule 2); the Java static factory, when there is one, is
+                // an ordinary method beside it.
+                if has_handle && !is_error {
+                    for v in data {
+                        let mapper = Mapper {
+                            by_name: &by_name,
+                            aliases: &surface.aliases,
+                            error_types: &surface.error_types,
+                            owner: prefix,
+                            owner_name: &ty.name,
+                            generics: ty.generics.iter().map(|g| (g.clone(), Vec::new())).collect(),
+                        };
+                        let name = format!("{prefix}_{}", java::snake_case(&v.name));
+                        let mut params = Vec::new();
+                        let mut unmapped = Vec::new();
+                        for (fname, fty) in &v.fields {
+                            match map_param(&mapper, fname, fty) {
+                                Ok(c) => params.extend(c),
+                                Err(why) => unmapped.push(format!("field `{fname}`: {why}")),
+                            }
+                        }
+                        if unmapped.is_empty() {
+                            out.add(name, Shape::Fn(Sig { params, ret: Some(format!("*mut {prefix}_t")) }), file);
+                        } else {
+                            out.findings.push(Finding {
+                                kind: "unmapped",
+                                symbol: name.clone(),
+                                file: file.to_string(),
+                                detail: format!("the C shape cannot be derived: {}", unmapped.join("; ")),
+                            });
+                            out.add(name, Shape::Unknown, file);
+                        }
                     }
                 }
             }
@@ -1563,6 +1698,78 @@ fn generics_in_scope(
                 bounds.extend(pt.bounds.iter().cloned());
             }
         }
+    }
+    out
+}
+
+/// The trait names among `bounds`.
+fn trait_bound_names<'a>(bounds: impl IntoIterator<Item = &'a syn::TypeParamBound>) -> Vec<String> {
+    bounds
+        .into_iter()
+        .filter_map(|b| match b {
+            syn::TypeParamBound::Trait(tb) => tb.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The traits type parameter `param` of `generics` is bounded by, from its
+/// declaration and the `where` clause.
+fn bound_trait_names(generics: &syn::Generics, param: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for p in &generics.params {
+        if let syn::GenericParam::Type(t) = p {
+            if t.ident == param {
+                out.extend(trait_bound_names(&t.bounds));
+            }
+        }
+    }
+    if let Some(w) = &generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                if is_ident(&pt.bounded_ty, param) {
+                    out.extend(trait_bound_names(&pt.bounds));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether some type parameter of `generics` is a closure (`F: Fn(..)`).
+fn has_closure_bound(generics: &syn::Generics) -> bool {
+    type_params(generics).iter().any(|p| {
+        bound_trait_names(generics, p)
+            .iter()
+            .any(|b| matches!(b.as_str(), "Fn" | "FnMut" | "FnOnce"))
+    })
+}
+
+/// The methods of trait `t`, those of its public supertraits first in
+/// declaration order, each name once: Java inherits interface methods, so
+/// the C interface of `MeasurableStat: Stat + Measurable` lists `record`
+/// and `measure`.
+fn trait_methods(
+    t: &syn::ItemTrait,
+    traits: &BTreeMap<String, &syn::ItemTrait>,
+    seen: &mut BTreeSet<String>,
+) -> Vec<RustMethod> {
+    let mut out = Vec::new();
+    for name in trait_bound_names(&t.supertraits) {
+        if let Some(sup) = traits.get(&name) {
+            out.extend(trait_methods(sup, traits, seen));
+        }
+    }
+    for it in &t.items {
+        let syn::TraitItem::Fn(f) = it else { continue };
+        if requires_sized(&f.sig.generics) || is_hidden(&f.attrs) || !seen.insert(f.sig.ident.to_string()) {
+            continue;
+        }
+        out.push(RustMethod {
+            name: f.sig.ident.to_string(),
+            sig: f.sig.clone(),
+            has_default: f.default.is_some(),
+        });
     }
     out
 }
@@ -2300,6 +2507,13 @@ mod tests {
                 ),
                 class("common.serialization", &["Serializer"]),
                 class("common.serialization", &["StringSerializer"]),
+                class("common.metrics", &["Stat"]),
+                class("common.metrics", &["Measurable"]),
+                class("common.metrics", &["MeasurableStat"]),
+                class("common.metrics", &["Gauge"]),
+                class("common.metrics", &["MetricValueProvider"]),
+                class("common.metrics", &["Metrics"]),
+                class("common.metrics.stats", &["Avg"]),
             ],
         }
     }
@@ -2864,6 +3078,180 @@ mod tests {
             detail(&findings, "missing kafka_common_serialization_StringSerializer__as_Serializer"),
             "expected `fn(self: *const kafka_common_serialization_StringSerializer_t) \
              -> *const kafka_common_serialization_Serializer_t`"
+        );
+    }
+
+    /// Supertraits, a blanket impl, a trait carried by an enum variant, data
+    /// variants and a closure adapter: the metrics module in miniature.
+    const METRICS_RUST: &str = r#"
+        pub mod common {
+            pub mod metrics {
+                #[doc(alias = "org.apache.kafka.common.metrics.Stat")]
+                pub trait Stat: Send + Sync { fn record(&self, value: f64, time_ms: i64); }
+                #[doc(alias = "org.apache.kafka.common.metrics.Measurable")]
+                pub trait Measurable: Send + Sync { fn measure(&self, now: i64) -> f64; }
+                #[doc(alias = "org.apache.kafka.common.metrics.MeasurableStat")]
+                pub trait MeasurableStat: Stat + Measurable {}
+                impl<T: Stat + Measurable> MeasurableStat for T {}
+                #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
+                pub trait Gauge: Send + Sync { fn value(&self, now: i64) -> f64; }
+                #[doc(alias = "rust-only")]
+                pub struct ClosureGauge<F>(F) where F: Fn(i64) -> f64 + Send + Sync;
+                impl<F> ClosureGauge<F> where F: Fn(i64) -> f64 + Send + Sync { pub fn new(f: F) -> Self { ClosureGauge(f) } }
+                impl<F> Gauge for ClosureGauge<F> where F: Fn(i64) -> f64 + Send + Sync { fn value(&self, now: i64) -> f64 { (self.0)(now) } }
+                #[doc(alias = "org.apache.kafka.common.metrics.MetricValueProvider")]
+                pub enum MetricValueProvider { Measurable(Box<dyn Measurable>), Gauge(Box<dyn Gauge>) }
+                #[doc(alias = "org.apache.kafka.common.metrics.Metrics")]
+                pub struct Metrics;
+                impl Metrics {
+                    pub fn new() -> Self { Metrics }
+                    pub fn add(&self, stat: Box<dyn MeasurableStat>) {}
+                    pub fn add_provider(&self, provider: MetricValueProvider) {}
+                }
+                pub mod stats {
+                    #[doc(alias = "org.apache.kafka.common.metrics.stats.Avg")]
+                    pub struct Avg;
+                    impl Avg { pub fn new() -> Self { Avg } }
+                    impl super::Stat for Avg { fn record(&self, value: f64, time_ms: i64) {} }
+                    impl super::Measurable for Avg { fn measure(&self, now: i64) -> f64 { 0.0 } }
+                }
+            }
+        }
+    "#;
+
+    const METRICS_FFI: &str = r#"
+        #[repr(C)] pub struct kafka_common_metrics_Stat_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Stat_record(this: *const kafka_common_metrics_Stat_t, value: f64, time_ms: i64) {}
+        #[repr(C)] pub struct kafka_common_metrics_Measurable_t { _p: [u8; 0] }
+        pub type kafka_common_metrics_Measurable_measure_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_new(this: *mut c_void, measure: kafka_common_metrics_Measurable_measure_fn_t) -> *mut kafka_common_metrics_Measurable_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(this: *const kafka_common_metrics_Measurable_t, now: i64) -> f64 { 0.0 }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_destroy(this: *mut kafka_common_metrics_Measurable_t) {}
+        #[repr(C)] pub struct kafka_common_metrics_MeasurableStat_t { _p: [u8; 0] }
+        pub type kafka_common_metrics_MeasurableStat_record_fn_t = unsafe extern "C" fn(this: *mut c_void, value: f64, time_ms: i64);
+        pub type kafka_common_metrics_MeasurableStat_measure_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_new(this: *mut c_void, record: kafka_common_metrics_MeasurableStat_record_fn_t, measure: kafka_common_metrics_MeasurableStat_measure_fn_t) -> *mut kafka_common_metrics_MeasurableStat_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(this: *const kafka_common_metrics_MeasurableStat_t, value: f64, time_ms: i64) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(this: *const kafka_common_metrics_MeasurableStat_t, now: i64) -> f64 { 0.0 }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_destroy(this: *mut kafka_common_metrics_MeasurableStat_t) {}
+        #[repr(C)] pub struct kafka_common_metrics_Gauge_t { _p: [u8; 0] }
+        pub type kafka_common_metrics_Gauge_value_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_new(this: *mut c_void, value: kafka_common_metrics_Gauge_value_fn_t) -> *mut kafka_common_metrics_Gauge_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_value(this: *const kafka_common_metrics_Gauge_t, now: i64) -> f64 { 0.0 }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_destroy(this: *mut kafka_common_metrics_Gauge_t) {}
+        #[repr(C)] pub struct kafka_common_metrics_MetricValueProvider_t { _p: [u8; 0] }
+        #[repr(C)] pub enum kafka_common_metrics_MetricValueProvider_e { measurable, gauge }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(this: *const kafka_common_metrics_MetricValueProvider_t) -> kafka_common_metrics_MetricValueProvider_e { kafka_common_metrics_MetricValueProvider_e::gauge }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_measurable(value: *mut kafka_common_metrics_Measurable_t) -> *mut kafka_common_metrics_MetricValueProvider_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_gauge(value: *mut kafka_common_metrics_Gauge_t) -> *mut kafka_common_metrics_MetricValueProvider_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_destroy(this: *mut kafka_common_metrics_MetricValueProvider_t) {}
+        #[repr(C)] pub struct kafka_common_metrics_Metrics_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Metrics_new() -> *mut kafka_common_metrics_Metrics_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Metrics_add(this: *const kafka_common_metrics_Metrics_t, stat: *mut kafka_common_metrics_MeasurableStat_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_provider(this: *const kafka_common_metrics_Metrics_t, provider: *const kafka_common_metrics_MetricValueProvider_t) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Metrics_destroy(this: *mut kafka_common_metrics_Metrics_t) {}
+        #[repr(C)] pub struct kafka_common_metrics_stats_Avg_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_stats_Avg_new() -> *mut kafka_common_metrics_stats_Avg_t { std::ptr::null_mut() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Stat(this: *const kafka_common_metrics_stats_Avg_t) -> *const kafka_common_metrics_Stat_t { std::ptr::null() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_Measurable(this: *const kafka_common_metrics_stats_Avg_t) -> *const kafka_common_metrics_Measurable_t { std::ptr::null() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_stats_Avg__as_MeasurableStat(this: *const kafka_common_metrics_stats_Avg_t) -> *const kafka_common_metrics_MeasurableStat_t { std::ptr::null() }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_stats_Avg_destroy(this: *mut kafka_common_metrics_stats_Avg_t) {}
+    "#;
+
+    #[test]
+    fn test_metrics_shapes_pass() {
+        let findings = run("metrics-ok", METRICS_RUST, METRICS_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn test_closure_adapter_struct_expects_nothing() {
+        let ffi = format!(
+            "{METRICS_FFI}
+            #[repr(C)] pub struct kafka_common_metrics_ClosureGauge_t {{ _p: [u8; 0] }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_metrics_ClosureGauge_new(f: *const c_void) -> *mut kafka_common_metrics_ClosureGauge_t {{ std::ptr::null_mut() }}"
+        );
+        let findings = run("metrics-closure", METRICS_RUST, &ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "unexpected kafka_common_metrics_ClosureGauge_new",
+                "unexpected kafka_common_metrics_ClosureGauge_t",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_interface_lists_supertrait_methods() {
+        let ffi = METRICS_FFI
+            .lines()
+            .filter(|l| {
+                !l.contains("fn kafka_common_metrics_MeasurableStat_new(")
+                    && !l.contains("fn kafka_common_metrics_MeasurableStat_record(")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings = run("metrics-supertraits", METRICS_RUST, &ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_common_metrics_MeasurableStat_new",
+                "missing kafka_common_metrics_MeasurableStat_record",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_metrics_MeasurableStat_new"),
+            "expected `fn(self: *mut c_void, record: kafka_common_metrics_MeasurableStat_record_fn_t, \
+             measure: kafka_common_metrics_MeasurableStat_measure_fn_t) -> *mut kafka_common_metrics_MeasurableStat_t`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_metrics_MeasurableStat_record"),
+            "expected `fn(self: *const kafka_common_metrics_MeasurableStat_t, value: f64, time_ms: i64)`"
+        );
+    }
+
+    #[test]
+    fn test_enum_payload_trait_is_accepted_and_data_variants_have_constructors() {
+        let ffi = METRICS_FFI
+            .lines()
+            .filter(|l| {
+                !l.contains("fn kafka_common_metrics_Gauge_new(")
+                    && !l.contains("fn kafka_common_metrics_MetricValueProvider_gauge(")
+                    && !l.contains("fn kafka_common_metrics_MetricValueProvider__enum(")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings = run("metrics-payload", METRICS_RUST, &ffi);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_common_metrics_Gauge_new",
+                "missing kafka_common_metrics_MetricValueProvider__enum",
+                "missing kafka_common_metrics_MetricValueProvider_gauge",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_metrics_MetricValueProvider_gauge"),
+            "expected `fn(value: *mut kafka_common_metrics_Gauge_t) -> *mut kafka_common_metrics_MetricValueProvider_t`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_metrics_MetricValueProvider__enum"),
+            "expected `fn(self: *const kafka_common_metrics_MetricValueProvider_t) -> kafka_common_metrics_MetricValueProvider_e`"
+        );
+    }
+
+    #[test]
+    fn test_blanket_impl_yields_as_view() {
+        let ffi = METRICS_FFI
+            .lines()
+            .filter(|l| !l.contains("fn kafka_common_metrics_stats_Avg__as_MeasurableStat("))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let findings = run("metrics-blanket", METRICS_RUST, &ffi);
+        assert_eq!(keys(&findings), ["missing kafka_common_metrics_stats_Avg__as_MeasurableStat"]);
+        assert_eq!(
+            detail(&findings, "missing kafka_common_metrics_stats_Avg__as_MeasurableStat"),
+            "expected `fn(self: *const kafka_common_metrics_stats_Avg_t) -> *const kafka_common_metrics_MeasurableStat_t`"
         );
     }
 
