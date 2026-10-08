@@ -175,7 +175,15 @@ impl KafkaConsumerMetrics {
     pub(crate) fn record_poll_end(&self, poll_end_ms: i64) {
         let poll_time_ms = poll_end_ms - self.poll_start_ms.load(Ordering::SeqCst);
         let time_since_last_poll_ms = self.time_since_last_poll_ms.load(Ordering::SeqCst);
-        let poll_idle_ratio = poll_time_ms as f64 * 1.0 / (poll_time_ms + time_since_last_poll_ms) as f64;
+        let poll_cycle_time_ms = poll_time_ms + time_since_last_poll_ms;
+        // KAFKA-20750: a poll that starts and ends within the same millisecond,
+        // right after the previous one, has a zero cycle; record 0 rather than
+        // the NaN of 0/0.
+        let poll_idle_ratio = if poll_cycle_time_ms == 0 {
+            0.0
+        } else {
+            poll_time_ms as f64 * 1.0 / poll_cycle_time_ms as f64
+        };
         self.poll_idle_sensor.record_value(poll_idle_ratio);
     }
 
@@ -366,6 +374,30 @@ mod tests {
         time.sleep(25);
         consumer_metrics.record_poll_end(time.milliseconds());
         assert_eq!(read_metric(&metrics, "poll-idle-ratio-avg"), (1.0 + 0.0 + 0.5) / 3.0);
+    }
+
+    /// Java `KafkaConsumerTest.testPollIdleRatioZero` (KAFKA-20750, 02c0ce9707),
+    /// translated at the `KafkaConsumerMetrics` level like
+    /// [`test_poll_idle_ratio`]: Java also drives `kafkaConsumerMetrics()`
+    /// directly, through a consumer it builds only to reach the registry.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollIdleRatioZero")]
+    fn test_poll_idle_ratio_zero() {
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
+
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
+
+        // Test default value
+        assert!(read_metric(&metrics, "poll-idle-ratio-avg").is_nan());
+
+        // Poll starts and ends within the same millisecond, so the metric should be 0.
+        consumer_metrics.record_poll_start(time.milliseconds());
+        consumer_metrics.record_poll_end(time.milliseconds());
+        assert_eq!(0.0, read_metric(&metrics, "poll-idle-ratio-avg"));
     }
 
     /// Java: `shouldRecordCommitSyncTime`.
