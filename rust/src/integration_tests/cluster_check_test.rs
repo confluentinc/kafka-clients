@@ -208,6 +208,40 @@ fn only_broker(metadata: &MetadataResponse) -> Node {
     Node::new(broker.node_id(), broker.host().to_string(), broker.port())
 }
 
+/// The recovery half of Java's `testRebootstrapOnMetadataClusterCheckFail`:
+/// after the rebootstrap the client fetches metadata through the bootstrap
+/// address, learns the real cluster id and broker, and the real broker becomes
+/// ready ("successfully reconnect with the updated cluster metadata, and
+/// continue processing").
+async fn assert_recovers(
+    client: &mut NetworkClient<Selector, DefaultHostResolver>,
+    metadata: &Metadata,
+    info: &BrokerInfo,
+) {
+    let start = std::time::Instant::now();
+    loop {
+        client.poll(100, SystemTime.milliseconds()).await;
+        if !metadata.fetch().is_bootstrap_configured() {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "metadata never refreshed after the rebootstrap"
+        );
+    }
+    assert_eq!(
+        metadata.fetch().cluster_resource().cluster_id(),
+        info.metadata.data().cluster_id().as_deref()
+    );
+    let real_id = only_broker(&info.metadata).id();
+    let fresh = metadata
+        .fetch()
+        .node_by_id(real_id)
+        .cloned()
+        .expect("real broker in the refreshed metadata");
+    assert!(connect(client, &fresh).await, "the real broker should become ready");
+}
+
 /// With the metadata the broker itself returned, the check passes (or, before
 /// 4.4, is not made) and the connection becomes ready.
 #[tokio::test]
@@ -242,6 +276,7 @@ async fn test_wrong_cluster_id_rebootstraps() {
         // addresses, which carry no cluster id.
         assert!(metadata.fetch().is_bootstrap_configured());
         assert_eq!(metadata.fetch().cluster_resource().cluster_id(), None);
+        assert_recovers(&mut client, &metadata, &info).await;
     } else {
         assert!(ready, "a broker without ApiVersions v5 performs no check");
         assert!(!metadata.fetch().is_bootstrap_configured());
@@ -270,6 +305,7 @@ async fn test_wrong_node_id_rebootstraps() {
     if info.checks_cluster {
         assert!(!ready, "a 4.4 broker must reject a connection naming another node id");
         assert!(metadata.fetch().is_bootstrap_configured());
+        assert_recovers(&mut client, &metadata, &info).await;
     } else {
         assert!(ready, "a broker without ApiVersions v5 performs no check");
     }

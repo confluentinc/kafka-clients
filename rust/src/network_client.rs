@@ -909,6 +909,24 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let receives: Vec<(String, Option<Vec<u8>>)> = self.selector.drain_completed_receives();
 
         for (source, payload) in receives {
+            // A receive whose connection an earlier receive of this same loop
+            // closed: the KIP-1242 `REBOOTSTRAP_REQUIRED` branch of
+            // `handle_api_versions_response` disconnects every known node, and
+            // `process_disconnection` has already failed this node's in-flight
+            // requests as disconnected. Java's `completeNext` would throw
+            // `IllegalStateException` here and the exception would escape
+            // `poll()`, dropping the rest of the poll's responses, which Java's
+            // I/O threads then catch. Rust skips the stale receive instead
+            // (deviation, Milestone 16 Phase 4 / Critic 94 Issue 1): a panic here
+            // would end the consumer's background task, which has no catch.
+            if self.in_flight_requests.is_empty_for_node(&source) && self.connection_states.is_disconnected(&source) {
+                kafka_debug!(
+                    self.log_context,
+                    "Ignoring a response from node {} received before its connection was closed by a rebootstrap.",
+                    source
+                );
+                continue;
+            }
             let mut req = self.in_flight_requests.complete_next(&source);
 
             if let Some(payload_bytes) = payload {
@@ -1220,7 +1238,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_flight_requests
                 .increment_throttle_time(node_id, throttle_time_ms as i64);
             self.connection_states.throttle(node_id, now + throttle_time_ms as i64);
-            kafka_trace!(
+            // `log.warn` since KAFKA-19117 (525b278288, `NetworkClient.java:1076`).
+            kafka_warn!(
                 self.log_context,
                 "Connection to node {} is throttled for {} ms until timestamp {}",
                 node_id,
@@ -4980,7 +4999,6 @@ mod tests {
     // `parseResponse`'s two catch clauses (`NetworkClient.java:917-933`).
     // ---------------------------------------------------------------------------
 
-    /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     /// Translated from `NetworkClientTest.testMetadataClusterCheckFailureCausesRebootstrap`
     /// (0ef4a4c80e, KIP-1242).
     ///
@@ -5334,6 +5352,102 @@ mod tests {
         assert!(client.connection_states.is_connecting("-1"));
     }
 
+    /// Critic 94 Issue 1's probe. A `REBOOTSTRAP_REQUIRED` from node 1 and an
+    /// ordinary response from node 0 are drained by the same poll. The
+    /// rebootstrap branch disconnects node 0, which fails its in-flight request,
+    /// so when the branch runs first, node 0's receive no longer has a request
+    /// to complete. Java's `completeNext` throws there; before the fix Rust
+    /// panicked in `InFlightRequests::complete_next` ("There are no in-flight
+    /// requests for node 0"), which ends the consumer's background task. Now
+    /// the stale receive is skipped. Both orders leave both nodes failed and one
+    /// rebootstrap.
+    async fn rebootstrap_required_with_a_concurrent_receive(node0_first: bool) {
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+        await_ready(&mut client, &node0).await;
+        // An ordinary request in flight to node 0.
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let request = client.new_client_request(node0.id_string(), Box::new(builder), now, true);
+        let metadata_correlation_id = request.correlation_id();
+        client.send(request, now);
+        // Node 1 connects; its ApiVersions request goes out.
+        client.ready(&node1, now).await;
+        client.poll(0, now).await;
+        client.poll(0, now).await;
+        let api_versions_correlation_id =
+            client.in_flight_requests.last_sent(node1.id_string()).header.correlation_id();
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        let api_bytes = serialize_response_with_header(
+            &ApiKeys::API_VERSIONS,
+            ApiKeys::API_VERSIONS.latest_version(),
+            error_response.data_mut(),
+            api_versions_correlation_id,
+        );
+        let md_bytes = serialize_response_with_header(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.latest_version(),
+            &mut MetadataResponseData::new(),
+            metadata_correlation_id,
+        );
+        let api_receive = NetworkReceive::with_source_buffer(node1.id_string(), api_bytes);
+        let md_receive = NetworkReceive::with_source_buffer(node0.id_string(), md_bytes);
+        // Both responses land in the same poll.
+        if node0_first {
+            client.selector_mut().complete_receive(md_receive);
+            client.selector_mut().complete_receive(api_receive);
+        } else {
+            client.selector_mut().complete_receive(api_receive);
+            client.selector_mut().complete_receive(md_receive);
+        }
+        client.poll(0, now).await;
+
+        assert!(!client.has_in_flight_requests_for_node(node0.id_string()));
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(client.connection_failed(&node0));
+        assert!(client.connection_failed(&node1));
+        assert_eq!(1, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// [`rebootstrap_required_with_a_concurrent_receive`], the
+    /// `REBOOTSTRAP_REQUIRED` drained first: the order that panicked.
+    #[tokio::test]
+    async fn test_rebootstrap_required_skips_a_later_receive_from_a_node_it_disconnected() {
+        rebootstrap_required_with_a_concurrent_receive(false).await;
+    }
+
+    /// [`rebootstrap_required_with_a_concurrent_receive`], node 0's response
+    /// drained first: it completes normally, then the rebootstrap disconnects.
+    #[tokio::test]
+    async fn test_rebootstrap_required_after_a_receive_from_another_node() {
+        rebootstrap_required_with_a_concurrent_receive(true).await;
+    }
+
+    /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
         crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()

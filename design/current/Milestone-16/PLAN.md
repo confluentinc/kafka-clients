@@ -1097,6 +1097,37 @@ Phase 4 completion notes (agent 94):
   - `make -k verify` (macOS) fails only in `build-c` (`cmake: command not found`, environment) and `lint`
     (the 15 §5.1 rows). Lib all-features 4661 passed; integration 308 passed, 0 failed, 2 ignored; Python
     366 passed / 2 skipped; `check-bindings` 29; soak 156.
+- **Critic 94 round 1** (1 Medium, 2 Low; fixed on `milestone-16-p4fix`, plain commits for the merge):
+  - Issue 1 (Medium, `a5269fa2`), `2e6b2968`: the `REBOOTSTRAP_REQUIRED` branch disconnects every known
+    node inside the receive loop. A later receive drained in the same poll from one of those nodes
+    panicked in `InFlightRequests::complete_next`, which ends the consumer's I/O task.
+    - Now such a receive is skipped when its node has no in-flight requests and is disconnected.
+    - **Deviation:** Java's `completeNext` throws there, and its I/O threads catch the throw. Java drops the
+      rest of that poll's responses; Rust keeps them.
+    - The regression test is Critic 94's probe, in both drain orders. With the skip disabled it panics
+      ("There are no in-flight requests for node 0").
+  - Issue 2 (Low, `0212ac53`), `55e8e585`: both falsified-metadata broker tests now assert recovery on
+    4.4. The metadata refreshes with the real cluster id and the real broker becomes ready.
+  - Issue 3 (Low doc, `a5269fa2`): `metadata_request_header`'s doc line is back on the helper (in
+    `2e6b2968`).
+  - KAFKA-19117 (`525b278288`, Critic note N2, routed here by the coordinator), `d16e956e`: `maybe_throttle`
+    now logs Java's text at warn (`NetworkClient.java:1076`).
+- **Open questions for the human (not implemented):**
+  - (a) Should the consumer I/O loop get a catch-all like Java's `catch (Throwable)`
+    (`ConsumerNetworkThread.java:160-167`), as the producer `Sender` has (`sender.rs:1023-1055`)?
+    - This gap predates Phase 4; Critic 94 Issue 1 was one instance of it.
+    - Rust caveat: after a caught panic, any `std` mutex held during the unwind stays poisoned, e.g.
+      `SubscriptionState` (consumer-threading §16). So continuing is not equivalent to Java's "swallow and
+      continue".
+  - (b) Should we file an upstream JIRA for the half-open `+<id>` coordinator connection after
+    `REBOOTSTRAP_REQUIRED`? Critic 94 Q1 has the details.
+    - The branch closes only `fetchNodes()`, so the coordinator connection stays in
+      `CHECKING_API_VERSIONS` until the idle expiry.
+    - Rediscovery reuses the same `+<id>`.
+    - Java 4.4 behaves the same.
+- **Round-1 verification (HEAD of `milestone-16-p4fix`):**
+  - `integration_tests::cluster_check_test`: 3/3 on 4.4.0-rc4 and on 4.2.0.
+  - The other gates are in the round-1 report.
 - **Timing log** (2026-10-08, IST):
 
   | Step | Start | End | Minutes |
