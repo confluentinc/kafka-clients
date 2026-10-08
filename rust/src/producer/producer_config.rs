@@ -1132,10 +1132,16 @@ mod tests {
         assert!(c.metadata_cluster_check_enable);
 
         let mut props = base_props();
-        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "false".to_string());
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "false".to_string(),
+        );
         assert!(!ProducerConfig::new(&props).unwrap().metadata_cluster_check_enable);
 
-        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "maybe".to_string());
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "maybe".to_string(),
+        );
         assert_eq!(
             ProducerConfig::new(&props).unwrap_err().message(),
             "Invalid value maybe for configuration metadata.cluster.check.enable"

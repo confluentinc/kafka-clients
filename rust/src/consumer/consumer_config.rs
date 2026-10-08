@@ -1029,10 +1029,16 @@ mod tests {
         assert!(ConsumerConfig::new(&base_props()).unwrap().metadata_cluster_check_enable);
 
         let mut props = base_props();
-        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "false".to_string());
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "false".to_string(),
+        );
         assert!(!ConsumerConfig::new(&props).unwrap().metadata_cluster_check_enable);
 
-        props.insert(CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(), "maybe".to_string());
+        props.insert(
+            CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG.to_string(),
+            "maybe".to_string(),
+        );
         assert_eq!(
             ConsumerConfig::new(&props).unwrap_err().message(),
             "Invalid value maybe for configuration metadata.cluster.check.enable"
