@@ -1486,9 +1486,9 @@ internal sealed class SendAccumulator
             //
             // If Enqueue throws (out of memory), ownership never transferred, so FaultNode
             // must still see a live future at each of these indices and free it. Nulling first would
-            // make those indices look like "the core never saw this record", and FaultNode would
-            // then fire delivery callbacks the pump is also about to fire — DUPLICATES, which the
-            // exactly-once obligation makes strictly worse than the drop (root CLAUDE.md §11.5).
+            // zero their Futures slots and null their Completions and Deliveries slots, so FaultNode
+            // would find nothing to free and no awaiter to fault at those indices: the futures would
+            // leak and their awaiters would stay pending.
             //
             // Unchanged in substance from the pre-grouping form, which nulled one slot after one
             // per-record Enqueue: same invariant, one enqueue per send_batch call instead of one per
