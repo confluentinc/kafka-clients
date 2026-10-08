@@ -67,6 +67,8 @@
 //! - `testAsyncConsumerCloseOnBrokerShutdown` (line 214)
 //!   → `test_async_consumer_close_on_broker_shutdown` (Phase 16; dedicated
 //!   single-broker `Type::Kraft` cluster, stops the broker)
+//! - `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance` (4.4,
+//!   45c4bdc48a) → `test_async_static_member_close_with_leave_group_triggers_rebalance`
 //!
 //! ## SKIPped (documented gaps — see PLAN.md)
 //!
@@ -119,9 +121,11 @@ use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
+use confluent_kafka::consumer::CloseOptions;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::GroupMembershipOperation;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
@@ -1598,5 +1602,59 @@ async fn test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commi
         committed.get(&tp),
         "unsubscribe() should not commit offsets even when auto-commit is enabled"
     );
+    consumer2.close().await.expect("consumer2 close");
+}
+
+/// Translates Java's `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance`
+/// (`PlaintextConsumerTest.java:1816`, added by 45c4bdc48a).
+///
+/// Tests that when a static member closes with
+/// [`GroupMembershipOperation::LeaveGroup`], the other members in the group
+/// receive a rebalance callback. This is in contrast to the default behavior
+/// where static members remain in the group on close (no rebalance triggered).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_static_member_close_with_leave_group_triggers_rebalance() {
+    let mut ctx = TestContext::new(cluster_config_kip848()).await;
+    let topic_name = ctx.topic("test-static-member-leave-group");
+    let group_id = ctx.group_id("test-group");
+    create_test_topic(&ctx, &topic_name, 2, 1).await;
+
+    let mut consumer1 = make_consumer(&ctx, &group_id, &[("group.instance.id", "instance-1")]);
+    let mut consumer2 = make_consumer(&ctx, &group_id, &[("group.instance.id", "instance-2")]);
+
+    let listener1 = TestConsumerReassignmentListener::default();
+    let listener2 = TestConsumerReassignmentListener::default();
+
+    consumer1
+        .subscribe_with_topics_listener(vec![topic_name.clone()], Arc::new(listener1.clone()))
+        .await
+        .expect("consumer1 subscribe");
+    consumer2
+        .subscribe_with_topics_listener(vec![topic_name.clone()], Arc::new(listener2.clone()))
+        .await
+        .expect("consumer2 subscribe");
+
+    await_rebalance(consumer1.as_mut(), &listener1).await;
+    await_rebalance(consumer2.as_mut(), &listener2).await;
+
+    let initial_assigned_calls = listener2.calls_to_assigned();
+
+    // Consumer 1 closes with LEAVE_GROUP - this should trigger a rebalance
+    consumer1
+        .close_with_options(CloseOptions::new_group_membership_operation(
+            GroupMembershipOperation::LeaveGroup,
+        ))
+        .await
+        .expect("consumer1 close with LEAVE_GROUP");
+    await_rebalance(consumer2.as_mut(), &listener2).await;
+
+    // Consumer 2 should have received another assignment callback due to the rebalance
+    let current = listener2.calls_to_assigned();
+    assert!(
+        current > initial_assigned_calls,
+        "Consumer 2 should have received a rebalance after static consumer 1 left the group permanently. \
+         Initial assigned calls: {initial_assigned_calls}, current: {current}"
+    );
+
     consumer2.close().await.expect("consumer2 close");
 }
