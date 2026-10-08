@@ -502,7 +502,7 @@ only the rules text is outstanding.
 | # | Rules file | Section | Suggestion | Where above | Code status |
 |---|---|---|---|---|---|
 | 1 | `producer-transactions.md` | all | Re-point the 35 drifted cites (TransactionManager, Sender, RecordAccumulator, TransactionalRequestResult, MessageDataGenerator, one request builder) | Per-file tables | n/a (rules text only) |
-| 2 | `consumer-threading.md` | §1 | `AsyncKafkaConsumer.java:2107,2131` → `:2238,2261` | `AsyncKafkaConsumer.java` table | Rust copy at `rust/src/consumer/mod.rs` fixed in Phase 13 |
+| 2 | `consumer-threading.md` | §1 | `AsyncKafkaConsumer.java:2107,2131` → `:2238,2261` (the two method declarations) | `AsyncKafkaConsumer.java` table | Rust copy at `rust/src/consumer/mod.rs` fixed in Phase 13 as `:2246,2268`, the event-creating lines of the same two methods |
 | 3 | `producer-transactions.md` | §10 | The TxnOffsetCommit grouping site is now `TransactionManager.txnOffsetCommitHandler` | Content item 1 | Done in code (Phase 5) |
 | 4 | `producer-transactions.md` | §12 | Add `TxnOffsetCommitRequest.java:94` (deliberate `latestVersion()`) and `:82` (constant) | Content item 2 | Done in code (Phase 5) |
 | 5 | `producer-transactions.md` | §11 | Known cases: `Topics[].Name` / `Topics[].TopicId`, enforced at `Builder.build` | Content item 3 | Done in code (Phase 5) |

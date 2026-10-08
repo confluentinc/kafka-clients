@@ -1,6 +1,6 @@
 # Milestone 16 — Bring the Rust client up to Apache Kafka 4.4
 
-**Status:** DRAFT 2026-10-07 — awaiting user approval. Phases run through the Manager → Actor → Critic loop.
+**Status:** Phases 0-12 reviewed clean and merged; Phase 13 close-out done 2026-10-08 (agent 103), pending its review. Audit in §7, open items in §8.
 
 **Branch:** `milestone-16-ak-4.4` (off `master`). If tracks run in parallel (§4), each track gets its own
 branch/worktree off the milestone branch and is merged back with a merge commit — never rebase + force-push.
@@ -2504,6 +2504,78 @@ Phase 12 completion notes (agent 102):
   `MILESTONES.md` and `design/current/status.md`.
 - Hand the drafted `rules-errata.md` amendments to the user.
 
+Phase 13 completion notes (agent 103):
+
+- **Commits** (on `63b5614d`, branch `milestone-16-p13`): `1aecdfc0` `cargo doc` fix; `d04f4f4b`
+  structure.md count and PLAN phrase; `209293fc` rules-errata hand-off; `bad981bb` MILESTONES.md and
+  status.md; `d0fc40c2` rustdoc and log sync; `79592939` cite refresh; plus this notes, §7 and §8 commit.
+  The rustdoc work ran in a forked sub-agent in the same worktree, touching only `rust/`.
+- **D1: 4.4.0 final is not tagged.** `git -C kafka ls-remote --tags origin '4.4.0*'` (2026-10-08 19:37
+  IST) lists `4.4.0-rc0`, `-rc3` and `-rc4` only. **The milestone closes against `4.4.0-rc4`**
+  (`1156b2752a`). `AUDIENCE_REF = 4.4.0-rc3` and `DEPRECATION_REFS = [4.3.1, 4.4.0-rc3]` stay valid,
+  since `rc3..rc4` has no `clients/src/main` change. `CLAUDE.md` and `rust/README.md` already say
+  "4.4.0", which stays right once final ships. **When `4.4.0` is tagged:**
+  1. `git -C kafka fetch origin tag 4.4.0`, then
+     `git -C kafka diff --stat 4.4.0-rc4 4.4.0 -- clients/src/main clients/src/main/resources/common/message`.
+  2. If the diff is not empty, port it as a normal phase (tree diff, Actor/Critic). Stop here unless it
+     is empty or doc-only.
+  3. Check out `4.4.0` in the submodule and commit the gitlink.
+  4. In `rust/xtask/src/java.rs`, set `AUDIENCE_REF = "4.4.0"` and `DEPRECATION_REFS = &["4.3.1", "4.4.0"]`.
+  5. `cargo xtask fetch-java-refs`, then `cargo xtask java-deprecated` to regenerate
+     `design/current/java-deprecated.txt`.
+  6. Regenerate `design/current/interface-audience-public-4.4.txt` from the tag's
+     `@InterfaceAudience.Public` top-level types (no xtask writes it), and update its header line.
+  7. Copy any changed spec into `rust/generator/messages/` (none differ today; the corpus matches rc4
+     byte for byte), then `cargo xtask lint --keep-going` and `make verify`.
+- **Rustdoc sync (21 D commits):** 9 synced in `d0fc40c2`, 4 already applied by an earlier phase, 8
+  skipped with a reason. The per-commit dispositions are in §7. Notes:
+  - Two log changes have runtime effect: `FetchSessionHandler::handle_response`'s two session-error
+    logs move from INFO to DEBUG with Java's 4.4 texts (85b0e80272), and a REMAIN_IN_GROUP debug log is
+    added in `should_send_leave_heartbeat_now` (45c4bdc48a).
+  - `metrics()` (05185c1ef8) keeps the Rust snapshot contract; the rustdoc says where Java's documented
+    live view differs. No public contract changed (CLAUDE.md §6).
+  - da3b5e78ed's code half (a warning when `connections.max.idle.ms` < `max.poll.interval.ms`) fires
+    only for `group.protocol=classic`, which `KafkaConsumer::new` rejects, so it is not ported.
+  - A `ConsumerRecords` builder doc that said `build()` panics now says it returns an error, as the
+    code does.
+- **Found and fixed: `cargo doc --no-deps` was failing at `63b5614d`.** Phase 4's doc on
+  `AdminClientConfig::METADATA_CLUSTER_CHECK_ENABLE_CONFIG` linked two private items, an error under
+  `#![deny(warnings)]`. `1aecdfc0` writes Java's text inline. `cargo xtask lint` does not run
+  `cargo doc` (§8 F16).
+- **Phase 13 leftovers:**
+  - `structure.md:269`: now "22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)".
+  - `rust/src/consumer/mod.rs`: `AsyncKafkaConsumer.java:2107,2131` → `2246,2268`, the 4.4 lines that
+    create the two pattern-subscription events (rules-errata's suggestion for the rules file,
+    `2238,2261`, cites the two method declarations; both name the same methods).
+  - `ConfigDef.java:729-731` → `731-733` in `producer_config.rs` (3) and `admin_client_config.rs` (1),
+    plus eight more stale `ConfigDef` / `ProducerConfig` cites (`79592939`). About 8 `ProducerConfig.java`
+    cites remain (§8 F15).
+  - The duplicated "keep that order" phrase in the Phase 2 notes.
+- **Audit (§7):** 190 of 190 mapped, no gaps: 58 ported, 10 test-only, 4 reviewed N/A, 21 doc, 33 no-op,
+  56 out of scope, 6 reverted, 2 already in 4.3.1; plus D3 and the two master merges.
+- **§8:** 7 open decisions and 17 follow-ups, each with a pointer.
+- **Rules errata:** one merge-misplaced block moved back to Phase 8, a stale intro replaced, a wording
+  nit applied, a process section and a 13-row hand-off index added. `.claude/rules/` untouched.
+- **§5.1:** the table is empty. `cargo xtask lint --keep-going` is fully green at `79592939` (every
+  custom rule, doc-hygiene, module-path hygiene, all three clippy passes; exit 0).
+- **Gates** (`79592939`): `cargo build` passes; `cargo xtask format-check` clean; `cargo doc --no-deps`
+  0 warnings / 0 errors (was 2 errors at the base); `cargo test --lib` 4585 passed / 0 failed / 3
+  ignored (run by the fork after the code-touching commits). No doc examples changed, so no
+  `cargo test --doc`. No broker runs and no `make verify` (Docker is down; `make verify` runs on the
+  milestone branch after merge-back). `git status` is clean.
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (brief, PLAN, commits.md, errata, Critic files) | 19:30 | 19:37 | 7 |
+  | 1 D1 tag check; fork the rustdoc sync | 19:37 | 19:38 | 1 |
+  | 2 structure.md / PLAN leftovers (`d04f4f4b`) | 19:38 | 19:39 | 1 |
+  | 3 rules-errata hand-off (`209293fc`) | 19:39 | 19:41 | 2 |
+  | 4 MILESTONES.md, status.md (`bad981bb`) | 19:41 | 19:45 | 4 |
+  | 5 audit map, §8 draft (fork running in parallel: `1aecdfc0`, `d0fc40c2`, `79592939`) | 19:45 | 19:54 | 9 |
+  | 6 lint, format-check, `cargo doc` | 19:54 | 19:57 | 3 |
+  | 7 §7, §8, these notes | 19:57 | 20:00 | 3 |
+
 ## 4. Ordering and parallelism
 
 ```
@@ -2557,7 +2629,7 @@ produced were pure relocations and were fixed in Phase 0.
 - Each phase deletes its rows here in the commit that fixes them.
 - Phase 13 requires this table to be empty and `cargo xtask lint` fully green.
 
-The table is empty: every row has been cleared, pending Phase 13's check. (Phase 1 cleared its 30: 25
+The table is empty: every row has been cleared. Phase 13 confirmed it at `79592939`, where `cargo xtask lint --keep-going` is fully green (exit 0). (Phase 1 cleared its 30: 25
 D2 moves + 5 throttle; Phase 5 cleared its 2; Phase 8 cleared the 2 shared with Phase 7; Phase 9 cleared
 its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cleared its 10, the
 `SensorBuilder` move to `consumer::internals::metrics`. The last four rows, Phase 5's 2 and Phases 7/8's 2,
@@ -2736,3 +2808,283 @@ bootstrap-window spin.)
       per-run medians overlap: run 3 has it 1.5-2 % behind, run 2 ahead on keyed.
     - No producer file differs between the two, so this is consistent with code-layout noise from the
       rest of the crate. It is reported, not fixed.
+
+## 7. Completeness audit (Phase 13, agent 103)
+
+Every commit of `git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`
+(the 190 rows of [`commits.md`](commits.md)), plus the trunk-only commit added by D3 and the two master
+merges, mapped to its disposition. The precedent is `design/history/Milestone-13/PLAN.md` §6.
+
+- **Method.** Each row's disposition comes from the owning phase's completion notes and the Critic
+  files, and the Rust commits are cited from `git log milestone-16-ak-4.4` (fixups in parentheses).
+  `rel` is the planning classification in `commits.md`; the disposition column is the final one.
+- **Classifications the phases changed** (the planning column is kept as it was):
+  - `b69c07c816`: Broker/O → Consumer/P, partial (Phase 10; Phase 1 review, COMMENTS.91 Q2). Master's
+    `a4b3311e` had already closed the stream-sizing OOM.
+  - `28de22de34` (KAFKA-20253): planned for Phase 9, ported in Phase 3, which needed it for KAFKA-21010.
+    `01f50af8b8` is a different KAFKA-20253 commit, the classic heartbeat thread, and stays out of scope.
+  - `d1c0bd82c0` (KAFKA-14648 2/2) touches only `ShareConsumerImpl`: Share, out of scope (Phase 2
+    recorded skip).
+  - `b56323874b` (the `RaftVoterEndpoint` tests): out of scope with the Raft-voter admin API (§1.1).
+  - `123ee9e45d` (KAFKA-20393): planned P, but the fix and its test are entirely in the KIP-714
+    `TelemetrySender`, which Rust does not translate, so it is N/A (Phase 4).
+  - The four KAFKA-20297 moves of classes Rust has (`b347f4bd2e` ByteUtils, `b4c977544f`
+    ExponentialBackoff, `10805c9782` LogContext, `d85d257c99` ProducerIdAndEpoch): planned N, ported
+    as module moves under D2 (Phase 1).
+  - Three test-only rows (`159d696005`, `16e976ac8e`, `c75e10d229`): planned T, but every hunk is a
+    CLASSIC-only `KafkaConsumerTest` case or a comment, so N/A (Phase 10).
+  - The 21 D rows: synced in Phase 13 unless an earlier phase already did, or skipped with a reason.
+
+| sha | component | rel | id | disposition | detail and Rust commits |
+|---|---|---|---|---|---|
+| `06bedcf369` | Admin | D | MINOR | Doc/log | Skipped: a Java log-argument fix with no Rust counterpart |
+| `112686cfa8` | Admin | D | MINOR | Doc/log | Skipped: a variable rename in `removeRaftVoter` (Raft-voter admin, out of scope) |
+| `74ef4dd97a` | Admin | D | MINOR | Doc/log | Skipped: the Rust Result docs never had the malformed `}}` links |
+| `f4afec0cb2` | Admin | D | MINOR | Doc/log | Synced in P13 (`d0fc40c2`): the `DescribeClusterOptions` getters |
+| `1a443b2d23` | Admin | N | MINOR | No-op | Test-class split: the 101 `KafkaAdminClientTest` markers re-pointed to the per-domain classes in P0 (`e84c6434`); P12 mapped its tests to them |
+| `9a8fd60fa2` | Admin | N | KAFKA-19932 | No-op | Java `OutOfMemoryError` handling in the admin runnable; no Rust counterpart (an allocation failure aborts). Critic 102 diffed it: no hunk Rust needs |
+| `b56323874b` | Admin | O | MINOR | Out of scope | Raft-voter admin API (`RaftVoterEndpoint`) tests, §1.1 |
+| `3b849ff2bd` | Admin | P | KAFKA-19663 | Ported | P12: `InternalDescribeFeaturesResult` (`19c84e34`, fixups `de96bb2b`, `b8aca85a`); tool/broker parts out of scope |
+| `58f63f448e` | Admin | P | MINOR | Ported | P12: `19c84e34` (+ `de96bb2b`) |
+| `c274a7348f` | Admin | P | KAFKA-20395 | Ported | P0 spec + code 136 (`954a6ff2`, `d584de7b`); P12 wrappers, API, mock, C, Python, gRPC (`1c5fd9ed`, `19d2fbeb`, `f9b9bde6`, `96ea1ec8`, `994979fb`); `#[ffi_guard]` port in merge `5c207c9f`. `unregisterBroker` tests skipped (no Rust `unregisterBroker`) |
+| `cb2f143b0d` | Admin | P | KAFKA-20673 | Ported | P12: `a560d9c7` (+ `fa0bdb52`) |
+| `01ba1b2d4d` | Broker | O | MINOR | Out of scope | Broker `FileRecords` |
+| `3bfcd4cfbf` | Broker | O | KAFKA-20633 | Out of scope | Broker/tiered-storage config |
+| `6be48c6e54` | Broker | O | KAFKA-20441 | Out of scope | Broker log dirs; its spec file synced in P0 (`954a6ff2`) |
+| `70dfc4236c` | Broker | O | KAFKA-19562 | Out of scope | Broker `AbortedTxn`; the spec synced in P0 (`954a6ff2`), no client caller |
+| `72b21c706e` | Broker | O | KAFKA-20979 | Out of scope | Broker index metadata |
+| `86328c25ee` | Broker | O | KAFKA-19566 | Out of scope | Broker `ClientQuotaCallback` |
+| `9c7fad3397` | Broker | O | MINOR | Out of scope | Broker OAUTHBEARER validator |
+| `9c943129eb` | Broker | O | KAFKA-20816 | Out of scope | Broker authorizer |
+| `ae03a1e456` | Broker | O | MINOR | Out of scope | Broker `AuthorizableRequestContext` javadoc |
+| `b69c07c816` | Consumer | P | MINOR | Ported | P10 partial: consumer-side `DefaultRecord` size checks (`65d785c4`); the DoS half already in master `a4b3311e` (merge `73badfd9`); broker iterators out of scope |
+| `cd5ce52240` | Broker | O | KAFKA-20664 | Out of scope | Broker `TopicConfig` docs |
+| `ed9898d7d3` | Broker | O | KAFKA-20831 | Out of scope | Broker SASL principal cache |
+| `edcada2a48` | Broker | O | KAFKA-19893 | Out of scope | Broker tiered storage (KIP-1241) |
+| `0071092b36` | Classic | O | KAFKA-16630 | Out of scope | Classic consumer test, consumer-threading §20 |
+| `01f50af8b8` | Classic | O | KAFKA-20253 | Out of scope | Classic heartbeat thread (`AbstractCoordinator`), §20. Not 28de22de34, the KIP-848 KAFKA-20253 fix |
+| `673107f49d` | Classic | O | KAFKA-20778 | Out of scope | Classic consumer, §20 |
+| `93ee413aca` | Classic | O | KAFKA-20232 | Out of scope | Classic `ConsumerNetworkClient`, §20 |
+| `9ea8c3931c` | Classic | O | MINOR | Out of scope | Classic `ConsumerNetworkClient` javadoc, §20 |
+| `05185c1ef8` | Common | D | KAFKA-20341 | Doc/log | Synced in P13 (`d0fc40c2`): `assignment()` / `subscription()` snapshot semantics; `metrics()` keeps the Rust snapshot contract and says where Java differs; no Rust `Admin::metrics()`; Share out of scope |
+| `150f09f784` | Common | D | KAFKA-20519 | Doc/log | Skipped: `TopicConfig` / `BrokerSecurityConfigs` are not translated |
+| `26e8df61e3` | Common | D | MINOR | Doc/log | Skipped: Rust has no `formatBytes` counterpart |
+| `7c7fc5fac2` | Common | D | MINOR | Doc/log | Synced in P13 (`d0fc40c2`): `SerializationError` doc |
+| `8c15611221` | Common | D | MINOR | Doc/log | Skipped: none of the four typo sites has a Rust counterpart |
+| `da3b5e78ed` | Common | D | MINOR | Doc/log | Skipped: classic-only. The new warning fires only with `group.protocol=classic`, which `KafkaConsumer::new` rejects |
+| `0a367aa1ec` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart (`OperatingSystem`, `Java`, `Exit`) |
+| `10805c9782` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `LogContext` → `common::utils::internals` (`5bc7915b`, `ef3f861e`); the other classes moved have no Rust counterpart |
+| `162b3a1bcf` | Common | N | MINOR | No-op | Test typo fixes |
+| `2299a06e31` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of iterator utilities with no Rust counterpart |
+| `282eef9d05` | Common | N | MINOR | No-op | Java double-checked-locking idiom |
+| `2ad4c7a2ef` | Common | N | MINOR | No-op | Java HashMap/`Uuid` micro-refactor |
+| `3b6c8385ca` | Common | N | MINOR | No-op | Test utilities to `testFixtures`; xtask now indexes `clients/src/testFixtures` (P0 `e84c6434`) |
+| `4048aa19fa` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
+| `496ed66512` | Common | N | MINOR | No-op | Unused telemetry `MetricsEmitter` method (KIP-714 untranslated) |
+| `4ae78a36ac` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart |
+| `5eff4ceb5f` | Common | N | MINOR | No-op | Java `Collections` factory idiom |
+| `6c3b63b825` | Common | N | MINOR | No-op | Java `RecordHeaders` constructor allocation tweak; no behaviour change |
+| `6cd450e677` | Common | N | MINOR | No-op | Java stream classes to `utils.internal`; P7 placed the new `ByteBufferOutputStream` in `common::utils::internals` to match (`14eec39c`) |
+| `a1c155ee28` | Common | N | KAFKA-20297 | No-op | `CollectionUtils` cleanup; Rust has no `CollectionUtils` |
+| `b347f4bd2e` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `ByteUtils` → `common::utils::internals` (`5bc7915b`) |
+| `b4c977544f` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `ExponentialBackoff` → `common::utils::internals` (`5bc7915b`) |
+| `cab3cea505` | Common | N | MINOR | No-op | Test `@SuppressWarnings` |
+| `cac4d1f5c5` | Common | N | MINOR | No-op | Gradle test-fixtures build change |
+| `d85d257c99` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `ProducerIdAndEpoch` → `common::utils::internals` (`5bc7915b`) |
+| `e7a568863e` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of classes with no Rust counterpart |
+| `fac6838045` | Common | N | KAFKA-20032 | No-op | KIP-1265 audience annotations: already applied before M16 (`AUDIENCE_REF = 4.4.0-rc3`) |
+| `c0579dbfb4` | Common | O | KAFKA-20769 | Out of scope | `ListDeserializer` untranslated, §1.1 |
+| `d995cd14cc` | Common | O | KAFKA-20700 | Out of scope | Config providers (`AllowedPaths`) untranslated, §1.1 |
+| `46ad599a6e` | Common | P | MINOR | Ported | P1: `KafkaMetric` `Display` (`85325f15`, `0407ff80`) |
+| `474798afbe` | Common | P | KAFKA-20072 | Ported | P1: `7e508e24` |
+| `8ba75d04cb` | Common | P | MINOR | Ported | P0: `FENCED_STATE_EPOCH` text (`d584de7b`) |
+| `8b6d31f00c` | Common | T | KAFKA-20297 | Test-only ported | P1: `ByteUtilsTest` split (`56aba3a1`) |
+| `44bafc60e7` | Consumer | A | KAFKA-20426 | Already in 4.3.1 | KAFKA-20426, backported to 4.3.1; ported in M13 |
+| `4b9eddc132` | Consumer | A | KAFKA-20428 | Already in 4.3.1 | KAFKA-20428, backported to 4.3.1; ported in M13 |
+| `45c4bdc48a` | Consumer | D | MINOR | Doc/log | Synced in P13 (`d0fc40c2`): `GroupMembershipOperation` docs, the REMAIN_IN_GROUP debug log, the `leave_group_epoch` comment |
+| `67850b0b68` | Consumer | D | KAFKA-20136 | Doc/log | Synced in P13 (`d0fc40c2`): `CloseOptions`, the commit-failed errors, `GroupProtocol`, `ConsumerRecords` `next_offsets`, `Subscription` / `Assignment`; the rest already equivalent; Share / assignor machinery out of scope |
+| `6ce2682d7b` | Consumer | D | KAFKA-20539 | Doc/log | Synced in P13 (`d0fc40c2`): the `auto.offset.reset` / `by_duration` text on `AUTO_OFFSET_RESET_CONFIG` |
+| `6f4b47d61c` | Consumer | D | KAFKA-20089 | Doc/log | Synced in P13 (`d0fc40c2`): the auto-topic-creation caveat on `partitions_for` / `partitions_for_with_timeout` |
+| `a39e714c6f` | Consumer | D | KAFKA-20449 | Doc/log | Already applied in P10 (`e75bcf8a`): the high-watermark logs are DEBUG |
+| `cacc16797b` | Consumer | D | MINOR | Doc/log | Skipped: the Rust docs never had the malformed tags; `clientInstanceId` is not translated (KIP-714) |
+| `096cc96fee` | Consumer | N | KAFKA-20522 | No-op | Test for Java thread interruption on close; no Rust analogue |
+| `455cbdfea2` | Consumer | N | MINOR | No-op | Removed in Rust too: `has_partitions_needing_validation` (P0 `e84c6434`) |
+| `6291384496` | Consumer | N | KAFKA-20660 | No-op | Deprecated constructor, not translated (CLAUDE.md §3) |
+| `7c2b51eea0` | Consumer | N | MINOR | No-op | Java raw-type warnings in a test |
+| `8cfc1cc97f` | Consumer | N | KAFKA-20660 | No-op | Detection of the deprecated `ConsumerRecords(Map)` constructor, not translated (CLAUDE.md §3) |
+| `c09c9cd0ff` | Consumer | N | MINOR | No-op | Test typos |
+| `c39e2af92c` | Consumer | N | KAFKA-20408 | No-op | Rust never had `ConsumerMetrics`; noted in P11 (`26eebbc3`) |
+| `02c0ce9707` | Consumer | P | KAFKA-20750 | Ported | P11: `c885d2dc`; the Share half out of scope |
+| `20e952c783` | Consumer | P | KAFKA-20780 | Ported | P10: `679f2243` |
+| `2768948823` | Consumer | P | KAFKA-20575 | Ported | P10: `MockConsumer::lose_partitions` + C and Python (`eda231a4`); `#[ffi_guard]` port in merge `5c207c9f` |
+| `28de22de34` | Consumer | P | KAFKA-20253 | Ported | P3 (moved from P9): `02ac689c`, `98e6c919`, `150f4170`; the Share test out of scope |
+| `56410c311b` | Consumer | P | KAFKA-20761 | Ported | P9: `1cf59db1` (+ `33513466`) |
+| `5d03ccff57` | Consumer | P | KAFKA-15529 | Ported | P10: `1e9d18a4` (+ `da84120c`, `3ad090f3`) |
+| `642e0a5db0` | Consumer | P | KAFKA-20854 | Ported | P3: `91dcc787` (+ `73d04f5f`, `9a390dd3`, `a269808f`); classic `Fetcher` hunk skipped |
+| `65ffe10e3b` | Consumer | P | KAFKA-20187 | Ported | P10: `e75bcf8a` |
+| `6a6b536fbc` | Consumer | P | KAFKA-20681 | Ported | P9: `0d2e8766` (+ `b831ba72`); the Share half out of scope |
+| `8c0ca4ae35` | Consumer | P | KAFKA-18812 | Ported | P10: `db8c6d17` |
+| `9a28bd23ad` | Consumer | P | KAFKA-19542 | Ported | P11: `0b46e480`, `0cf8db98`, `c4d62b62` (+ `f36c48ee`, `829fade8`); Share/Classic halves out of scope |
+| `b8429b93a7` | Consumer | P | MINOR | Ported | P9: `34c7fc7f` |
+| `cd44c5de0f` | Consumer | P | KAFKA-20970 | Ported | P3: `e4bf1523`, `7ffcfa5b` (+ `84d68956`); the Streams half out of scope |
+| `d0e0ec478c` | Consumer | P | KAFKA-20312 | Ported | P10: `2c002ab8`; the classic `OffsetFetcher` half out of scope |
+| `d12e95da90` | Consumer | P | KAFKA-21010 | Ported | P3: `98e6c919`; the Streams/Share halves out of scope |
+| `e320142b7c` | Consumer | P | KAFKA-20145 | Ported | P9: `1c199323` |
+| `f7dbf0bf3b` | Consumer | P | KAFKA-20570 | Ported | P10: `488ba4cd`; the group-coordinator tests are broker side |
+| `fe88647935` | Consumer | P | KAFKA-20765 | Ported | P9: `26b89ae2` (+ `5f9efd51`) |
+| `05033d348c` | Consumer | R | KAFKA-20385 | Reverted in range | KAFKA-20385 [1/N], reverted by 79a29b0675 |
+| `79a29b0675` | Consumer | R | KAFKA-20385 | Reverted in range | The revert of KAFKA-20385 / KAFKA-20684 on 4.4; net no change |
+| `a98049e989` | Consumer | R | KAFKA-20385 | Reverted in range | KAFKA-20385 [2/N], reverted by 79a29b0675 |
+| `bc756ed514` | Consumer | R | KAFKA-20684 | Reverted in range | KAFKA-20684 [1/N], reverted by 79a29b0675 |
+| `dacff9c85a` | Consumer | R | KAFKA-20385 | Reverted in range | KAFKA-20385 [3/N], reverted by 79a29b0675 |
+| `0fd8327920` | Consumer | T | KAFKA-20315 | Test-only ported | P10: the `AsyncKafkaConsumerTest` half (`679f2243`); the Share half out of scope |
+| `159d696005` | Consumer | T | KAFKA-20565 | Reviewed, not applicable | P10 reviewed: only touches a CLASSIC-only `KafkaConsumerTest` case (§20) |
+| `16e976ac8e` | Consumer | T | KAFKA-20423 | Reviewed, not applicable | P10 reviewed: CLASSIC-only `KafkaConsumerTest` case (§20) |
+| `1a46339e90` | Consumer | T | MINOR | Test-only ported | P11: the skip-list rename (`26eebbc3`); the other hunks are CLASSIC-only |
+| `36aab4fddd` | Consumer | T | MINOR | Test-only ported | P10: CONSUMER arms and rustdoc (`ac1506c4`); the cooperative-assignor arm is classic |
+| `40e9fcd742` | Consumer | T | KAFKA-20119 | Test-only ported | P10: CONSUMER arm and rustdoc (`ac1506c4`) |
+| `624ca392ef` | Consumer | T | MINOR | Test-only ported | P10: `ac1506c4` |
+| `7c010c7583` | Consumer | T | KAFKA-20733 | Test-only ported | P10: CONSUMER arm (`ac1506c4`) |
+| `a5137f7c38` | Consumer | T | KAFKA-20759 | Test-only ported | P10: `ac1506c4` |
+| `c75e10d229` | Consumer | T | KAFKA-20424 | Reviewed, not applicable | P10 reviewed: comments and CLASSIC-only cases (§20) |
+| `e7b0cb7908` | Consumer | T | KAFKA-18862 | Test-only ported | P9: `AbstractHeartbeatRequestManagerTest` mapping (`1e37d528`) |
+| `3e32d9aa3c` | Network | D | MINOR | Doc/log | Synced in P13 (`d0fc40c2`): `Metadata::update_last_seen_epoch_if_newer` |
+| `525b278288` | Network | D | KAFKA-19117 | Doc/log | Already applied in P4 (`d16e956e`): client throttling logs at WARN |
+| `85b0e80272` | Network | D | KAFKA-20713 | Doc/log | Synced in P13 (`d0fc40c2`): both fetch-session error logs INFO → DEBUG with Java's texts |
+| `7f1ec08519` | Network | N | MINOR | No-op | Java `isDebugEnabled` guard; Rust log macros are already lazy |
+| `0720ba1141` | Network | P | MINOR | Ported | P2: `b3d85ec1` |
+| `0df48ff5c5` | Network | P | KAFKA-20939 | Ported | P2: `b3d85ec1`, `5b2eef8d` |
+| `0ef4a4c80e` | Network | P | KAFKA-20246 | Ported | P0 spec (`954a6ff2`); P4 code (`b0182fa4`, `a5269fa2`, + `2e6b2968`) |
+| `123ee9e45d` | Network | P | KAFKA-20393 | Reviewed, not applicable | P4 reviewed: the fix is entirely in the telemetry `TelemetrySender` (KIP-714 untranslated). Classified P at planning |
+| `507d01da42` | Network | P | KAFKA-14648 | Ported | P2: `b3d85ec1`, `5b2eef8d`, `37617f3c` (+ `f570c0e3`, `20185de8`, `253f968d`, `6b929c66`, `fbfe06c7`); P5 merge follow-up `335c0b67`; Share/Classic hunks out of scope |
+| `7be741d08b` | Network | P | KAFKA-20246 | Ported | P0 spec (`954a6ff2`); P4 `GroupCoordinatorNode` / `Node` (`994fe6b5`, + `14f4d1bc`, `bea4f64e`) |
+| `87943b2ff8` | Network | P | KAFKA-20939 | Ported | P2: `b3d85ec1` |
+| `ede01b871e` | Network | P | KAFKA-20246 | Ported | P0 spec (`954a6ff2`); P4 `metadata.cluster.check.enable` (`a5269fa2`, + `1944ff3b`) |
+| `fc18c47efd` | Producer | D | KAFKA-19193 | Doc/log | Already applied in P6 (`d0171254`): the rack-aware parameter docs |
+| `36a69b49c5` | Producer | N | KAFKA-16937 | No-op | Java refactor: `Time#waitObject` inlined into `ProducerMetadata.awaitUpdate`; no behaviour change (P5 notes: left untouched) |
+| `9f15f3c540` | Producer | N | KAFKA-20804 | No-op | Java lock-contention tweak in `ProducerMetadata.add`; no behaviour change (P5 notes: left untouched) |
+| `165d7ec933` | Producer | P | KAFKA-19193 | Ported | P6: `d0171254` |
+| `1aed299b3e` | Producer | P | KAFKA-20578 | Ported | P7 `005844bf`, `3271f906`, `14eec39c`, `2139ba84`; P8 `6442a838`, `d529098c`, `5475f4e4` (+ `77183531`, `67e85c90`) |
+| `6208dfc014` | Producer | P | KAFKA-20444 | Ported | P5: `dc43f174` (+ `335c0b67`) |
+| `7f5861817d` | Producer | P | KAFKA-20444 | Ported | P5: `d952668d` |
+| `83976543fe` | Producer | P | KAFKA-20444 | Ported | P5: `d952668d` (+ `19ca6321`) |
+| `88b48794ea` | Producer | P | KAFKA-19193 | Ported | P6: `d0171254` |
+| `89f3888c87` | Producer | P | KAFKA-20444 | Ported | P5: `4540a340` |
+| `a3f17327de` | Producer | P | KAFKA-19193 | Ported | P6: `06469f7a`, `d0171254` (+ `33506759`, `a9a4bb85`, `0a4a87f2`) |
+| `b9945c8e84` | Producer | P | KAFKA-20444 | Ported | P5: spec sync and builder (`d6593d7b`) |
+| `31e698de7f` | Producer | R | KAFKA-19414 | Reverted in range | Cherry-pick of the 4.3 2PC revert (`c41ff4de0e`), already applied in M13 Phase 2; nothing new |
+| `930ebc5608` | Producer | T | MINOR | Test-only ported | P5: frozen `MockTime` in the two 6208dfc014 tests (`dc43f174`) |
+| `afed4b8183` | Security | N | KAFKA-20440 | No-op | Type of the in-memory JDK `KeyStore` built from PEM; rustls loads PEM directly |
+| `ab71359239` | Security | O | KAFKA-20874 | Out of scope | OAuth `JaasOptionsUtils` (untranslated) |
+| `05b3d2adcd` | Share | O | KAFKA-20736 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `1277346c9b` | Share | O | KAFKA-21106 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `12e135bd26` | Share | O | MINOR | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `2cc6ef65e5` | Share | O | KAFKA-20736 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `33ea66bf7e` | Share | O | KAFKA-20736 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `b4da5b66e1` | Share | O | KAFKA-20524 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `b6d2503710` | Share | O | KAFKA-20410 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `c3a830f8d2` | Share | O | KAFKA-20585 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `cc5b632871` | Share | O | KAFKA-21106 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `d1c0bd82c0` | Share | O | KAFKA-14648 | Out of scope | Share (KIP-932), consumer-threading §20; the ShareConsumerImpl half of KAFKA-14648, recorded skip in P2 |
+| `eb8f9c916c` | Share | O | KAFKA-20720 | Out of scope | Share (KIP-932), consumer-threading §20 |
+| `1ba3ca579c` | Streams | O | MINOR | Out of scope | Streams, §1.1 |
+| `238eb6e6a7` | Streams | O | KAFKA-20116 | Out of scope | Streams, §1.1 |
+| `359763b286` | Streams | O | KAFKA-20790 | Out of scope | Streams, §1.1 |
+| `402087dc42` | Streams | O | KAFKA-20626 | Out of scope | Streams, §1.1 |
+| `5a91e404fa` | Streams | O | KAFKA-20169 | Out of scope | Streams, §1.1 |
+| `678c0e07e4` | Streams | O | MINOR | Out of scope | Streams, §1.1 |
+| `844de98644` | Streams | O | KAFKA-20116 | Out of scope | Streams, §1.1 |
+| `89bc8808f9` | Streams | O | KAFKA-20116 | Out of scope | Streams, §1.1 |
+| `89ccd6a126` | Streams | O | KAFKA-20868 | Out of scope | Streams, §1.1; spec synced in P0 (`954a6ff2`) |
+| `8d76fddb5c` | Streams | O | KAFKA-20782 | Out of scope | Streams, §1.1 |
+| `91958dfa28` | Streams | O | KAFKA-20169 | Out of scope | Streams, §1.1 |
+| `9391bdd4f4` | Streams | O | KAFKA-20625 | Out of scope | Streams, §1.1 |
+| `953f0a0827` | Streams | O | KAFKA-20861 | Out of scope | Streams, §1.1 |
+| `9aa8295b7c` | Streams | O | KAFKA-20894 | Out of scope | Streams, §1.1 |
+| `9ec73ca7b0` | Streams | O | KAFKA-21025 | Out of scope | Streams, §1.1 |
+| `a3362c491e` | Streams | O | KAFKA-20625 | Out of scope | Streams, §1.1 |
+| `b91561ac8a` | Streams | O | KAFKA-20744 | Out of scope | Streams, §1.1 |
+| `bbe1227697` | Streams | O | KAFKA-20870 | Out of scope | Streams, §1.1 |
+| `be4d31c869` | Streams | O | KAFKA-20655 | Out of scope | Streams, §1.1; spec synced in P0 (`954a6ff2`) |
+| `ca0c89d83a` | Streams | O | MINOR | Out of scope | Streams, §1.1 |
+| `d933e42b59` | Streams | O | MINOR | Out of scope | Streams, §1.1 |
+| `d9c3b92588` | Streams | O | KAFKA-20167 | Out of scope | Streams, §1.1 |
+| `e78cd1fb7c` | Streams | O | KAFKA-20116 | Out of scope | Streams, §1.1 |
+| `eb722e43f0` | Streams | O | KAFKA-18652 | Out of scope | Streams, §1.1 |
+| `04c3c00f25` | Wire | D | MINOR | Doc/log | Spec comment only; the spec files were synced in P0 (`954a6ff2`) |
+| `38227ab768` | Wire | N | KAFKA-20551 | No-op | Java generics cleanup; the Rust TxnOffsetCommit wrappers were reshaped in P5 |
+| `78fd214d5f` | Wire | N | MINOR | No-op | Formatting of `UpdateRaftVoterRequest` |
+| `c7d574e75f` | Wire | N | KAFKA-20371 | No-op | Generated-collection `Iterable` constructor (Java tests); the Rust generator emits `Vec`s |
+| `1a770734fe` | Wire | P | MINOR | Ported | P1: `8f60523e` (+ `c8046d5c`, `7c3209a9`) |
+| `20c2450e5b` | Wire | P | MINOR | Ported | P5: `4540a340` |
+| `2342c80dca` | Wire | P | KAFKA-20444 | Ported | P5: `d6593d7b` |
+| `239a3e4990` | Wire | P | KAFKA-18157 | Ported | P1: `5b98adb9` (+ `1f1d98f3`); FFI predicate guard in merge `5c207c9f` |
+| `319dd61cb3` | Wire | P | KAFKA-20444 | Ported | P5: `use_topic_ids`, its only client hunk (`4540a340`) |
+| `63f445aaa9` | Wire | P | KAFKA-20828 | Ported | P1: `ecfdfea5` (+ `21bc64d3`) |
+| `723847904b` | Wire | P | KAFKA-20444 | Ported | P5: `supports_*` (`d6593d7b`) |
+| `7340eefc48` | Wire | P | MINOR | Ported | P5: `d6593d7b` (+ `f48b1c2c`) |
+| `7562044781` | Wire | P | KAFKA-20444 | Ported | P5: spec sync (`d6593d7b`) |
+| `7997c9ebe0` | Wire | P | KAFKA-20620 | Ported | P0: specs and error 135 (`954a6ff2`, `d584de7b`); the Streams RPC itself out of scope |
+| `baa064e422` | Wire | P | KAFKA-20444 | Ported | P5: `d6593d7b`, `4540a340` |
+| `f66a67fcef` | Wire | P | MINOR | Ported | P1: generated-reader limits (`8f60523e`); no Rust `ArrayOf` reader |
+
+**Outside the 190:**
+
+| item | disposition | detail and Rust commits |
+|---|---|---|
+| `cc6d42206f` KAFKA-20864 (trunk, D3) | Ported ahead of 4.4 | P8: `6573e08b` (the batch-to-extend close check, retries bounded by `max.block.ms`, 9 + 2 tests); no Java markers until the submodule passes it (§8 F14) |
+| master `a4b3311e` (#205, decode & decompression DoS) | Merged | `73badfd9`; covers the stream-sizing half of `b69c07c816`; checked by hand against Phase 3 / Phase 1 (§6) |
+| master `1f4afc36` (#207, FFI & binding memory safety) | Merged | `5c207c9f`; the five new M16 FFI exports ported to `#[ffi_guard]` + `// SAFETY:` in the merge (§6) |
+
+**Tally (190 commits):**
+
+| Disposition | Count | Notes |
+|---|---|---|
+| Ported | 58 | 55 planned P, minus `123ee9e45d` (N/A), plus the four D2 moves; `b69c07c816` partial |
+| Test-only ported | 10 | 13 planned T, minus three CLASSIC-only rows |
+| Reviewed, not applicable | 4 | `123ee9e45d` (telemetry); `159d696005`, `16e976ac8e`, `c75e10d229` (CLASSIC-only tests) |
+| Doc/log | 21 | 9 synced in P13 (`d0fc40c2`), 4 already applied in P0 / P4 / P6 / P10, 8 skipped with a reason |
+| No-op | 33 | 37 planned N, minus the four D2 moves |
+| Out of scope | 56 | Streams 24, Broker 12, Share 11, Classic 5, Common 2, Admin 1, Security 1 (`b69c07c816`'s broker half is a skip inside its Ported row) |
+| Reverted in range | 6 | KAFKA-20385 / KAFKA-20684 (5); the 4.4 cherry-pick of the 2PC revert M13 had already applied (1) |
+| Already in 4.3.1 | 2 | KAFKA-20426, KAFKA-20428 (M13) |
+| **Total** | **190** | **Gaps: none.** Plus D3 and the two master merges. |
+
+## 8. Open decisions for the human and follow-ups
+
+Consolidated by Phase 13 (agent 103) from every phase's notes and the Critic files. Nothing here was
+implemented in Milestone 16. Each entry names where the detail lives.
+
+### 8.1 Open decisions
+
+| # | Decision | Pointer |
+|---|---|---|
+| O1 | **S1:** a full-strategy batch's `created_ms` predates the blocking `allocate`, so time blocked in `send()` counts against `delivery.timeout.ms` (Java refreshes `nowMs` after `free.allocate`). Fix proposed: one clock read per new batch, plus a `MockTime` fixture for `RecordAccumulator::new_for_test`. | Phase 8 notes, "Open questions" S1; `COMMENTS.98.md` |
+| O2 | **S2:** `partition_changed` cannot see a sticky switch made between the peek and the deque lock. Fix proposed: a switch generation counter on `BuiltInPartitioner`. | Phase 8 notes, S2; `COMMENTS.98.md` |
+| O3 | **Admin `close(timeout)` grace period:** Rust sets `closing` at once, so calls stop retrying during the grace period, and `HandleResult::NewCall` follow-ups bypass the hard-shutdown rejection. Fix proposed in the note. Changes close behaviour for every RPC. | Phase 12 notes, "Open questions" 1; `COMMENTS.102.md` Issue 1 |
+| O4 | **`unregisterBroker`:** the only member of its family still untranslated (M11 Tier 4 deferral); it shares Java's `runUnregisterScenario` with `unregisterController`. Port it, or keep the deferral? | Phase 12 notes, "Open questions" 2 |
+| O5 | **Consumer I/O-loop catch-all**, decided together with **KAFKA-18812's per-event `catch_unwind`**. Should `run_once` get Java's `catch (Throwable)` (`ConsumerNetworkThread.java:160-167`) as the producer `Sender` has? And should a caught per-event panic stay "fail the event, continue" (Java-faithful) or end the task, given that a panic while holding `SubscriptionState` leaves it poisoned for the app-side getters and the fetch path? | Phase 4 notes, open question (a); Phase 10 notes, Critic 100 Q1 |
+| O6 | **Upstream JIRA: the half-open `+<id>` coordinator connection.** After `REBOOTSTRAP_REQUIRED`, `NetworkClient` closes only `fetchNodes()`, so the coordinator connection stays in `CHECKING_API_VERSIONS` until the idle expiry. Java 4.4 behaves the same. File it? | Phase 4 notes, open question (b); `COMMENTS.94.md` Q1 |
+| O7 | **Upstream JIRA: Java's `ConsumerBounceTest` never exercises KIP-848 batching.** `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize` never sets `group.protocol=consumer`, so its assignment-interval arms run the classic protocol. File it? | Phase 9 fix-round notes, "Open question" |
+
+### 8.2 Follow-ups
+
+| # | Follow-up | Pointer |
+|---|---|---|
+| F1 | Tighten `check-java-name` so a constructor marker accepts only the `with_` names built from that constructor's parameters (`rust/xtask/src/java.rs:197-198`). | Phase 11 notes, follow-up (a); `COMMENTS.101.md`; rules-errata process section |
+| F2 | `RequestManagers::close()` does not close the `FetchRequestManager`; Java's `AbstractFetch.close` drains the fetch buffer during network-thread cleanup. The drain must run before `fetch_metrics_manager.close()`. | Phase 11 notes, follow-up (b) |
+| F3 | Consumer `close()` hang: the network-task join has no timeout. Seen once, not reproduced. | Manager brief for Phase 13 (2026-10-08) |
+| F4 | A client API wait never times out once the cluster vanishes (reproduced by killing a test's own containers: the test then hangs until its 300 s timeout). Pre-existing. | Phase 4 notes, "Rebootstrap-spin follow-up" (follow-up 2); `COMMENTS.95.md` follow-ups 1-2 |
+| F5 | Flaky `producer_transactions_test::test_transaction_after_transaction_id_expires_but_producer_id_remains` under load (transactional-id expiry timing); passes alone. | Merge of the milestone branch at 75be908e (agent 98), broker runs |
+| F6 | Config audit #28, `parse_bool`: the message lacks Java's `": Expected value to be either true or false"`, and the parse is case-sensitive where Java's `BOOLEAN` is not. Every boolean key in the producer, consumer and admin configs. | Phase 6 notes, "Recorded skips"; `COMMENTS.DONE.94.md` N1 |
+| F7 | Keyed `do_send_bytes` runs about +2-3 % over the pre-milestone base (`7ccc9ffb`) in the production build: Phase 8 measured +2.1 %; agent 103's runs gave +2.3 % at the producer tip and +3.3 % after both merges. The other three columns are faster. Reported, not fixed. | §6 "Pre-close-out merges", production perf table |
+| F8 | The local Docker gRPC images (`*-grpc-server:dev`) are about two months old, so a Docker-mode multilanguage run fails with `UNIMPLEMENTED`, and the C++ `UnregisterController` handler is not compiled locally. CI rebuilds both. | Phase 12 notes, recorded skips; `COMMENTS.102.md` "Still unverified" |
+| F9 | `cmake` is not installed on the development host, so `build-c` and ctest run only in CI. Every phase hand-built the C suites with `cc` instead. | Every phase's `make -k verify` notes |
+| F10 | The Rust-only `LocalIllegalState("Consumer background task is no longer running.")` in `process_background_events_inner`'s `Disconnected` arm still uses the pre-KAFKA-18812 text; reuse the 18812 message. | `COMMENTS.100.md` N1 |
+| F11 | `ConsumerHandle` operations after `close()` return a bare `KafkaError`; Java's closed consumer throws `IllegalStateException("This consumer has already been closed.")`. The handle has never checked for closure. | `COMMENTS.100.md` N2 |
+| F12 | Owed broker reruns on `5c207c9f`: the consumer modules on 4.2.0, and `cluster_check_test` / `producer_transactions_test` on 4.4.0-rc4 (Docker died mid-run), then `make verify` on the milestone branch. | §6 "Pre-close-out merges" |
+| F13 | When 4.4.0 final is tagged: re-diff `4.4.0-rc4..4.4.0` and bump (steps in the Phase 13 notes, D1). | Phase 13 notes, D1 |
+| F14 | When the submodule passes trunk `cc6d42206f` (KAFKA-20864, D3): add the Java markers to the D3 code and tests, which the rc4 tree cannot resolve yet. | Phase 8 notes, D3 |
+| F15 | About 8 `ProducerConfig.java` cites in `producer_config.rs` still carry 4.3.1 numbers (`:379`, `:548-554`, `:551`, `:555-558`, `:555-560`, `:581-583`, `:653-659`, `:657`); Phase 13 refreshed only the `ConfigDef` ones and two `ProducerConfig` ones. | Phase 13 notes |
+| F16 | `cargo doc --no-deps` is not part of `cargo xtask lint` or `make verify`, which let a Phase 4 private intra-doc link break it (fixed in Phase 13, `1aecdfc0`). Add it to the gate. | Phase 13 notes |
+| F17 | Two stale planning comments: "Phase 6 will move this constant" on `CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS`, and "a later phase will wire this" in `consumer_group_metadata.rs`. | Phase 13 notes |
