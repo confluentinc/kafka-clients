@@ -142,7 +142,6 @@ impl ControlRecordType {
     /// Returns a [`Error`] for [`Self::Unknown`] — Java throws
     /// `IllegalArgumentException("Cannot serialize UNKNOWN control record type")`
     /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §12.2).
-    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#recordKey")]
     pub fn record_key(self) -> Result<Vec<u8>, Error> {
         if self == Self::Unknown {
@@ -159,7 +158,6 @@ impl ControlRecordType {
     /// Java's `buffer` is precomputed once in the enum constructor, so its
     /// `remaining()` is a constant read; returning the constant here mirrors
     /// that amortization instead of re-serializing the key per call.
-    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#controlRecordKeySize")]
     pub fn control_record_key_size(self) -> usize {
         CONTROL_RECORD_KEY_SIZE
