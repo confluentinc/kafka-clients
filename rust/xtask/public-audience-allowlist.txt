@@ -60,5 +60,6 @@ kafka_consumer_string_destroy  # frees a Java `String` returned to C
 kafka_consumer_MetricMap  # a Java `Map<MetricName, Metric>`
 kafka_producer_MetricMap  # a Java `Map<MetricName, Metric>`
 kafka_consumer_ConsumerHandle  # the C side of the Rust-only ConsumerHandle above
+kafka_consumer_PendingCallback  # a rebalance-listener call queued for the embedder's thread (consumer-threading.md §31); Java runs the listener in-process, so has no class for it
 kafka_common_Error  # the handle over `common::Error` (CLAUDE.md §4)
 kafka_common_ErrorCode  # the C enum of error codes a `kafka_common_Error_t` classifies by
