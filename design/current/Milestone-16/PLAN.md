@@ -1168,6 +1168,194 @@ Phase 4 completion notes (agent 94):
   `TransactionManagerTest` (+157), `KafkaProducerTest` (+160, incl. the 930ebc5608 deflake), `SenderTest`,
   `MessageTest`. Byte-level v6 encoding test.
 
+Phase 5 completion notes (agent 95):
+
+- **Specs (7562044781, b9945c8e84).** `TxnOffsetCommitRequest.json` / `TxnOffsetCommitResponse.json` synced:
+  `rust/generator/messages/` now matches `kafka/` 4.4.0-rc4 exactly. Both files were already tracked, so
+  the `*.json` ignore rule did not apply; no new file was added in this phase.
+- **How v6 is kept from going out without topic ids.** Three layers, all Java's:
+  1. `txn_offset_commit_request::Builder::for_topic_names` caps at v5 (v4 without TV2); only
+     `for_topic_ids_or_names` reaches v6.
+  2. `TransactionManager::txn_offset_commit_handler` picks `for_topic_ids_or_names` only when every topic
+     resolved to a non-zero id in `metadata.topic_ids()` (`TransactionManager.java:1295-1297`).
+  3. `build_version` rejects a v6 topic with the zero id ("... does require usage of topic ids.") and a
+     v0-5 topic with an empty name ("... does require usage of topic names."). This is where Java enforces
+     the two `ignorable` fields, which the generated writer drops silently (producer-transactions §11).
+  Step 1 committed the spec together with the reshaped builder and switched the manager to
+  `for_topic_names`, so no intermediate commit could negotiate v6.
+- **§12.** `for_topic_names` translates Java's constants (`(short) 5`, `LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`);
+  `for_topic_ids_or_names` translates Java's deliberate `ApiKeys.TXN_OFFSET_COMMIT.latestVersion()`
+  (`TxnOffsetCommitRequest.java:94`) as `latest_version()`, marked at the site. v6 is stable, so both
+  accessors return 6; a test pins that. The 4.3.1 `build()` clamp is gone, as in Java.
+- **§10.** `get_topics` / `get_topics_with_topic_ids` and the response's map constructor sort by topic, then
+  partition. `txn_offset_commit_handler` sorts the caller's offsets the same way before its single pass,
+  where Java walks the caller's map (rules-errata item 1). The response is now read in wire order, as
+  Java does; the old sorted flattening (`errors()`) is gone.
+- **§1-§4.** No new transition call site: the handler's arms reuse `abortable_error` / `fatal_error`. The
+  manager gains `metadata: Arc<Metadata>`, read under the manager's lock (manager → `Metadata`, as in
+  Java). `Metadata::update` does call out under its own lock (`ProducerMetadata`'s closures,
+  `ClusterResourceListeners`), but none of those callbacks takes the manager's lock or
+  `pending_requests`, so the order cannot invert; the field doc records this invariant (corrected
+  after review, COMMENTS.95 L2). `send_offsets_to_transaction`
+  awaits the metadata refresh before it takes `pending_requests` and the manager lock.
+- **What landed, per class:**
+  - `TxnOffsetCommitRequest`: the private constructor plus the two factories (7340eefc48, 2342c80dca);
+    `supports_group_id_not_found_error` / `supports_stale_member_epoch_error` (723847904b);
+    `get_topics_with_topic_ids`; and the static `getErrorResponse(data, errors)` as
+    `get_error_response_with_request`, which carries topic id and name (baa064e422). The Rust-only
+    `TxnOffsetCommitRequestBuilderOptions` / `...OptionsBuilder` are deleted with the constructors they served.
+  - `TxnOffsetCommitResponse`: `use_topic_ids` (319dd61cb3's only client hunk), `new_builder` and the
+    builder surface (20c2450e5b, baa064e422); `errors()` removed (89f3888c87). Module
+    `txn_offset_commit_response` is now `pub`, so the nested builder is `txn_offset_commit_response::Builder`.
+  - `TransactionManager` (83976543fe, 7f5861817d): topic ids, the id -> name snapshot, the unknown-id skip
+    with Java's warning, `GROUP_ID_NOT_FOUND` / `STALE_MEMBER_EPOCH` as `CommitFailed`, the per-topic
+    "stop once completed" break. The request is now built from the offsets **passed in**, not from all of
+    `pendingTxnOffsetCommits` (a 4.4 behaviour change, tested).
+  - `ProducerMetadata::add_with_topics` and `KafkaProducer::await_topic_metadata` (6208dfc014);
+    `configure_transaction_state` passes the metadata (83976543fe).
+- **Tests.**
+  - `TxnOffsetCommitRequestTest`: all 9 cases, including the 4.4 override of `testGetErrorResponse`, which
+    was previously skipped as broker-only.
+  - `TxnOffsetCommitResponseTest`: all 8 cases, each builder case over both builder flavours.
+  - `RequestResponseTest`: the `createTxnOffsetCommitRequest(version)` /
+    `...WithAutoDowngrade` arms, as two tests.
+  - `MessageTest`: both TxnOffsetCommit cases, per version.
+  - `TransactionManagerTest`: `testGroupMetadataMismatchErrorInTxnOffsetCommit` (both codes, exact
+    messages) and the three v6 tests. Both `prepareTxnOffsetCommitResponse` translations (TM and Sender)
+    gain `assertTxnOffsetCommitRequestUsesTopicNames`.
+  - `KafkaProducerTest`: both 6208dfc014 tests, with 930ebc5608's frozen `MockTime`.
+  - `SenderTest`: its hunks are only the extra constructor argument.
+  - Byte-level (DoD #3): request v6 (16-byte id, no name) and v5 (compact name, no id), response v6 and v5,
+    each derived field by field from the spec in declaration order.
+  - Rust-only additions: the unknown-id skip, offsets-passed-in-only with sorting, the metadata-wait
+    timeout (asserting `"Failed to update metadata after 100 ms."`), `use_topic_ids` / `supports_*`
+    thresholds, and the group-metadata-check-first ordering.
+  - Teeth check: making `send_offsets_to_transaction` skip the metadata wait fails all three new
+    `KafkaProducer` tests.
+- **Recorded skips and deviations:**
+  - `awaitTopicMetadata`'s no-refresh branch calls `metadata.maybeThrowBootstrapFatalException()` (KIP-909).
+    That method does not exist on this branch: **Phase 2 owns it, and the merge must add the call** in
+    `KafkaProducer::await_topic_metadata` (the rustdoc says so).
+  - Java's `TxnOffsetCommitResponse.Builder` / `TopicIdBuilder` / `TopicNameBuilder` are one Rust `Builder`
+    over a private `TopicIndex` enum (DoD #7, documented on the type): the subclasses differ only in the
+    lookup key. The nullable `Uuid` / `String` parameters are `Option`s, and Java's
+    `IllegalArgumentException("TopicId cannot be null." / "TopicName cannot be null.")` is
+    `LocalIllegalArgument` with the same text. `merge` into an empty builder adopts the data without
+    indexing it, exactly as Java does.
+  - The static `getErrorResponse` is `get_error_response_with_request` (CLAUDE.md §2: it shares the Java
+    name with the instance method; `request` is its discriminating parameter).
+  - This crate's `MockClient` has no metadata updater (Java's `MockClient.poll` applies
+    `prepareMetadataUpdate` / `updateWithCurrentMetadata`). The `KafkaProducer` tests run a small
+    responder beside the operation that does that. The `TransactionManager` tests are manager-level, so a
+    helper negotiates the version the way `NetworkClient` does (`latest_usable_version_in_range` against
+    node 0).
+  - The Sender / RecordAccumulator test fixtures build their `TransactionManager` before the context's
+    metadata exists, so each gets a separate empty `Metadata` (`txn_manager_metadata()`, documented). None
+    of those tests seeds an id for an offset-commit topic, and Java's shared metadata carries none either,
+    so the request is the same v0-5 one.
+  - Not Phase 5: the other 4.4 `ProducerMetadata` changes (36a69b49c5 `Timer` `awaitUpdate`, 9f15f3c540
+    lock-free `add` fast path and `retainTopic` CAS, the constructor losing `Time`) are classified N in
+    §6 and were not touched.
+  - Pre-existing, out of scope: `KafkaProducerMetrics::record_send_offsets` has no call site in Rust
+    (the module carries an `expect(dead_code)` for the transactional sensors). Java records it after the
+    send-offsets wait; 6208dfc014 did not change that line.
+  - `testMeasureTransactionDurations`' new `metadata.add("topic", ...)` hunk is already what Rust's
+    `TxnProducerContext` does by default, so nothing changed there.
+- **DoD #10:** N/A: transactional control requests, not the per-record path.
+- **For Phases 6-8 (same track):**
+  - `TransactionManager::new` now takes `metadata: Arc<Metadata>` (7 parameters), and
+    `KafkaProducer::configure_transaction_state` takes `&Arc<Metadata>`. Test fixtures: TM tests use
+    `test_metadata()` / `manager_with_metadata(..)`; Sender and RecordAccumulator tests use
+    `txn_manager_metadata()`.
+  - `TxnProducerContext::with_metadata_seed(extra, n, tv2, track_topic, with_topic_ids)` and the
+    `topic_metadata_update` helper exist in `kafka_producer.rs` tests.
+  - Phase 6 (rack-aware) touches `RecordAccumulator::PartitionerConfig` and `KafkaProducer` construction.
+    This phase changed only the `configure_transaction_state` call there (one argument).
+  - Gate on `cargo xtask lint --keep-going`. `check-java-name` rejects a test whose `#[doc(alias)]` names a
+    Java test it is not named after, so a test that translates only part of a Java test should carry no alias.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, errata, Java diffs) | 20:29 | 20:35 | 6 |
+  | 1 specs + `TxnOffsetCommitRequest` + MessageTest | 20:35 | 20:43 | 8 |
+  | 2 `TxnOffsetCommitResponse` + response by topic | 20:43 | 20:49 | 6 |
+  | 3 `TransactionManager` topic ids + new errors + tests | 20:49 | 20:58 | 9 |
+  | 4 `KafkaProducer` / `ProducerMetadata` refresh + tests | 20:58 | 21:03 | 5 |
+  | 5 gates (format-check, lint + fixup, full `cargo test`) | 21:03 | 21:08 | 5 |
+  | 6 `make -k verify` (twice, see below), completion notes | 21:08 | 21:29 | 21 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4330 passed, 0 failed, 10 ignored (lib 4281 / 3 ignored, plus 36, 8 and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: lint-custom reports exactly the 13 remaining §5.1 rows (Phases 7/8 2,
+    Phase 9 1, Phase 11 10), nothing new. Every other step passes: the other custom lints, doc-hygiene,
+    module-path-hygiene, and all three clippy passes. A first run found two of this phase's test aliases
+    (`RequestResponseTest#testSerialization` on differently named tests); fixed in a fixup.
+  - `make -k verify` (macOS, 21:19-21:27) fails in three targets, none of them this phase's:
+    - `build-c`: `cmake: command not found`. Environment: cmake is not installed on this host.
+    - `lint`: the 13 remaining §5.1 rows only. Expected under the §5.1 gate rule.
+    - `test-rust-all-features`: 4508 passed, 17 failed, 3 ignored. All 17 are Docker-backed
+      `integration_tests::*` ("failed to list networks": the Docker daemon is not running).
+    Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` / format-arity
+    (29 passed), and the soak tests (156 passed).
+    The first `make -k verify` run (21:08) is discarded: its log file was shared with the parallel Phase 2
+    agent and holds that worktree's output.
+  - **Owed:** a Docker-backed run of the integration suite, in particular
+    `producer_transactions_test` against a 4.4 broker, which now negotiates TxnOffsetCommit v6 when the
+    offsets' topics have ids. Also a `build-c` / C-test run on a host with cmake (this phase changed no C
+    surface).
+
+Merge of Phase 2 (agent 95, 2026-10-07/08):
+
+- **Merge.** `4b1d6f54` merges exactly `ed2e3ce3` (Phase 2, reviewed clean), not the
+  `milestone-16-ak-4.4` tip, into `milestone-16-producer` with `--no-ff`.
+  - **The one textual conflict** was in `rust/src/common_client_configs.rs`: Phase 6's `CLIENT_RACK_CONFIG` /
+    `DEFAULT_CLIENT_RACK` and Phase 2's `BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG` /
+    `DEFAULT_BOOTSTRAP_RESOLVE_TIMEOUT_MS` were added at the same spot. Both are kept.
+  - **`KafkaProducer` construction auto-merged.** Phase 2's `maybe_bootstrap_metadata_synchronously`
+    follows the `ProducerMetadata` creation, and `set_bootstrap_configuration` follows the `NetworkClient`,
+    where Java has them. Phase 5's `configure_transaction_state(.., &metadata.metadata_arc(), ..)` and
+    Phase 6's `build_accumulator` / partitioner-close structure are unchanged.
+  - **`PLAN.md` auto-merged.**
+- **Follow-up `335c0b67`** (the Phase 5 merge item):
+  - `await_topic_metadata`'s no-refresh branch now calls `Metadata::maybe_return_bootstrap_fatal_error`.
+    The refresh branch already surfaces the error through Phase 2's `maybe_return_fatal_error` inside
+    `await_update`.
+  - `KafkaProducerTest.testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated` is
+    translated (Phase 2 had left it to Phase 5), with the exact message asserted.
+  - Teeth-checked: without the check, the second call fails with
+    "Cannot send offsets if a transaction is not in progress" instead.
+- **Gates after the merge:**
+  - `cargo test`: 4376 passed, 0 failed, 10 ignored (lib 4327).
+  - `cargo xtask format-check` passes.
+  - `cargo xtask lint --keep-going`: exactly the 13 §5.1 rows.
+- **Broker suites** (`producer_transactions_test`, `transactions_bounce_test`, `admin_transactions_test`,
+  `bootstrap_resolution_test`; 56 tests in one parallel run per tag):
+  - **4.2.0 (default):** 51 passed, 5 failed (`producer_transactions_test`). All 5 failed with
+    load-shaped timeouts: "Timed out waiting for a node assignment" (createTopics / listOffsets) and an
+    EndTxn commit timeout.
+    - Run alone, serially: 4 passed, and the fifth then hit `TopicExists` on its own create (a retried
+      create). That fifth test, run alone twice more, passed both times.
+  - **4.4.0-rc4** (`INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`): 44 passed, 12 failed, all
+    `producer_transactions_test`, with the same timeout shapes plus consequent assertion failures.
+    - Rerun serially: all 12 passed (16 matched by the filters).
+  - In both tags `admin_transactions_test` (11), `transactions_bounce_test` (1) and
+    `bootstrap_resolution_test` (4) passed in the parallel run.
+  - **Note for the Critic:** Critic 95 saw the 4.2.0 suite pass whole before the merge. The parallel-run
+    failures appear only with Phase 2 merged and under load. Several admin logs say "Metadata is not ready
+    because it contains bootstrap nodes", so a load interaction with KIP-909's lazy bootstrap is not ruled
+    out; serial runs are clean.
+- **TxnOffsetCommit on the wire** (`RUST_LOG=confluent_kafka::network_client=debug`, request headers):
+  - **4.2.0:** 44 sent at v5, 2 at v4 (TV1), none at v6. The request data carries topic ids, since every
+    topic resolved one, but the broker caps the negotiation at v5, so `Name` is what is written.
+  - **4.4.0-rc4:** 40 sent at v6 and 2 at v4 (TV1) in the parallel run; 15 at v6 in the serial rerun. A
+    v6 request carries `topic_id` for each topic.
+  - **v6 responses** (`transaction_manager=debug`, two tests): all 14 `TxnOffsetCommit` responses are
+    keyed by id alone (`name: ""`) and resolved through the build-time snapshot, with no "unknown topic id"
+    warning. Partition codes: 29 × `NONE`, 24 × `CONCURRENT_TRANSACTIONS` (51, retriable, retried to
+    success). Both tests passed.
+
 ### Phase 6 — Producer: rack-aware partitioning (agent 96)
 
 - KAFKA-19193 (a3f17327de, 88b48794ea, 165d7ec933, fc18c47efd docs):
@@ -1178,6 +1366,128 @@ Phase 4 completion notes (agent 94):
 - Tests: `BuiltInPartitionerTest` (+228), and the `RecordAccumulatorTest` / `SenderTest` hunks.
 - DoD #10 applies: the partitioner is on the send path.
 - Runs before Phases 7–8 (they also edit `RecordAccumulator`).
+
+Phase 6 completion notes (agent 96):
+
+- **What landed** (06469f7a, d0171254 + fixup 33506759):
+  - `ProducerConfig`: `PARTITIONER_RACK_AWARE_CONFIG` (boolean, default false, Java's doc text) and
+    `CLIENT_RACK_CONFIG` / `DEFAULT_CLIENT_RACK`. These alias new `CommonClientConfigs::CLIENT_RACK_CONFIG` /
+    `DEFAULT_CLIENT_RACK`. `ConsumerConfig::CLIENT_RACK_CONFIG` now reuses the common constant, as Java's
+    does. `client.rack` is trimmed like every `Type.STRING`.
+  - `BuiltInPartitioner`:
+    - the `rack_aware` / `rack` fields and the fc18c47efd parameter docs;
+    - `PartitionLoadStatsHolder { total, in_this_rack }`, `create_partition_load_stats_for_this_rack_if_needed`,
+      `invert_and_fold_queue_size_array` and `load_stats_in_this_rack_range_end`;
+    - the rack-aware uniform choice;
+    - the 88b48794ea trace log, behind `log_enabled!(Trace)`, which is Java's `isTraceEnabled()`.
+    `update_partition_load_stats` gains `partition_leader_racks: &[Option<&str>]`. A `None` there is a
+    leader with no rack, which is Java's `null` array element.
+  - `RecordAccumulator`:
+    - `partitioner_rack_aware` / `rack: Arc<str>`, handed to each new topic's partitioner through a
+      translated `create_built_in_partitioner`;
+    - `partition_ready` fills a `partition_leader_racks` vec beside `queue_sizes`, allocated under the
+      same condition as Java's `String[]`;
+    - `PartitionerConfig::new(adaptive, timeout, rack_aware, rack) -> Result`, which returns
+      `Error::Config("client.rack must be provided if partitioner.rack.aware is enabled")` when the rack is
+      blank (165d7ec933). Its fields are now **private**, as in Java, so the check can't be bypassed.
+      `Default` is Java's no-arg `this(false, 0, false, "")`.
+  - `Utils::is_blank`: Java trims chars <= U+0020, not Unicode whitespace.
+  - `KafkaProducer` passes both configs whether or not a custom partitioner is set (Java does too), so
+    construction fails, wrapped in "Failed to construct kafka producer", even with `RoundRobinPartitioner`.
+  - The soak client's `PRODUCER_CONFIG_KEYS` gains both keys.
+  - Bindings (§2.5): both are plain string config keys, so they pass through the C/Python config maps
+    unchanged. No FFI surface was added.
+- **Tests:**
+  - `BuiltInPartitionerTest`: all 6 cases. The two `@ParameterizedTest`s loop over their `@CsvSource`
+    rows (4 and 3); Java's empty CSV rack (`null`) is `""`.
+  - The test `SequentialPartitioner` used to re-implement `nextPartition` in the fixture, which DoD #12
+    rules out. It now only replaces `randomPartition()`, through a `#[cfg(test)] mock_random` seam on
+    `BuiltInPartitioner`, as Java's subclass does.
+  - `RecordAccumulatorTest`: 4.4's hunk only changes `testAdaptiveBuiltInPartitioner` /
+    `createTestRecordAccumulator` constructor arguments. `testAdaptiveBuiltInPartitioner` and
+    `testUniformBuiltInPartitioner` had never been translated (listed missing since M2 Phase 6). Both are
+    translated now, through a `#[cfg(test)] set_mock_random_for_test` that stands in for Java's
+    `createBuiltInPartitioner` override.
+  - `testUniformBuiltInPartitioner` builds its `Cluster` from a vec, as Java does. A
+    `MetadataSnapshot`'s cluster view does not keep partition order.
+  - `SenderTest`: the hunk is only the constructor argument (`PartitionerConfig::new(false, 42, false, "")`).
+  - `ProducerConfigTest`: no 4.4 hunk.
+  - Rust-only additions:
+    - a rack-aware run of the adaptive accumulator test, which pins that the racks come from the snapshot's
+      leader nodes;
+    - the `PartitionerConfig` blank-rack check, with the exact message;
+    - config parsing;
+    - producer wiring, with the exact cause message;
+    - `test_rack_aware_uniform_choice_matches_filtered_list`;
+    - `test_partition_switch_does_not_allocate`.
+  - Teeth checks:
+    - Disabling the rack branch in `next_partition` fails 3 partitioner tests.
+    - Writing `None` racks in `partition_ready` fails the accumulator rack test.
+    - Collecting a `Vec` in the rack branch fails the allocation test (20 allocations).
+- **DoD #10.** The partition choice runs on the send path at every sticky switch, roughly once per
+  `batch.size` bytes.
+  - Java collects the in-rack partitions into a new list. Rust counts them, then indexes the
+    `(random % n)`-th in place: same choice, no allocation. `test_rack_aware_uniform_choice_matches_filtered_list`
+    checks this against the filtered list.
+  - The rack is an `Arc<str>`, refcounted once per new topic. It is never cloned per record. The
+    in-rack test compares `&str` with no copy.
+  - Nothing is boxed. `test_partition_switch_does_not_allocate` asserts zero allocations over 20 switches,
+    for uniform and adaptive, each with rack-aware off, on, and on with no in-rack partition.
+  - The existing producer-level allocation tests send keyed records or explicit partitions, so they can't
+    reach the switch. They were not extended, and the partitioner-level test covers this instead.
+  - The extra `Vec`s are per topic per `ready()` call (in-rack CFT and ids; the racks vec), not per record.
+    Java allocates the same arrays there.
+- **Recorded skips and deviations:**
+  - No Java test skipped.
+  - `with_built_in_partitioner_for_test` (closure over the locked partitioner) stands in for
+    `getBuiltInPartitioner`. Because it is Rust-only, it carries no Java marker (the lint fixup).
+  - Pre-existing, not fixed: `ProducerConfig::parse_bool` reports `"Invalid value X for configuration K"`.
+    It is missing Java's `": Expected value to be either true or false"`, and it is case-sensitive where
+    Java's `BOOLEAN` parse is not. This affects every boolean key. The new test asserts the prefix only and
+    says why. It is a candidate for the Phase 13 config audit.
+- **For Phases 7–8 (`RecordAccumulator`):**
+  - `PartitionerConfig` has private fields: build it with `PartitionerConfig::new(..).unwrap()` in tests,
+    or `PartitionerConfig::default()`. Struct literals no longer compile.
+  - New topic partitioners come only from `create_built_in_partitioner` (Java's override point). Keep any
+    new `TopicInfo` construction going through it, or the test seam and the rack settings are lost.
+  - `partition_ready` now has three parallel arrays (`queue_sizes`, `partition_ids`,
+    `partition_leader_racks`) indexed by `queue_sizes_index`. Keep them in step if the drain or ready loop
+    is reshaped.
+  - `#[cfg(test)]` fields `mock_random` on `RecordAccumulator` and `BuiltInPartitioner` must be kept in
+    any new struct-literal constructor.
+  - `KafkaProducer::new_inner` closes a configured custom partitioner when `build_accumulator` fails
+    (KAFKA-2121, Critic 96 F1). Put any new fallible constructor step that follows the partitioner's
+    `configure` inside `build_accumulator`, e.g. KIP-1332's "does not support compression yet"
+    `ConfigException` (`KafkaProducer.java:475-480`), so it is covered.
+- **Timing log** (2026-10-07, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, Java diffs, Rust sources) | 22:06 | 22:11 | 5 |
+  | 1 `BuiltInPartitioner` + `BuiltInPartitionerTest` | 22:11 | 22:17 | 6 |
+  | 2 `Utils::is_blank`, `PartitionerConfig`, accumulator, configs, producer, tests, commits | 22:17 | 22:24 | 7 |
+  | 3 gates: format-check, lint (+ fixup), full `cargo test` | 22:24 | 22:28 | 4 |
+  | 4 producer integration tests (Docker) | 22:28 | 22:31 | 3 |
+  | 5 `make -k verify`, rerun of its failures, notes | 22:31 | 22:41 | 10 |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4341 passed, 0 failed, 10 ignored (lib 4292 / 3 ignored, plus 36, 8 and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: exactly the 13 remaining §5.1 rows, nothing new. All other steps pass.
+    The first run had a 14th finding, this phase's alias on the test-only helper; fixed in 33506759.
+  - `cargo test --features integration-tests --test integration -- producer` (Docker, default broker):
+    93 passed, 0 failed.
+  - `make -k verify` (22:31-22:39) fails in three targets:
+    - `build-c`: `cmake: command not found`. This is the environment: cmake is not installed here.
+    - `lint`: the 13 §5.1 rows only, which the §5.1 gate rule expects.
+    - `test-rust-all-features`: 4536 lib tests passed; integration 298 passed, 3 failed. The failures are
+      `producer_transactions_test::test_fatal_error_after_invalid_producer_id_mapping_with_tv2`
+      ("Transaction state never expired."), `..._test_transaction_after_producer_id_expires_with_tv2`, and
+      `plaintext_consumer_assign_test::test_async_poll_after_topic_deleted`. All three pass on rerun in
+      isolation (3/3), and both transaction tests also passed in the producer-only run above. They depend
+      on broker producer-id or transaction expiry timing under full-suite load. None takes the rack-aware
+      path, since `partitioner.rack.aware` defaults to false.
+    - Everything else passes: Python unit tests (363 passed, 2 skipped), `check-bindings` (29), soak (156).
 
 ### Phase 7 — Producer: KIP-1332 part A — chunked pool, stream, builder (agent 97)
 
@@ -1196,6 +1506,172 @@ Phase 4 completion notes (agent 94):
   tests: a cancelled `allocate_chunks` neither leaks waiters nor memory; no chunk grows past its capacity.
 - DoD #10: re-run the hot-path allocation test, and do a throughput A/B on the default `full` path to show
   no regression.
+
+#### Phase 7 completion notes (agent 97)
+
+Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `14eec39c`
+(MemoryRecordsBuilder), `2139ba84` (Java-name fixup of the three).
+
+- **What landed:**
+  - `BufferPool`: `AllocationMode { Full, Incremental }` (`buffer_pool::AllocationMode`, Display
+    `FULL` / `INCREMENTAL`), `with_allocation_mode`, `allocation_mode()`, and the mode guards with
+    Java's messages. `allocate_chunks` is async, takes one FIFO waiter per request, and refunds on
+    timeout, close, a `record_wait_time` error, and (Rust-only) a dropped future (`ChunkWaitGuard`).
+    `try_allocate_chunks` is the sync 0 ms path. Extracted: `await_memory`,
+    `signal_next_waiter_if_memory_available` (renamed from `maybe_signal_next_waiter`),
+    `release_reserved_bytes` (a guard that runs if raw chunk allocation unwinds),
+    `record_buffer_exhausted`, `return_if_chunks_needed_exceeds_pool`, and `allocate_byte_buffer`.
+    `allocate` behaves as before; its wait now goes through `await_memory`.
+  - `ChunkedByteBufferOutputStream` (crate-private, `producer::internals`): chunks are `Box<[u8]>`,
+    so a chunk cannot grow. It stores one write position, not one per chunk; chunks before the current
+    one are always full (see the struct docs). The flatten cache is a `bytes::Bytes`, and in-place
+    header writes go through `rewrite_buffer`. It implements `io::Write` (a short write, then an
+    error). `Drop` returns any chunks still attached.
+  - `MemoryRecordsBuilder` holds a `ByteBufferOutputStream` (`common::utils::internals`, an enum
+    `Single(Vec<u8>)` / `Chunked(..)`). This is the one new type (DoD #7, §2.3).
+- **Recorded skips and deviations:**
+  - No Java test skipped. In `testConstructorRejectsInvalidChunks`, the `null`-list case has no Rust
+    counterpart; the empty list and wrong-capacity cases are translated.
+  - `write(ByteBuffer)` is not a separate method. A slice covers it, through `write_with_bytes` and
+    `io::Write`.
+  - `set_position` (Java `position(int)`) checks capacity before it moves, where Java moves the
+    chunk positions first and then throws. It carries no Java marker, because CLAUDE.md §2's setter
+    name conflicts with the lint's `position_with_<params>`.
+  - `try_allocate_chunks` never enters the waiters queue. Java adds the waiter, times out at 0 ns and
+    removes it, so the outcome is the same. It carries no marker (lint).
+  - The deadline stays on the tokio clock, as `allocate` already does. `await_memory` returns `()`,
+    not the nanos waited.
+  - Recycled free-list chunks are not zeroed. They are `resize(capacity)`, which is a no-op for
+    chunks; this matches Java's `clear()`.
+  - `add_buffers(&mut Vec<Vec<u8>>)` drains only on success, so a caller can refund a refused
+    attach (Java's caller keeps its list for its `finally`).
+  - `ChunkedByteBufferOutputStream::new` drops its chunks on a validation error. That is reachable
+    only with buffers the pool did not allocate.
+  - Builder: chunked plus compression appends the compressed output to the stream at close and
+    panics if the chunks overflow, like the existing "Failed to finish compression" panic. Phase 8
+    must reject compression for the incremental strategy (`KafkaProducer.java:475-480`).
+  - `estimated_bytes_written_after` for magic < 2 spells out `LegacyRecord.recordSize` (14 / 22 +
+    key + value), since `LegacyRecord` is not translated.
+  - `MemoryRecordsBuilder::buffer` is now `&mut self -> Result<&[u8], Error>`, because a chunked
+    stream flattens on the first call. `ProducerBatch::buffer` follows (no callers). The dead
+    Rust-only `buffer_mut` is removed.
+  - §5.1: both shared rows (`ProducerBatch.isWritable`, `RecordAccumulator.recordsBuilder`) are
+    removed by Java in `ProducerBatch` / `RecordAccumulator`, which are Phase 8's half, so **neither is
+    cleared here**. The lint still has exactly the 13 rows.
+- **DoD #10:**
+  - Producer allocation tests: `test_send_allocations_do_not_grow_*`: 2 allocations per steady-state
+    send, before and after. `test_records_allocations_do_not_scale_with_the_record_count`: first
+    `records()` = 1, before and after. Both were measured with a temporary `eprintln` that is not
+    committed.
+  - Throughput uses a temporary release-mode test that is not committed: 20 000 builders x
+    16 KiB, a 10 B key and 100 B values, appended until full and then built, giving 2.72 M records
+    per round, best of 5. Before (dbc609d1): 0.0604 s = **45.07 M rec/s**. After (14eec39c):
+    0.0582 s = **46.73 M rec/s**. No regression.
+  - The chunked path copies once at close (the flatten), and the batch is an O(1) `Bytes` slice of
+    it. The reopen path reuses the flattened allocation when nothing else holds it, and copies
+    otherwise, as the single path re-copies on every close.
+- **Phase 8 API:**
+  - Pool: `BufferPool::with_allocation_mode(memory, batch_size, metrics, time, grp,
+    AllocationMode::Incremental)`, then `pool.allocation_mode()` for the up-front check.
+    - New batch: `pool.allocate_chunks(size: i32, remaining_ms).await -> Result<Vec<Vec<u8>>, Error>`.
+      It does **not** record buffer-exhausted; on `ProducerBufferExhausted` the caller calls
+      `pool.record_buffer_exhausted()`.
+    - Extension: `pool.try_allocate_chunks(size)` (sync).
+    - Unattached chunks go back one by one with `pool.deallocate(chunk)`. A bare `Vec<Vec<u8>>`
+      has **no** Drop refund, so `AppendGuard` must return them itself.
+  - Stream: `ChunkedByteBufferOutputStream::new(chunks, pool.poolable_size(), Some(pool.clone()))?`,
+    then:
+    - `add_buffers(&mut extension_chunks)?`, which drains on success;
+    - `attached_capacity()?`;
+    - `deallocate()` / `deallocate_with_pool(Some(&pool))`.
+    - Dropping a stream refunds its chunks, which covers a cancelled append holding a
+      `NewBatchBuffer`.
+  - Builder: `MemoryRecordsBuilder::with_buffer_stream(ByteBufferOutputStream::Chunked(stream),
+    RecordBatch::CURRENT_MAGIC_VALUE, compression, TimestampType::CreateTime, 0,
+    RecordBatch::NO_TIMESTAMP, NO_PRODUCER_ID, NO_PRODUCER_EPOCH, NO_SEQUENCE, false, false,
+    NO_PARTITION_LEADER_EPOCH, max(batch_size, first_record_size), RecordBatch::NO_TIMESTAMP)?`.
+    - Use `builder.estimated_bytes_written_after(key, value, headers)` for `extensionBytesNeeded`.
+    - `builder.buffer_stream().is_chunked()` is `instanceof`.
+    - `builder.buffer_stream_mut().as_chunked_mut()` returns the stream.
+  - Returning a batch's chunks: `deallocate_buffer` and `deallocate_inflight_buffer` for a chunked
+    batch call `as_chunked_mut().unwrap().deallocate_with_pool(Some(&pool))`.
+    - **Never** use `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a chunked
+      batch: `take_buffer` returns an empty `Vec`, and `initial_capacity()` is the chunk size.
+    - Unused chunks were already released at `close_for_record_appends`.
+  - **Critic 97 notes for Phase 8:**
+    - `take_buffer()` on a chunked builder returns an empty `Vec`. Today's
+      `RecordAccumulator::deallocate` (`record_accumulator.rs` ~1794-1800) would call
+      `deallocate_with_size(Vec::new(), chunk_size)`, crediting a chunk of non-pooled memory, while
+      the stream's `Drop` also returns the real chunks. The in-flight branch
+      (`vec![0u8; initial_capacity()]`) is wrong the same way. Both over-credit the pool, so
+      `buffer.memory` can be exceeded.
+      - Phase 8 must branch on `is_chunked()` (Java's `ChunkedProducerBatch.deallocateBuffer` /
+        `deallocateInflightBuffer`).
+      - A `debug_assert!` in `take_buffer`'s `Chunked` arm would make a missed branch loud.
+    - An overflowing chunked append panics: `append_default_record`'s `.expect("I/O error ...")`
+      is now reachable through the fallible stream. Java refuses an under-sized first append
+      *before* writing (`ChunkedProducerBatch.tryAppend`, `ChunkedProducerBatch.java:82-88`).
+      - Translate that refusal as a returned error ahead of the append, and keep the builder panic
+        as the last-resort bug guard.
+      - The chunked-plus-compression panic at close stays acceptable only while the `ConfigException`
+        (`KafkaProducer.java:475-480`) runs before any chunked builder is built, on every
+        construction path.
+- **Java line-cite convention (Manager decision, Critic 97 L2):** a phase that ports a file's Java
+  changes refreshes that file's Java line cites to the new reference in the same phase. Phase 7 did
+  this for `buffer_pool.rs` and `memory_records_builder.rs` (and the one `BufferPool.java` cite in
+  `ffi/producer.rs`). Its `ProducerBatch.java` cite belongs to Phase 8's file.
+- **Critic 97 round 1:** 0 blockers, 2 Low, both fixed.
+  - L1: two probe tests were added, for the free-list-before-raw swap and for `set_position` on a
+    chunk boundary. Each fails under its mutation. The `test_try_allocate_chunks` docstring
+    overclaim is gone. Fixups `b3db22aa` and `f5285aea`.
+  - L2: cites refreshed to rc4 in `1d297caa`.
+  - Throughput: the Critic's interleaved re-run confirms "no regression"; the +3.7 % above is noise.
+- **Timing log** (2026-10-07/08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, PLAN, Java commit and tests, Rust sources) | 23:58 | 00:09 | 11 |
+  | 1 DoD #10 baseline capture (alloc counts, release bench) | 00:09 | 00:12 | 3 |
+  | 2 `BufferPool` + `BufferPoolChunkAllocationTest`, teeth check, commit | 00:12 | 00:19 | 7 |
+  | 3 `ChunkedByteBufferOutputStream` + its test, commit | 00:19 | 00:22 | 3 |
+  | 4 builder buffer type + builder tests, teeth check, commit | 00:22 | 00:26 | 4 |
+  | 5 DoD #10 after-measure | 00:26 | 00:29 | 3 |
+  | 6 gates (format-check, full test, lint), Java-name fixup | 00:29 | 00:36 | 7 |
+  | 7 producer broker tests (under the lock), stopped waiting on a hung test | 00:38 | 01:19 | 41 |
+  | 8 Critic 97 round 1 fixes; `make -k verify` | 02:00 | 10:45 | (interrupted; verify 9) |
+
+- **Verification:**
+  - `cargo build` passes. `cargo xtask format-check` passes.
+  - `cargo test`: 4367 passed, 0 failed, 3 ignored (lib), plus 36, 8 and 5 / 7 ignored.
+  - `cargo xtask lint --keep-going`: exactly the 13 §5.1 rows. Clippy is clean. The first run found 6
+    of this phase's markers misnamed; `2139ba84` fixed them.
+  - `cargo test --features integration-tests --test integration -- producer` (under the broker
+    lock): 92 passed, 0 failed, and 1 did not finish.
+    `producer_transactions_test::test_read_committed_consumer_should_not_see_undecided_data` was
+    still running after 40 minutes.
+    - A `sample` of the test process put its CPU (about 50 %) in the **consumer**
+      `ConsumerNetworkThread::run_once` → `NetworkClientDelegate::poll` → `NetworkClient::poll`
+      (`handle_rebootstrap`, `handle_timed_out_connections`, `maybe_update`), with no
+      producer-builder frames.
+    - The default `full` path is the only one any producer uses, and it runs the pre-Phase-7 code.
+      The other 92 producer tests passed, including every transactional one.
+    - So this looks like a consumer-side busy loop (possibly from the KIP-909 / Phase 2 merge) and
+      not this phase. It is **unverified**: the process could not be stopped from here to re-run
+      the test alone.
+  - The hung run was ended externally (SIGTERM, about 10:39). By then it had also reported
+    `test_send_offsets_with_group_metadata` FAILED, under three-cluster load. That test passed in the
+    verify run below.
+  - `make -k verify` (2026-10-08 10:36-10:45): `lockf -t 60` timed out while the hung binary held the
+    lock. Per the Manager's instruction it then ran without `lockf`, at load 5.1. Results:
+    - lib: 4613 passed, 3 ignored.
+    - Integration: 305 passed, 0 failed, 2 ignored. This includes
+      `test_read_committed_consumer_should_not_see_undecided_data` and
+      `test_send_offsets_with_group_metadata`, both ok.
+    - Python: 363 passed, 2 skipped.
+    - check-bindings: 29 + 29.
+    - soak: 156.
+    - It failed only in `build-c` (`cmake: command not found`, the environment) and `lint` (the 13
+      §5.1 rows).
 
 ### Phase 8 — Producer: KIP-1332 part B — accumulator, batch, producer wiring (agent 98)
 
@@ -1222,6 +1698,254 @@ Phase 4 completion notes (agent 94):
   (`IncrementalAllocationProducerSendTest` / `BaseProducerSendTest` analog).
 - Deliverable: draft the `ProducerBatch`-fold rules note into `rules-errata.md` (§2.3).
 - DoD #10 applies.
+
+#### Phase 8 completion notes (agent 98)
+
+Commits: `6442a838` (accumulator, batch fold, chunked accumulator, config, producer wiring),
+`6573e08b` (D3, KAFKA-20864), `d529098c` (separate chunked guard for DoD #10; rules note),
+`1daace6b` (Java cites to rc4), `5475f4e4` (IncrementalAllocationProducerSendTest analog), plus this
+notes commit.
+
+- **How the types compose (§2.3).**
+  - `ChunkedRecordAccumulator { base: Arc<RecordAccumulator>, chunked_free: Arc<BufferPool> }` in
+    `chunked_record_accumulator.rs`, with its own `append` / `try_append` / `create_producer_batch` /
+    `chunked_records_builder` / `allocate_extension_chunks` / `deallocate_extension_chunks`.
+    `ChunkedRecordAccumulator::new` builds the base itself (Java's `super(..)`) after Java's two
+    checks (incremental pool; compression `none`).
+  - `RecordAccumulator::append_new_batch` takes Java's two virtual steps as parameters: a
+    `try_append` closure, a records-builder supplier, and a `create_producer_batch` closure. Both
+    strategies use it; neither boxes anything.
+  - `Sender` is unchanged (`Arc<RecordAccumulator>`). `KafkaProducer` holds `accumulator` (the shared
+    base) and `chunked_accumulator: Option<ChunkedRecordAccumulator>`; `do_send_bytes` dispatches
+    `append` on it (two concrete awaits, no boxed future). `build_accumulator` picks the strategy
+    and returns both.
+  - `ChunkedProducerBatch` is `pub(crate) type ChunkedProducerBatch = ProducerBatch;` (carrying the
+    Java marker) plus an `impl` block in `chunked_producer_batch.rs` (`new_chunked`, `is_chunked`,
+    `extension_bytes_needed`, `add_buffers`, `stream`). The three overrides branch on `is_chunked()`
+    inside `ProducerBatch::try_append` / `deallocate_buffer` / `deallocate_inflight_buffer`.
+- **DoD #7 deviations.**
+  - The `ProducerBatch` fold (above; rules note drafted in `rules-errata.md`).
+  - `ChunkedAppendGuard`: the chunked `append`'s `finally` (new-batch stream, extension chunks,
+    `appendsInProgress`) as a `Drop` type, for the same cancellation reason as `AppendGuard`. It is a
+    separate type so the full path's per-append future does not grow (see DoD #10).
+  - Test-only: `ChunkedAccumulatorTestHooks` (stands in for the anonymous `BufferPool` /
+    `ChunkedRecordAccumulator` subclasses of `ChunkedRecordAccumulatorTest`),
+    `BufferPool::deallocate_observer`, `ProducerBatch::close_for_record_appends_calls`.
+- **Other deviations, recorded.**
+  - `RecordAppendResult.future` and `.topic_partition` are `Option`s (Java's nullable `future`); the
+    static `appended(..)` factory is `appended_result` (no marker: the instance predicate holds the
+    name). `KafkaProducer` turns a non-appended result into an `IllegalState` error, not a panic.
+  - `setPartition` has no Rust call: the partition reaches the caller as `topic_partition`
+    (pre-existing).
+  - `partition_changed` keeps the pre-4.4 Rust shape (no `StickyPartitionInfo` identity), now with
+    an `unknown_partition` flag for Java's `partitionInfo != null`. Java tests that rely on
+    `super.partitionChanged` detecting a moved info have their hook report the move itself.
+  - The full path does not refresh `nowMs` after `allocate` (Java does): kept as before, because
+    the brief requires the full path behaviour-identical and many unit tests fix `now`. The
+    incremental path refreshes it as Java does.
+  - `ChunkedRecordAccumulator`'s compression check returns `Error::UnsupportedVersion` (Java's
+    `UnsupportedOperationException`; no Rust variant, same mapping as `MockAdminClient`). The
+    producer rejects the combination first with Java's `ConfigException`, inside
+    `build_accumulator`, so the partitioner-close path covers it (tested).
+  - Java's second constructor without `partitionerConfig` is not separate: pass
+    `PartitionerConfig::default()`.
+  - An under-sized first chunked append is refused before writing (Critic 97 (b)) and surfaces as
+    Java's `IllegalStateException` message from `append_new_batch`. The plain-batch "should have
+    room" case is now an error too, not a panic.
+  - `RecordAccumulator::deallocate` still panics on an inflight batch (pre-existing); the chunked
+    test catches the panic and checks the pool is fully restored.
+  - The batch-to-extend identity (D3) is the batch's `ProduceRequestResult`, held as an `Arc` so a
+    replacement batch cannot reuse the address.
+- **D3, KAFKA-20864 (`cc6d42206f`, trunk; ahead of 4.4).** Ported in `6573e08b`:
+  `append_deadline_ms`, `remaining_time_to_block_ms`, `return_if_no_more_retries_allowed`, the
+  `batch_to_extend` close check, and every retry bounded by the deadline. Its nine
+  `ChunkedRecordAccumulatorTest` and two `RecordAccumulatorTest` additions are translated. These
+  items carry no Java marker (the rc4 tree the markers resolve against predates them); a later bump
+  past `cc6d42206f` should add them.
+- **Skips.** None of the Java tests. Notes:
+  - `KafkaProducerTest` hunk (`RecordAppendResult.appended(..)` in a Mockito stub of
+    `testPartitionAddedToTransaction`): the Rust test uses a real accumulator, so there is no stub to
+    rename.
+  - `IncrementalAllocationProducerSendTest.testSendCompressedMessageWithCreateTime` is skipped exactly
+    as Java skips it.
+  - `RecordAccumulator.recordsBuilder` and `ProducerBatch.isWritable` are removed as in Java; the
+    `testFull` hunk now asserts `is_full()` instead.
+- **Tests.** `ChunkedRecordAccumulatorTest`: 14 (4.4) + 9 (D3), `@ParameterizedTest` as a loop over
+  both values. Rust-only: cancelled append refunds and counts out; `ChunkedAppendGuard` refunds
+  stream and chunks; no over-credit on deallocate (completed and inflight); undersized first append
+  errors without panicking; constructor messages; steady-state incremental append allocates exactly
+  what a full one does. `ProducerConfigTest` +3, `RecordAccumulatorTest` +2 and the `testFull` hunk;
+  `KafkaProducer` wiring tests (strategy and fallback, compression `ConfigException`, partitioner
+  closed on that failure). Integration: 11 tests in
+  `producer_test::incremental_allocation_producer_send`.
+- **DoD #10.**
+  - Producer send path: `test_send_allocations_do_not_grow_*` = 2 allocations per steady send,
+    unchanged (measured with a temporary `eprintln`, not committed).
+  - Incremental path: a steady append that needs no extension costs exactly what a full one does
+    (1 at the accumulator level; pinned by a committed test). Records that extend the batch add about
+    3 allocations per 16 KiB chunk (the chunk, the chunk list, the stream's list growth): 100 x 1000 B
+    appends cost 124 allocations against 104 for the full strategy, about 0.2 per record. That is the
+    on-demand allocation the strategy exists for, per chunk rather than per record.
+  - Throughput, full strategy: a temporary release-mode test, not committed (500 000 appends of a
+    10 B key and a 100 B value into 16 KiB batches, best of 5), interleaved runs of 3957e76f and
+    HEAD. First version: 10.3-10.7 M rec/s before, 9.65-9.94 after (about -7 %). The extra
+    `Option`s in `AppendGuard` were most of it; splitting out `ChunkedAppendGuard` (`d529098c`)
+    brought it to 10.19-10.47 after vs 10.70-10.78 before (-2 to -5 %, about 3-4 ns per append).
+    Allocation counts are unchanged.
+  - **Critic 98 F1 (fixup `77183531`) and P1 (fixup `67e85c90`).** The F1 numbers, and every number
+    above, came from a `cfg(test)` binary (test allocator, test seams), whose inlining is not the
+    shipped build's. They are superseded by the production measurements below.
+    - F1 (cold first-append helper, `#[inline]` hints, `unknown_partition &&` guard, 40 B
+      `RecordAppendResult`) was tuned on that test harness.
+    - P1, measured in a production build: the default `full` strategy was +15-18 % per record against
+      `3957e76f`. The chunked accumulator gives hot code it shares with the full path a second call
+      site (DashMap `_entry` / `_get`, `has_room_for`, `topic_info_for`,
+      `update_partition_info_on_append`), so fat LTO stopped inlining it into the full path. The
+      per-append `batches.entry(p)` shard write lock was the largest single cost.
+    - The fix:
+      - the deque lookup takes `get(p)` first and falls back to `entry(p).or_insert_with(..)` only
+        on a miss. The full path writes this out in place (a shared helper was itself not inlined),
+        and the chunked path uses `RecordAccumulator::deque_for`;
+      - `#[inline(always)]` on those three helpers.
+    - Each F1 part was re-measured in production on top of the fix. Removing the cold helper, the
+      `#[inline]` hints or the 40 B layout made no part faster, and removing the 40 B layout cost
+      +3 % on the sticky accumulator path. All are kept, and the size-pinning test stays.
+    - **Production method** (the Critic's): a clean export per commit, with a `#[doc(hidden)]
+      critic98_prodbench` module and an `examples/critic98_prodbench.rs`.
+      - `cargo build --release --example`: fat LTO, one codegen unit, the system allocator.
+      - 500 000 appends of a 10 B key and a 100 B value into 16 KiB batches, best of 9 per run.
+      - 8 interleaved runs. Load was 3.5 at the start of the run and 9.8 at the end.
+      - Scripts: `actor98-pb/{add.py,variant.py,buildv.sh,runbench.sh,summ.py}` in scratch.
+
+    | median ns / record, production build | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
+    |---|---|---|---|---|
+    | `7ccc9ffb` (master before Milestone 16) | 91.90 | 97.26 | 103.84 | 112.66 |
+    | `3957e76f` (before Phase 8) | 92.06 | 97.12 | 103.50 | 111.69 |
+    | after P1 (`67e85c90`) | 89.24 (−3.1 % / −2.9 %) | 97.42 (+0.3 % / +0.2 %) | 102.27 (−1.2 % / −1.5 %) | 113.37 (+1.5 % / +0.6 %) |
+
+    The percentages are against `3957e76f` / `7ccc9ffb`.
+    - `3957e76f` and `7ccc9ffb` are at parity with each other, so neither Phase 5 nor Phase 6
+      regressed this path.
+    - For information, the incremental strategy's accumulator costs 147.0 ns (explicit) and
+      151.9 ns (sticky) per record in the same run, about 1.6x the full strategy. The extra is the
+      per-record extension check, plus a chunk acquire and attach every 16 KiB.
+    - Allocations per steady send are unchanged: 2 at the producer, 1 at the accumulator.
+    - After P1:
+      - `producer::` lib tests: 793 passed;
+      - format-check is clean; lint shows the 11 §5.1 rows;
+      - producer broker tests in both strategies: 104 of 105 passed, including all 11 incremental
+        ones. The failure, `test_producer_rebootstrap_disabled`, was a container startup timeout,
+        and it passed when re-run alone.
+- **Cites.** `KafkaProducer.java`, `RecordAccumulator.java` and `ProducerBatch.java` cites across
+  `rust/src` refreshed to rc4 by content (204 cites in 13 files, `1daace6b`), including the bare
+  `:1056` / `:1072` in `buffer_pool.rs` (now `KafkaProducer.java:1130` / `:1147`). One historical
+  statement in `kafka_producer.rs` (`:1449-1450` vs 4.3.1's `:1446`) is left as written. The cite
+  `record_accumulator.rs` "the second `try_append` (`:553-575`)" matched no version, so it now names
+  the construct (the `try_append` inside `append_new_batch`, `RecordAccumulator.java:419`). The
+  `sender.rs` pool cite names both 4.4 pools, `:494` and `:508` (Critic 98 L2, fixup `9769c54b`).
+- **Open questions for the human (Critic 98 S1 and S2).** Both are pre-existing, both would change
+  default-path behaviour, and both are left open in `COMMENTS.98.md` as "deferred to human decision".
+  - **S1 (Medium): a full-strategy batch's creation time predates the blocking `allocate`.**
+    - Java refreshes `nowMs = time.milliseconds()` after `free.allocate`
+      (`RecordAccumulator.java:336-340`), and that time becomes the batch's `createdMs`. Rust keeps
+      the caller's `now_ms` (`record_accumulator.rs`, the full `append_inner`).
+    - The Critic's probe: with MockTime and a full pool, an append parked 5000 ms in `allocate` gets
+      `created_ms` 5000 ms before the memory arrived. The incremental path gets Java's value.
+    - The consequence: time blocked in `send()`, up to `max.block.ms`, is charged against
+      `delivery.timeout.ms`. With `max.block.ms >= delivery.timeout.ms` a batch can be born already
+      expired. `record-queue-time` is inflated and `linger.ms` counts as elapsed. The two strategies
+      now disagree.
+    - Proposed fix: one clock read after `allocate` (once per new batch), plus moving
+      `RecordAccumulator::new_for_test` and its callers to a `MockTime`, as Java's tests pass `time`.
+      Without that fixture, about 15 Sender tests break (seen during this phase).
+  - **S2 (Low): `partition_changed` cannot see a concurrent sticky switch.**
+    - Java checks `isPartitionChanged(partitionInfo)` by identity first (`RecordAccumulator.java:244-247`,
+      `BuiltInPartitioner.java:195-197`). Rust re-reads the partition under the lock, so a switch
+      made between the peek and the deque lock goes unseen.
+    - The Critic's probe: append A peeks partition 0 and parks in `allocate`, a concurrent switch
+      moves the sticky partition to 1, and memory is freed. Rust lands A on 0 and credits its bytes
+      to partition 1's sticky info; Java retries and lands on 1.
+    - Phase 8 impact: none on accounting. The chunked second block re-checks the same deque, and
+      the two tests whose hooks report the move stay faithful to what they assert.
+    - Proposed fix: a switch generation counter on `BuiltInPartitioner`, returned by the peek and
+      compared under the deque lock. `testPartitionChangeRetriesBoundedByMaxBlockTime` could then
+      call the real check. The wrong `is_partition_changed` doc is already corrected (`6d339e83`).
+- **§5.1:** the two shared rows (`ProducerBatch.isWritable`, `RecordAccumulator.recordsBuilder`) are
+  cleared and removed. Lint shows exactly the 11 remaining rows.
+- **Environment.** Docker Desktop's backend was killed at 11:06 (`com.docker.backend ... signal:
+  killed`), so the daemon was down. I quit and reopened Docker Desktop at 11:58 before the broker
+  runs. No containers were running at the time.
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (PLAN, Java commit + D3, tests, Rust sources) | 10:55 | 11:03 | 8 |
+  | 1 refactor, batch fold, chunked accumulator, config, wiring, 4.4 tests, commit | 11:03 | 11:31 | 28 |
+  | 2 D3 + its tests, teeth check, commit | 11:31 | 11:37 | 6 |
+  | 3 DoD #10 alloc counts, throughput A/B, guard split, commit | 11:37 | 11:56 | 19 |
+  | 4 integration analog (written during step 3's builds) | 11:40 | 11:45 | 5 |
+  | 5 cite refresh (subagent, in parallel), cherry-pick, leftovers | 11:42 | 11:57 | 15 |
+  | 6 Docker recovery | 11:46 | 11:58 | 12 |
+  | 7 producer broker tests, both strategies (under the lock), re-run of the one failure | 11:59 | 12:06 | 7 |
+  | 8 gates (format-check, full test, lint), `make -k verify`, integration re-run | 12:06 | 12:20 | 14 |
+
+- **Verification.**
+  - `cargo build` passes; `cargo xtask format-check` passes.
+  - `cargo test`: 4406 passed, 0 failed, 3 ignored (lib), plus 36, 8 and 5 (7 ignored).
+  - `cargo xtask lint --keep-going`: clippy clean; exactly the 11 §5.1 rows.
+  - `cargo test --features integration-tests --test integration -- producer` (under the lock):
+    104 passed, 1 failed out of 105. All 11 incremental-strategy tests passed. The failure,
+    `client_rebootstrap_test::test_producer_rebootstrap_disabled`, was a container startup
+    timeout under load, and it passed when re-run alone.
+  - `make -k verify` (12:08-12:14, under the lock):
+    - lib with all features: 4649 passed, 1 failed, 3 ignored. The failure,
+      `integration_tests::api_versions_test::test_metadata_api_version_range`, was a container
+      startup timeout, and it passed when re-run alone. That failure stopped `cargo test` before the
+      integration target, so I ran it separately afterwards.
+    - Python: 363 passed, 2 skipped. check-bindings: 29 + 29. soak: 156.
+    - `build-c` failed: `cmake: command not found` (environment).
+    - `lint` failed on the 11 §5.1 rows.
+  - `cargo test --all-features --test integration` (re-run under the lock): 316 passed, 0 failed of
+    the native tests, 2 ignored. All 381 failures were `__grpc_*` multilanguage variants, which cannot
+    run on this macOS host (Linux-artifact images).
+
+#### Merge of milestone branch at 75be908e (agent 98)
+
+- **Merge `78378d6a`** (`--no-ff`, exactly `75be908e`). It brings in Phase 3, the `origin/master`
+  `a4b3311e` merge and the admin-track merge.
+  - There was one conflict, in `rules-errata.md`. Both sides had appended independent draft notes:
+    the Phase 5/8 producer notes on this side, the Phase 12 `admin-client.md` §11 note on the other.
+    I kept both, producer notes first.
+  - Everything else auto-merged, including `selector.rs`, `produce_request.rs`, the record files and
+    `PLAN.md`.
+  - The producer structures are intact: `build_accumulator`, the chunked dispatch in
+    `do_send_bytes`, and the F1 layout (cold first-append helper, `#[inline]` hints, 40 B
+    `RecordAppendResult`). None of those files changed in the merge.
+  - §5.1 still has the 11 rows, with the Phase 5 and Phase 7/8 rows still cleared.
+- **Gates.**
+  - `cargo test`: 4508 passed, 3 ignored (lib), plus 36, 8 and 5 (7 ignored).
+  - `format-check` is clean.
+  - `lint --keep-going`: clippy is clean, and lint shows exactly the 11 rows.
+- **Broker runs** (under the lock):
+  - Producer tests in both strategies plus `transactions_bounce_test`, `admin_transactions_test`
+    and `bootstrap_resolution_test`, on 4.2.0: 116 of 117 passed.
+    - All 11 incremental-strategy tests passed.
+    - The failure, `test_transaction_after_transaction_id_expires_but_producer_id_remains`, is
+      sensitive to transactional-id expiry timing under load. It passed when re-run alone.
+  - `producer_transactions_test`, `transactions_bounce_test` and `admin_transactions_test` on
+    `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4`: 52 of 52 passed.
+  - Lib `integration_tests::`: 32 of 32 passed.
+- **Throughput re-check** (the Critic 98 harness, 8 interleaved runs, best of 9).
+  - The merged tree measured +4 to +5 % at `do_send_bytes` against both `3957e76f` and the
+    pre-merge head `676ccb05`.
+  - The producer hot path is identical across the merge: the same functions and the same call sets
+    in the disassembly. The difference is the merged test-only `TrackingAllocator`
+    (`test_alloc_tracker.rs`, `#[cfg(test)]`): its new `MAX_ALLOC_SIZE` bookkeeping is inlined into
+    every allocation site of the test binary that hosts the bench.
+  - With the pre-merge tracker swapped into the merged export (`max_allocation` stubbed), the merged
+    tree is +1.2 % (explicit) and +1.9 % (keyed) over `676ccb05` at `do_send_bytes`. That is within
+    the harness's noise at load 4-5.
+  - Production builds do not include the tracker, so the F1 fix is not regressed.
 
 ### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
 
@@ -1405,6 +2129,7 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
   `ApplicationEventHandlerTest`, `ConsumerNetworkThreadTest`, and the `AsyncKafkaConsumerTest` /
   `KafkaConsumerTest` / `FetchRequestManagerTest` hunks.
 - DoD #10 applies (`CompletedFetch` / `FetchCollector` are on the per-record receive path; §27).
+- Also: Critic 96 F3: trim consumer `client.rack` (Java trims Type.STRING) and add `ConsumerConfig::DEFAULT_CLIENT_RACK` (`ConsumerConfig.java:267`).
 
 #### Phase 10 completion notes (agent 100)
 
@@ -1832,16 +2557,12 @@ produced were pure relocations and were fixed in Phase 0.
 - Each phase deletes its rows here in the commit that fixes them.
 - Phase 13 requires this table to be empty and `cargo xtask lint` fully green.
 
-Count by owner: Phase 5 2, Phases 7/8 2. (Phase 1 cleared its 30: 25 D2 moves + 5 throttle; Phase 9
-cleared its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cleared its 10, the
-`SensorBuilder` move to `consumer::internals::metrics`.)
-
-| Rust item | Java marker | Cause | Owner |
-|---|---|---|---|
-| `rust/src/common/requests/txn_offset_commit_request.rs` `get_error_response_topics` | `common.requests.TxnOffsetCommitRequest#getErrorResponseTopics` | Removed by KIP-1319 (baa064e422); TxnOffsetCommit held back by §2.2 | Phase 5 |
-| `rust/src/common/requests/txn_offset_commit_response.rs` `errors` | `common.requests.TxnOffsetCommitResponse#errors` | Removed by KIP-1319 (89f3888c87); TxnOffsetCommit held back by §2.2 | Phase 5 |
-| `rust/src/producer/internals/producer_batch.rs` `is_writable` | `clients.producer.internals.ProducerBatch#isWritable` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
-| `rust/src/producer/internals/record_accumulator.rs` `records_builder` | `clients.producer.internals.RecordAccumulator#recordsBuilder` | Removed by KIP-1332 incremental allocation (KAFKA-20578, 1aed299b3e) | Phases 7/8 |
+The table is empty: every row has been cleared, pending Phase 13's check. (Phase 1 cleared its 30: 25
+D2 moves + 5 throttle; Phase 5 cleared its 2; Phase 8 cleared the 2 shared with Phase 7; Phase 9 cleared
+its 1, `ConsumerMembershipManager.onHeartbeatSuccess`, in 0d2e8766; Phase 11 cleared its 10, the
+`SensorBuilder` move to `consumer::internals::metrics`. The last four rows, Phase 5's 2 and Phases 7/8's 2,
+disappeared with the merge of `milestone-16-producer` by agent 103; see §6.) The table header has been
+removed with the last row.
 
 ## 6. Commit classification (input to the Phase 13 audit)
 

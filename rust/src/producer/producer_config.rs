@@ -68,6 +68,13 @@ pub struct ProducerConfig {
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
 
+    /// `client.rack` - A rack identifier for this client. This can be any string
+    /// value which indicates where this client is physically located. It
+    /// corresponds with the broker config `broker.rack`. Default:
+    /// [`ProducerConfig::DEFAULT_CLIENT_RACK`] (`""`). Used by the built-in
+    /// partitioner when `partitioner.rack.aware` is enabled (KIP-1123).
+    pub(crate) client_rack: String,
+
     // --- Security ---
     /// `security.protocol` - Protocol used to communicate with brokers.
     /// Default: `SecurityProtocol::Plaintext`.
@@ -93,6 +100,21 @@ pub struct ProducerConfig {
     /// `buffer.memory` - Total bytes of memory the producer can use to buffer records
     /// waiting to be sent. Default: 32 MiB.
     pub(crate) buffer_memory: i64,
+
+    /// `buffer.memory.allocation.strategy` - Controls how the producer allocates memory from
+    /// `buffer.memory` for record batches. The following values are supported:
+    ///
+    /// - `full`: reserves a full `batch.size` up front when a batch is created, regardless of how
+    ///   much data it ends up holding. Pool memory therefore scales with the number of active
+    ///   partitions.
+    /// - `incremental`: allocates memory on demand as records are appended, growing a batch up to
+    ///   `batch.size`. Pool memory therefore scales with the data actually buffered rather than
+    ///   the number of active partitions, allowing larger `batch.size` values (e.g. for
+    ///   high-latency clusters) without reserving `batch.size` for every active partition.
+    ///
+    /// Default: `full`. Internal (Java's `defineInternal`) until the incremental strategy is fully
+    /// implemented. Validated case-insensitively and kept as given; `KafkaProducer` lower-cases it.
+    pub(crate) buffer_memory_allocation_strategy: String,
 
     /// `max.block.ms` - Maximum time `send()` and `partitionsFor()` will block.
     /// Default: 60000 ms.
@@ -214,6 +236,18 @@ pub struct ProducerConfig {
     /// Default: false.
     pub(crate) partitioner_ignore_keys: bool,
 
+    /// `partitioner.rack.aware` - Controls whether the default partitioner is
+    /// rack-aware. This has no effect when a custom partitioner is used.
+    /// Default: false.
+    ///
+    /// When `client.rack` is specified and `partitioner.rack.aware=true`, the
+    /// sticky partition is chosen from partitions with the leader broker in the
+    /// same rack, if at least one is available. If none are available, it falls
+    /// back on selecting from all available partitions (KIP-1123). Enabling it
+    /// with a blank `client.rack` makes the producer constructor fail with
+    /// `"client.rack must be provided if partitioner.rack.aware is enabled"`.
+    pub(crate) partitioner_rack_aware: bool,
+
     /// `partitioner.type` - Selects the partitioning strategy. Default: `None`
     /// (unset), which uses the built-in default partitioner keyed by IEEE CRC-32
     /// ([`KeyHasher::Crc32`], librdkafka `consistent_random` parity).
@@ -321,12 +355,14 @@ impl Default for ProducerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfigs::default(),
             ssl_config: SslConfigs::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
+            buffer_memory_allocation_strategy: Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL.to_string(),
             max_block_ms: 60 * 1000,
             acks: -1, // "all"
             retries: i32::MAX,
@@ -354,6 +390,7 @@ impl Default for ProducerConfig {
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
+            partitioner_rack_aware: false,
             partitioner_type: None,
             partitioner: None,
             transactional_id: None,
@@ -380,12 +417,25 @@ impl ProducerConfig {
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
+    /// Config key: `client.rack`
+    pub const CLIENT_RACK_CONFIG: &'static str = CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack.
+    pub const DEFAULT_CLIENT_RACK: &'static str = CommonClientConfigs::DEFAULT_CLIENT_RACK;
     /// Config key: `batch.size`
     pub const BATCH_SIZE_CONFIG: &'static str = "batch.size";
     /// Config key: `linger.ms`
     pub const LINGER_MS_CONFIG: &'static str = "linger.ms";
     /// Config key: `buffer.memory`
     pub const BUFFER_MEMORY_CONFIG: &'static str = "buffer.memory";
+    /// Config key: `buffer.memory.allocation.strategy` (KIP-1332). Internal until the incremental
+    /// strategy is fully implemented.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG: &'static str = "buffer.memory.allocation.strategy";
+    /// `buffer.memory.allocation.strategy` value: reserve a full `batch.size` per batch up front
+    /// (the default).
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL: &'static str = "full";
+    /// `buffer.memory.allocation.strategy` value: allocate memory on demand as records are
+    /// appended.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL: &'static str = "incremental";
     /// Config key: `max.block.ms`
     pub const MAX_BLOCK_MS_CONFIG: &'static str = "max.block.ms";
     /// Config key: `acks`
@@ -449,6 +499,8 @@ impl ProducerConfig {
     pub const PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG: &'static str = "partitioner.availability.timeout.ms";
     /// Config key: `partitioner.ignore.keys`
     pub const PARTITIONER_IGNORE_KEYS_CONFIG: &'static str = "partitioner.ignore.keys";
+    /// Config key: `partitioner.rack.aware`
+    pub const PARTITIONER_RACK_AWARE_CONFIG: &'static str = "partitioner.rack.aware";
     /// Config key: `partitioner.type`
     pub const PARTITIONER_TYPE_CONFIG: &'static str = "partitioner.type";
     /// Accepted `partitioner.type` value selecting the CRC-32 key hash
@@ -522,6 +574,10 @@ impl ProducerConfig {
                     // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
                     config.client_id = value.trim().to_string();
                 },
+                Self::CLIENT_RACK_CONFIG => {
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_rack = value.trim().to_string();
+                },
                 Self::BATCH_SIZE_CONFIG => {
                     config.batch_size = Self::parse_i32(key, value)?;
                 },
@@ -530,6 +586,22 @@ impl ProducerConfig {
                 },
                 Self::BUFFER_MEMORY_CONFIG => {
                     config.buffer_memory = Self::parse_i64(key, value)?;
+                },
+                Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
+                    // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
+                    // `Type.STRING` value (`ConfigDef.java:729-731`).
+                    let strategy = value.trim();
+                    if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
+                        && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
+                    {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            strategy,
+                            "String must be one of (case insensitive): FULL, INCREMENTAL",
+                        ));
+                    }
+                    config.buffer_memory_allocation_strategy = strategy.to_string();
                 },
                 Self::MAX_BLOCK_MS_CONFIG => {
                     config.max_block_ms = Self::parse_i64(key, value)?;
@@ -634,6 +706,9 @@ impl ProducerConfig {
                 },
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
+                },
+                Self::PARTITIONER_RACK_AWARE_CONFIG => {
+                    config.partitioner_rack_aware = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_TYPE_CONFIG => {
                     // Only the built-in partitioner types are accepted. The two
@@ -776,7 +851,7 @@ impl ProducerConfig {
     ///
     /// This is the Rust stand-in for Java's
     /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
-    /// ...)` (`KafkaProducer.java:382-385`), which reflectively loads and
+    /// ...)` (`KafkaProducer.java:389-392`), which reflectively loads and
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
@@ -828,7 +903,7 @@ impl ProducerConfig {
     /// Java names a class, which the producer instantiates by reflection; here
     /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
     /// `configure`s it with the user configs plus the resolved `client.id`, as
-    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// Java does (`KafkaProducer.java:388-395`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
     /// The producer built from this config takes ownership of the partitioner.
     ///
@@ -1037,6 +1112,8 @@ mod tests {
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
+        assert!(!config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "");
         assert!(config.partitioner_type.is_none());
         // The default (unset) key hash is CRC-32 (librdkafka parity), NOT the
         // Java-client murmur2 default.
@@ -1379,7 +1456,7 @@ mod tests {
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
-    /// `partitioner.class` (`KafkaProducer.java:382-385`).
+    /// `partitioner.class` (`KafkaProducer.java:389-392`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();
@@ -1588,6 +1665,63 @@ mod tests {
         );
     }
 
+    /// Translated from `ProducerConfigTest.testDefaultBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testDefaultBufferMemoryAllocationStrategy")]
+    fn test_default_buffer_memory_allocation_strategy() {
+        let producer_config = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testValidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testValidBufferMemoryAllocationStrategy")]
+    fn test_valid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL.to_string(),
+        );
+        let producer_config = ProducerConfig::new(&props).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+
+        // Rust-only: `CaseInsensitiveValidString` accepts any case, and the value is kept as given.
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "INCREMENTAL".to_string(),
+        );
+        assert_eq!(
+            "INCREMENTAL",
+            ProducerConfig::new(&props).unwrap().buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidBufferMemoryAllocationStrategy")]
+    fn test_invalid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "expected Error::Config, got {err:?}");
+        assert!(err.message().contains(ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG));
+        // Rust-only: the whole `CaseInsensitiveValidString` message.
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration buffer.memory.allocation.strategy: \
+             String must be one of (case insensitive): FULL, INCREMENTAL"
+        );
+    }
+
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
@@ -1676,6 +1810,37 @@ mod tests {
     /// Java's `KafkaProducerTest.baseProperties()`.
     fn base_properties() -> HashMap<String, String> {
         HashMap::from([("bootstrap.servers".to_string(), "localhost:9999".to_string())])
+    }
+
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` is a `Type.BOOLEAN` and the
+    /// producer's `client.rack` a `Type.STRING` (trimmed by `ConfigDef.parseType`),
+    /// defined with the keys and defaults Java's `ProducerConfig` gives them.
+    #[test]
+    fn test_partitioner_rack_aware_and_client_rack() {
+        assert_eq!(ProducerConfig::PARTITIONER_RACK_AWARE_CONFIG, "partitioner.rack.aware");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, "client.rack");
+        assert_eq!(ProducerConfig::CLIENT_RACK_CONFIG, CommonClientConfigs::CLIENT_RACK_CONFIG);
+        assert_eq!(ProducerConfig::DEFAULT_CLIENT_RACK, "");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "true".to_string());
+        props.insert("client.rack".to_string(), " rack0 ".to_string());
+        let config = ProducerConfig::new(&props).expect("valid config");
+        assert!(config.partitioner_rack_aware);
+        assert_eq!(config.client_rack, "rack0");
+
+        let mut props = base_props();
+        props.insert("partitioner.rack.aware".to_string(), "yes".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "got {err:?}");
+        // Prefix only: Java appends ": Expected value to be either true or false"
+        // (`ConfigDef.parseType`), which the shared `parse_bool` does not (pre-existing,
+        // every boolean key; recorded in the Phase 6 notes).
+        assert!(
+            err.message()
+                .starts_with("Invalid value yes for configuration partitioner.rack.aware"),
+            "unexpected message: {err}"
+        );
     }
 
     fn props_with(extra: &[(&str, &str)]) -> HashMap<String, String> {

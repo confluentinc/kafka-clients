@@ -140,7 +140,7 @@ mod sasl_handshake_response;
 mod send_builder;
 mod transaction_result;
 pub mod txn_offset_commit_request;
-mod txn_offset_commit_response;
+pub mod txn_offset_commit_response;
 
 pub use abstract_request::{AbstractRequest, RequestBuilder};
 pub use abstract_response::{AbstractResponse, ConcreteResponse};
@@ -269,10 +269,7 @@ pub use sasl_handshake_request::SaslHandshakeRequest;
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 pub use transaction_result::TransactionResult;
-pub use txn_offset_commit_request::{
-    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilderOptions,
-    TxnOffsetCommitRequestBuilderOptionsBuilder,
-};
+pub use txn_offset_commit_request::{CommittedOffset, TxnOffsetCommitRequest};
 pub use txn_offset_commit_response::TxnOffsetCommitResponse;
 pub use unregister_controller_request::UnregisterControllerRequest;
 pub use unregister_controller_response::UnregisterControllerResponse;

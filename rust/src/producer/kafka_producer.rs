@@ -24,7 +24,7 @@
 //! and its four siblings.
 
 use crate::common::requests::TxnOffsetCommitRequest;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,6 +34,7 @@ use tokio::task::JoinHandle;
 
 use crate::ClientUtils;
 use crate::KafkaClient;
+use crate::Metadata;
 use crate::NetworkClient;
 use crate::common::Cluster;
 use crate::common::Error;
@@ -65,6 +66,7 @@ use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::Caller;
+use crate::producer::internals::ChunkedRecordAccumulator;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::PendingRequests;
@@ -74,6 +76,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::SenderStatics;
 use crate::producer::internals::TransactionManager;
+use crate::producer::internals::buffer_pool::AllocationMode;
 use crate::producer::internals::{BuiltInPartitioner, KeyHasher, PartitionerConfig, RecordAccumulator};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -118,12 +121,20 @@ pub struct KafkaProducer<K, V> {
     total_memory_size: i64,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
+    /// The incremental-strategy accumulator (KIP-1332), when `buffer.memory.allocation.strategy`
+    /// is `incremental` and `batch.size` admits it; its base is [`Self::accumulator`].
+    ///
+    /// Java holds one `accumulator` field typed `RecordAccumulator` and lets virtual dispatch pick
+    /// `ChunkedRecordAccumulator.append`. Rust composes the chunked accumulator over the base
+    /// (PLAN §2.3), so the one call site that differs — `append` on the send path — dispatches on
+    /// this field, and every other use keeps the shared base.
+    chunked_accumulator: Option<ChunkedRecordAccumulator>,
     /// The producer metadata.
     metadata: Arc<ProducerMetadata>,
     /// All the state related to transactions, in particular the producer id,
     /// producer epoch, and sequence numbers; `None` when idempotence is disabled.
     ///
-    /// Translated from `KafkaProducer.transactionManager` (Java 269), which is
+    /// Translated from `KafkaProducer.transactionManager` (Java 288), which is
     /// nullable — hence [`Option`].
     ///
     /// Shared with the [`Sender`] task and the [`RecordAccumulator`] behind a
@@ -162,7 +173,7 @@ pub struct KafkaProducer<K, V> {
     /// default partitioner (the keyed CRC-32 / murmur2 path plus adaptive
     /// partitioning).
     ///
-    /// Translated from `KafkaProducer.partitionerPlugin` (Java 264), a
+    /// Translated from `KafkaProducer.partitionerPlugin` (Java 271), a
     /// `Plugin<Partitioner>`. The `Plugin<>` wrapper is `Monitorable`/metrics
     /// plumbing (KIP-877) with no Rust counterpart in this milestone, so the
     /// bare [`Partitioner`] trait object is held directly. Nullable in Java
@@ -211,7 +222,7 @@ pub struct KafkaProducer<K, V> {
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
 /// CLAUDE.md §2's cap on derived overload names: Java's widest `KafkaProducer`
-/// constructor (`KafkaProducer.java:482`, marked `// visible for testing`)
+/// constructor (`KafkaProducer.java:528`, marked `// visible for testing`)
 /// differs from the constructor group's parameter-name intersection —
 /// `{config, keySerializer, valueSerializer}`, which [`KafkaProducer::new`] owns
 /// — by ten parameters, far past the cap of three. So the derived name collapses
@@ -233,7 +244,9 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
-    /// The record accumulator. Java's `accumulator`.
+    /// The record accumulator. Java's `accumulator`. A producer built through these options
+    /// uses the full strategy: no caller (all of them tests) hands it a
+    /// `ChunkedRecordAccumulator`.
     pub accumulator: Arc<RecordAccumulator>,
     /// Whether the sender task is running. Part of Rust's decomposition of
     /// Java's `Sender sender` / `Sender.SenderThread ioThread` pair; defaults to
@@ -249,19 +262,19 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// to share one must set it.
     pub wakeup: Arc<Notify>,
     /// Handle to the sender background task, or `None` when no task was spawned.
-    /// Rust's counterpart of Java's `ioThread`, which the `:482` constructor also
+    /// Rust's counterpart of Java's `ioThread`, which the `:528` constructor also
     /// accepts as a pre-built value.
     pub sender_handle: Option<JoinHandle<()>>,
     /// The clock. Java's `time`.
     pub time: Arc<dyn Time>,
     /// The shared transaction state, or `None` when idempotence is disabled.
-    /// Java's `transactionManager`, which `:482` also accepts as `null`.
+    /// Java's `transactionManager`, which `:528` also accepts as `null`.
     pub transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     /// The transactional request queue this producer shares with the [`Sender`].
     pub pending_requests: Arc<Mutex<PendingRequests>>,
     /// The custom partitioner instance, or `None` for the built-in default.
     /// Java's `partitioner`. Stored as-is and **not** configured, mirroring
-    /// `KafkaProducer.java:502`, which wraps a pre-built `Partitioner` without
+    /// `KafkaProducer.java:548`, which wraps a pre-built `Partitioner` without
     /// calling `configure`.
     pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
 }
@@ -395,7 +408,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
     /// `time` and `pending_requests`.
     ///
     /// The other six are not in it for two distinct reasons. `sender_handle`,
-    /// `transaction_manager` and `partitioner` are the parameters Java's `:482`
+    /// `transaction_manager` and `partitioner` are the parameters Java's `:528`
     /// itself accepts as `null`. `running`, `force_close` and `wakeup` have no
     /// Java counterpart at all — they are Rust's decomposition of Java's
     /// `Sender` / `SenderThread` pair, and are values a constructor supplies on
@@ -446,7 +459,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
 ///
 /// This struct has **no Java counterpart** (DoD #7), and exists for the same
 /// reason as [`KafkaProducerOptions`]: Java's other `// visible for testing`
-/// constructor (`KafkaProducer.java:345`) differs from the group's
+/// constructor (`KafkaProducer.java:352`) differs from the group's
 /// parameter-name intersection by ten parameters, past CLAUDE.md §2's cap of
 /// three, so it is served by an options struct rather than by a name listing
 /// every parameter.
@@ -454,7 +467,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
 /// Note the method it parameterizes is `with_client_options`, not the bare
 /// `with_options` §2's rule would literally derive: both widest Java
 /// constructors collapse to the same derived name, so the one discriminating
-/// parameter that distinguishes this overload from `:482` — Java's
+/// parameter that distinguishes this overload from `:528` — Java's
 /// `kafkaClient` — is kept in the name.
 #[non_exhaustive]
 pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
@@ -466,9 +479,12 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
-    /// The record accumulator. Java has no `accumulator` parameter on `:345`;
+    /// The record accumulator. Java has no `accumulator` parameter on `:352`;
     /// Rust builds it in [`KafkaProducer::new_inner`] and injects it here.
     pub accumulator: Arc<RecordAccumulator>,
+    /// The incremental-strategy accumulator over `accumulator`, or `None` for the full strategy
+    /// (see `KafkaProducer::chunked_accumulator`).
+    pub chunked_accumulator: Option<ChunkedRecordAccumulator>,
     /// The network client the sender task drives. Java's `kafkaClient`.
     pub client: C,
     /// The clock. Java's `time`.
@@ -501,6 +517,7 @@ pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
+    chunked_accumulator: Option<ChunkedRecordAccumulator>,
     client: Option<C>,
     time: Option<Arc<dyn Time>>,
     metrics: Option<Arc<Metrics>>,
@@ -527,6 +544,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             value_serializer: None,
             metadata: None,
             accumulator: None,
+            chunked_accumulator: None,
             client: None,
             time: None,
             metrics: None,
@@ -561,6 +579,12 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     /// Sets [`KafkaProducerClientOptions::accumulator`], a mandatory parameter.
     pub(crate) fn set_accumulator(mut self, accumulator: Arc<RecordAccumulator>) -> Self {
         self.accumulator = Some(accumulator);
+        self
+    }
+    /// Sets [`KafkaProducerClientOptions::chunked_accumulator`]; `None` (the full strategy) if
+    /// unset.
+    pub(crate) fn set_chunked_accumulator(mut self, chunked_accumulator: Option<ChunkedRecordAccumulator>) -> Self {
+        self.chunked_accumulator = chunked_accumulator;
         self
     }
     /// Sets [`KafkaProducerClientOptions::client`], a mandatory parameter.
@@ -611,8 +635,8 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     ///
     /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
     /// being named in the constructor. Every parameter is mandatory except
-    /// `transaction_manager` and `partitioner`, the two Java's `:345` /
-    /// `:482` path also accepts as `null`.
+    /// `transaction_manager` and `partitioner`, the two Java's `:352` /
+    /// `:528` path also accepts as `null`.
     ///
     /// # Errors
     ///
@@ -627,6 +651,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             value_serializer: self.value_serializer.ok_or_else(|| Self::missing("value_serializer"))?,
             metadata: self.metadata.ok_or_else(|| Self::missing("metadata"))?,
             accumulator: self.accumulator.ok_or_else(|| Self::missing("accumulator"))?,
+            chunked_accumulator: self.chunked_accumulator,
             client: self.client.ok_or_else(|| Self::missing("client"))?,
             time: self.time.ok_or_else(|| Self::missing("time"))?,
             metrics: self.metrics.ok_or_else(|| Self::missing("metrics"))?,
@@ -681,7 +706,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// Serializer, Serializer, ProducerMetadata, RecordAccumulator,
     /// TransactionManager, Sender, ProducerInterceptors, Partitioner, Time,
     /// Sender.SenderThread, Optional<ClientTelemetryReporter>)`
-    /// (`KafkaProducer.java:482`), which Java marks `// visible for testing`.
+    /// (`KafkaProducer.java:528`), which Java marks `// visible for testing`.
     /// This is the injection seam tests use when they supply every collaborator
     /// themselves; [`Self::new`] is the user-facing constructor.
     ///
@@ -723,6 +748,7 @@ impl<K, V> KafkaProducer<K, V> {
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
+            chunked_accumulator: None,
             metadata,
             transaction_manager,
             pending_requests,
@@ -747,12 +773,12 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// This is the primary public factory method, mirroring Java's
     /// `new KafkaProducer(Properties, Serializer, Serializer)` constructor
-    /// (`KafkaProducer.java:339`) and its `Map` twin (`:312`).
+    /// (`KafkaProducer.java:346`) and its `Map` twin (`:319`).
     ///
     /// # Java's no-serializer constructors are deliberately not translated
     ///
-    /// Java has two further public constructors, `KafkaProducer(Map)` (`:295`)
-    /// and `KafkaProducer(Properties)` (`:324`), which both delegate to
+    /// Java has two further public constructors, `KafkaProducer(Map)` (`:302`)
+    /// and `KafkaProducer(Properties)` (`:331`), which both delegate to
     /// `this(configs, null, null)`. They exist only because the private
     /// constructor can fill a `null` serializer in reflectively:
     ///
@@ -760,7 +786,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// if (keySerializer == null) {
     ///     keySerializer = config.getConfiguredInstance(KEY_SERIALIZER_CLASS_CONFIG, Serializer.class);
     /// ```
-    /// (`KafkaProducer.java:391-392`)
+    /// (`KafkaProducer.java:398-399`)
     ///
     /// `key.serializer` is a `Type.CLASS` entry (`ProducerConfig.java:479-482`),
     /// so honouring those constructors means loading and instantiating a class
@@ -777,7 +803,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Consequence for CLAUDE.md §2: the Java constructor group's parameter
     /// intersection is `{configs}`, and Java does have an overload with exactly
-    /// that (`:295`) — but it is untranslatable, so there is no Rust
+    /// that (`:302`) — but it is untranslatable, so there is no Rust
     /// constructor that could hold the plain name on its behalf. Rather than
     /// leave `new` permanently unused and rename the only general-purpose
     /// constructor after a sibling that can never exist,
@@ -836,7 +862,7 @@ impl<K, V> KafkaProducer<K, V> {
         V: 'static,
     {
         // Java wraps the whole constructor body in `catch (Throwable t)` and
-        // relabels every failure (`KafkaProducer.java:461-466`):
+        // relabels every failure (`KafkaProducer.java:519-524`):
         //
         //     throw new KafkaException("Failed to construct kafka producer", t);
         //
@@ -845,9 +871,11 @@ impl<K, V> KafkaProducer<K, V> {
         // the caller as something for which `is_kafka_error()` is `false`.
         //
         // The `close(Duration.ofMillis(0), true)` half of Java's catch (KAFKA-2121)
-        // has nothing to do here: every fallible step in `new_inner`
-        // precedes the `Selector` / `NetworkClient` / sender-task construction, so
-        // no socket and no spawned task can leak.
+        // matters for one resource only. No socket and no spawned task can leak: the
+        // sender task is spawned by the final, infallible step, and an unconnected
+        // `Selector` / `NetworkClient` dropped on an error owns no socket. But a
+        // configured custom partitioner must be closed (`KafkaProducer.java:1533`),
+        // and `new_inner` does that for every fallible step after it is configured.
         Self::new_inner(config, key_serializer, value_serializer)
             .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
@@ -859,9 +887,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// [`ProducerConfig::set_partitioner`](crate::producer::ProducerConfig::set_partitioner))
     /// via `ProducerConfig::resolve_partitioner`. A resolved partitioner is
     /// `configure`d exactly once here (`originals` + `client.id`, Java
-    /// `KafkaProducer.java:381-388`), and adaptive partitioning is gated on its
+    /// `KafkaProducer.java:388-395`), and adaptive partitioning is gated on its
     /// absence. Errors escape raw from here; `new` relabels them
-    /// (`KafkaProducer.java:461-466`).
+    /// (`KafkaProducer.java:519-524`).
     fn new_inner(
         mut config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
@@ -906,7 +934,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    default) bootstrap it synchronously from `bootstrap.servers`, so an
         //    unresolvable address fails construction (`ConfigException`); with a
         //    positive value the NetworkClient resolves them asynchronously
-        //    (KIP-909, `KafkaProducer.java:446-447`).
+        //    (KIP-909, `KafkaProducer.java:443-444`).
         let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
@@ -986,19 +1014,20 @@ impl<K, V> KafkaProducer<K, V> {
         )?);
 
         // 8. Create the metrics registry. Java creates `this.metrics` early in
-        //    the constructor (`KafkaProducer.java:357`), before the
-        //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
+        //    the constructor (`KafkaProducer.java:386`), before the
+        //    `RecordAccumulator`/`BufferPool` (`:481-508`), because both are
         //    handed the same `Metrics` instance.
         let (metrics, producer_metrics) = Self::create_metrics(&config);
 
         // 9. Create the TransactionManager, before the accumulator and the Sender
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
-        //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
-        //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
-        let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
+        //    at the same point in the constructor (`KafkaProducer.java:446`, ahead
+        //    of the `RecordAccumulator` at `:481` and the `Sender` at `:512`).
+        let transaction_manager =
+            Self::configure_transaction_state(&config, &api_versions, &metadata.metadata_arc(), &log_context);
 
         // 9b. Resolve and configure the partitioner. Translated from
-        //     `KafkaProducer.java:381-388`: Java reflectively instantiates
+        //     `KafkaProducer.java:388-395`: Java reflectively instantiates
         //     `partitioner.class` and calls `partitioner.configure(originals +
         //     {client.id -> clientId})`. Rust has no reflection, so the built-in
         //     `partitioner.type` names resolve here, and a user-written partitioner
@@ -1009,13 +1038,14 @@ impl<K, V> KafkaProducer<K, V> {
         //     (matching Java's ordering) and before the `RecordAccumulator`, whose
         //     adaptive-partitioning flag is gated on the partitioner's absence below.
         //
-        //     KAFKA-2121: Java's constructor `catch (Throwable)` closes an
-        //     already-constructed partitioner. Here, `resolve_partitioner` fails
-        //     only before resolving one (a partitioner written for other record
-        //     types), `configure` is infallible, and every other fallible `?` step
-        //     runs *before* this point, so no reachable fallible step follows the
-        //     partitioner's construction; the normal `close()` path is therefore the
-        //     only one, and no close-on-error path is needed.
+        //     KAFKA-2121: Java's constructor `catch (Throwable)` calls
+        //     `close(Duration.ofMillis(0), true)`, which closes an already-configured
+        //     partitioner (`KafkaProducer.java:519-523` -> `:1533`).
+        //     `resolve_partitioner` fails only before resolving one (a partitioner
+        //     written for other record types), and `configure` is infallible. Every
+        //     fallible step *after* this point lives in `build_accumulator`, and its
+        //     error closes the partitioner before propagating, so a step added there
+        //     later is covered too.
         let mut partitioner = config.resolve_partitioner::<K, V>()?;
         if let Some(partitioner) = partitioner.as_mut() {
             let mut configs = config.originals.clone();
@@ -1023,45 +1053,29 @@ impl<K, V> KafkaProducer<K, V> {
             partitioner.configure(&configs);
         }
 
-        // 10. Create BufferPool and RecordAccumulator, threading the shared
-        //    `Arc<Metrics>` and `time` into both (KafkaProducer.java:438
-        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
-        //    As per Kafka configuration documentation, batch.size may be set to 0
-        //    to explicitly disable batching, which in practice uses a batch size of 1.
-        let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(
-            config.buffer_memory,
-            batch_size as usize,
-            Arc::clone(&metrics),
-            Arc::clone(&time),
-            Self::PRODUCER_METRIC_GROUP_NAME,
-        ));
-        let accumulator = Arc::new(RecordAccumulator::with_log_context(
-            batch_size,
+        let (accumulator, chunked_accumulator) = match Self::build_accumulator(
+            &config,
             compression,
-            config.linger_ms as i32,
-            config.retry_backoff_ms,
-            config.retry_backoff_max_ms,
             delivery_timeout_ms,
-            PartitionerConfig {
-                // Java `KafkaProducer.java:428-433`: "There is no need to do work
-                // required for adaptive partitioning, if we use a custom
-                // partitioner." So adaptive partitioning is enabled only when no
-                // custom partitioner is present AND the config opts in.
-                enable_adaptive_partitioning: partitioner.is_none() && config.partitioner_adaptive_partitioning_enable,
-                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
+            partitioner.is_none(),
+            &metrics,
+            &time,
+            &transaction_manager,
+            &log_context,
+        ) {
+            Ok(accumulator) => accumulator,
+            Err(error) => {
+                if let Some(partitioner) = partitioner.as_ref() {
+                    partitioner.close();
+                }
+                return Err(error);
             },
-            Arc::clone(&metrics),
-            Self::PRODUCER_METRIC_GROUP_NAME,
-            buffer_pool,
-            transaction_manager.clone(),
-            log_context.clone(),
-        ));
+        };
 
         // 11. Wire the produce-throttle-time sensor into the network client.
         //    Java creates the throttle sensor (`Sender.throttleTimeSensor(...)`)
         //    and hands it to the `NetworkClient` at construction
-        //    (`KafkaProducer.java:514,523` via `ClientUtils.createNetworkClient`);
+        //    (`KafkaProducer.java:572,582` via `ClientUtils.createNetworkClient`);
         //    the client then records every response's throttle time into it. We
         //    set it on the concrete `NetworkClient` here, before it moves into
         //    the generic sender task.
@@ -1080,6 +1094,7 @@ impl<K, V> KafkaProducer<K, V> {
                 .set_value_serializer(value_serializer)
                 .set_metadata(metadata)
                 .set_accumulator(accumulator)
+                .set_chunked_accumulator(chunked_accumulator)
                 .set_client(client)
                 .set_time(time)
                 .set_metrics(metrics)
@@ -1093,10 +1108,140 @@ impl<K, V> KafkaProducer<K, V> {
         ))
     }
 
+    /// Step 10 of [`new_inner`](Self::new_inner): the `BufferPool` and the
+    /// `RecordAccumulator` — a `ChunkedRecordAccumulator` for the incremental
+    /// `buffer.memory.allocation.strategy` (KIP-1332) — i.e. every fallible constructor step that
+    /// follows the custom partitioner's `configure`. `new_inner` closes the partitioner when this
+    /// returns an error, as Java's constructor `catch` does (KAFKA-2121), so a fallible step added
+    /// after the partitioner belongs here: the incremental strategy's compression
+    /// `ConfigException` is one.
+    ///
+    /// Returns the base accumulator, which the `Sender` and the producer's flush / close paths
+    /// share, and, for the incremental strategy, the chunked accumulator whose `append` the send
+    /// path calls instead of the base one (PLAN §2.3).
+    ///
+    /// Translated from `KafkaProducer.java:447-509`.
+    #[expect(clippy::too_many_arguments)]
+    fn build_accumulator(
+        config: &ProducerConfig,
+        compression: Compression,
+        delivery_timeout_ms: i32,
+        no_custom_partitioner: bool,
+        metrics: &Arc<Metrics>,
+        time: &Arc<dyn Time>,
+        transaction_manager: &Option<Arc<Mutex<TransactionManager>>>,
+        log_context: &LogContext,
+    ) -> Result<(Arc<RecordAccumulator>, Option<ChunkedRecordAccumulator>), Error> {
+        // 10. Create BufferPool and RecordAccumulator, threading the shared
+        //    `Arc<Metrics>` and `time` into both (`KafkaProducer.java:496-508`
+        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
+        let partitioner_config = PartitionerConfig::new(
+            // Java `KafkaProducer.java:447-449`: "There is no need to do work
+            // required for adaptive partitioning, if we use a custom
+            // partitioner." So adaptive partitioning is enabled only when no
+            // custom partitioner is present AND the config opts in.
+            no_custom_partitioner && config.partitioner_adaptive_partitioning_enable,
+            config.partitioner_availability_timeout_ms,
+            // KIP-1123 (`KafkaProducer.java:450-455`): passed through whether or
+            // not a custom partitioner is set, as Java does, so a blank
+            // `client.rack` with `partitioner.rack.aware=true` fails construction
+            // either way.
+            config.partitioner_rack_aware,
+            &config.client_rack,
+        )?;
+        // As per Kafka producer configuration documentation batch.size may be set to 0
+        // to explicitly disable batching which in practice actually means using a batch size of 1.
+        let batch_size = config.batch_size.max(1);
+        let allocation_strategy = config.buffer_memory_allocation_strategy.to_lowercase();
+        let incremental = allocation_strategy == ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL;
+        // Use the chunked path only when a batch is at least one full chunk
+        // (batch.size >= CHUNK_SIZE). Below that, a batch can't fill even one chunk, so chunking
+        // would over-reserve and the producer falls back to the full strategy instead.
+        let use_incremental = incremental && batch_size >= ChunkedRecordAccumulator::CHUNK_SIZE;
+        if incremental && !use_incremental {
+            kafka_warn!(
+                log_context,
+                "Ignoring {}={} and falling back to {}: {} is {} bytes, below the {} byte chunk size, so a batch \
+                 cannot fill a single chunk.",
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+                ProducerConfig::BATCH_SIZE_CONFIG,
+                batch_size,
+                ChunkedRecordAccumulator::CHUNK_SIZE
+            );
+        }
+        // The chunked path does not support compression yet (KAFKA-20579).
+        if use_incremental && compression.compression_type() != CompressionType::None {
+            return Err(Error::config_message(Self::incremental_compression_error_message()));
+        }
+        if use_incremental {
+            let buffer_pool = Arc::new(BufferPool::with_allocation_mode(
+                config.buffer_memory,
+                ChunkedRecordAccumulator::CHUNK_SIZE as usize,
+                Arc::clone(metrics),
+                Arc::clone(time),
+                Self::PRODUCER_METRIC_GROUP_NAME,
+                AllocationMode::Incremental,
+            ));
+            let accumulator = ChunkedRecordAccumulator::new(
+                batch_size,
+                compression,
+                config.linger_ms as i32,
+                config.retry_backoff_ms,
+                config.retry_backoff_max_ms,
+                delivery_timeout_ms,
+                partitioner_config,
+                Arc::clone(metrics),
+                Self::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(time),
+                buffer_pool,
+                transaction_manager.clone(),
+                log_context.clone(),
+            )?;
+            return Ok((Arc::clone(accumulator.base()), Some(accumulator)));
+        }
+        let buffer_pool = Arc::new(BufferPool::with_allocation_mode(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(metrics),
+            Arc::clone(time),
+            Self::PRODUCER_METRIC_GROUP_NAME,
+            AllocationMode::Full,
+        ));
+        let accumulator = Arc::new(RecordAccumulator::with_log_context(
+            batch_size,
+            compression,
+            config.linger_ms as i32,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            delivery_timeout_ms,
+            partitioner_config,
+            Arc::clone(metrics),
+            Self::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(time),
+            buffer_pool,
+            transaction_manager.clone(),
+            log_context.clone(),
+        ));
+        Ok((accumulator, None))
+    }
+
+    /// The `ConfigException` message for the incremental strategy combined with compression
+    /// (`KafkaProducer.java:475-480`).
+    fn incremental_compression_error_message() -> String {
+        format!(
+            "The {} {} does not support compression yet. {} must be set to none.",
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+            ProducerConfig::COMPRESSION_TYPE_CONFIG
+        )
+    }
+
     /// Builds the [`TransactionManager`] when idempotence is enabled.
     ///
     /// Translated from `KafkaProducer.configureTransactionState`
-    /// (`KafkaProducer.java:592-620`).
+    /// (`KafkaProducer.java:651-680`).
     ///
     /// Java returns `null` when `enable.idempotence` is `false`; that is `None`
     /// here. Java's `else` branch only marks `transaction.timeout.ms` as consumed
@@ -1111,6 +1256,7 @@ impl<K, V> KafkaProducer<K, V> {
     fn configure_transaction_state(
         config: &ProducerConfig,
         api_versions: &Arc<ApiVersions>,
+        metadata: &Arc<Metadata>,
         log_context: &LogContext,
     ) -> Option<Arc<Mutex<TransactionManager>>> {
         if !config.enable_idempotence {
@@ -1123,6 +1269,7 @@ impl<K, V> KafkaProducer<K, V> {
             config.transaction_timeout_ms,
             config.retry_backoff_ms,
             Arc::clone(api_versions),
+            Arc::clone(metadata),
             config.two_phase_commit_enable,
         );
 
@@ -1140,7 +1287,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Translates Java's `KafkaProducer(ProducerConfig, Serializer, Serializer,
     /// ProducerMetadata, KafkaClient, ProducerInterceptors, ApiVersions, Time)`
-    /// (`KafkaProducer.java:345`), which Java marks `// visible for testing`.
+    /// (`KafkaProducer.java:352`), which Java marks `// visible for testing`.
     /// [`Self::new`] is the user-facing constructor and the analogue of Java's
     /// public `KafkaProducer` constructor; this is the injection seam
     /// [`Self::new_inner`] delegates to, and the seam through which a mock
@@ -1179,6 +1326,7 @@ impl<K, V> KafkaProducer<K, V> {
             value_serializer,
             metadata,
             accumulator,
+            chunked_accumulator,
             client,
             time,
             metrics,
@@ -1233,6 +1381,7 @@ impl<K, V> KafkaProducer<K, V> {
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
+            chunked_accumulator,
             metadata,
             transaction_manager,
             pending_requests,
@@ -1255,7 +1404,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// Create the producer's [`Metrics`] registry and [`KafkaProducerMetrics`].
     ///
     /// Translated from the metrics-setup block of Java's `KafkaProducer`
-    /// constructor (`KafkaProducer.java:357-368`): a [`MetricConfig`] carrying
+    /// constructor (`KafkaProducer.java:376-387`): a [`MetricConfig`] carrying
     /// `metrics.num.samples`, `metrics.sample.window.ms`,
     /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
     /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
@@ -1282,7 +1431,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// `linger.ms + request.timeout.ms`.
     ///
     /// Translated from `KafkaProducer.configureDeliveryTimeout()`
-    /// (`KafkaProducer.java:569-590`). Java's check has two arms and both are
+    /// (`KafkaProducer.java:628-649`). Java's check has two arms and both are
     /// reproduced: an *explicitly supplied* inconsistent `delivery.timeout.ms` is
     /// a `ConfigException`, while an inconsistency that comes only from the
     /// default is clamped up to `linger.ms + request.timeout.ms` and warned about,
@@ -1303,7 +1452,7 @@ impl<K, V> KafkaProducer<K, V> {
 
         if delivery_timeout_ms < linger_and_request_timeout_ms {
             if config.user_configured(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG) {
-                // Java `:578`: throw if the user explicitly set an inconsistent value.
+                // Java `:637`: throw if the user explicitly set an inconsistent value.
                 // The class is `ConfigException`, inside the `KafkaException`
                 // hierarchy (`KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`
                 // asserts `KafkaException.class`); `illegal_argument` put it outside,
@@ -1315,7 +1464,7 @@ impl<K, V> KafkaProducer<K, V> {
                     ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
                 )));
             }
-            // Java `:583-587`: override the default for backward compatibility.
+            // Java `:642-646`: override the default for backward compatibility.
             delivery_timeout_ms = linger_and_request_timeout_ms;
             kafka_warn!(
                 log_context,
@@ -1353,7 +1502,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// set in the configuration.
     ///
     /// Translated from `KafkaProducer.initTransactions()`
-    /// (`KafkaProducer.java:648-659`). This method does the following:
+    /// (`KafkaProducer.java:708-717`). This method does the following:
     ///
     /// 1. Ensures any transactions initiated by previous instances of the producer
     ///    with the same `transactional.id` are completed. If the previous instance
@@ -1417,7 +1566,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// invoked exactly one time.
     ///
     /// Translated from `KafkaProducer.beginTransaction()`
-    /// (`KafkaProducer.java:674-681`). Stays synchronous: Java's body is a pure
+    /// (`KafkaProducer.java:734-740`). Stays synchronous: Java's body is a pure
     /// state transition with no wait, so CLAUDE.md §11.1 does not apply.
     ///
     /// # Errors
@@ -1445,7 +1594,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Translated from
     /// `KafkaProducer.sendOffsetsToTransaction(Map, ConsumerGroupMetadata)`
-    /// (`KafkaProducer.java:733-746`).
+    /// (`KafkaProducer.java:794-810`).
     ///
     /// The committed offset should be the next message the application will
     /// consume, i.e. `next_record_to_be_processed.offset()`. The leader epoch
@@ -1487,8 +1636,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// - A commit-failed error if the commit cannot be retried (e.g. the consumer
     ///   has been kicked out of the group); users should handle this by aborting
     ///   the transaction
-    /// - [`Error::Timeout`] if sending the offsets takes longer than
-    ///   `max.block.ms`
+    /// - [`Error::Timeout`] if the combined time taken for resolving topic metadata
+    ///   and sending the offsets has surpassed `max.block.ms`
+    ///
+    /// The producer first resolves the metadata for the topics in `offsets`
+    /// (KIP-1319), so the `TxnOffsetCommit` can carry their topic ids and use v6.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction")]
     pub async fn send_offsets_to_transaction(
         &self,
@@ -1499,11 +1651,18 @@ impl<K, V> KafkaProducer<K, V> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
 
-        // Java 738: an empty map is a no-op, and in particular does not consult the
+        // Java 800: an empty map is a no-op, and in particular does not consult the
         // transaction state at all.
         if offsets.is_empty() {
             return Ok(());
         }
+
+        // KIP-1319 (6208dfc014): make sure the metadata cache knows these topics'
+        // ids before the manager builds the request. No manager guard is held
+        // across this await (`producer-transactions.md` §4).
+        let topics: HashSet<&str> = offsets.keys().map(TopicPartition::topic).collect();
+        let wait_ms = self.await_topic_metadata(&topics).await?;
+        let remaining_ms = (self.max_block_ms - wait_ms).max(0);
 
         let result = {
             // `pending_requests` before the manager, per the field docs.
@@ -1516,15 +1675,48 @@ impl<K, V> KafkaProducer<K, V> {
         };
         self.wakeup.notify_one();
         result
-            .await_result_timeout(self.max_block_timeout(), Self::SEND_OFFSETS_TIMEOUT_MSG)
+            .await_result_timeout(Duration::from_millis(remaining_ms as u64), Self::SEND_OFFSETS_TIMEOUT_MSG)
             .await
+    }
+
+    /// Request a partial metadata refresh for the given topics and await the next
+    /// metadata update (up to `max.block.ms`). Returns the elapsed wait time so the
+    /// caller can subtract it from its own `max.block.ms` budget.
+    ///
+    /// Translated from `KafkaProducer.awaitTopicMetadata(Set<String>)`
+    /// (6208dfc014, with KIP-909's bootstrap check). Even when no refresh is
+    /// needed, a permanent bootstrap failure is surfaced so every API call sees
+    /// it; on the refresh branch `await_update` surfaces it through
+    /// `maybe_return_fatal_error`, as Java's `awaitUpdate` does through
+    /// `maybeThrowFatalException`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] (`"Failed to update metadata after <max.block.ms> ms."`)
+    /// if no update arrives in time, [`Error::BootstrapResolution`] once bootstrap
+    /// resolution has failed for good, or the fatal metadata error /
+    /// closed-metadata error `await_update` reports.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#awaitTopicMetadata")]
+    async fn await_topic_metadata(&self, topics: &HashSet<&str>) -> Result<i64, Error> {
+        let start_nanos = self.time.nanoseconds();
+        let Some(version) = self.metadata.add_with_topics(topics.iter().copied(), self.now_ms()) else {
+            // Even when no metadata refresh is needed for these topics, a permanent bootstrap
+            // failure must still be surfaced so every API call sees the error.
+            self.metadata.maybe_return_bootstrap_fatal_error()?;
+            return Ok(0);
+        };
+        self.wakeup.notify_one();
+        self.metadata.await_update(version, self.max_block_ms).await?;
+        let elapsed_nanos = self.time.nanoseconds() - start_nanos;
+        self.producer_metrics.record_metadata_wait(elapsed_nanos);
+        Ok(elapsed_nanos / 1_000_000)
     }
 
     /// Commits the ongoing transaction. This method will flush any unsent records
     /// before actually committing the transaction.
     ///
     /// Translated from `KafkaProducer.commitTransaction()`
-    /// (`KafkaProducer.java:779-786`).
+    /// (`KafkaProducer.java:870-877`).
     ///
     /// If any of the [`send`](Self::send) calls which were part of the transaction
     /// hit irrecoverable errors, this method returns the last received error
@@ -1577,7 +1769,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// aborted when this call is made.
     ///
     /// Translated from `KafkaProducer.abortTransaction()`
-    /// (`KafkaProducer.java:813-821`).
+    /// (`KafkaProducer.java:904-912`).
     ///
     /// This call returns an error immediately if any prior [`send`](Self::send)
     /// call failed with a producer-fenced or an authorization error.
@@ -1621,7 +1813,7 @@ impl<K, V> KafkaProducer<K, V> {
     }
 
     /// The shared [`TransactionManager`], or the error Java's
-    /// `throwIfNoTransactionManager()` (`KafkaProducer.java:1507-1511`) throws.
+    /// `throwIfNoTransactionManager()` (`KafkaProducer.java:1587-1591`) throws.
     ///
     /// Java checks `transactionManager == null` only, so an *idempotent* producer
     /// passes this check and is rejected one level down by the manager's own
@@ -1641,7 +1833,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// [`Self::send_offsets_to_transaction`].
     ///
     /// Translated from `KafkaProducer.throwIfInvalidGroupMetadata`
-    /// (`KafkaProducer.java:1498-1505`). Java's first arm rejects a `null`
+    /// (`KafkaProducer.java:1578-1585`). Java's first arm rejects a `null`
     /// argument; a `ConsumerGroupMetadata` value cannot be null in Rust, so the
     /// type system enforces that arm and only the second is translated.
     ///
@@ -1685,7 +1877,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// Everything else is propagated as `Err(...)`: the generic runtime errors
     /// (`LocalIllegalState` when the producer is closed, or `LocalIllegalArgument`
     /// when a custom partitioner returns a negative partition —
-    /// `KafkaProducer.java:1476-1481`, which escapes `doSend` through
+    /// `KafkaProducer.java:1563-1568`, which escapes `doSend` through
     /// `catch (Exception e)` and is rethrown out of `send()`) and the
     /// `KafkaException`s that are not `ApiException`s. `SerializationException` is
     /// one of the latter — it extends `KafkaException` directly — so a
@@ -1706,7 +1898,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             Ok(cwt) => cwt,
             Err(e) => {
-                // Java 993-998 relabels a closed-producer race first, then the
+                // Java 1067-1072 relabels a closed-producer race first, then the
                 // outer catches dispatch on the resulting class.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
@@ -1723,22 +1915,22 @@ impl<K, V> KafkaProducer<K, V> {
         let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
 
         // Java's only catch around either serializer call is
-        // `catch (ClassCastException cce)` (`KafkaProducer.java:1006` / `:1013`),
+        // `catch (ClassCastException cce)` (`KafkaProducer.java:1081` / `:1089`),
         // which relabels a key/value whose runtime class does not match the
         // configured serializer. That cannot happen here — the serializer is
         // statically typed on `K` / `V` — so there is nothing to convert, and the
         // serializer's own error propagates with its class intact. `doSend`'s outer
         // catches then dispatch on that class exactly as Java does: an
         // `ApiException` (a schema-registry `TimeoutException`, say) fires the
-        // callback and yields a failed future (`:1056`), anything else is returned
-        // as `Err` (`:1073` / `:1077`). Rewriting every serializer error as
+        // callback and yields a failed future (`:1130`), anything else is returned
+        // as `Err` (`:1147` / `:1151`). Rewriting every serializer error as
         // `SerializationException` flipped `is_retriable_error()` for the first
         // case and skipped its callback entirely. Both branches below — the
         // custom-partitioner one that serializes by borrowing and the owned
         // zero-copy one — dispatch the same way.
         if self.partitioner.is_some() {
             // A custom partitioner is handed the *typed* key/value
-            // (`KafkaProducer.java:1474-1475` passes `record.key()` / `record.value()`),
+            // (`KafkaProducer.java:1561-1562` passes `record.key()` / `record.value()`),
             // so serialize by BORROWING — `serialize_headers` keeps `key`/`value`
             // alive — and compute the partition here, with the typed references. That
             // partition is passed to `do_send_bytes` as an explicit `Some(..)`, which
@@ -1878,30 +2070,59 @@ impl<K, V> KafkaProducer<K, V> {
 
         let timestamp = timestamp.unwrap_or(now_ms);
 
-        match self
-            .accumulator
-            .append(
-                topic,
-                partition,
-                timestamp,
-                key,
-                value,
-                headers,
-                callback,
-                remaining_wait_ms,
-                now_ms,
-                cluster,
-            )
-            .await
-        {
+        // Java's `accumulator.append(..)` dispatches virtually to `ChunkedRecordAccumulator.append`
+        // for the incremental strategy (`KafkaProducer.java:1110`); here the strategy picks the
+        // accumulator explicitly (see `chunked_accumulator`). Each arm awaits its own concrete
+        // future, so the dispatch costs a branch, not a boxed future (CLAUDE.md §13).
+        let appended = match &self.chunked_accumulator {
+            Some(chunked_accumulator) => {
+                chunked_accumulator
+                    .append(
+                        topic,
+                        partition,
+                        timestamp,
+                        key,
+                        value,
+                        headers,
+                        callback,
+                        remaining_wait_ms,
+                        now_ms,
+                        cluster,
+                    )
+                    .await
+            },
+            None => {
+                self.accumulator
+                    .append(
+                        topic,
+                        partition,
+                        timestamp,
+                        key,
+                        value,
+                        headers,
+                        callback,
+                        remaining_wait_ms,
+                        now_ms,
+                        cluster,
+                    )
+                    .await
+            },
+        };
+        match appended {
             Ok(result) => {
+                // `append` only ever returns an appended result, whose future and partition are
+                // set (`RecordAppendResult::appended`); the other outcomes are signals between
+                // the accumulator's own steps.
+                let (Some(future), Some(topic_partition)) = (result.future, result.topic_partition) else {
+                    return Err(Error::local_illegal_state("append returned a result that was not appended"));
+                };
                 // Add the partition to the transaction (if in progress) after it has
                 // been successfully appended to the accumulator. We cannot do it
                 // before because the partition may be unknown. Note that the `Sender`
                 // will refuse to dequeue batches from the accumulator until they have
-                // been added to the transaction (`KafkaProducer.java:1040-1046`).
+                // been added to the transaction (`KafkaProducer.java:1114-1120`).
                 //
-                // `result.topic_partition` is what Java reads back as
+                // `topic_partition` is what Java reads back as
                 // `appendCallbacks.topicPartition()`. It is borrowed, not rebuilt:
                 // constructing it here from `topic: &str` would allocate a `String` and
                 // an `Arc<str>` and copy the topic name twice on **every** record, which
@@ -1918,8 +2139,7 @@ impl<K, V> KafkaProducer<K, V> {
                     // `if let` scrutinee's temporaries live for the whole success arm —
                     // edition 2024 only shortens them across the `else`. Written inline,
                     // this self-deadlocks the application task.
-                    let add_partition =
-                        transaction_manager.lock().unwrap().maybe_add_partition(&result.topic_partition);
+                    let add_partition = transaction_manager.lock().unwrap().maybe_add_partition(&topic_partition);
                     if let Err(error) = add_partition {
                         // `maybeAddPartition` throws across two of `doSend`'s catch
                         // blocks, so the error class decides how the failure surfaces:
@@ -1949,7 +2169,7 @@ impl<K, V> KafkaProducer<K, V> {
                         // (the `Error::KafkaError` variant), for which `is_api_error()`
                         // answers `false` directly, so the code-based workaround is gone.
                         if error.is_api_error() {
-                            let partition = result.topic_partition.partition();
+                            let partition = topic_partition.partition();
                             // `None`, not a callback: unlike the pre-append failure paths
                             // (`ensure_valid_record_size`, `wait_on_metadata`), the record
                             // has ALREADY been appended here, and `append` above took
@@ -1960,7 +2180,7 @@ impl<K, V> KafkaProducer<K, V> {
                             // completed/aborted. Firing it here too would double-invoke it,
                             // breaking the exactly-once-per-record contract (CLAUDE.md §11.5).
                             // (Java's `doSend` catch fires the raw `callback` at
-                            // `KafkaProducer.java:1061`, but keeps it as a reference separate
+                            // `KafkaProducer.java:1135`, but keeps it as a reference separate
                             // from the `appendCallbacks` it registered, so Java can fire it
                             // twice on this path; Rust's single-owner model fires it once.)
                             return self.handle_api_error(error, topic, partition, None);
@@ -1977,9 +2197,9 @@ impl<K, V> KafkaProducer<K, V> {
                     );
                     self.wakeup.notify_one();
                 }
-                Ok(KafkaFuture::new(result.future))
+                Ok(KafkaFuture::new(future))
             },
-            // Java's `catch (ApiException e)` (`KafkaProducer.java:1056-1068`) fires the
+            // Java's `catch (ApiException e)` (`KafkaProducer.java:1130-1142`) fires the
             // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
             // NO_TIMESTAMP, -1, -1)` *and* returns a failed future. `append` gives the
             // callback back (`AppendFailure::callback`) precisely so this arm can honour
@@ -1988,7 +2208,7 @@ impl<K, V> KafkaProducer<K, V> {
             Err(failure) if failure.error.is_api_error() => {
                 self.handle_api_error(failure.error, topic, partition, failure.callback)
             },
-            // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1072-1080`)
+            // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1147-1154`)
             // rethrow, and neither invokes the callback. `failure.callback` is dropped
             // here, exactly as Java drops its `appendCallbacks` reference when `send()`
             // throws.
@@ -1998,7 +2218,7 @@ impl<K, V> KafkaProducer<K, V> {
 
     /// `transactionManager.maybeTransitionToErrorState(e)`, the tail of
     /// `KafkaProducer.doSend`'s `catch (ApiException e)` block
-    /// (`KafkaProducer.java:1065-1067`).
+    /// (`KafkaProducer.java:1139-1141`).
     ///
     /// [`Caller::App`](crate::producer::internals::Caller::App): `doSend` runs on the
     /// application task.
@@ -2029,7 +2249,7 @@ impl<K, V> KafkaProducer<K, V> {
     }
 
     /// `doSend`'s **inner** `catch (KafkaException e)` around `waitOnMetadata`
-    /// (`KafkaProducer.java:993-998`):
+    /// (`KafkaProducer.java:1067-1072`):
     ///
     /// ```java
     /// } catch (KafkaException e) {
@@ -2164,11 +2384,11 @@ impl<K, V> KafkaProducer<K, V> {
                 Err(e) if !e.is_timeout_error() => return Err(e),
                 Err(_) => {
                     // Rethrow with the original `max_wait_ms` to keep the message
-                    // free of the shrinking `remaining_wait_ms` (Java 1133).
+                    // free of the shrinking `remaining_wait_ms` (Java 1207).
                     let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
                     if let Some(code) = self.metadata.get_error(topic) {
                         // `new TimeoutException(errorMessage, metadata.getError(topic).exception())`
-                        // (Java 1136): the broker error is the timeout's *cause*, so
+                        // (Java 1210): the broker error is the timeout's *cause*, so
                         // `Error::source()` can be walked back to it. Flattening it
                         // into the message left `source()` empty.
                         return Err(Error::Timeout(TimeoutError::with_source(error_message, Error::new(code))));
@@ -2181,7 +2401,7 @@ impl<K, V> KafkaProducer<K, V> {
             elapsed = self.now_ms() - now_ms;
             if elapsed >= max_wait_ms {
                 let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
-                // Java 1143-1146 attaches the topic's error as the cause here too,
+                // Java 1217-1220 attaches the topic's error as the cause here too,
                 // but only when it is retriable — a non-retriable one is about to be
                 // raised as itself by `maybe_return_error_for_topic` on the next
                 // iteration, so pinning it under a timeout would mislabel it.
@@ -2280,7 +2500,7 @@ impl<K, V> KafkaProducer<K, V> {
     }
 
     /// Compute the partition for a record, mirroring Java's `KafkaProducer.partition()`
-    /// (`KafkaProducer.java:1469-1489`).
+    /// (`KafkaProducer.java:1556-1576`).
     ///
     /// Precedence is exactly Java's:
     /// 1. an explicit `partition` on the record wins outright;
@@ -2383,7 +2603,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// Corresponds to Java's `ioThread.join(closeTimer.remainingMs())`.
     ///
     /// On expiry the handle is **put back**, because Java's `close` force-closes and
-    /// then joins unconditionally (`KafkaProducer.java:1414-1418`) — dropping it here
+    /// then joins unconditionally (`KafkaProducer.java:1517-1521`) — dropping it here
     /// would leave [`Self::await_sender_handle_indefinitely`] with nothing to join and
     /// `close` would return while the Sender task was still running, which CLAUDE.md
     /// §11.4 forbids. `JoinHandle` is `Unpin`, so `&mut` is enough to await it without
@@ -2435,7 +2655,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         {
             Ok(cwt) => cwt,
             Err(e) => {
-                // Java 993-998, as in `do_send`.
+                // Java 1067-1072, as in `do_send`.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
                     return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
@@ -2527,7 +2747,7 @@ where
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
         // Java: `long start = time.nanoseconds()` then a try/finally recording
         // `producerMetrics.recordFlush(time.nanoseconds() - start)`
-        // (`KafkaProducer.java:1231/1239`). `await_flush_completion` returns
+        // (`KafkaProducer.java:1305/1313`). `await_flush_completion` returns
         // `()` (no error channel), so the finally reduces to recording after
         // the await.
         let start = self.time.nanoseconds();
@@ -2606,7 +2826,7 @@ where
 
         // Java `close`'s `Utils.closeQuietly(...)` chain, in order:
         // `producerMetrics` → `metrics` → `keySerializer` → `valueSerializer` →
-        // `partitioner` (`KafkaProducer.java:1441-1446`). This crate does not model
+        // `partitioner` (`KafkaProducer.java:1528-1533`). This crate does not model
         // closeable serializers, so the partitioner is closed right after `metrics`,
         // which is its faithful position among the closeables that exist. (The Phase 2
         // spec cited `:1449-1450` for the position, but 4.3.1 closes the partitioner at
@@ -2731,7 +2951,7 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
@@ -2800,10 +3020,10 @@ mod tests {
     }
 
     /// Java's only catch around the serializer call is
-    /// `catch (ClassCastException cce)` (`KafkaProducer.java:1004-1010`), which
+    /// `catch (ClassCastException cce)` (`KafkaProducer.java:1078-1084`), which
     /// cannot happen in Rust — the serializer is statically typed on `K`. Everything
     /// else the serializer throws keeps its class and is dispatched by `doSend`'s
-    /// outer catches: an `ApiException` at `:1056` fires the callback and returns a
+    /// outer catches: an `ApiException` at `:1130` fires the callback and returns a
     /// failed future.
     ///
     /// Rewriting every serializer error as `SerializationException` flipped
@@ -2846,7 +3066,7 @@ mod tests {
 
     /// The other half of the same dispatch: a `SerializationException` — which
     /// extends `KafkaException` directly and is NOT an `ApiException` — reaches
-    /// `catch (KafkaException e)` at `KafkaProducer.java:1073` and is rethrown, so
+    /// `catch (KafkaException e)` at `KafkaProducer.java:1147` and is rethrown, so
     /// `send()` returns `Err` rather than a failed future.
     #[tokio::test]
     async fn a_serialization_error_from_the_serializer_is_returned_as_err() {
@@ -2870,7 +3090,7 @@ mod tests {
     }
 
     /// `waitOnMetadata`'s first throw attaches the topic's metadata error as the
-    /// `TimeoutException`'s **cause** (`KafkaProducer.java:1136`,
+    /// `TimeoutException`'s **cause** (`KafkaProducer.java:1210`,
     /// `new TimeoutException(errorMessage, metadata.getError(topic).exception())`).
     ///
     /// The message used to be built by interpolating the underlying error into it,
@@ -3185,7 +3405,7 @@ mod tests {
     /// `doSend`'s `catch (ApiException e)` block invokes the user `Callback` exactly
     /// once with a null-metadata `RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`
     /// and the error, then returns a failed future
-    /// (`KafkaProducer.java:1056-1068`).
+    /// (`KafkaProducer.java:1130-1142`).
     ///
     /// The arm covering a failure of `accumulator.append` itself used to drop the
     /// callback: it is *moved* into `append`, and `append` returned it only on the
@@ -3217,9 +3437,10 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(Metrics::new()),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::new(crate::common::utils::SystemTime),
             // Room for exactly one batch.
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
             None,
@@ -3286,7 +3507,7 @@ mod tests {
     }
 
     /// The sibling of the test above on the *rethrowing* path: Java's
-    /// `catch (KafkaException e)` (`KafkaProducer.java:1072-1076`) does NOT invoke the
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1147-1150`) does NOT invoke the
     /// callback — it rethrows out of `send()`. `RecordAccumulator.tryAppend`'s
     /// `KafkaException("Producer closed while send in progress")` is a bare
     /// `KafkaException`, so it lands there.
@@ -3543,7 +3764,7 @@ mod tests {
     //
     //   - test_round_robin_partitioner_resolution_and_gating — `new` resolves a
     //         `partitioner.type=RoundRobinPartitioner` and a resolved partitioner
-    //         disables adaptive partitioning (KafkaProducer.java:428-433).
+    //         disables adaptive partitioning (KafkaProducer.java:447-452).
     //   - test_round_robin_partitioner_used_once_per_record — a stateful partitioner is
     //         consulted EXACTLY once per record on the send path (do_send computes it,
     //         do_send_bytes short-circuits on the passed `Some(..)`).
@@ -3695,7 +3916,7 @@ mod tests {
     /// `configure`. `MockPartitioner` is a test-only type with no built-in
     /// `partitioner.type` name, so here it is supplied as an explicit instance;
     /// constructing it via `MockPartitioner::new()` bumps `INIT_COUNT` exactly as the
-    /// Java ctor does. `close()` then bumps `CLOSE_COUNT` (`KafkaProducer.java:1446`).
+    /// Java ctor does. `close()` then bumps `CLOSE_COUNT` (`KafkaProducer.java:1533`).
     ///
     /// The counters are process-global statics, so the whole body must hold
     /// `lock_counters()` and reset at start AND end (Java's `finally`) to serialize
@@ -3801,7 +4022,7 @@ mod tests {
     /// `partitioner.type=RoundRobinPartitioner` is resolved by `new` into a live
     /// `partitioner`, and a
     /// resolved partitioner turns OFF adaptive partitioning in the accumulator (Java
-    /// `KafkaProducer.java:428-433`: "no need ... if we use a custom partitioner"). The
+    /// `KafkaProducer.java:447-452`: "no need ... if we use a custom partitioner"). The
     /// control producer (no `partitioner.type`) keeps `partitioner = None` and adaptive
     /// partitioning follows the config default.
     ///
@@ -4034,7 +4255,7 @@ mod tests {
     /// Translated from `KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`.
     ///
     /// `delivery.timeout.ms` must be >= `linger.ms + request.timeout.ms`. When the
-    /// user set it explicitly, Java throws `ConfigException` (`KafkaProducer.java:578`)
+    /// user set it explicitly, Java throws `ConfigException` (`KafkaProducer.java:637`)
     /// — and the Java test asserts `KafkaException.class`, so the error must answer
     /// `true` to `is_kafka_error()`.
     #[test]
@@ -4072,7 +4293,7 @@ mod tests {
 
     /// Java's *other* arm: when `delivery.timeout.ms` was NOT supplied by the user,
     /// an inconsistency is clamped up to `linger.ms + request.timeout.ms` and warned
-    /// about rather than rejected (`KafkaProducer.java:583-587`).
+    /// about rather than rejected (`KafkaProducer.java:642-646`).
     ///
     /// `request.timeout.ms = 180000` with everything else defaulted
     /// (`delivery.timeout.ms = 120000`, `linger.ms = 5`) is a legal Kafka
@@ -4329,7 +4550,7 @@ mod tests {
     /// `ApiException`) out of `append`, and `doSend`'s
     /// `catch (ApiException e)` arm still fires the user callback with the
     /// placeholder metadata because it holds its own `callback` reference
-    /// (`KafkaProducer.java:1056-1068`). Rust *moves* the callback into
+    /// (`KafkaProducer.java:1130-1142`). Rust *moves* the callback into
     /// `append`, so the callback obligation (CLAUDE.md §7, §11.5) is only met
     /// because `AppendFailure` hands it back — this test is the regression guard
     /// for that hand-back.
@@ -4351,7 +4572,7 @@ mod tests {
             100,
             1000,
             120_000,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
             None,
         ));
@@ -4416,11 +4637,11 @@ mod tests {
     /// **not** fire the callback.
     ///
     /// "Producer closed while send in progress" is a **bare** `KafkaException`
-    /// in Java (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+    /// in Java (`RecordAccumulator.java:472-473`), not an `ApiException`, so
     /// `doSend` skips `catch (ApiException e)` (the arm that invokes the
     /// callback) and lands in `catch (KafkaException e)`, which records the
     /// error, notifies the interceptors and **rethrows**
-    /// (`KafkaProducer.java:1073-1077`). Firing the callback here would break
+    /// (`KafkaProducer.java:1147-1151`). Firing the callback here would break
     /// the exactly-once obligation as surely as dropping one where Java fires.
     ///
     /// The accumulator is closed while the producer itself is not, which is
@@ -4756,6 +4977,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_allocations_do_not_grow_when_idempotence_is_enabled() {
         async fn steady_state_send_allocations(with_transaction_manager: bool) -> usize {
+            let metadata = create_metadata_with_topic(TOPIC, 1);
             let transaction_manager = if with_transaction_manager {
                 let manager = TransactionManager::new(
                     LogContext::empty(),
@@ -4763,13 +4985,13 @@ mod tests {
                     60_000,
                     100,
                     Arc::new(ApiVersions::new()),
+                    metadata.metadata_arc(),
                     false,
                 );
                 Some(Arc::new(Mutex::new(manager)))
             } else {
                 None
             };
-            let metadata = create_metadata_with_topic(TOPIC, 1);
             // A large batch so every send below appends to the same batch.
             let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
@@ -4778,7 +5000,7 @@ mod tests {
                 100,
                 1000,
                 120_000,
-                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                PartitionerConfig::new(true, 0, false, "").unwrap(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
@@ -4860,7 +5082,7 @@ mod tests {
                 100,
                 1000,
                 120_000,
-                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                PartitionerConfig::new(true, 0, false, "").unwrap(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
@@ -4974,6 +5196,25 @@ mod tests {
         ))
     }
 
+    /// `RequestTestUtils.metadataUpdateWithIds(1, Map.of(topic, n), Map.of(topic, id))`,
+    /// or `metadataUpdateWith(1, Map.of(topic, n))` (no ids) when `with_topic_ids` is
+    /// `false`.
+    fn topic_metadata_update(num_partitions: i32, with_topic_ids: bool) -> crate::common::requests::MetadataResponse {
+        let topic_ids = if with_topic_ids {
+            HashMap::from([(TOPIC.to_string(), topic_id())])
+        } else {
+            HashMap::new()
+        };
+        crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &HashMap::from([(TOPIC.to_string(), num_partitions)]),
+            &|_| None,
+            &topic_ids,
+        )
+    }
+
     /// A `KafkaProducer` and the `Sender` that serves it, sharing every piece of
     /// state production shares.
     struct TxnProducerContext {
@@ -5007,6 +5248,21 @@ mod tests {
         }
 
         fn with_options(extra: &[(&str, &str)], num_partitions: i32, transaction_v2: bool) -> Self {
+            Self::with_metadata_seed(extra, num_partitions, transaction_v2, true, true)
+        }
+
+        /// As [`Self::with_options`], choosing how the metadata starts out: whether
+        /// [`TOPIC`] is already in the producer's tracked topic set (`metadata.add`),
+        /// and whether the seeded snapshot carries its topic id. The KIP-1319 tests
+        /// use an untracked topic, as Java's do, so `sendOffsetsToTransaction` has to
+        /// refresh the metadata before it delegates.
+        fn with_metadata_seed(
+            extra: &[(&str, &str)],
+            num_partitions: i32,
+            transaction_v2: bool,
+            track_topic: bool,
+            with_topic_ids: bool,
+        ) -> Self {
             let mut props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9000".to_string())]);
             for (key, value) in extra {
                 props.insert((*key).to_string(), (*value).to_string());
@@ -5019,11 +5275,8 @@ mod tests {
                 seed_transaction_version(&api_versions, 2);
             }
 
-            let transaction_manager =
-                KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
-                    .expect("these tests always enable idempotence");
-            let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
-
+            // The metadata comes first: the transaction manager reads its topic ids
+            // (KIP-1319), as Java's constructor now builds it ahead of the manager.
             let metadata = Arc::new(ProducerMetadata::with_log_context(
                 config.reconnect_backoff_ms,
                 config.reconnect_backoff_max_ms,
@@ -5032,18 +5285,22 @@ mod tests {
                 ClusterResourceListeners::new(),
                 log_context.clone(),
             ));
-            metadata.add(TOPIC, time.milliseconds());
+            let transaction_manager = KafkaProducer::<String, String>::configure_transaction_state(
+                &config,
+                &api_versions,
+                &metadata.metadata_arc(),
+                &log_context,
+            )
+            .expect("these tests always enable idempotence");
+            let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
+
+            if track_topic {
+                metadata.add(TOPIC, time.milliseconds());
+            }
             // `metadata_update_with_ids` rather than `metadata_update_with`: the produce
             // path stamps the topic id from metadata onto the request, so a response has
             // to carry the same one to be matched back to its batch.
-            let update = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
-                "kafka-cluster",
-                1,
-                &HashMap::new(),
-                &HashMap::from([(TOPIC.to_string(), num_partitions)]),
-                &|_| None,
-                &HashMap::from([(TOPIC.to_string(), topic_id())]),
-            );
+            let update = topic_metadata_update(num_partitions, with_topic_ids);
             metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
             let batch_size = config.batch_size.max(1);
@@ -5062,12 +5319,16 @@ mod tests {
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
                 config.delivery_timeout_ms,
-                PartitionerConfig {
-                    enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
-                    partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-                },
+                PartitionerConfig::new(
+                    config.partitioner_adaptive_partitioning_enable,
+                    config.partitioner_availability_timeout_ms,
+                    config.partitioner_rack_aware,
+                    &config.client_rack,
+                )
+                .unwrap(),
                 Arc::clone(&metrics),
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(&time) as Arc<dyn Time>,
                 buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
@@ -5508,7 +5769,7 @@ mod tests {
     ///
     /// Pins the producer-level transactional wiring: `doSend` must call
     /// `transactionManager.maybeAddPartition(tp)` after the append succeeds, with the
-    /// partition the accumulator actually chose (`KafkaProducer.java:1040-1046`). The
+    /// partition the accumulator actually chose (`KafkaProducer.java:1114-1120`). The
     /// send's future must also still be pending — the record is buffered, not sent.
     ///
     /// # Deviation: a real manager instead of Mockito's `verify`
@@ -5677,7 +5938,7 @@ mod tests {
     /// `IllegalStateException` (`TransactionManager.java:443`), which is not a
     /// `KafkaException` at all, so it misses `catch (ApiException e)` *and*
     /// `catch (KafkaException e)`, reaches `catch (Exception e)`
-    /// (`KafkaProducer.java:1077-1081`) and is rethrown out of `send()`.
+    /// (`KafkaProducer.java:1151-1155`) and is rethrown out of `send()`.
     #[test]
     fn test_send_before_init_transactions_returns_illegal_state() {
         let error = bounded_block_on("send before initTransactions", || async {
@@ -5736,7 +5997,7 @@ mod tests {
     /// `maybeFailWithError` raises a **bare** `KafkaException`
     /// (`TransactionManager.java:1171`). `ApiException extends KafkaException`, not the
     /// other way round, so `catch (ApiException e)` does not match and
-    /// `catch (KafkaException e)` (`KafkaProducer.java:1073-1076`) rethrows it — a
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1147-1150`) rethrows it — a
     /// block that, unlike the `ApiException` one, never calls
     /// `maybeTransitionToErrorState`. Hence the second assertion: routing this error to
     /// the `ApiException` arm would overwrite `lastError` with the "we are in an error
@@ -5921,7 +6182,7 @@ mod tests {
     /// record's future, which fires it exactly once when the batch is later
     /// completed/aborted. Passing it here too would double-fire (CLAUDE.md §11.5).
     /// (Java's `doSend` catch additionally fires the raw `callback` at
-    /// `KafkaProducer.java:1061`, but keeps `callback` as a reference separate from
+    /// `KafkaProducer.java:1135`, but keeps `callback` as a reference separate from
     /// the `appendCallbacks` it registered, so Java can invoke it twice on this path;
     /// Rust's single-owner model fires it exactly once.)
     #[test]
@@ -5981,7 +6242,7 @@ mod tests {
     ///
     /// A record larger than `max.request.size` fails its future with
     /// `RecordTooLargeException`, and because `doSend`'s `catch (ApiException e)` runs
-    /// `maybeTransitionToErrorState` (`KafkaProducer.java:1065-1067`) the transaction
+    /// `maybeTransitionToErrorState` (`KafkaProducer.java:1139-1141`) the transaction
     /// is now abortable — so the following `commitTransaction` must fail rather than
     /// commit a partial transaction.
     #[tokio::test]
@@ -6183,7 +6444,7 @@ mod tests {
     /// (Java 1676-1711).
     ///
     /// The offsets map Java passes is **empty**, so `sendOffsetsToTransaction` takes
-    /// `KafkaProducer.java:738`'s early exit and sends nothing at all: the
+    /// `KafkaProducer.java:800`'s early exit and sends nothing at all: the
     /// `AddOffsetsToTxn`, second `FindCoordinator` and `TxnOffsetCommit` responses the
     /// Java test queues are never consumed, and only the `EndTxn` is. That is
     /// preserved rather than "fixed" — `testSendTxnOffsetsWithGroupIdTransactionV2`
@@ -6212,7 +6473,7 @@ mod tests {
         assert_eq!(
             ctx.sender.client().request_count(),
             sent_before,
-            "KafkaProducer.java:738 returns before touching the transaction state"
+            "KafkaProducer.java:800 returns before touching the transaction state"
         );
 
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
@@ -6269,7 +6530,7 @@ mod tests {
     /// other caller of that helper, passing `null`. It is **not translated**: the
     /// parameter is a `ConsumerGroupMetadata` value in Rust, so a null cannot be
     /// constructed and the arm it exercises
-    /// (`KafkaProducer.java:1499-1500`) is enforced by the type system rather than by
+    /// (`KafkaProducer.java:1579-1580`) is enforced by the type system rather than by
     /// a runtime check. This is the same reasoning that dropped the arm from
     /// [`KafkaProducer::throw_if_invalid_group_metadata`].
     #[tokio::test]
@@ -6498,6 +6759,172 @@ mod tests {
             .expect("commitTransaction");
     }
 
+    /// What Java's `MockClient.poll` does for metadata (`MockClient.java:327-334`):
+    /// whenever an update is requested, apply `update` — the queued
+    /// `prepareMetadataUpdate` response, or the current snapshot standing in for
+    /// `updateWithCurrentMetadata`. This crate's `MockClient` has no metadata
+    /// updater, so the tests that need one run this beside the operation.
+    async fn with_metadata_responder<T>(
+        metadata: &ProducerMetadata,
+        time: &MockTime,
+        update: &crate::common::requests::MetadataResponse,
+        op: impl std::future::Future<Output = T>,
+    ) -> T {
+        let done = AtomicBool::new(false);
+        let op = async {
+            let out = op.await;
+            done.store(true, Ordering::SeqCst);
+            out
+        };
+        let responder = async {
+            while !done.load(Ordering::SeqCst) {
+                if metadata.update_requested() {
+                    metadata.update_with_current_request_version(update, false, time.milliseconds());
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(op, responder).0
+    }
+
+    /// The shared body of the two KIP-1319 `KafkaProducerTest` cases (6208dfc014,
+    /// with 930ebc5608's frozen `MockTime`): a Transaction V2 producer whose
+    /// metadata does not yet track [`TOPIC`] sends offsets for it. The refresh that
+    /// `sendOffsetsToTransaction` triggers returns `refreshed`; the `TxnOffsetCommit`
+    /// must then be at v6+ and carry the topic id.
+    async fn send_offsets_to_transaction_negotiates_v6(initial_has_topic_id: bool) {
+        let mut ctx = TxnProducerContext::with_metadata_seed(
+            &[("transactional.id", "some.id"), ("max.block.ms", "10000")],
+            1,
+            true,
+            false,
+            initial_has_topic_id,
+        );
+        const GROUP_ID: &str = "group";
+        let node = coordinator_node();
+        let partition = TopicPartition::new(TOPIC.to_string(), 0);
+
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 1, 5));
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender.client_mut().prepare_response_matcher(
+            Box::new(|request| {
+                let crate::common::requests::AbstractRequest::TxnOffsetCommit(request) = request else {
+                    panic!("expected a TxnOffsetCommit request, got {request}");
+                };
+                assert_eq!(request.data().group_id, GROUP_ID);
+                assert!(
+                    request.version() >= 6,
+                    "Expected TxnOffsetCommit at v6+, got {}",
+                    request.version()
+                );
+                assert_eq!(request.data().topics.len(), 1);
+                assert_eq!(request.data().topics[0].topic_id, topic_id());
+                true
+            }),
+            txn_offsets_commit_response(&[(partition.clone(), Errors::None)]),
+        );
+        ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
+
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        ctx.producer.begin_transaction().expect("beginTransaction");
+        assert!(!ctx.metadata.contains_topic(TOPIC), "the topic starts out untracked");
+
+        let refreshed = topic_metadata_update(1, true);
+        let group_metadata = ConsumerGroupMetadataImpl::new(GROUP_ID);
+        let offsets = HashMap::from([(partition, OffsetAndMetadata::new(5).expect("a non-negative offset"))]);
+        let metadata = Arc::clone(&ctx.metadata);
+        let time = Arc::clone(&ctx.time);
+        drive(
+            &mut ctx.sender,
+            with_metadata_responder(
+                &metadata,
+                &time,
+                &refreshed,
+                ctx.producer.send_offsets_to_transaction(offsets, &group_metadata),
+            ),
+        )
+        .await
+        .expect("sendOffsetsToTransaction");
+        assert!(ctx.metadata.contains_topic(TOPIC), "awaitTopicMetadata tracks the topic");
+
+        drive(&mut ctx.sender, ctx.producer.commit_transaction())
+            .await
+            .expect("commitTransaction");
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testSendOffsetsToTransactionNegotiatesV6WhenMetadataKnowsTopicId`.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendOffsetsToTransactionNegotiatesV6WhenMetadataKnowsTopicId"
+    )]
+    async fn test_send_offsets_to_transaction_negotiates_v6_when_metadata_knows_topic_id() {
+        send_offsets_to_transaction_negotiates_v6(true).await;
+    }
+
+    /// Translated from
+    /// `KafkaProducerTest.testSendOffsetsToTransactionTriggersMetadataRefreshThenNegotiatesV6`:
+    /// the initial snapshot has the topic but no id; only the refresh
+    /// `sendOffsetsToTransaction` triggers supplies it.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendOffsetsToTransactionTriggersMetadataRefreshThenNegotiatesV6"
+    )]
+    async fn test_send_offsets_to_transaction_triggers_metadata_refresh_then_negotiates_v6() {
+        send_offsets_to_transaction_negotiates_v6(false).await;
+    }
+
+    /// `awaitTopicMetadata` waits at most `max.block.ms` for the refresh it
+    /// requests, and reports Java's `awaitUpdate` timeout when none arrives.
+    #[tokio::test]
+    async fn test_send_offsets_to_transaction_times_out_waiting_for_topic_metadata() {
+        let mut ctx = TxnProducerContext::with_metadata_seed(
+            &[("transactional.id", "some.id"), ("max.block.ms", "100")],
+            1,
+            true,
+            false,
+            false,
+        );
+        let node = coordinator_node();
+        ctx.sender
+            .client_mut()
+            .prepare_response(find_coordinator_response(Errors::None, "some.id", &node));
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, 1, 5));
+        drive(&mut ctx.sender, ctx.producer.init_transactions())
+            .await
+            .expect("initTransactions");
+        ctx.producer.begin_transaction().expect("beginTransaction");
+
+        let offsets = HashMap::from([(
+            TopicPartition::new(TOPIC.to_string(), 0),
+            OffsetAndMetadata::new(5).expect("a non-negative offset"),
+        )]);
+        let error = drive(
+            &mut ctx.sender,
+            ctx.producer
+                .send_offsets_to_transaction(offsets, &ConsumerGroupMetadataImpl::new("group")),
+        )
+        .await
+        .expect_err("no metadata update arrives");
+        assert!(error.is_timeout_error(), "{error:?}");
+        assert_eq!(error.message(), "Failed to update metadata after 100 ms.");
+        assert!(
+            !ctx.transaction_manager.lock().unwrap().has_pending_offset_commits(),
+            "the manager is not reached when the metadata wait fails"
+        );
+    }
+
     /// Translated from `KafkaProducerTest.testMeasureAbortTransactionDuration`
     /// (Java 1502-1530).
     ///
@@ -6626,10 +7053,6 @@ mod tests {
         let time = mock_time(1_000);
         let api_versions = Arc::new(ApiVersions::new());
 
-        let transaction_manager =
-            KafkaProducer::<String, String>::configure_transaction_state(&config, &api_versions, &log_context)
-                .expect("these tests always enable idempotence");
-
         let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
@@ -6638,6 +7061,13 @@ mod tests {
             ClusterResourceListeners::new(),
             log_context.clone(),
         ));
+        let transaction_manager = KafkaProducer::<String, String>::configure_transaction_state(
+            &config,
+            &api_versions,
+            &metadata.metadata_arc(),
+            &log_context,
+        )
+        .expect("these tests always enable idempotence");
         metadata.add(TOPIC, time.milliseconds());
         let update = crate::common::requests::RequestTestUtils::metadata_update_with(
             1,
@@ -6661,12 +7091,16 @@ mod tests {
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             config.delivery_timeout_ms,
-            PartitionerConfig {
-                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
-                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-            },
+            PartitionerConfig::new(
+                config.partitioner_adaptive_partitioning_enable,
+                config.partitioner_availability_timeout_ms,
+                config.partitioner_rack_aware,
+                &config.client_rack,
+            )
+            .unwrap(),
             Arc::clone(&metrics),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time) as Arc<dyn Time>,
             buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,
@@ -6815,7 +7249,7 @@ mod tests {
     /// handle in place for [`KafkaProducer::await_sender_handle_indefinitely`] to join.
     ///
     /// Java's `close` force-closes and *then* joins unconditionally
-    /// (`KafkaProducer.java:1414-1418`), and CLAUDE.md §11.4 requires the Rust
+    /// (`KafkaProducer.java:1517-1521`), and CLAUDE.md §11.4 requires the Rust
     /// translation to await the handle rather than merely signal it. Passing the handle
     /// by value into `tokio::time::timeout` breaks that silently: `timeout` takes
     /// ownership and drops it on `Elapsed`.
@@ -6885,7 +7319,7 @@ mod tests {
             exited.load(Ordering::SeqCst),
             "close returned before the Sender task finished: the graceful wait expired, \
              so close force-closed and must then have joined the handle \
-             (KafkaProducer.java:1414-1418, CLAUDE.md §11.4)"
+             (KafkaProducer.java:1517-1521, CLAUDE.md §11.4)"
         );
 
         init.abort();
@@ -7083,7 +7517,7 @@ mod tests {
     //   1944 testNullGroupMetadataInSendOffsets — passes `null` for the
     //     `ConsumerGroupMetadata`. The Rust parameter is a value, so the argument
     //     cannot be constructed and the arm it exercises
-    //     (`KafkaProducer.java:1499-1500`) is enforced by the type system instead of a
+    //     (`KafkaProducer.java:1579-1580`) is enforced by the type system instead of a
     //     runtime check. Recorded again on
     //     `test_invalid_generation_id_and_member_id_combined_in_send_offsets`, the
     //     other caller of the same Java helper, which *is* translated.
@@ -7115,7 +7549,7 @@ mod tests {
     // These began life covering the temporary MILESTONE-11 GUARD in `new`.
     // Phase 4 turned the idempotence cases from rejections into constructions, and
     // Phase 6 removed the guard's last (transactional) arm — so what they now cover
-    // is `configureTransactionState` (`KafkaProducer.java:592-620`) across its three
+    // is `configureTransactionState` (`KafkaProducer.java:651-680`) across its three
     // outcomes: no manager, an idempotent manager, and a transactional manager.
 
     fn guard_props(extra: &[(&str, &str)]) -> HashMap<String, String> {
@@ -7131,9 +7565,207 @@ mod tests {
         KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer)).map(|_| ())
     }
 
+    /// KIP-1123 (KAFKA-19193): `partitioner.rack.aware` and `client.rack` reach the
+    /// accumulator's `PartitionerConfig` (`KafkaProducer.java:450-455`), and a blank
+    /// rack in rack-aware mode fails construction with `PartitionerConfig`'s
+    /// `ConfigException`, wrapped like every other construction failure. Java checks
+    /// it even with a custom partitioner, so the `RoundRobinPartitioner` case fails
+    /// too.
+    #[tokio::test]
+    async fn test_partitioner_rack_awareness_wiring() {
+        let props = guard_props(&[("partitioner.rack.aware", "true"), ("client.rack", "rack0")]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("a rack-aware producer with a rack constructs");
+        assert_eq!((true, "rack0"), producer.accumulator.partitioner_rack_for_test());
+
+        let props = guard_props(&[("client.rack", "rack0")]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("default config constructs");
+        assert_eq!((false, "rack0"), producer.accumulator.partitioner_rack_for_test());
+
+        for partitioner_type in [None, Some(ProducerConfig::ROUND_ROBIN_PARTITIONER)] {
+            let mut extra = vec![("partitioner.rack.aware", "true")];
+            if let Some(name) = partitioner_type {
+                extra.push(("partitioner.type", name));
+            }
+            let config = ProducerConfig::new(&guard_props(&extra)).expect("valid config");
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("rack-aware without client.rack must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer", "{partitioner_type:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(
+                cause.message(),
+                "client.rack must be provided if partitioner.rack.aware is enabled"
+            );
+        }
+    }
+
+    /// KAFKA-2121 for the KIP-1123 check: a custom partitioner is configured before
+    /// `PartitionerConfig` rejects a blank `client.rack`, so the failed construction
+    /// must close it, as Java's constructor `catch` -> `close(0, true)` does
+    /// (`KafkaProducer.java:519-523` -> `:1533`). Critic 96 F1.
+    #[test]
+    fn test_partitioner_closed_when_construction_fails_after_configure() {
+        let _guard = MockPartitioner::lock_counters();
+        MockPartitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let partitioner: Box<dyn Partitioner<String, String>> = Box::new(MockPartitioner::new());
+            let config = ProducerConfig::new(&guard_props(&[("partitioner.rack.aware", "true")]))
+                .expect("valid config")
+                .set_partitioner(partitioner);
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("rack-aware without client.rack must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer");
+
+            assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
+            assert_eq!(1, MockPartitioner::close_count().load(Ordering::SeqCst));
+        });
+
+        MockPartitioner::reset_counters();
+    }
+
+    /// KIP-1332 (`KafkaProducer.java:458-509`): `buffer.memory.allocation.strategy=incremental`
+    /// (any case) builds a `ChunkedRecordAccumulator` over a pool serving 16 KiB chunks when
+    /// `batch.size` is at least one chunk, and falls back to the full strategy, with a pool of
+    /// `batch.size` buffers, when it is not. The default is the full strategy.
+    #[tokio::test]
+    async fn test_buffer_memory_allocation_strategy_wiring() {
+        use crate::producer::internals::buffer_pool::AllocationMode;
+        type Case<'a> = (&'a [(&'a str, &'a str)], bool, usize);
+        let cases: [Case; 5] = [
+            (&[], false, 16384),
+            (&[("buffer.memory.allocation.strategy", "incremental")], true, 16384),
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "Incremental"),
+                    ("batch.size", "1048576"),
+                ],
+                true,
+                16384,
+            ),
+            // Below one chunk: the warning, then the full strategy.
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "incremental"),
+                    ("batch.size", "16383"),
+                ],
+                false,
+                16383,
+            ),
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "incremental"),
+                    ("batch.size", "0"),
+                ],
+                false,
+                1,
+            ),
+        ];
+        for (extra, incremental, poolable_size) in cases {
+            let config = ProducerConfig::new(&guard_props(extra)).expect("valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("the producer constructs");
+            assert_eq!(incremental, producer.chunked_accumulator.is_some(), "{extra:?}");
+            let pool = producer.accumulator.buffer_pool_for_test();
+            let mode = if incremental {
+                AllocationMode::Incremental
+            } else {
+                AllocationMode::Full
+            };
+            assert_eq!(mode, pool.allocation_mode(), "{extra:?}");
+            assert_eq!(poolable_size, pool.poolable_size(), "{extra:?}");
+            if let Some(chunked) = &producer.chunked_accumulator {
+                // The chunked accumulator extends the very accumulator the Sender drains.
+                assert!(Arc::ptr_eq(chunked.base(), &producer.accumulator), "{extra:?}");
+            }
+        }
+    }
+
+    /// KIP-1332: the incremental strategy does not support compression yet, so the combination
+    /// fails construction with Java's `ConfigException` (`KafkaProducer.java:475-480`), wrapped
+    /// like every other construction failure. Below one chunk the strategy falls back to the full
+    /// one first, so compression is allowed there, as in Java.
+    #[tokio::test]
+    async fn test_incremental_allocation_strategy_rejects_compression() {
+        let config = ProducerConfig::new(&guard_props(&[
+            ("buffer.memory.allocation.strategy", "incremental"),
+            ("compression.type", "gzip"),
+        ]))
+        .expect("valid config");
+        let error =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .err()
+                .expect("incremental with compression must fail construction");
+        assert_eq!(error.message(), "Failed to construct kafka producer");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(
+            cause.message(),
+            "The incremental buffer.memory.allocation.strategy does not support compression yet. \
+             compression.type must be set to none."
+        );
+
+        let config = ProducerConfig::new(&guard_props(&[
+            ("buffer.memory.allocation.strategy", "incremental"),
+            ("compression.type", "gzip"),
+            ("batch.size", "1024"),
+        ]))
+        .expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("the full-strategy fallback supports compression");
+        assert!(producer.chunked_accumulator.is_none());
+    }
+
+    /// KAFKA-2121 for the KIP-1332 check: the compression `ConfigException` is raised inside
+    /// `build_accumulator`, after a custom partitioner is configured, so the failed construction
+    /// closes it (`KafkaProducer.java:519-523` -> `:1533`).
+    #[test]
+    fn test_partitioner_closed_when_incremental_compression_is_rejected() {
+        let _guard = MockPartitioner::lock_counters();
+        MockPartitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let partitioner: Box<dyn Partitioner<String, String>> = Box::new(MockPartitioner::new());
+            let config = ProducerConfig::new(&guard_props(&[
+                ("buffer.memory.allocation.strategy", "incremental"),
+                ("compression.type", "lz4"),
+            ]))
+            .expect("valid config")
+            .set_partitioner(partitioner);
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("incremental with compression must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer");
+
+            assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
+            assert_eq!(1, MockPartitioner::close_count().load(Ordering::SeqCst));
+        });
+
+        MockPartitioner::reset_counters();
+    }
+
     /// Java wraps the whole constructor in `catch (Throwable t)` and rethrows
     /// `new KafkaException("Failed to construct kafka producer", t)`
-    /// (`KafkaProducer.java:461-466`), so a caller has one class and one message to
+    /// (`KafkaProducer.java:519-524`), so a caller has one class and one message to
     /// guard construction with whatever went wrong inside. Every failure used to
     /// escape raw, and one of them (`Error::local_illegal_argument` from the channel
     /// builder) answered `false` to `is_kafka_error()`.
@@ -7221,6 +7853,61 @@ mod tests {
         producer.close_with_timeout(Duration::ZERO).await.unwrap();
     }
 
+    /// Translated from
+    /// `KafkaProducerTest.testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated`
+    /// (KIP-909 + KIP-1319, with 0720ba1141's group-metadata mock): sendOffsetsToTransaction became
+    /// metadata-aware in KIP-1319, so it can also block on bootstrap and must surface the
+    /// `BootstrapResolutionException`. The first call waits on the refresh and is woken by the
+    /// failure; the second finds the topic already tracked and hits the no-refresh branch's check.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testProducerSendOffsetsToTransactionBootstrapResolutionExceptionPropagated"
+    )]
+    async fn test_producer_send_offsets_to_transaction_bootstrap_resolution_error_propagated() {
+        let props = HashMap::from([
+            (
+                ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            (
+                ProducerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "3000".to_string(),
+            ),
+            (ProducerConfig::TRANSACTIONAL_ID_CONFIG.to_string(), "test-tx-id".to_string()),
+        ]);
+        let producer = KafkaProducer::<String, String>::new(
+            ProducerConfig::new(&props).unwrap(),
+            Box::new(StringSerializer),
+            Box::new(StringSerializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let group_metadata = ConsumerGroupMetadataImpl::new("test-group");
+        let offsets = || {
+            HashMap::from([(
+                TopicPartition::new("test-topic".to_string(), 0),
+                OffsetAndMetadata::new(0).expect("a non-negative offset"),
+            )])
+        };
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        for attempt in 0..2 {
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                producer.send_offsets_to_transaction(offsets(), &group_metadata),
+            )
+            .await
+            {
+                Ok(Err(Error::BootstrapResolution(e))) => assert_eq!(e.message(), expected, "attempt {attempt}"),
+                Ok(other) => panic!("attempt {attempt}: expected the bootstrap failure, got {other:?}"),
+                Err(_) => {
+                    panic!("attempt {attempt}: send_offsets_to_transaction must be woken by the bootstrap failure")
+                },
+            }
+        }
+        producer.close_with_timeout(Duration::ZERO).await.unwrap();
+    }
+
     /// Critic 92, Issue 2: the C / Python producer destroy path closes the
     /// producer and drops the runtime it built. With a slow bootstrap lookup in
     /// flight that now returns within Java's bound; with the lookup on that
@@ -7288,7 +7975,7 @@ mod tests {
     }
 
     /// `doSend`'s inner `catch (KafkaException e)` around `waitOnMetadata`
-    /// (`KafkaProducer.java:993-998`) relabels a `close()` racing an in-flight send:
+    /// (`KafkaProducer.java:1067-1072`) relabels a `close()` racing an in-flight send:
     ///
     /// ```java
     /// if (metadata.isClosed())
@@ -7370,7 +8057,7 @@ mod tests {
     }
 
     /// `enable.idempotence=false` builds no manager at all, mirroring Java's `null`
-    /// return from `configureTransactionState` (`KafkaProducer.java:594`, `:615`).
+    /// return from `configureTransactionState` (`KafkaProducer.java:653`, `:675`).
     #[tokio::test]
     async fn test_disabled_idempotence_builds_no_transaction_manager() {
         let props = guard_props(&[("enable.idempotence", "false")]);
@@ -7383,7 +8070,7 @@ mod tests {
 
     /// `transactional.id` is accepted as of Phase 6, and the producer really is
     /// transactional: `configureTransactionState` passes the id through to the
-    /// manager (`KafkaProducer.java:597`, `:602`) and `isTransactional()` reports it.
+    /// manager (`KafkaProducer.java:656`, `:661`) and `isTransactional()` reports it.
     ///
     /// This replaces the Phase-1 `test_guard_rejects_transactional_id`, whose whole
     /// subject — the `new` guard of PLAN §7.1 — is what this phase deleted.
@@ -7408,7 +8095,7 @@ mod tests {
     /// no manager at all, i.e. `enable.idempotence=false`. An *idempotent* producer
     /// has a manager and is rejected one level down; the next test covers that.
     ///
-    /// Java's message is built at `KafkaProducer.java:1508-1510`.
+    /// Java's message is built at `KafkaProducer.java:1588-1590`.
     #[tokio::test]
     async fn test_transactional_methods_without_a_manager() {
         let props = guard_props(&[("enable.idempotence", "false")]);

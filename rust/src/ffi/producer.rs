@@ -501,10 +501,10 @@ type BatchCallbackFn = unsafe extern "C" fn(
 /// destroy, every non-null handle.
 ///
 /// It does **not** cover a producer closed mid-send: Java raises a bare
-/// `KafkaException` there (`RecordAccumulator.java:427-428`,
-/// `BufferPool.java:119`/`:157`), which `doSend` rethrows from its
+/// `KafkaException` there (`RecordAccumulator.java:472-473`,
+/// `BufferPool.java:151`/`:246`), which `doSend` rethrows from its
 /// `catch (KafkaException e)` arm without invoking the callback
-/// (`KafkaProducer.java:1073-1077`). The failure is reported by the return
+/// (`KafkaProducer.java:1147-1151`). The failure is reported by the return
 /// code of the `send` call itself, and this callback never fires.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -1666,9 +1666,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// arose, and mirrors Java, whose three callback sites differ:
 ///
 /// - a broker-side or delivery failure passes null metadata
-///   (`ProducerBatch.java:315`);
+///   (`ProducerBatch.java:334`);
 /// - a synchronous `ApiException` inside `send` passes a `RecordMetadata(tp, -1,
-///   -1, NO_TIMESTAMP, -1, -1)` (`KafkaProducer.java:1060-1061`), as does the
+///   -1, NO_TIMESTAMP, -1, -1)` (`KafkaProducer.java:1134-1135`), as does the
 ///   `MockProducer` completion path (`MockProducer.java:578`).
 ///
 /// So do **not** treat the two as mutually exclusive: the caller owns *every*
@@ -2989,7 +2989,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
 // Transactions
 //
 // The C counterparts of Java's five transaction-control methods
-// (`KafkaProducer.java:648, 674, 733, 779, 813`). Design record:
+// (`KafkaProducer.java:708, 734, 794, 870, 904`). Design record:
 // `design/history/Milestone-11/producer-transactions-ffi-plan.md`.
 //
 // Two properties are load-bearing and are what the plan document argues for:

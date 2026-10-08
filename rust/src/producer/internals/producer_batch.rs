@@ -38,6 +38,7 @@ use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
 use crate::producer::Callback;
+use crate::producer::internals::BufferPool;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
 
@@ -102,7 +103,7 @@ pub struct ProducerBatch {
     /// Wrapped in a `Mutex` to allow `complete_future_and_fire_callbacks` (which takes
     /// `&self` due to the atomic state machine) to take ownership of the callbacks.
     thunks: Mutex<Vec<Thunk>>,
-    records_builder: MemoryRecordsBuilder,
+    pub(crate) records_builder: MemoryRecordsBuilder,
     attempts: AtomicI32,
     is_split_batch: bool,
     final_state: AtomicU8,
@@ -120,6 +121,11 @@ pub struct ProducerBatch {
     current_leader_epoch: Option<i32>,
     /// Tracks the attempt in which leader was changed to current_leader_epoch for the 1st time.
     attempts_when_leader_last_changed: i32,
+    /// Test seam: counts [`close_for_record_appends`](Self::close_for_record_appends) calls,
+    /// standing in for the `ChunkedProducerBatch` subclasses Java's `ChunkedRecordAccumulatorTest`
+    /// creates to override `closeForRecordAppends`. `None` unless a test sets it.
+    #[cfg(test)]
+    pub(crate) close_for_record_appends_calls: Option<Arc<AtomicI32>>,
 }
 
 impl ProducerBatch {
@@ -163,6 +169,8 @@ impl ProducerBatch {
             max_record_size: 0,
             drained_ms: 0,
             reopened: false,
+            #[cfg(test)]
+            close_for_record_appends_calls: None,
         }
     }
 
@@ -230,6 +238,28 @@ impl ProducerBatch {
         callback: Option<Callback>,
         now: i64,
     ) -> Result<Arc<FutureRecordMetadata>, Option<Callback>> {
+        // `ChunkedProducerBatch.tryAppend`'s override, folded in (PLAN §2.3). A chunked batch never
+        // acquires memory itself: the capacity is arranged before the append, by the accumulator
+        // attaching chunks (see `extension_bytes_needed` and `add_buffers`). The capacity is
+        // verified here only for the batch's first record, which is the one append no caller
+        // checks: `append_new_batch` creates the batch and appends straight into it, relying on
+        // the stream having been pre-sized. Every later append arrives through
+        // `ChunkedRecordAccumulator::try_append`, which evaluates `extension_bytes_needed` itself
+        // and attaches chunks before retrying, so repeating the check for those would size the
+        // record a second time on every append for no added safety.
+        //
+        // Java throws `IllegalStateException` here; this signature's refusal is the callback, so
+        // the refusal comes back as one and `append_new_batch` — the only caller that can reach it
+        // — turns it into that error ([`Self::UNSIZED_FIRST_APPEND_MESSAGE`]). Either way the
+        // record is refused before a byte is written, so the stream never overflows.
+        //
+        // The check lives in a cold, out-of-line helper so a plain batch's per-record path pays
+        // only the `record_count == 0` test for it, as Java's plain `ProducerBatch.tryAppend` pays
+        // nothing (the override exists only on `ChunkedProducerBatch`).
+        if self.record_count == 0 && self.chunked_first_append_lacks_capacity(timestamp, key, value, headers) {
+            return Err(callback);
+        }
+
         if !self.records_builder.has_room_for(timestamp, key, value, headers) {
             return Err(callback);
         }
@@ -435,7 +465,7 @@ impl ProducerBatch {
         self.produce_future.set(base_offset, log_append_time, record_errors.clone());
 
         // Java's `ProducerBatch` thunk callback is the `AppendCallbacks` wrapper
-        // installed by `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`),
+        // installed by `KafkaProducer.doSend` (`KafkaProducer.java:1676-1683`),
         // which substitutes a sentinel `RecordMetadata` (real topic-partition
         // kept, offset/batch-index/timestamp/sizes all `-1`) whenever it is
         // invoked with `null` metadata, before ever reaching the user's own
@@ -455,7 +485,7 @@ impl ProducerBatch {
         for (i, thunk) in thunks.iter_mut().enumerate() {
             if let Some(callback) = thunk.callback.take() {
                 // Java's try/catch sits INSIDE the loop
-                // (`ProducerBatch.java:307-322`), which is what isolates each user
+                // (`ProducerBatch.java:326-341`), which is what isolates each user
                 // callback: one bad callback must neither skip the remaining records
                 // nor stop `produceFuture.done()` from running.
                 //
@@ -593,14 +623,14 @@ impl ProducerBatch {
     /// base sequence derived from its predecessor's record count.
     ///
     /// Translated from `assignProducerStateToBatches(Deque<ProducerBatch>)`
-    /// (`ProducerBatch.java:395-405`), reached from `finalizeSplitBatches` at `:392`.
+    /// (`ProducerBatch.java:414-424`), reached from `finalizeSplitBatches` at `:411`.
     ///
     /// This was previously omitted, on the strength of
     /// `createBatchOffAccumulatorForRecord`'s comment that producer state "will be set
     /// when the batch is dequeued for sending". That comment is about the *fresh*
     /// batch; `assignProducerStateToBatches` then fills it in before `split` returns,
     /// which is what `splitAndReenqueue`'s own comment ("they already have assigned
-    /// sequences", `RecordAccumulator.java:531`) refers to. Without it,
+    /// sequences", `RecordAccumulator.java:576`) refers to. Without it,
     /// `RecordAccumulator::split_and_reenqueue` cannot call `addInFlightBatch` on an
     /// idempotent producer — it fails with "Can't track batch for partition … when
     /// sequence is not set" — so a `MESSAGE_TOO_LARGE` response would break the
@@ -713,7 +743,7 @@ impl ProducerBatch {
 
     /// The built memory records for this batch.
     ///
-    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:483-485`), which
+    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:502-504`), which
     /// is a bare `recordsBuilder.build()` and is therefore **re-callable**: the send
     /// path calls it to serialise the produce request, and `split` calls it again (via
     /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
@@ -774,9 +804,28 @@ impl ProducerBatch {
         );
     }
 
+    /// `ChunkedProducerBatch.tryAppend`'s first-record capacity check: whether this is a chunked
+    /// batch whose stream lacks capacity for `key` / `value` / `headers`. Kept out of line and
+    /// cold so the plain batch's [`try_append`](Self::try_append) stays as small as before the fold.
+    #[cold]
+    #[inline(never)]
+    fn chunked_first_append_lacks_capacity(
+        &self,
+        timestamp: i64,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+    ) -> bool {
+        self.is_chunked() && self.extension_bytes_needed(timestamp, key, value, headers) != 0
+    }
+
     /// Release resources required for record appends (e.g. compression buffers).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#closeForRecordAppends")]
     pub fn close_for_record_appends(&mut self) {
+        #[cfg(test)]
+        if let Some(calls) = &self.close_for_record_appends_calls {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
         self.records_builder.close_for_record_appends();
     }
 
@@ -813,29 +862,59 @@ impl ProducerBatch {
     // stopped leaking this type through a `pub` signature.
     #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#buffer")]
-    pub fn buffer(&self) -> &Vec<u8> {
+    pub fn buffer(&mut self) -> Result<&[u8], Error> {
         self.records_builder.buffer()
     }
 
     /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
     ///
-    /// Used by [`RecordAccumulator::deallocate`] to return the actual batch buffer
-    /// to the pool rather than allocating a new one.
-    pub fn take_buffer(&mut self) -> Vec<u8> {
+    /// Used by [`deallocate_buffer`](Self::deallocate_buffer) to return the actual batch buffer
+    /// to the pool rather than allocating a new one. Single-buffer batches only: a chunked
+    /// batch's memory is its chunks, which `deallocate_buffer` returns through the stream.
+    fn take_buffer(&mut self) -> Vec<u8> {
+        debug_assert!(!self.is_chunked(), "a chunked batch's memory is returned through its stream");
         self.records_builder.take_buffer()
+    }
+
+    /// Return this batch's buffer memory to the pool. The default single-buffer batch returns
+    /// the pooled buffer at its initial capacity; a chunked batch (`ChunkedProducerBatch`'s
+    /// override, folded in here per PLAN §2.3) returns its remaining chunks (fully-unused chunks
+    /// are released earlier, at close).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#deallocateBuffer")]
+    pub(crate) fn deallocate_buffer(&mut self, pool: &BufferPool) {
+        if let Some(stream) = self.records_builder.buffer_stream_mut().as_chunked_mut() {
+            // `ChunkedProducerBatch.deallocateBuffer`: `stream().deallocate(pool)`.
+            stream.deallocate_with_pool(Some(pool));
+            return;
+        }
+        let initial_capacity = self.initial_capacity();
+        let buffer = self.take_buffer();
+        pool.deallocate_with_size(buffer, initial_capacity);
+    }
+
+    /// Credit this batch's memory back to the pool when it is unexpectedly still inflight
+    /// (KAFKA-19012): the buffer can't be touched (the network may still be reading it), so the
+    /// default donates a fresh same-capacity buffer. A chunked batch (`ChunkedProducerBatch`'s
+    /// override) instead returns the actual chunks — safe, because its inflight bytes live in the
+    /// separate flattened buffer (see `ChunkedByteBufferOutputStream::buffer`).
+    ///
+    /// The chunked half is to be reviewed when removing the flatten (KAFKA-20580): once the
+    /// producer sends directly from the chunks, the chunks themselves hold the inflight bytes, so
+    /// returning them here would be unsafe.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#deallocateInflightBuffer")]
+    pub(crate) fn deallocate_inflight_buffer(&mut self, pool: &BufferPool) {
+        if let Some(stream) = self.records_builder.buffer_stream_mut().as_chunked_mut() {
+            // `ChunkedProducerBatch.deallocateInflightBuffer`: `stream().deallocate(pool)`.
+            stream.deallocate_with_pool(Some(pool));
+            return;
+        }
+        pool.deallocate(vec![0u8; self.initial_capacity()]);
     }
 
     /// Returns the initial capacity of the buffer.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#initialCapacity")]
     pub fn initial_capacity(&self) -> usize {
         self.records_builder.initial_capacity()
-    }
-
-    /// Whether the batch is still writable (not closed).
-    #[expect(dead_code)]
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isWritable")]
-    pub fn is_writable(&self) -> bool {
-        !self.records_builder.is_closed()
     }
 
     /// The magic version.
@@ -1019,7 +1098,7 @@ mod tests {
     }
 
     /// `ProducerBatch.completeFutureAndFireCallbacks` puts its `try`/`catch`
-    /// **inside** the per-record loop (`ProducerBatch.java:307-322`), so one bad user
+    /// **inside** the per-record loop (`ProducerBatch.java:326-341`), so one bad user
     /// callback neither skips the remaining records nor stops
     /// `produceFuture.done()`:
     ///
@@ -1404,7 +1483,7 @@ mod tests {
     ///
     /// No Java counterpart, because Java cannot get this wrong:
     /// `ProducerBatch.records()` is a bare `recordsBuilder.build()`
-    /// (`ProducerBatch.java:483-485`) and Java's `build()` memoises, so it is
+    /// (`ProducerBatch.java:502-504`) and Java's `build()` memoises, so it is
     /// re-callable by construction. Rust's used to hand its only copy away, and
     /// `Sender.completeBatch`'s `MESSAGE_TOO_LARGE` arm (`Sender.java:674-688`) is
     /// exactly a `split()` after a `records()` — the batch cannot receive that error
@@ -1608,7 +1687,7 @@ mod tests {
     /// `complete_future_and_fire_callbacks`.
     ///
     /// Java's thunk callback is the `AppendCallbacks` wrapper from
-    /// `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`), which replaces a
+    /// `KafkaProducer.doSend` (`KafkaProducer.java:1676-1683`), which replaces a
     /// `null` `RecordMetadata` with a sentinel — the real topic-partition, and
     /// `-1` for offset, timestamp and both serialized sizes — before the user's
     /// `Callback` sees it. Rust stores the raw user `Callback` in the thunk, so

@@ -31,11 +31,13 @@
 
 #![expect(dead_code)]
 
+mod byte_buffer_output_stream;
 mod byte_utils;
 mod exponential_backoff;
 mod log_context;
 mod producer_id_and_epoch;
 
+pub(crate) use byte_buffer_output_stream::ByteBufferOutputStream;
 pub(crate) use byte_utils::ByteUtils;
 pub(crate) use exponential_backoff::ExponentialBackoff;
 pub(crate) use log_context::LogContext;

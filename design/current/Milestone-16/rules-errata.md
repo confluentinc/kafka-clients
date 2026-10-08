@@ -387,6 +387,66 @@ Named Java classes, packages and version stamps in the rules, checked against 4.
 
 Reserved for the PLAN §2.3 KIP-1332 note (the `ChunkedProducerBatch` fold into `ProducerBatch`, so Critics do not flag the missing type) and any other rule amendments later Milestone-16 phases draft. Phase 0 adds none.
 
+### Phase 5 (agent 95): `producer-transactions.md` §2/§3 — the manager → `Metadata` lock edge (KIP-1319)
+
+Drafted amendment, from Critic 95's review (COMMENTS.95 Q3). For a human to apply; `.claude/rules/` is not edited.
+
+- **What changed.** `TransactionManager` now holds `Arc<Metadata>` (Java's new constructor parameter,
+  `TransactionManager.java:106`) and reads `metadata.topic_ids()` under the manager's lock, from
+  `txn_offset_commit_handler`. Java has the same edge: `synchronized sendOffsetsToTransaction`
+  (`:430`) reaches `metadata.topicIds()` (`:1253`).
+- **Why the rules should say it.** §2 lists what lives behind the manager's lock and §3 fixes the
+  deque → manager order, but neither mentions a lock taken *while* the manager's is held. `Metadata`
+  is not a leaf: `Metadata::update` runs `ProducerMetadata`'s retain and request-builder closures and
+  the `ClusterResourceListeners` under its own lock. The order is safe only because none of those
+  callbacks takes the manager's lock.
+- **Suggested text** (append to §2's "How to apply"):
+  "`TransactionManager` holds `Arc<Metadata>` (KIP-1319) and reads `topic_ids()` under the manager's
+  lock, so the order is manager → `Metadata`. `Metadata` runs `ProducerMetadata`'s closures and
+  `ClusterResourceListeners` under its own lock, so none of them may take the manager's lock or
+  `pending_requests`."
+- **Suggested anti-pattern** (§2/§3 list): a `Metadata` callback, retain closure or cluster listener
+  that locks the `TransactionManager` or `pending_requests`.
+- **Related (from the same review):** rules-errata content items 1-3 above (KIP-1319 vs §10/§11/§12)
+  are now implemented as suggested. The §11 "known cases" addition can cite the enforcement sites
+  `TxnOffsetCommitRequest.java:100-118` and `rust/src/common/requests/txn_offset_commit_request.rs`
+  `Builder::build_version`.
+
+### Phase 8 (agent 98): `producer-transactions.md` §7 — `ChunkedProducerBatch` is folded into `ProducerBatch` (KIP-1332)
+
+Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not edited.
+
+- **What changed.** Java 4.4 adds `ChunkedProducerBatch extends ProducerBatch` (KAFKA-20578) and
+  `ChunkedRecordAccumulator extends RecordAccumulator`. Rust has **no** `ChunkedProducerBatch` type:
+  `rust/src/producer/internals/chunked_producer_batch.rs` declares
+  `pub(crate) type ChunkedProducerBatch = ProducerBatch;` (the alias carries the Java marker) and an
+  `impl` block with the methods Java adds (`new_chunked`, `is_chunked`, `extension_bytes_needed`,
+  `add_buffers`, `stream`). The three overrides (`tryAppend`, `deallocateBuffer`,
+  `deallocateInflightBuffer`) branch on `ProducerBatch::is_chunked()` inside the base methods.
+  `instanceof ChunkedProducerBatch` is `batch.is_chunked()`, which reads the builder's stream kind.
+- **Why the rules should say it.** §7 explains that a `ProducerBatch` has exactly one owner at a time
+  and moves by value between the accumulator deque, the `Sender`'s in-flight map and back. A second
+  batch type would need a trait object or an enum in every one of those owners, and one deque holds
+  both kinds in incremental mode (a split batch stays plain). A Critic comparing class-by-class
+  against Java will otherwise report the missing class, or ask for `Box<dyn ..>` in the deque.
+- **`ChunkedRecordAccumulator` is a real struct, by composition** (`base: Arc<RecordAccumulator>`).
+  The `Sender` keeps `Arc<RecordAccumulator>` (the shared base); only `KafkaProducer::do_send_bytes`
+  dispatches `append` on the strategy (`KafkaProducer::chunked_accumulator`). Java's virtual
+  `tryAppend` / `createProducerBatch` inside `appendNewBatch` are that method's step parameters.
+- **Suggested text** (append to §7's "How to apply"):
+  "KIP-1332's `ChunkedProducerBatch` is not a separate type: it is folded into `ProducerBatch` (one
+  single-or-chunked buffer per batch, `is_chunked()` for `instanceof`), so batches of both kinds share
+  one deque and keep moving by value. A chunked batch returns its memory through its stream
+  (`deallocate_buffer` / `deallocate_inflight_buffer`), never through `take_buffer`."
+- **Suggested anti-patterns:** a `ChunkedProducerBatch` struct or a `Box<dyn ..Batch>` deque element;
+  `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a batch without checking
+  `is_chunked()` (it would credit a chunk of memory the pool never lent: Critic 97 caution (a)).
+- **Suggested anti-pattern (Critic 98 F1):** a folded `ChunkedProducerBatch` override that adds work
+  to a plain batch's per-record path. In Java the override costs a plain `ProducerBatch` nothing.
+  Put chunk-only checks behind a `#[cold]` out-of-line helper, or at the one call site that needs
+  them. Here the inline first-append check alone cost a few ns per record on the default strategy
+  until it moved out of line.
+
 ### Drafted amendment (Phase 12, Critic 102): `admin-client.md` §11 is stale
 
 - **Rule text today:** §11 says the only FFI on the branch is the fully synchronous `rust/src/ffi/producer.rs`,
@@ -404,3 +464,7 @@ Reserved for the PLAN §2.3 KIP-1332 note (the `ChunkedProducerBatch` fold into 
   and name callbacks per CLAUDE.md §4.
 - **Related, `admin-client.md` §2:** if restated, note that not every enqueue goes through `CallSender::call`:
   `HandleResult::NewCall` follow-ups are pushed by the I/O task directly (Critic 102 Issue 1).
+- **More suggested anti-patterns (Critic 98 P1):**
+  - a per-record `DashMap::entry` (a shard write lock) where a `get` would do;
+  - send-path performance judged from a `cfg(test)` build. Measure in a release example (fat LTO,
+    system allocator), not in the test binary, whose test allocator and seams change the inlining.
