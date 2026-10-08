@@ -54,6 +54,7 @@ use crate::producer::RecordMetadata;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::ChunkedByteBufferOutputStream;
 use crate::producer::internals::PartitionerConfig;
+use crate::producer::internals::ProduceRequestResult;
 use crate::producer::internals::ProducerBatch;
 use crate::producer::internals::RecordAccumulator;
 use crate::producer::internals::TransactionManager;
@@ -243,13 +244,33 @@ impl ChunkedRecordAccumulator {
         // record), paired with that size. Set and cleared together across retries; `None` when
         // none is held. `guard.extension_chunks`: the chunks acquired to extend the open batch.
 
-        // Budget shared by every blocking acquisition this append makes, so the total blocking
-        // time stays within max_time_to_block. The full strategy holds its one buffer across
-        // retries and so blocks at most once; this loop can release the chunks it acquired (when
-        // a concurrent appender created a batch to extend instead) and block again on a later
-        // iteration.
-        let mut remaining_time_to_block = max_time_to_block;
+        // KAFKA-20864 (`cc6d42206f`, Apache Kafka trunk, ported ahead of 4.4): this append's share
+        // of max.block.ms, as an absolute deadline. Blocking allocations bound themselves against
+        // it. Retries that never block are bounded by it through return_if_no_more_retries_allowed:
+        // they are allowed while time is left. All retries bounded consistently (retry failed
+        // extension, retry on partition change).
+        let deadline_ms = RecordAccumulator::append_deadline_ms(now_ms, max_time_to_block);
+
+        // The first pass is always allowed; the deadline is enforced on every retry after it.
+        let mut first_pass = true;
+
+        // Whether the non-blocking extension was denied memory on the pass that just ended (only
+        // memory exhaustion case a pass can survive because it's non-blocking, all others fail).
+        // Cleared once the next pass has read it, so it can only ever describe the pass
+        // immediately before.
+        let mut non_blocking_memory_allocation_denied = false;
+
         loop {
+            if let Err(error) = base.return_if_no_more_retries_allowed(
+                first_pass,
+                deadline_ms,
+                non_blocking_memory_allocation_denied,
+                topic,
+            ) {
+                return Err(AppendFailure::boxed(error, callback.take()));
+            }
+            first_pass = false;
+            non_blocking_memory_allocation_denied = false;
             let effective_partition = if unknown_partition {
                 let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
                 partitioner.peek_current_partition_info(cluster).partition()
@@ -264,6 +285,13 @@ impl ChunkedRecordAccumulator {
                 .or_insert_with(|| Mutex::new(VecDeque::new()));
 
             let append_result;
+            // The batch the extension gap was sized against, set exactly when the result is
+            // needs_buffer_extension. The acquire below runs off the deque lock, so this is used to
+            // check if that batch is still the open one once the acquire fails, so it can be
+            // closed. Java compares object identity; a Rust batch moves by value, so its identity
+            // is its `ProduceRequestResult`, held here (an `Arc` clone) so the address cannot be
+            // reused by a replacement batch while it is compared.
+            let mut batch_to_extend = None;
             {
                 let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
                 let mut deque = dq_ref.lock().unwrap();
@@ -297,6 +325,9 @@ impl ChunkedRecordAccumulator {
                     ));
                 }
                 callback = returned_callback;
+                if result.needs_buffer_extension() {
+                    batch_to_extend = deque.back().map(|batch| Arc::clone(&batch.produce_future));
+                }
                 append_result = result;
             }
 
@@ -304,6 +335,7 @@ impl ChunkedRecordAccumulator {
                 let extension_chunks = self
                     .allocate_extension_chunks(
                         append_result.extension_bytes_needed,
+                        batch_to_extend.as_ref(),
                         topic_info,
                         topic,
                         effective_partition,
@@ -311,8 +343,11 @@ impl ChunkedRecordAccumulator {
                     .await
                     .map_err(|error| AppendFailure::boxed(error, callback.take()))?;
                 let Some(extension_chunks) = extension_chunks else {
-                    // Pool exhausted, so no writable batch is left to extend: retry, normally
-                    // landing on the blocking new-batch path (needs_new_batch).
+                    // Pool exhausted, so no chunks are held. allocate_extension_chunks has already
+                    // decided whether to close the open batch; retry either way, bounded by
+                    // return_if_no_more_retries_allowed, which will report exhausted memory as the
+                    // cause.
+                    non_blocking_memory_allocation_denied = true;
                     continue;
                 };
                 guard.extension_chunks = Some(extension_chunks);
@@ -330,6 +365,7 @@ impl ChunkedRecordAccumulator {
                     value,
                     headers,
                 );
+                let remaining_time_to_block = base.remaining_time_to_block_ms(deadline_ms);
                 kafka_trace!(
                     base.log_context,
                     "Allocating {} byte chunked buffer ({} byte chunks) for topic {} partition {} with remaining timeout {}ms",
@@ -339,11 +375,9 @@ impl ChunkedRecordAccumulator {
                     effective_partition,
                     remaining_time_to_block
                 );
-                let allocation_start_ms = base.time.milliseconds();
                 let initial_chunks = self.allocate_chunks(new_batch_size, remaining_time_to_block).await;
-                // Java's `finally`: update the remaining time to block.
+                // Java's `finally`.
                 now_ms = base.time.milliseconds();
-                remaining_time_to_block = (remaining_time_to_block - (now_ms - allocation_start_ms).max(0)).max(0);
                 let initial_chunks = match initial_chunks {
                     Ok(initial_chunks) => initial_chunks,
                     Err(error) => {
@@ -515,8 +549,18 @@ impl ChunkedRecordAccumulator {
     }
 
     /// Mid-batch extension: the open batch can still take this record so grow it in place. The
-    /// acquire is non-blocking and fails fast when the pool is exhausted, closing the open batch
-    /// for appends if it is still writable so the record retries on the new-batch path.
+    /// acquire is non-blocking and fails fast when the pool is exhausted, closing
+    /// `batch_to_extend` for appends so the record retries on the new-batch path (blocks for
+    /// memory).
+    ///
+    /// The acquire runs off the deque lock, so the open batch may no longer be the one the gap was
+    /// sized against by the time this would close it: it could have been drained and replaced by
+    /// a batch a concurrent appender created. So close only if the open batch is still
+    /// `batch_to_extend`; when it is not, nothing is closed and the caller's next iteration
+    /// re-evaluates against whatever is open then (KAFKA-20864, `cc6d42206f`, ahead of 4.4).
+    ///
+    /// `batch_to_extend` is the identity (`ProduceRequestResult`) of the batch the gap was sized
+    /// against; Java requires it non-null, and `None` here closes nothing.
     ///
     /// Returns the chunks, or `None` if the pool was exhausted.
     ///
@@ -528,6 +572,7 @@ impl ChunkedRecordAccumulator {
     async fn allocate_extension_chunks(
         &self,
         extension_bytes_needed: i32,
+        batch_to_extend: Option<&Arc<ProduceRequestResult>>,
         topic_info: &TopicInfo,
         topic: &str,
         partition: i32,
@@ -535,18 +580,29 @@ impl ChunkedRecordAccumulator {
         match self.allocate_chunks(extension_bytes_needed, 0).await {
             Ok(chunks) => Ok(Some(chunks)),
             Err(Error::ProducerBufferExhausted(_)) => {
-                kafka_trace!(
-                    self.base.log_context,
-                    "Pool exhausted while extending batch for topic {} partition {}; closing existing batch",
-                    topic,
-                    partition
-                );
                 if let Some(dq_ref) = topic_info.batches.get(&partition) {
                     let mut deque = dq_ref.lock().unwrap();
-                    // No need to check whether it is still open: close_for_record_appends is
-                    // idempotent.
-                    if let Some(last) = deque.back_mut() {
-                        last.close_for_record_appends();
+                    match (deque.back_mut(), batch_to_extend) {
+                        (Some(last), Some(batch_to_extend)) if Arc::ptr_eq(&last.produce_future, batch_to_extend) => {
+                            kafka_trace!(
+                                self.base.log_context,
+                                "Pool exhausted while extending batch for topic {} partition {}; closing existing batch",
+                                topic,
+                                partition
+                            );
+                            // No need to check whether it is still open: close_for_record_appends
+                            // is idempotent.
+                            last.close_for_record_appends();
+                        },
+                        _ => {
+                            kafka_trace!(
+                                self.base.log_context,
+                                "Pool exhausted while extending batch for topic {} partition {}; the batch it was \
+                                 sized against is no longer the open one, so closing nothing and retrying",
+                                topic,
+                                partition
+                            );
+                        },
                     }
                 }
                 Ok(None)
@@ -1667,6 +1723,772 @@ mod tests {
         assert!(
             extension_chunks.iter().all(|chunk| returned_to_pool.contains(chunk)),
             "every chunk acquired to extend the closed batch must be returned to the pool"
+        );
+        accum.base().close();
+    }
+
+    // ---- KAFKA-20864 (`cc6d42206f`, Apache Kafka trunk, ported ahead of 4.4) ------------------
+    //
+    // These tests were added to `ChunkedRecordAccumulatorTest` by KAFKA-20864, which the 4.4
+    // reference the Java markers resolve against predates, so they carry no marker.
+
+    /// `hasOpenBatch(accum)`.
+    fn has_open_batch(accum: &ChunkedRecordAccumulator) -> bool {
+        accum.base().with_deque_for_test(&tp1(), |deque| !deque.is_empty())
+    }
+
+    /// Simulates the concurrent activity that can move the deque while an extension acquire runs
+    /// off the deque lock: the sender drains the open batch, returning its chunks to the pool, and
+    /// another appender claims that memory for a fresh batch in its place.
+    ///
+    /// Returns the record count of the batch that was drained (Java returns the batch itself).
+    async fn simulate_concurrent_drain_and_replace(
+        accum: &ChunkedRecordAccumulator,
+        time: &MockTime,
+        cluster: &Cluster,
+    ) -> Result<i32, Error> {
+        let mut drained = accum
+            .base()
+            .with_deque_for_test(&tp1(), |deque| deque.pop_front())
+            .expect("there must be an open batch to drain");
+        accum.base().deallocate(&mut drained);
+        append_with(accum, time, cluster, PARTITION1, &[0u8; 100], MAX_BLOCK_TIME_MS).await?;
+        Ok(drained.record_count)
+    }
+
+    /// Java's `poolRefusingExtensionAfterBatchReplaced`: refuses the non-blocking extension acquire
+    /// after replacing the batch that acquire was sized against. The refusal therefore closes
+    /// nothing, since the batch it would close is no longer the open one.
+    ///
+    /// The replacement batch is pre-sized for its own single record, so the chunk size decides
+    /// whether it has room to spare for the retried one.
+    struct RefusingExtensionAfterBatchReplaced {
+        /// Counts the refusals: gates the safety limit below, and is what callers assert on.
+        refusals: Arc<AtomicI32>,
+        /// Mock-clock time the refusal spends, standing in for time gone earlier in the append (a
+        /// prior blocking acquire, or the metadata wait). 0 leaves the append time on the clock
+        /// for another pass.
+        sleep_on_refusal_ms: i64,
+        time: Arc<MockTime>,
+        cluster: Cluster,
+    }
+
+    impl ChunkedAccumulatorTestHooks for RefusingExtensionAfterBatchReplaced {
+        fn allocate_chunks<'a>(
+            &'a self,
+            accum: &'a ChunkedRecordAccumulator,
+            total_size: i32,
+            max_time_to_block_ms: i64,
+        ) -> HookFuture<'a> {
+            // Used to prevent the test from retrying forever if the logic fails.
+            const RETRY_SAFETY_LIMIT: i32 = 5;
+            Box::pin(async move {
+                // The extension acquire always passes a zero timeout, and a new-batch acquire does
+                // too once no time is left — but only with an empty deque here, since these tests
+                // always create the first batch with a blocking acquire.
+                let is_extension_path = max_time_to_block_ms == 0 && has_open_batch(accum);
+                if is_extension_path && self.refusals.load(Ordering::SeqCst) < RETRY_SAFETY_LIMIT {
+                    self.refusals.fetch_add(1, Ordering::SeqCst);
+                    simulate_concurrent_drain_and_replace(accum, &self.time, &self.cluster).await?;
+                    if self.sleep_on_refusal_ms > 0 {
+                        self.time.sleep(self.sleep_on_refusal_ms);
+                    }
+                    return Err(Error::buffer_exhausted("injected: pool exhausted"));
+                }
+                accum.real_allocate_chunks(total_size, max_time_to_block_ms).await
+            })
+        }
+    }
+
+    fn refusing_extension_after_batch_replaced(
+        fx: &Fixture,
+        refusals: &Arc<AtomicI32>,
+        sleep_on_refusal_ms: i64,
+    ) -> Arc<RefusingExtensionAfterBatchReplaced> {
+        Arc::new(RefusingExtensionAfterBatchReplaced {
+            refusals: Arc::clone(refusals),
+            sleep_on_refusal_ms,
+            time: Arc::clone(&fx.time),
+            cluster: fx.cluster.clone(),
+        })
+    }
+
+    /// Java's `accumulatorWithPartitionChange`: its `partitionChanged` reports that the sticky
+    /// partition moved, so the append retries its pass having asked the pool for nothing. It
+    /// stands in for a concurrent appender crossing the switch threshold; only the append under
+    /// test is affected, since `partitionInfo` is null for the appends that name their partition
+    /// (as the concurrent ones the pool hooks inject all do).
+    struct PartitionChange {
+        /// When to report the move, so the retry lands on the pass the test needs — it is
+        /// re-evaluated on every call, and reports nothing until it first holds.
+        active_while: Box<dyn Fn() -> bool + Send + Sync>,
+        /// Counts the retries: gates the cap, and is what callers assert on.
+        retries: Arc<AtomicI32>,
+        /// Caps the retries, so a bound that regressed fails an assertion rather than spinning.
+        max_retries: i32,
+        /// The pool behaviour the accumulator is built over (Java's `pool` argument); the real
+        /// acquire when `None`.
+        pool: Option<Arc<dyn ChunkedAccumulatorTestHooks>>,
+    }
+
+    impl ChunkedAccumulatorTestHooks for PartitionChange {
+        fn allocate_chunks<'a>(
+            &'a self,
+            accum: &'a ChunkedRecordAccumulator,
+            total_size: i32,
+            max_time_to_block_ms: i64,
+        ) -> HookFuture<'a> {
+            match &self.pool {
+                Some(pool) => pool.allocate_chunks(accum, total_size, max_time_to_block_ms),
+                None => Box::pin(accum.real_allocate_chunks(total_size, max_time_to_block_ms)),
+            }
+        }
+
+        fn partition_changed(
+            &self,
+            _accum: &ChunkedRecordAccumulator,
+            _topic_info: &TopicInfo,
+            unknown_partition: bool,
+            _cluster: &Cluster,
+        ) -> Option<bool> {
+            // Java's `partitionInfo != null && activeWhile.getAsBoolean() && retries.get() <
+            // maxRetries`, in that evaluation order.
+            if unknown_partition && (self.active_while)() && self.retries.load(Ordering::SeqCst) < self.max_retries {
+                self.retries.fetch_add(1, Ordering::SeqCst);
+                return Some(true);
+            }
+            None
+        }
+    }
+
+    /// The extension acquire runs off the deque lock, so the open batch can be replaced while it
+    /// is in flight: the sender drains the batch the gap was sized against and a concurrent
+    /// appender creates a new one with the memory that drain just freed. On exhaustion the append
+    /// must then leave that new batch open.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testExhaustedExtensionLeavesAReplacementBatchOpen`.
+    #[tokio::test]
+    async fn test_exhausted_extension_leaves_a_replacement_batch_open() {
+        struct Hooks {
+            injected: AtomicBool,
+            close_for_appends_calls: Arc<AtomicI32>,
+            drained: Mutex<Option<i32>>,
+            time: Arc<MockTime>,
+            cluster: Cluster,
+        }
+        impl ChunkedAccumulatorTestHooks for Hooks {
+            fn allocate_chunks<'a>(
+                &'a self,
+                accum: &'a ChunkedRecordAccumulator,
+                total_size: i32,
+                max_time_to_block_ms: i64,
+            ) -> HookFuture<'a> {
+                Box::pin(async move {
+                    // Only the first non-blocking (extension) acquire is intercepted; the deque
+                    // lock is not held here, which is exactly what lets the open batch change
+                    // under the appender.
+                    if max_time_to_block_ms == 0
+                        && self
+                            .injected
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    {
+                        // From here on the deque's last batch is no longer the batch the gap was
+                        // sized against.
+                        let drained = simulate_concurrent_drain_and_replace(accum, &self.time, &self.cluster).await?;
+                        *self.drained.lock().unwrap() = Some(drained);
+                        return Err(Error::buffer_exhausted("injected: pool exhausted"));
+                    }
+                    accum.real_allocate_chunks(total_size, max_time_to_block_ms).await
+                })
+            }
+
+            fn close_for_record_appends_calls(&self) -> Option<Arc<AtomicI32>> {
+                Some(Arc::clone(&self.close_for_appends_calls))
+            }
+        }
+
+        let fx = fixture();
+        let chunk_size = 256;
+        let hooks = Arc::new(Hooks {
+            injected: AtomicBool::new(false),
+            close_for_appends_calls: Arc::new(AtomicI32::new(0)),
+            drained: Mutex::new(None),
+            time: Arc::clone(&fx.time),
+            cluster: fx.cluster.clone(),
+        });
+        let accum = fx.hooked(8192, fx.pool(16 * chunk_size as i64, chunk_size), hooks.clone());
+
+        // First record establishes the open batch the extension gap will be sized against.
+        fx.append(&accum, &[0u8; 100]).await.unwrap();
+
+        // Second record overflows that batch's chunk, so it needs an extension. The injected
+        // exhaustion fires after the batch has been replaced by the nested append's batch.
+        fx.append(&accum, &[0u8; 100]).await.unwrap();
+
+        assert!(
+            hooks.injected.load(Ordering::SeqCst),
+            "the extension acquire must have been intercepted"
+        );
+        assert!(
+            hooks.drained.lock().unwrap().is_some(),
+            "the sized batch must have been drained by the injection"
+        );
+        assert_eq!(
+            0,
+            hooks.close_for_appends_calls.load(Ordering::SeqCst),
+            "the failed extension must not close a batch it did not size the gap against"
+        );
+
+        // Only the replacement batch is expected; far below its write limit, so is_full() can
+        // only be true via a closed append stream.
+        assert_eq!(
+            vec![false],
+            fullness(&accum),
+            "the replacement batch must stay open for appends"
+        );
+        assert_eq!(
+            vec![2],
+            record_counts(&accum),
+            "the retried record must land in the replacement batch, extending it"
+        );
+        accum.base().close();
+    }
+
+    /// The extension acquire is refused with the batch it was sized against already replaced, so
+    /// nothing is closed, the append's `max.block.ms` is spent, and the replacement needs memory
+    /// too. The retry finds the deadline gone and gives up, reporting the exhausted pool that
+    /// refused the pass before it.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testExtensionRetriesBoundedByMaxBlockTimeWhenAcquireFails`.
+    #[tokio::test]
+    async fn test_extension_retries_bounded_by_max_block_time_when_acquire_fails() {
+        let fx = fixture();
+        let refusals = Arc::new(AtomicI32::new(0));
+        let hooks = refusing_extension_after_batch_replaced(&fx, &refusals, MAX_BLOCK_TIME_MS + 1);
+        let accum = fx.hooked(8192, fx.pool(16 * 256, 256), hooks);
+
+        fx.append(&accum, &[0u8; 100]).await.unwrap();
+
+        // Needs an extension it never gets, on a batch that keeps being replaced: the first pass
+        // is refused and spends the budget, so the retry gives up. The pass before it was denied
+        // memory, so the failure carries the type, the metric and the diagnosis of an exhausted
+        // pool.
+        let error = fx.append(&accum, &[0u8; 100]).await.err().unwrap();
+        assert!(matches!(error, Error::ProducerBufferExhausted(_)), "{error:?}");
+        // BufferPool's own exhaustion message also reports "Available memory", so match the
+        // wording only the retry bound uses: the failure must come from it, not from the blocking
+        // new-batch acquire.
+        assert!(
+            error.message().contains("Failed to allocate memory for a record"),
+            "the drop must be reported by return_if_no_more_retries_allowed (not by the blocking new-batch \
+             acquire in BufferPool), but was: {}",
+            error.message()
+        );
+        assert_eq!(
+            "Failed to allocate memory for a record of topic test within max.block.ms. Total memory: 4096 bytes. \
+             Available memory: 3840 bytes.",
+            error.message()
+        );
+        assert_eq!(
+            1.0,
+            fx.buffer_exhausted_total(),
+            "a record dropped because the pool had no memory must be counted as one"
+        );
+        assert_eq!(
+            1,
+            refusals.load(Ordering::SeqCst),
+            "the extension acquire must be refused exactly once: the first pass must run, and the retry after it \
+             must give up on the spent deadline rather than acquire again"
+        );
+
+        // Giving up must leave the open batch untouched: only the replacement batch is expected,
+        // still open (far below its write limit), and the dropped record must not have landed.
+        assert_eq!(
+            vec![false],
+            fullness(&accum),
+            "the replacement batch must stay open for appends"
+        );
+        assert_eq!(
+            vec![1],
+            record_counts(&accum),
+            "the dropped record must not have landed anywhere"
+        );
+        accum.base().close();
+    }
+
+    /// A successful extension acquire whose chunks fall short, because a concurrent appender took
+    /// the capacity first, so the append comes back for more with the deadline already gone. Every
+    /// acquire this append made was granted, so it gives up with a plain timeout and charges the
+    /// pool no buffer-exhausted drop.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testExtensionRetryPastDeadlineFailsAfterInsufficientAttach`.
+    #[tokio::test]
+    async fn test_extension_retry_past_deadline_fails_after_insufficient_attach() {
+        struct Hooks {
+            injecting: AtomicBool,
+            extension_acquires: AtomicI32,
+            value: Vec<u8>,
+            time: Arc<MockTime>,
+            cluster: Cluster,
+        }
+        impl ChunkedAccumulatorTestHooks for Hooks {
+            fn allocate_chunks<'a>(
+                &'a self,
+                accum: &'a ChunkedRecordAccumulator,
+                total_size: i32,
+                max_time_to_block_ms: i64,
+            ) -> HookFuture<'a> {
+                Box::pin(async move {
+                    let chunks = accum.real_allocate_chunks(total_size, max_time_to_block_ms).await?;
+                    if max_time_to_block_ms == 0
+                        && self
+                            .injecting
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    {
+                        self.extension_acquires.fetch_add(1, Ordering::SeqCst);
+                        // Takes the capacity this acquire was sized against, so the attach that
+                        // follows is too small and the append has to come back for more.
+                        let injected =
+                            append_with(accum, &self.time, &self.cluster, PARTITION1, &self.value, MAX_BLOCK_TIME_MS)
+                                .await;
+                        // Leave the append with no max.block.ms left, so its retry is refused.
+                        self.time.sleep(MAX_BLOCK_TIME_MS + 1);
+                        // Java's `finally`.
+                        self.injecting.store(false, Ordering::SeqCst);
+                        injected?;
+                    }
+                    Ok(chunks)
+                })
+            }
+        }
+
+        let fx = fixture();
+        let chunk_size = 256;
+        let value = vec![0u8; 350]; // needs 2 chunks, so the open batch always needs an extension for it
+        let hooks = Arc::new(Hooks {
+            injecting: AtomicBool::new(false),
+            extension_acquires: AtomicI32::new(0),
+            value: value.clone(),
+            time: Arc::clone(&fx.time),
+            cluster: fx.cluster.clone(),
+        });
+        let accum = fx.hooked(8192, fx.pool(64 * chunk_size as i64, chunk_size), hooks.clone());
+
+        // Tiny first record opens the batch.
+        fx.append(&accum, &[0u8; 1]).await.unwrap();
+
+        let error = fx.append(&accum, &value).await.err().unwrap();
+        // ProducerBufferExhausted is Java's BufferExhaustedException, a TimeoutException
+        // subclass, so this must be the plain Timeout variant.
+        assert!(
+            matches!(error, Error::Timeout(_)),
+            "the pass that gave up was not denied memory, so it must fail with a timeout: {error:?}"
+        );
+        assert!(
+            error.message().contains("kept retrying"),
+            "the failure must be the timeout return_if_no_more_retries_allowed raises when a retry finds the \
+             deadline gone, but was: {}",
+            error.message()
+        );
+        assert_eq!(
+            "Failed to append a record to topic test within max.block.ms. The append kept retrying because \
+             concurrent appends changed the state it read.",
+            error.message()
+        );
+        assert_eq!(
+            0.0,
+            fx.buffer_exhausted_total(),
+            "every acquire this append made was granted, so no drop may be charged to the pool"
+        );
+
+        assert_eq!(
+            1,
+            hooks.extension_acquires.load(Ordering::SeqCst),
+            "the retry must be refused at the top of the loop, before it can acquire again"
+        );
+        // Only the one open batch is expected: the opening record and the injected concurrent
+        // append; the record under test never landed.
+        assert_eq!(vec![2], record_counts(&accum), "the refused record must not have landed");
+        accum.base().close();
+    }
+
+    /// A failed extension acquire spends part of the append's `max.block.ms` before closing the
+    /// batch and falling through to the blocking new-batch acquire. That acquire is given what is
+    /// left of it.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testBlockingAcquireGetsOnlyWhatIsLeftOfMaxBlockTimeAfterFailedExtension`.
+    #[tokio::test]
+    async fn test_blocking_acquire_gets_only_what_is_left_of_max_block_time_after_failed_extension() {
+        const SPENT_IN_EXTENSION_MS: i64 = 600;
+        struct Hooks {
+            injected: AtomicBool,
+            blocking_acquire_timeout: std::sync::atomic::AtomicI64,
+            time: Arc<MockTime>,
+        }
+        impl ChunkedAccumulatorTestHooks for Hooks {
+            fn allocate_chunks<'a>(
+                &'a self,
+                accum: &'a ChunkedRecordAccumulator,
+                total_size: i32,
+                max_time_to_block_ms: i64,
+            ) -> HookFuture<'a> {
+                Box::pin(async move {
+                    // The extension is the only acquire that does not block.
+                    let is_extension_path = max_time_to_block_ms == 0;
+                    if is_extension_path
+                        && self
+                            .injected
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    {
+                        // The open batch is left in place, so this failure closes it and the retry
+                        // falls through to the blocking new-batch acquire below.
+                        self.time.sleep(SPENT_IN_EXTENSION_MS);
+                        return Err(Error::buffer_exhausted("injected: pool exhausted"));
+                    }
+                    // The first blocking acquire after that failure is the new-batch one under test.
+                    if self.injected.load(Ordering::SeqCst) && !is_extension_path {
+                        let _ = self.blocking_acquire_timeout.compare_exchange(
+                            -1,
+                            max_time_to_block_ms,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        );
+                    }
+                    accum.real_allocate_chunks(total_size, max_time_to_block_ms).await
+                })
+            }
+        }
+
+        let fx = fixture();
+        let chunk_size = 256;
+        let hooks = Arc::new(Hooks {
+            injected: AtomicBool::new(false),
+            blocking_acquire_timeout: std::sync::atomic::AtomicI64::new(-1),
+            time: Arc::clone(&fx.time),
+        });
+        let accum = fx.hooked(8192, fx.pool(16 * chunk_size as i64, chunk_size), hooks.clone());
+
+        fx.append(&accum, &[0u8; 100]).await.unwrap();
+
+        // Needs an extension; the failed acquire burns part of max.block.ms before the batch is
+        // closed and the record retries on the blocking path.
+        fx.append(&accum, &[0u8; 100]).await.unwrap();
+
+        assert_eq!(
+            MAX_BLOCK_TIME_MS - SPENT_IN_EXTENSION_MS,
+            hooks.blocking_acquire_timeout.load(Ordering::SeqCst),
+            "the blocking acquire must only get the remaining max.block.ms"
+        );
+        accum.base().close();
+    }
+
+    /// Appends 100-byte records until one needs an extension, which the pool refuses after
+    /// replacing the batch it was sized against and spending the whole of the append's budget. The
+    /// deadline is enforced strictly on that append: the retry gives up even though the roomier
+    /// replacement batch would take the record with no allocation at all, so the deadline bounds
+    /// the loop as well as the waiting inside it. The pool refused this append, so the failure
+    /// carries the type, metric and diagnosis of an exhausted pool.
+    ///
+    /// Java's `@ParameterizedTest @ValueSource(booleans = {false, true})` over the two ways an
+    /// append arrives at its retry with no time left, as a loop:
+    ///
+    /// - `zero_max_block_time = false`: a normal `max.block.ms`, spent by an acquire that
+    ///   succeeded.
+    /// - `zero_max_block_time = true`: `max.block.ms` of 0, which is legal and whose deadline is
+    ///   behind the append before it starts, so such a producer gets a single pass and cannot
+    ///   survive a concurrent change to the batch it was sized against.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testRetryPastDeadlineIsRefusedEvenWhenTheRecordNeedsNoMemory`.
+    #[tokio::test]
+    async fn test_retry_past_deadline_is_refused_even_when_the_record_needs_no_memory() {
+        for zero_max_block_time in [false, true] {
+            let max_time_to_block = if zero_max_block_time { 0 } else { MAX_BLOCK_TIME_MS };
+            let fx = fixture();
+            let refusals = Arc::new(AtomicI32::new(0));
+            // A chunk many times a record's size, so the replacement batch has room to spare and
+            // the retried record needs no memory at all.
+            let hooks = refusing_extension_after_batch_replaced(&fx, &refusals, MAX_BLOCK_TIME_MS + 1);
+            let accum = fx.hooked(8192, fx.pool(16 * 1024, 1024), hooks);
+
+            let mut error = None;
+            for _ in 0..50 {
+                if refusals.load(Ordering::SeqCst) != 0 {
+                    break;
+                }
+                match fx.append_to(&accum, PARTITION1, &[0u8; 100], max_time_to_block).await {
+                    Ok(_) => {},
+                    Err(thrown @ Error::ProducerBufferExhausted(_)) => {
+                        error = Some(thrown);
+                        break;
+                    },
+                    Err(other) => panic!("zero_max_block_time={zero_max_block_time}: unexpected {other:?}"),
+                }
+            }
+            assert_eq!(
+                1,
+                refusals.load(Ordering::SeqCst),
+                "zero_max_block_time={zero_max_block_time}: the extension acquire was never reached"
+            );
+            let error = error.unwrap_or_else(|| {
+                panic!("zero_max_block_time={zero_max_block_time}: the append past its deadline must be refused, not recovered")
+            });
+            assert!(
+                error.message().contains("Failed to allocate memory for a record"),
+                "zero_max_block_time={zero_max_block_time}: the drop must be reported by \
+                 return_if_no_more_retries_allowed (not by the blocking new-batch acquire in BufferPool), but was: {}",
+                error.message()
+            );
+
+            // Only the replacement batch is expected.
+            assert_eq!(
+                vec![1],
+                record_counts(&accum),
+                "zero_max_block_time={zero_max_block_time}: the refused record must not have landed, even though \
+                 the batch had room for it"
+            );
+            assert_eq!(
+                1.0,
+                fx.buffer_exhausted_total(),
+                "zero_max_block_time={zero_max_block_time}: the pool refused this append, so the drop is counted \
+                 against it"
+            );
+            accum.base().close();
+        }
+    }
+
+    /// When the sticky partition keeps changing between the peek and the check under the deque
+    /// lock, the append abandons every pass without acquiring anything, so only this bound stops
+    /// it. The hook stands in for the concurrent appender that moves the partition.
+    ///
+    /// Java's override moves the sticky partition (`updatePartitionInfo(partitionInfo, batchSize,
+    /// cluster, true)`) and lets `super.partitionChanged` detect the new `StickyPartitionInfo`.
+    /// The Rust partitioner has no info identity to compare across the lock (see
+    /// `RecordAccumulator::partition_changed`), and this cluster has one partition, so the hook
+    /// reports the move itself.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testPartitionChangeRetriesBoundedByMaxBlockTime`.
+    #[tokio::test]
+    async fn test_partition_change_retries_bounded_by_max_block_time() {
+        struct Hooks {
+            forced_switches: AtomicI32,
+            time: Arc<MockTime>,
+        }
+        impl ChunkedAccumulatorTestHooks for Hooks {
+            fn partition_changed(
+                &self,
+                _accum: &ChunkedRecordAccumulator,
+                _topic_info: &TopicInfo,
+                unknown_partition: bool,
+                _cluster: &Cluster,
+            ) -> Option<bool> {
+                // Capped so a regressed bound fails an assertion rather than spinning forever.
+                if unknown_partition && self.forced_switches.load(Ordering::SeqCst) < 5 {
+                    self.forced_switches.fetch_add(1, Ordering::SeqCst);
+                    // Leave no time, so the append gets its first pass and the retry after it
+                    // gives up.
+                    self.time.sleep(MAX_BLOCK_TIME_MS + 1);
+                    return Some(true);
+                }
+                None
+            }
+        }
+
+        let fx = fixture();
+        let chunk_size = 256;
+        let hooks = Arc::new(Hooks { forced_switches: AtomicI32::new(0), time: Arc::clone(&fx.time) });
+        let accum = fx.hooked(1024, fx.pool(16 * chunk_size as i64, chunk_size), hooks.clone());
+
+        let error = fx
+            .append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 100], MAX_BLOCK_TIME_MS)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, Error::Timeout(_)),
+            "the pass that gave up was not denied memory, so it must fail with a timeout: {error:?}"
+        );
+        assert!(
+            error.message().contains("kept retrying"),
+            "the failure must be the timeout return_if_no_more_retries_allowed raises when a retry finds the \
+             deadline gone, but was: {}",
+            error.message()
+        );
+        assert_eq!(
+            1,
+            hooks.forced_switches.load(Ordering::SeqCst),
+            "the partition must be moved exactly once: the first pass must run, and the retry after it must give \
+             up on the spent deadline rather than re-read the partition"
+        );
+        accum.base().close();
+    }
+
+    /// An append that needs no waiting still lands its record, on the first pass, which always
+    /// runs whatever the time left.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testZeroMaxBlockTimeStillAppendsWhenNothingHasToBeWaitedFor`.
+    #[tokio::test]
+    async fn test_zero_max_block_time_still_appends_when_nothing_has_to_be_waited_for() {
+        let fx = fixture();
+        let chunk_size = 256;
+        let accum = fx.accumulator(8192, chunk_size, 16 * chunk_size as i64);
+
+        // First record creates the batch; the acquire is non-blocking but the memory is there.
+        fx.append_to(&accum, PARTITION1, &[0u8; 100], 0).await.unwrap();
+        // Second record overflows the batch's chunk, so it needs an extension — also non-blocking,
+        // also satisfiable right away.
+        fx.append_to(&accum, PARTITION1, &[0u8; 100], 0).await.unwrap();
+
+        // Both records belong in the one extended batch; no record may be dropped for lack of
+        // time alone.
+        assert_eq!(vec![2], record_counts(&accum));
+        accum.base().close();
+    }
+
+    /// An append that gives up still holding the stream it allocated for a new batch refunds it to
+    /// the pool. The stream is allocated on one pass and carried unattached across a partition
+    /// switch, so the pass that finds nothing left to spend leaves it for the `finally` (the
+    /// [`AppendGuard`]) to return.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testGivingUpRefundsAnUnattachedNewBatchStream`.
+    #[tokio::test]
+    async fn test_giving_up_refunds_an_unattached_new_batch_stream() {
+        struct StreamAllocatedPool {
+            stream_allocated: Arc<AtomicBool>,
+            time: Arc<MockTime>,
+        }
+        impl ChunkedAccumulatorTestHooks for StreamAllocatedPool {
+            fn allocate_chunks<'a>(
+                &'a self,
+                accum: &'a ChunkedRecordAccumulator,
+                total_size: i32,
+                max_time_to_block_ms: i64,
+            ) -> HookFuture<'a> {
+                Box::pin(async move {
+                    let chunks = accum.real_allocate_chunks(total_size, max_time_to_block_ms).await?;
+                    // Use up the time on the acquire that succeeded, standing in for a blocking
+                    // acquire that waited out the whole of max.block.ms before getting its memory.
+                    if self
+                        .stream_allocated
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        self.time.sleep(MAX_BLOCK_TIME_MS + 1);
+                    }
+                    Ok(chunks)
+                })
+            }
+        }
+
+        let fx = fixture();
+        let chunk_size = 256;
+        let total_memory = 16 * chunk_size as i64;
+        let stream_allocated = Arc::new(AtomicBool::new(false));
+        let retries = Arc::new(AtomicI32::new(0));
+        let pool = fx.pool(total_memory, chunk_size);
+        let active = Arc::clone(&stream_allocated);
+        // The cap allows two retries so a regressed bound spins no further than an assertion
+        // failure; a correct bound takes the single retry asserted below, holding the stream
+        // across it.
+        let hooks = Arc::new(PartitionChange {
+            active_while: Box::new(move || active.load(Ordering::SeqCst)),
+            retries: Arc::clone(&retries),
+            max_retries: 2,
+            pool: Some(Arc::new(StreamAllocatedPool { stream_allocated, time: Arc::clone(&fx.time) })),
+        });
+        let accum = fx.hooked(8192, Arc::clone(&pool), hooks);
+
+        let error = fx
+            .append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 100], MAX_BLOCK_TIME_MS)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, Error::Timeout(_)),
+            "the pass that gave up was not denied memory, so it must fail with a timeout: {error:?}"
+        );
+        assert_eq!(
+            1,
+            retries.load(Ordering::SeqCst),
+            "the stream must have been held across the retry that gave up"
+        );
+        assert_eq!(
+            total_memory,
+            pool.available_memory(),
+            "the chunks reserved for a batch that was never created must go back to the pool"
+        );
+        accum.base().close();
+    }
+
+    /// A refusal describes only the pass it happened on. The extension acquire is refused, then
+    /// the pass after it retries because the sticky partition moved, asking the pool for nothing
+    /// at all, and it is that pass which runs out of time. The append gives up with a plain timeout
+    /// and charges the pool no buffer-exhausted drop.
+    ///
+    /// Translated from `ChunkedRecordAccumulatorTest.testPartitionChangeTimeoutAfterExtensionFail`.
+    #[tokio::test]
+    async fn test_partition_change_timeout_after_extension_fail() {
+        let fx = fixture();
+        let refusals = Arc::new(AtomicI32::new(0));
+        let retries = Arc::new(AtomicI32::new(0));
+
+        // The refusal leaves time on the clock, so the pass after it runs rather than giving up.
+        let pool_hooks = refusing_extension_after_batch_replaced(&fx, &refusals, 0);
+        // Exactly one retry, on the pass right after the refusal — and it is that pass which
+        // spends the rest of max.block.ms, so the pass after it gives up having asked the pool for
+        // nothing.
+        let refused = Arc::clone(&refusals);
+        let time = Arc::clone(&fx.time);
+        let hooks = Arc::new(PartitionChange {
+            active_while: Box::new(move || {
+                if refused.load(Ordering::SeqCst) == 0 {
+                    return false;
+                }
+                time.sleep(MAX_BLOCK_TIME_MS + 1);
+                true
+            }),
+            retries: Arc::clone(&retries),
+            max_retries: 1,
+            pool: Some(pool_hooks),
+        });
+        let accum = fx.hooked(8192, fx.pool(16 * 256, 256), hooks);
+
+        fx.append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 100], MAX_BLOCK_TIME_MS)
+            .await
+            .unwrap();
+
+        let error = fx
+            .append_to(&accum, RecordMetadata::UNKNOWN_PARTITION, &[0u8; 100], MAX_BLOCK_TIME_MS)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            1,
+            refusals.load(Ordering::SeqCst),
+            "the extension acquire must have been refused once"
+        );
+        assert_eq!(
+            1,
+            retries.load(Ordering::SeqCst),
+            "the interleaving under test was never reached"
+        );
+        assert!(
+            matches!(error, Error::Timeout(_)),
+            "the pass that gave up was not denied memory, so it must fail with a timeout: {error:?}"
+        );
+        assert!(
+            error.message().contains("kept retrying"),
+            "the failure must be the timeout return_if_no_more_retries_allowed raises when a retry finds the \
+             deadline gone, but was: {}",
+            error.message()
+        );
+        assert_eq!(
+            0.0,
+            fx.buffer_exhausted_total(),
+            "the pass that gave up never asked the pool, so no drop may be attributed to it"
         );
         accum.base().close();
     }

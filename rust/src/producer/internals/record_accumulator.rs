@@ -1025,6 +1025,94 @@ impl RecordAccumulator {
         append_result
     }
 
+    /// Adds `max_time_to_block` to `now_ms`, capped at [`i64::MAX`] so that a large
+    /// `max.block.ms` cannot overflow into a deadline in the past.
+    ///
+    /// KAFKA-20864 (`cc6d42206f`, Apache Kafka trunk, ahead of 4.4): `RecordAccumulator.appendDeadlineMs`.
+    /// No Java marker, because the 4.4 reference the markers resolve against predates it.
+    pub(crate) fn append_deadline_ms(now_ms: i64, max_time_to_block: i64) -> i64 {
+        if max_time_to_block > i64::MAX - now_ms {
+            i64::MAX
+        } else {
+            now_ms + max_time_to_block
+        }
+    }
+
+    /// What is left of `deadline_ms` to wait for memory. An acquire given this rather than the
+    /// raw `max.block.ms` has the time already spent retrying counted against its wait. Reads the
+    /// clock, not a cached `now_ms`, which retries that acquired nothing never refresh.
+    ///
+    /// Only `ChunkedRecordAccumulator::append` uses it so far; [`append`](Self::append) still
+    /// passes the raw value.
+    ///
+    /// KAFKA-20864 (`cc6d42206f`, ahead of 4.4): `RecordAccumulator.remainingTimeToBlockMs`.
+    pub(crate) fn remaining_time_to_block_ms(&self, deadline_ms: i64) -> i64 {
+        (deadline_ms - self.time.milliseconds()).max(0)
+    }
+
+    /// Decide whether an append pass may run, and return an error if it may not because no time
+    /// is left.
+    ///
+    /// - The first pass is always allowed. The deadline is not even read, so an append that
+    ///   completes in one pass never depends on the clock.
+    /// - Every following pass is allowed only while there is time left before `deadline_ms`. The
+    ///   first one that finds the deadline gone fails.
+    ///
+    /// The deadline therefore bounds the loop as well as the waiting inside it. Every acquire is
+    /// bounded by [`remaining_time_to_block_ms`](Self::remaining_time_to_block_ms). Every retry
+    /// that waits for nothing is bounded too (e.g., the partition changed, the batch the pass read
+    /// was replaced or filled under it).
+    ///
+    /// # Arguments
+    ///
+    /// * `first_pass` - whether this is the append's first pass, which is always allowed no matter
+    ///   the deadline.
+    /// * `denied_memory` - whether the pool refused the pass that just ended; it only decides how
+    ///   giving up is reported. Only the incremental extension acquire can be refused and still let
+    ///   its pass finish, and it suppresses the pool's own buffer-exhausted metric so the drop is
+    ///   counted here — exactly once either way. The full path should pass `false`:
+    ///   [`BufferPool::allocate`] records that metric itself and its refusal ends the append.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ProducerBufferExhausted`] if the pass that gave up was denied memory;
+    /// - [`Error::Timeout`] if the deadline has been reached (and it's not the first pass).
+    ///
+    /// KAFKA-20864 (`cc6d42206f`, ahead of 4.4): `RecordAccumulator.throwIfNoMoreRetriesAllowed`,
+    /// with `throw` translated as `return` (CLAUDE.md §2).
+    pub(crate) fn return_if_no_more_retries_allowed(
+        &self,
+        first_pass: bool,
+        deadline_ms: i64,
+        denied_memory: bool,
+        topic: &str,
+    ) -> Result<(), Error> {
+        // The common case is a single pass, so it costs no clock read.
+        if first_pass {
+            return Ok(());
+        }
+        if self.time.milliseconds() < deadline_ms {
+            return Ok(());
+        }
+        if denied_memory {
+            self.free.record_buffer_exhausted();
+            return Err(Error::buffer_exhausted(format!(
+                "Failed to allocate memory for a record of topic {} within {}. Total memory: {} bytes. \
+                 Available memory: {} bytes.",
+                topic,
+                crate::producer::ProducerConfig::MAX_BLOCK_MS_CONFIG,
+                self.free.total_memory(),
+                self.free.available_memory()
+            )));
+        }
+        Err(Error::timeout(format!(
+            "Failed to append a record to topic {} within {}. The append kept retrying because concurrent \
+             appends changed the state it read.",
+            topic,
+            crate::producer::ProducerConfig::MAX_BLOCK_MS_CONFIG
+        )))
+    }
+
     /// Append a new batch to the queue.
     ///
     /// Java's two virtual calls inside `appendNewBatch` are this method's step parameters, since
@@ -2825,6 +2913,106 @@ mod tests {
             offset_delta += 1;
             size += record_size;
         }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testRetryPolicy` (KAFKA-20864, `cc6d42206f`,
+    /// Apache Kafka trunk, ahead of 4.4 — so no Java marker).
+    #[test]
+    fn test_retry_policy() {
+        let time = Arc::new(crate::common::utils::MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let pool = Arc::new(BufferPool::new(
+            10 * 1024,
+            1024,
+            Arc::clone(&metrics),
+            Arc::clone(&time) as Arc<dyn Time>,
+            "producer-metrics",
+        ));
+        let accum = RecordAccumulator::new(
+            1024,
+            Compression::none().build(),
+            0,
+            100,
+            1000,
+            30000,
+            PartitionerConfig::default(),
+            Arc::clone(&metrics),
+            "producer-metrics",
+            Arc::clone(&time) as Arc<dyn Time>,
+            pool,
+            None,
+        );
+        let spent = time.milliseconds(); // a deadline that is up: reached, so no time is left
+        let open = time.milliseconds() + 1000; // and one that is not
+
+        // The first pass may always run, whether or not there is time left.
+        accum.return_if_no_more_retries_allowed(true, spent, false, TOPIC).unwrap();
+        accum.return_if_no_more_retries_allowed(true, open, false, TOPIC).unwrap();
+
+        // So may a retry, while there is time left.
+        accum.return_if_no_more_retries_allowed(false, open, false, TOPIC).unwrap();
+
+        // A retry that finds the deadline gone gives up, reporting the cause the pass before it
+        // hit. `Error::ProducerBufferExhausted` is Java's `BufferExhaustedException`, a
+        // `TimeoutException` subclass, so the plain variant is what tells them apart.
+        let timeout = accum.return_if_no_more_retries_allowed(false, spent, false, TOPIC).unwrap_err();
+        assert!(
+            matches!(timeout, Error::Timeout(_)),
+            "the pass that gave up was not denied memory, so it must fail with a timeout: {timeout:?}"
+        );
+        assert!(
+            timeout.message().contains("kept retrying"),
+            "the failure must be the timeout return_if_no_more_retries_allowed raises when a retry finds the \
+             deadline gone, but was: {}",
+            timeout.message()
+        );
+        assert_eq!(
+            "Failed to append a record to topic test within max.block.ms. The append kept retrying because \
+             concurrent appends changed the state it read.",
+            timeout.message()
+        );
+
+        let exhausted = || {
+            let name = metrics.metric_name_description_tags(
+                "buffer-exhausted-total",
+                "producer-metrics",
+                "",
+                std::collections::BTreeMap::new(),
+            );
+            metrics.metric(&name).unwrap().measurable_value(time.milliseconds())
+        };
+        assert_eq!(0.0, exhausted(), "a timeout is not a buffer-exhausted drop");
+
+        // A pass the pool refused is the only one reported as exhaustion, and it is the
+        // incremental strategy's extension acquire that reaches this; pinned here because the
+        // policy decides it.
+        let denied = accum.return_if_no_more_retries_allowed(false, spent, true, TOPIC).unwrap_err();
+        assert!(matches!(denied, Error::ProducerBufferExhausted(_)), "{denied:?}");
+        assert!(
+            denied.message().contains("Failed to allocate memory for a record"),
+            "a pass the pool refused must be reported as an exhausted-pool drop, but was: {}",
+            denied.message()
+        );
+        assert_eq!(
+            "Failed to allocate memory for a record of topic test within max.block.ms. Total memory: 10240 bytes. \
+             Available memory: 10240 bytes.",
+            denied.message()
+        );
+        assert_eq!(
+            1.0,
+            exhausted(),
+            "giving up on a pass the pool refused must count the dropped record"
+        );
+        accum.close();
+    }
+
+    /// Translated from `RecordAccumulatorTest.testAppendDeadline` (KAFKA-20864, `cc6d42206f`,
+    /// ahead of 4.4 — so no Java marker).
+    #[test]
+    fn test_append_deadline() {
+        assert_eq!(i64::MAX, RecordAccumulator::append_deadline_ms(1000, i64::MAX));
+        assert_eq!(1500, RecordAccumulator::append_deadline_ms(1000, 500));
+        assert_eq!(1000, RecordAccumulator::append_deadline_ms(1000, 0));
     }
 
     /// Translated from `RecordAccumulatorTest.testFull`.
