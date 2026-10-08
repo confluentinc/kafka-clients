@@ -346,52 +346,66 @@ pipeline over a single owned buffer — read them in that order.*
 ## ffi/ and bindings
 
 ```
-rust/src/ffi/           # feature-gated: --features ffi
-├── mod.rs
-├── common.rs           # kafka_common_Error_t & co. (57 exported symbols)
-│                       # + the callback dispatcher: CompletionJob,
-│                       # spawn_dispatcher, enqueue_or_run_inline
-├── producer.rs         # 62 exported symbols (12 of them *_async)
-├── consumer.rs         # 156 exported symbols (22 of them *_async)
-├── consumer_handle.rs  # 23 exported symbols (1 of them *_async)
-└── admin.rs            # 490 exported symbols (47 of them *_async)
+rust/src/ffi/           # feature-gated: --features ffi; 265 files, 2299 exported symbols
+├── mod.rs              # module docs: the C conventions as implemented
+├── common.rs           # kafka_common_Error_t, kafka_common_ErrorCode_e, init_default_logger
+├── error_predicates.rs # generated: 167 kafka_common_Error_is_*_error predicates
+├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
+├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)
+├── callback_queue.rs   # CallbackQueue behind <Client>_execute_callbacks / _set_callbacks_notify
+├── common/             # 104 files, 835 symbols: one file per Java class (acl/, config/,
+│                       # security/, serialization/, metrics/, ...)
+├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
+│                       # Callback_t, Partitioner_t, ProducerConfig_t, ProducerRecord_t, ...
+├── consumer/           # 16 files, 297 symbols: Consumer_t, MockConsumer_t, ConsumerHandle_t,
+│                       # ConsumerRebalanceListener_t, OffsetCommitCallback_t, ...
+└── admin/              # 130 files, 844 symbols: Admin_t, MockAdminClient_t, rpc.rs (94 RPC
+    ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
+    └── ...
+
+rust/xtask/ffi-baseline.txt   # burn-down baseline of check-ffi-translation (7 by-design lines)
 
 c/
 ├── CMakeLists.txt, Makefile, Dockerfile.grpc, README.md
 ├── tests/{test_kafka_producer,test_kafka_consumer,test_kafka_admin,
 │          test_mock_producer,test_mock_consumer,test_mock_admin,
-│          test_consumer_callbacks,producer_perf_test}.c + unity/ (submodule)
+│          test_consumer_callbacks,test_kafka_future,test_serialization,
+│          producer_perf_test}.c + unity/ (submodule)
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
 ├── producer.py, consumer.py, admin.py
 ├── _confluentkafka.c   # hand-written C extension
-├── _error_code.py      # generated from rust/src/ffi/common.rs by
-│                       # tools/generate_error_code.py
+├── _error_code.py      # generated from kafka_common_ErrorCode_e in
+│                       # rust/src/ffi/common.rs by tools/generate_error_code.py
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py
 ├── Dockerfile.grpc, Dockerfile.grpc.async
 ├── test/{unit,static,performance}/, soak/, tools/
 └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
-Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-09-27).
+Symbol counts are `#[unsafe(no_mangle)]` occurrences per directory (2026-10-08).
 
 Both bindings link the library cargo builds under `rust/target/<profile>/` and
 compile against `rust/target/include/confluent_kafka.h`: `c/CMakeLists.txt`
 defaults `RUST_PROJECT_ROOT` to `../rust`, and `python/setup.py` resolves
 `../rust` (overridable with `CONFLUENT_KAFKA_LIB_DIR`).
 
-The bindings expose each operation twice: a synchronous entry point that
-`block_on`s the async API on the runtime the handle owns, and an `*_async`
-one that takes a `*_callback_t` + `user_data`, spawns the future and delivers
-the result through a dispatcher thread (`spawn_dispatcher` /
-`enqueue_or_run_inline` in `rust/src/ffi/common.rs`). The rest of the exported
-symbols are the sync forms, the accessors and the destructors.
+The C surface mirrors the Rust surface one-to-one (CLAUDE.md §4, enforced by
+`cargo xtask lint-custom check-ffi-translation`): every public Rust method is
+one C function with the Rust name, a fallible one returns
+`kafka_common_Error_t *` and fills a trailing `out_` parameter, and every Rust
+`async fn` additionally has a `_cb` twin whose completion is queued on the
+client's `CallbackQueue` and run by `<Client>_execute_callbacks()` on the
+caller's thread (`<Client>_set_callbacks_notify` only signals). Traits C can
+implement are `<Interface>_new(void *self, fn_t...)` interfaces; Rust classes
+implementing them expose borrowed `<Class>__as_<Interface>()` views. The rest
+of the exported symbols are accessors, enum singletons and destructors.
 
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-two entry-point shapes; neither binding adds a runtime of its own.*
+blocking / `_cb` entry-point shapes; neither binding adds a thread of its own.*
 
 ## tests/
 
