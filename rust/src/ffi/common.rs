@@ -90,8 +90,24 @@ pub(crate) fn init_default_logger() {
 ///
 /// No Java counterpart: Java has no C boundary.
 pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error) -> R, body: impl FnOnce() -> R) -> R {
-    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+    match catch_panic(fn_name, body) {
         Ok(value) => value,
+        Err(error) => on_panic(error),
+    }
+}
+
+/// Runs `body`, turning a Rust panic into the [`Error`] [`panic_error`] builds
+/// for `fn_name`, logged at `error` level: the catching half of
+/// [`ffi_guard_or`].
+///
+/// Also used inside an entry point, where a panic must be reported somewhere
+/// more specific than the entry point's own `on_panic` value — the per-key
+/// admin dispatch catches a panic in its RPC submission with it, so the panic
+/// reaches every requested key's callback instead of unwinding to the guard.
+/// The same unwind-safety reasoning as [`ffi_guard_or`] applies.
+pub(crate) fn catch_panic<R>(fn_name: &'static str, body: impl FnOnce() -> R) -> Result<R, Error> {
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => Ok(value),
         Err(payload) => {
             let error = panic_error(fn_name, &*payload);
             // A payload's destructor is arbitrary code, and one that panicked
@@ -101,7 +117,7 @@ pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error
                 std::mem::forget(nested);
             }
             log::error!("{}", error.message());
-            on_panic(error)
+            Err(error)
         },
     }
 }
@@ -146,6 +162,27 @@ where
     F::Output: Send + 'static,
 {
     spawn_or_abort(|| runtime.spawn(task))
+}
+
+/// Runs `body` and aborts the process, after logging `reason`, if it panics.
+///
+/// For code that may already have fired some of a call's C callbacks: an
+/// unwind from there would reach `#[ffi_guard]`, whose `on_panic` reports the
+/// panic through those callbacks again, breaking their exactly-once contract.
+/// Aborting is what every panic at the boundary did before `#[ffi_guard]`, and
+/// what [`spawn_callback_task`] does for the same reason. The per-key admin
+/// dispatch runs its callback fan-out under it.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn run_or_abort<R>(reason: &str, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        // The payload is not dropped: nothing runs after the abort.
+        Err(_) => {
+            log::error!("aborting: {reason}");
+            std::process::abort()
+        },
+    }
 }
 
 /// Runs `spawn` and aborts the process if it panics: the body of
@@ -1397,8 +1434,13 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
 /// # Safety
 ///
 /// `error` must be a valid, non-null error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_clone(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    // SAFETY: `error_ref` requires a non-null, live error handle, which this function's
+    // `# Safety` requires of `error` (a required parameter, so it is not null-checked); the
+    // reference is used only to clone the error during this call, and the returned handle is
+    // a fresh `box_error` allocation independent of `error`.
     box_error(unsafe { error_ref(error) }.error.clone())
 }
 
@@ -1424,8 +1466,13 @@ pub unsafe extern "C" fn kafka_common_Error_clone(error: *const kafka_common_Err
 /// # Safety
 ///
 /// `error` must be a valid, non-null error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_cause(error: *const kafka_common_Error_t) -> *mut kafka_common_Error_t {
+    // SAFETY: `error_ref` requires a non-null, live error handle, which this function's
+    // `# Safety` requires of `error` (a required parameter, so it is not null-checked); the
+    // reference is used only to clone its cause during this call, and the returned handle is
+    // a fresh `box_error` allocation independent of `error`.
     match unsafe { error_ref(error) }.error.source() {
         Some(cause) => box_error(cause.clone()),
         None => std::ptr::null_mut(),
@@ -4503,8 +4550,19 @@ mod tests {
     /// returning `(code, message)` per link, freeing every owned cause handle.
     unsafe fn cause_chain(error: *const kafka_common_Error_t) -> Vec<(kafka_common_ErrorCode_t, String)> {
         let mut chain = Vec::new();
+        // SAFETY: Test code: Every accessor is called on a live handle (built by this test or
+        // received by the running callback and not yet destroyed); borrowed results are read before
+        // their owner is freed, and out-of-range indices exercise the documented null / -1 / 0
+        // paths.
         let mut current = unsafe { kafka_common_Error_cause(error) };
         while !current.is_null() {
+            // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
+            // string borrowed from a live handle or passed to the running callback, and is copied
+            // before that owner goes away. Each handle passed to a `_destroy` is a live, owned handle
+            // (built by this test or received by the callback) that nothing uses afterwards, destroyed
+            // exactly once. Every accessor is called on a live handle (built by this test or received
+            // by the running callback and not yet destroyed); borrowed results are read before their
+            // owner is freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
             unsafe {
                 chain.push((
                     kafka_common_Error_code(current),
@@ -4525,6 +4583,11 @@ mod tests {
     #[test]
     fn error_cause_is_null_without_a_cause() {
         let error = box_error(Error::kafka_message("no cause"));
+        // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
+        // this test or received by the callback) that nothing uses afterwards, destroyed exactly
+        // once. Every accessor is called on a live handle (built by this test or received by the
+        // running callback and not yet destroyed); borrowed results are read before their owner is
+        // freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
         unsafe {
             assert!(kafka_common_Error_cause(error).is_null());
             kafka_common_Error_destroy(error);
@@ -4561,6 +4624,13 @@ mod tests {
         for wrapped in cases {
             let expected_cause = wrapped.source().expect("each case has a cause").clone();
             let parent = box_error(wrapped);
+            // SAFETY: Test code: Each string read with `CStr::from_ptr` is a non-null, NUL-terminated
+            // string borrowed from a live handle or passed to the running callback, and is copied
+            // before that owner goes away. Each handle passed to a `_destroy` is a live, owned handle
+            // (built by this test or received by the callback) that nothing uses afterwards, destroyed
+            // exactly once. Every accessor is called on a live handle (built by this test or received
+            // by the running callback and not yet destroyed); borrowed results are read before their
+            // owner is freed, and out-of-range indices exercise the documented null / -1 / 0 paths.
             unsafe {
                 let cause = kafka_common_Error_cause(parent);
                 assert!(!cause.is_null());
@@ -4583,6 +4653,10 @@ mod tests {
             "outer",
             Error::kafka_message_source("middle", Error::group_authorization("g")),
         ));
+        // SAFETY: Test code: Each handle passed to a `_destroy` is a live, owned handle (built by
+        // this test or received by the callback) that nothing uses afterwards, destroyed exactly
+        // once. The test helper is called on a live handle built by this test, as its `# Safety`
+        // requires.
         unsafe {
             let chain = cause_chain(error);
             assert_eq!(chain.len(), 2);

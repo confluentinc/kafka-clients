@@ -2501,8 +2501,12 @@ pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t
 /// # Safety
 ///
 /// `node` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_is_fenced(node: *const kafka_common_Node_t) -> bool {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle, i.e. a pointer
+    // to a live `Node` this library handed out (owned or borrowed from a live result); the
+    // reference is used only to read one flag during this call.
     unsafe { &*(node as *const Node) }.is_fenced()
 }
 
@@ -6934,6 +6938,10 @@ mod tests {
     fn node_is_fenced_reads_the_fenced_flag() {
         let fenced = Node::with_rack_is_fenced(1, "h".to_string(), 9092, Some("r1".to_string()), true);
         let active = Node::new(2, "h".to_string(), 9092);
+        // SAFETY: Test code: Every accessor is called on a live handle (built by this test or
+        // received by the running callback and not yet destroyed); borrowed results are read before
+        // their owner is freed, and out-of-range indices exercise the documented null / -1 / 0
+        // paths.
         unsafe {
             assert!(kafka_common_Node_is_fenced(
                 &fenced as *const Node as *const kafka_common_Node_t
