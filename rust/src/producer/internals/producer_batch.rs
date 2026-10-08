@@ -252,10 +252,11 @@ impl ProducerBatch {
         // the refusal comes back as one and `append_new_batch` — the only caller that can reach it
         // — turns it into that error ([`Self::UNSIZED_FIRST_APPEND_MESSAGE`]). Either way the
         // record is refused before a byte is written, so the stream never overflows.
-        if self.record_count == 0
-            && self.is_chunked()
-            && self.extension_bytes_needed(timestamp, key, value, headers) != 0
-        {
+        //
+        // The check lives in a cold, out-of-line helper so a plain batch's per-record path pays
+        // only the `record_count == 0` test for it, as Java's plain `ProducerBatch.tryAppend` pays
+        // nothing (the override exists only on `ChunkedProducerBatch`).
+        if self.record_count == 0 && self.chunked_first_append_lacks_capacity(timestamp, key, value, headers) {
             return Err(callback);
         }
 
@@ -801,6 +802,21 @@ impl ProducerBatch {
             base_sequence,
             self.is_transactional(),
         );
+    }
+
+    /// `ChunkedProducerBatch.tryAppend`'s first-record capacity check: whether this is a chunked
+    /// batch whose stream lacks capacity for `key` / `value` / `headers`. Kept out of line and
+    /// cold so the plain batch's [`try_append`](Self::try_append) stays as small as before the fold.
+    #[cold]
+    #[inline(never)]
+    fn chunked_first_append_lacks_capacity(
+        &self,
+        timestamp: i64,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+    ) -> bool {
+        self.is_chunked() && self.extension_bytes_needed(timestamp, key, value, headers) != 0
     }
 
     /// Release resources required for record appends (e.g. compression buffers).

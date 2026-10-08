@@ -335,7 +335,7 @@ impl ChunkedRecordAccumulator {
             if append_result.needs_buffer_extension() {
                 let extension_chunks = self
                     .allocate_extension_chunks(
-                        append_result.extension_bytes_needed,
+                        append_result.extension_bytes_needed(),
                         batch_to_extend.as_ref(),
                         topic_info,
                         topic,

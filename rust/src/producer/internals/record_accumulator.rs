@@ -200,12 +200,10 @@ pub struct RecordAppendResult {
     pub batch_is_full: bool,
     /// Whether a new batch was created for this append.
     pub new_batch_created: bool,
-    /// Bytes of chunk capacity the open batch needs before the record fits (incremental
-    /// strategy). Meaningful only for a [`needs_buffer_extension`](Self::needs_buffer_extension)
-    /// result: the append was NOT attempted (`future` is `None`); the caller allocates this many
-    /// bytes, attaches them via `ProducerBatch::add_buffers`, and retries.
-    pub extension_bytes_needed: i32,
-    /// The number of bytes appended.
+    /// The number of bytes appended. For a [`needs_buffer_extension`](Self::needs_buffer_extension)
+    /// result, which appended nothing, the slot holds Java's `extensionBytesNeeded` instead, read
+    /// through [`extension_bytes_needed`](Self::extension_bytes_needed): sharing it keeps the
+    /// result at its pre-KIP-1332 40 bytes, which every full-strategy append returns.
     pub appended_bytes: i32,
     /// The topic-partition the record was actually appended to; `None` exactly when `future` is.
     ///
@@ -241,7 +239,6 @@ impl RecordAppendResult {
         future: None,
         batch_is_full: false,
         new_batch_created: false,
-        extension_bytes_needed: 0,
         appended_bytes: 0,
         topic_partition: None,
     };
@@ -254,6 +251,7 @@ impl RecordAppendResult {
     /// marker: the instance predicate [`appended`](Self::appended) holds the Java name, and the
     /// four-argument factory has no `_with_<params>` spelling under CLAUDE.md §2's three-parameter
     /// cap that would not need an options type for a crate-private signal.
+    #[inline]
     pub fn appended_result(
         future: Arc<FutureRecordMetadata>,
         batch_is_full: bool,
@@ -266,7 +264,6 @@ impl RecordAppendResult {
             future: Some(future),
             batch_is_full,
             new_batch_created,
-            extension_bytes_needed: 0,
             appended_bytes,
             topic_partition: Some(topic_partition),
         }
@@ -279,8 +276,21 @@ impl RecordAppendResult {
     pub fn needs_extension(extension_bytes_needed: i32) -> Self {
         Self {
             outcome: Outcome::NeedsBufferExtension,
-            extension_bytes_needed,
+            appended_bytes: extension_bytes_needed,
             ..Self::NEEDS_NEW_BATCH
+        }
+    }
+
+    /// Bytes of chunk capacity the open batch needs before the record fits (incremental
+    /// strategy), Java's `extensionBytesNeeded`. Meaningful only for a
+    /// [`needs_buffer_extension`](Self::needs_buffer_extension) result: the append was NOT
+    /// attempted (`future` is `None`); the caller allocates this many bytes, attaches them via
+    /// `ProducerBatch::add_buffers`, and retries. 0 for the other outcomes, as in Java.
+    pub fn extension_bytes_needed(&self) -> i32 {
+        if self.needs_buffer_extension() {
+            self.appended_bytes
+        } else {
+            0
         }
     }
 
@@ -288,6 +298,7 @@ impl RecordAppendResult {
     /// for the [`needs_buffer_extension`](Self::needs_buffer_extension) and
     /// [`needs_new_batch`](Self::needs_new_batch) results.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$RecordAppendResult#appended")]
+    #[inline]
     pub fn appended(&self) -> bool {
         self.outcome == Outcome::Appended
     }
@@ -834,7 +845,7 @@ impl RecordAccumulator {
                 let mut deque = dq_ref.lock().unwrap();
 
                 // After taking the lock, validate that the partition hasn't changed and retry.
-                if self.partition_changed(topic_info, unknown_partition, &deque, cluster) {
+                if unknown_partition && self.partition_changed(topic_info, unknown_partition, &deque, cluster) {
                     continue;
                 }
 
@@ -911,7 +922,7 @@ impl RecordAccumulator {
                 let mut deque = dq_ref.lock().unwrap();
 
                 // After taking the lock, validate that the partition hasn't changed and retry.
-                if self.partition_changed(topic_info, unknown_partition, &deque, cluster) {
+                if unknown_partition && self.partition_changed(topic_info, unknown_partition, &deque, cluster) {
                     continue;
                 }
 
@@ -992,6 +1003,7 @@ impl RecordAccumulator {
     /// `BuiltInPartitioner.updatePartitionInfo` returns at once for a `null` info, which Rust
     /// spells as not calling it.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#updatePartitionInfoOnAppend")]
+    #[inline]
     pub(crate) fn update_partition_info_on_append(
         &self,
         append_result: RecordAppendResult,
@@ -1264,6 +1276,7 @@ impl RecordAccumulator {
 
     /// Check if all batches in the queue are full.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#allBatchesFull")]
+    #[inline]
     pub(crate) fn all_batches_full(deque: &VecDeque<ProducerBatch>) -> bool {
         // Only the last batch may be incomplete, so we just check that.
         match deque.back() {
@@ -1291,6 +1304,7 @@ impl RecordAccumulator {
     /// returned inside the [`AppendFailure`] for the same reason.
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#tryAppend")]
+    #[inline]
     pub(crate) fn try_append(
         &self,
         timestamp: i64,
@@ -2989,6 +3003,18 @@ mod tests {
             "giving up on a pass the pool refused must count the dropped record"
         );
         accum.close();
+    }
+
+    /// Rust-only (DoD #10, Critic 98 F1): every full-strategy append returns a
+    /// `RecordAppendResult`, so the KIP-1332 outcome must not widen it past its pre-KIP-1332
+    /// 40 bytes (the extension size shares `appended_bytes`).
+    #[test]
+    fn test_record_append_result_stays_forty_bytes() {
+        assert_eq!(40, std::mem::size_of::<RecordAppendResult>());
+        let extension = RecordAppendResult::needs_extension(4096);
+        assert!(extension.needs_buffer_extension());
+        assert_eq!(4096, extension.extension_bytes_needed());
+        assert_eq!(0, RecordAppendResult::NEEDS_NEW_BATCH.extension_bytes_needed());
     }
 
     /// Translated from `RecordAccumulatorTest.testAppendDeadline` (KAFKA-20864, `cc6d42206f`,
