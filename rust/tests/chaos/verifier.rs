@@ -580,14 +580,18 @@ struct ConservationState {
     /// what consumer-side ordering is checked against.
     consumed_since_assign: HashMap<(String, (String, i32)), AssignProgress>,
     /// `(consumer, (topic, partition)) -> its progress when
-    /// `on_partitions_revoked` released the partition`. The listener commits
-    /// and reads the released partitions back before it returns, so the
-    /// consumer's next events are those `Committed` read-backs; each is
-    /// compared with this progress. Any other event from the consumer ends the
-    /// window (the commit or the read-back failed, or the consumer is closing
-    /// and skips it), so a later read-back, which may carry the next owner's
-    /// commit, is never compared with it.
-    pending_revoke_checks: HashMap<(String, (String, i32)), AssignProgress>,
+    /// `on_partitions_revoked` released the partition`, one entry for every
+    /// partition the callback released. The listener commits and reads the
+    /// released partitions back before it returns, so the consumer's next
+    /// events are those `Committed` read-backs, in no particular order; each
+    /// is compared with this progress. `None` marks a partition the consumer
+    /// had not consumed from since its assignment: its read-back is the
+    /// previous owner's commit, so it is not compared, but it is still part of
+    /// the window. Any other event from the consumer ends the window (the
+    /// commit or the read-back failed, or the consumer is closing and skips
+    /// it), so a later read-back, which may carry the next owner's commit, is
+    /// never compared with it.
+    pending_revoke_checks: HashMap<(String, (String, i32)), Option<AssignProgress>>,
     /// Committed offsets that were actually compared (the consumer owned the
     /// partition and had consumed from it since assignment).
     commit_checks: usize,
@@ -732,9 +736,8 @@ impl ConservationState {
                         ));
                     }
                     let key = (consumer.clone(), partition.clone());
-                    if let Some(progress) = self.consumed_since_assign.remove(&key)
-                        && callback == RebalanceCallback::Revoked
-                    {
+                    let progress = self.consumed_since_assign.remove(&key);
+                    if callback == RebalanceCallback::Revoked {
                         self.pending_revoke_checks.insert(key.clone(), progress);
                     }
                     if let Some(new_owner) = self.overlaps.remove(&key)
@@ -1017,6 +1020,14 @@ impl ConservationState {
     ///     generation; the client cannot deduplicate across that boundary.
     ///     These are reported but do not fail the run.
     ///
+    /// On a recreated topic the `topic_id`s do not tell the generations apart
+    /// (see `trusted_addresses`): an old-generation copy polled after the id
+    /// map switched carries the new id, as does the retry acknowledged in the
+    /// new generation, so a legitimate cross-generation retry looks like two
+    /// addresses in one generation. Every record of such a topic observed at
+    /// two or more addresses is therefore counted as `cross_generation`, and a
+    /// genuine double write there goes unscored.
+    ///
     /// Consumer re-reads (the same address observed more than once) fall into
     /// neither category; they are covered by the `duplicates (by index)` and
     /// `duplicates (by offset)` counters and by the 2× ratio bound.
@@ -1031,7 +1042,7 @@ impl ConservationState {
             for (topic_id, _, _) in addrs {
                 *per_generation.entry(*topic_id).or_insert(0) += 1;
             }
-            if per_generation.values().any(|&n| n >= 2) {
+            if self.trusted_addresses(&key.0) && per_generation.values().any(|&n| n >= 2) {
                 let mut sorted = addrs.clone();
                 sorted.sort_unstable();
                 double_writes.push((key.clone(), sorted));
@@ -1406,11 +1417,17 @@ impl Verifier for ConservationVerifier {
             },
             WorkloadEvent::Committed { consumer, topic, partition, offset } => {
                 let partition = (topic, partition);
-                let pending = s.pending_revoke_checks.remove(&(consumer.clone(), partition.clone()));
-                if pending.is_none() {
-                    s.end_pending_revoke_checks(&consumer);
+                match s.pending_revoke_checks.remove(&(consumer.clone(), partition.clone())) {
+                    // A read-back of the revoke window.
+                    Some(Some(progress)) => s.record_committed(consumer, partition, offset, Some(progress)),
+                    // Of the window too, but nothing to compare (see
+                    // `pending_revoke_checks`).
+                    Some(None) => {},
+                    None => {
+                        s.end_pending_revoke_checks(&consumer);
+                        s.record_committed(consumer, partition, offset, None);
+                    },
                 }
-                s.record_committed(consumer, partition, offset, pending);
             },
             // The conservation verifier does not interpret share-consumer
             // events; a ShareAckVerifier will.
@@ -2011,7 +2028,8 @@ pub struct ChaosVerdict {
     pub producer_duplicates: Vec<LogicalKey>,
     /// Logical records observed in more than one topic generation (a retry
     /// committed again after a topic recreate destroyed the broker's producer
-    /// state). Excused; reported for context.
+    /// state), or at more than one address on a recreated topic, where the
+    /// generation cannot be told. Excused; reported for context.
     pub cross_generation_duplicates: usize,
     pub partitions_covered: usize,
     /// The maximum number of records any single producer had in flight at one
@@ -2643,6 +2661,34 @@ mod tests {
             partition: 0,
             offset: 3,
         });
+        let verdict = v.verdict(0);
+        assert!(verdict.producer_duplicates.is_empty(), "not a double write: {verdict}");
+        assert_eq!(verdict.cross_generation_duplicates, 1);
+        assert!(verdict.is_pass(), "{verdict}");
+    }
+
+    /// The same, but the ack that survives is the retry's, in the new
+    /// generation: the old-generation copy (polled after the switch) and the
+    /// retry both carry the new id, so on a recreated topic they look like one
+    /// generation. Ids there cannot tell generations apart, so it is a
+    /// cross-generation repeat, not a double write.
+    #[test]
+    fn a_retry_acked_in_the_new_generation_is_not_a_double_write() {
+        let old = Uuid::with_bytes([1u8; 16]);
+        let new = Uuid::with_bytes([2u8; 16]);
+        let v = ConservationVerifier::new();
+        recreate(&v, "t", old, new);
+        v.record(WorkloadEvent::Delivered { index: 7, topic: "t".into(), topic_id: new, partition: 0, offset: 3 });
+        for offset in [900, 3] {
+            v.record(WorkloadEvent::Consumed {
+                consumer: "c".into(),
+                index: 7,
+                topic: "t".into(),
+                topic_id: new,
+                partition: 0,
+                offset,
+            });
+        }
         let verdict = v.verdict(0);
         assert!(verdict.producer_duplicates.is_empty(), "not a double write: {verdict}");
         assert_eq!(verdict.cross_generation_duplicates, 1);
@@ -4107,6 +4153,34 @@ mod tests {
             verdict.commit_violations,
             vec![
                 "c3: committed offset 9 on t-2 is ahead of its own consumption (last consumed 5, expected 6)"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// The revoke-time read-backs arrive in `committed()`'s map order. One for
+    /// a released partition the consumer never consumed from (it carries the
+    /// previous owner's offset) is part of the window, so arriving first it
+    /// neither ends the window nor gets compared, and the others still are.
+    #[test]
+    fn a_revoke_read_back_without_progress_does_not_end_the_window() {
+        let v = ConservationVerifier::new();
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0, 1, 2]));
+        for offset in 0..=5 {
+            v.record(consumed_by("c1", 1, offset));
+            v.record(consumed_by("c1", 2, offset));
+        }
+        v.record(rebalance("c1", RebalanceCallback::Revoked, &[0, 1, 2]));
+        // p0: no consumption since assignment; the previous owner's commit.
+        v.record(committed("c1", 0, 40));
+        v.record(committed("c1", 1, 6));
+        v.record(committed("c1", 2, 9));
+        let verdict = v.verdict(0);
+        assert_eq!(verdict.commit_checks, 2, "{verdict}");
+        assert_eq!(
+            verdict.commit_violations,
+            vec![
+                "c1: committed offset 9 on t-2 is ahead of its own consumption (last consumed 5, expected 6)"
                     .to_string()
             ]
         );

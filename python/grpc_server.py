@@ -1513,7 +1513,9 @@ def main():
     host = os.environ.get("GRPC_HOST", "127.0.0.1")
     # A chaos workload's RunProducer / RunConsumer stream holds a worker for the
     # whole run, so the pool must leave room for those plus the unary calls
-    # (StopWorkload among them) that arrive meanwhile.
+    # (StopWorkload among them) that arrive meanwhile. The chaos config rejects
+    # runs whose streams would leave too few free (PYTHON_SERVER_WORKERS in
+    # rust/tests/chaos/config.rs; keep the two equal).
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=64))
     # One store, shared: a producer takes the group metadata its consumers
     # handed out.

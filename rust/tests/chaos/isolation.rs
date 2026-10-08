@@ -468,6 +468,36 @@ pub fn start_heartbeat_watchdog(heartbeat: Arc<Heartbeat>, stale_after: Duration
         .expect("failed to spawn the heartbeat watchdog");
 }
 
+/// Claim this test process for the scenario `name`, panicking if another
+/// scenario already claimed it. Called before the scenario starts its cluster.
+///
+/// One scenario per process: a finished scenario's [`ForcedExit`] ends the
+/// whole process a minute after its teardown, and the log sink, the signal
+/// state and the gRPC stream registry are process-wide. A second scenario in
+/// the same process (`-- --ignored` without `--exact` selects every scenario)
+/// would be killed mid-run, its result unreported and its cluster leaked.
+pub fn claim_process_for_scenario(name: &str) {
+    static CLAIMED: Mutex<Option<String>> = Mutex::new(None);
+    if let Err(refusal) = claim_scenario_slot(&CLAIMED, name) {
+        panic!("{refusal}");
+    }
+}
+
+/// [`claim_process_for_scenario`] against `slot`: the refusal message if a
+/// scenario already holds it.
+fn claim_scenario_slot(slot: &Mutex<Option<String>>, name: &str) -> Result<(), String> {
+    let mut claimed = lock(slot);
+    if let Some(first) = claimed.as_deref() {
+        return Err(format!(
+            "chaos: scenario {name} refused: this process already ran {first}, and chaos scenarios need a process \
+             each. Select one with `-- --ignored --exact <test path>` (e.g. `--exact run_test::chaos_run`), or \
+             use `cargo xtask chaos`."
+        ));
+    }
+    *claimed = Some(name.to_string());
+    Ok(())
+}
+
 /// When a [`ForcedExit`] fires, and what it prints and exits with.
 struct ForcedExitPlan {
     at: Instant,
@@ -1103,6 +1133,23 @@ mod tests {
         assert_eq!(workload_of_runtime_thread("consumer-rust-1"), None);
         assert_eq!(workload_of_runtime_thread("-rt"), None);
         assert_eq!(workload_of_runtime_thread("tokio-runtime-worker"), None);
+    }
+
+    /// A second scenario in one process is refused, naming both and the fix.
+    #[test]
+    fn a_second_scenario_in_one_process_is_refused() {
+        let slot = Mutex::new(None);
+        assert_eq!(claim_scenario_slot(&slot, "run_test::chaos_run"), Ok(()));
+        let refusal = claim_scenario_slot(&slot, "simple_flow_test::simple_flow_clean_broker_roll").unwrap_err();
+        assert!(
+            refusal.starts_with(
+                "chaos: scenario simple_flow_test::simple_flow_clean_broker_roll refused: this process already ran \
+                 run_test::chaos_run"
+            ),
+            "{refusal}"
+        );
+        assert!(refusal.contains("--exact run_test::chaos_run"), "{refusal}");
+        assert_eq!(lock(&slot).as_deref(), Some("run_test::chaos_run"));
     }
 
     /// The first panic is kept: it is the cause, later ones its consequences.

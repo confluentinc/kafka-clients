@@ -120,6 +120,10 @@ message RunConsumerRequest {
   // commit and after the commit inside on_partitions_revoked (except while
   // closing). 0 disables all read-backs.
   uint32 commit_check_interval_ms = 6;
+  // The producers' msg_size: a consumed record's value must be its index's
+  // encoding at this size (see RunProducerRequest.msg_size), or it is
+  // reported as Corrupted.
+  uint32 msg_size = 7;
 }
 
 message StopWorkloadRequest {
@@ -161,6 +165,8 @@ message WorkloadEvent {
     Finished finished = 11;
     Failed failed = 12;
     Marker marker = 13;
+    // Consumer.
+    Corrupted corrupted = 14;
   }
 }
 
@@ -199,13 +205,23 @@ message ProducerStats {
   double elapsed_seconds = 2;
 }
 
-// A record whose key is an 8-byte big-endian index. Records with any other key
-// are not the harness's and are not reported.
+// A record that is what a producer wrote: its key is the 8-byte big-endian
+// index and its value that index's encoding at RunConsumerRequest.msg_size.
 message Consumed {
   uint64 index = 1;
   string topic = 2;
   int32 partition = 3;
   int64 offset = 4;
+}
+
+// A consumed record that is not what any producer wrote: a missing or
+// wrong-length key, or a value that does not match the key's index. Fails the
+// run. `detail` says what was wrong.
+message Corrupted {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  string detail = 4;
 }
 
 enum RebalanceKind {
