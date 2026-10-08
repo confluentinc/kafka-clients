@@ -15,14 +15,15 @@
 //! Async-consumer background-task metrics
 //! (`org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::metrics::stats::{Avg, Max, Value};
 use crate::common::metrics::{Metrics, Sensor};
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records background-task / event-queue timing and depth metrics. Mirrors
-/// Java's `AsyncConsumerMetrics implements AutoCloseable`.
+/// Java's `AsyncConsumerMetrics extends AbstractConsumerMetricsManager`
+/// (an `AutoCloseable`; KAFKA-19542).
 ///
 /// All ten sensors are created via `metrics.sensor(name)` — the INFO-default
 /// overload (`Metrics.java`: `sensor(name)` → `sensor(name, INFO)`). The Java
@@ -33,8 +34,9 @@ use crate::common::metrics::{Metrics, Sensor};
 /// — never per-record (CLAUDE.md §13) — so the per-fetch / per-record hot path
 /// is untouched. `Sensor::record` short-circuits on `should_record()`
 /// internally.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics")]
 pub(crate) struct AsyncConsumerMetrics {
-    metrics: Arc<Metrics>,
+    inner: AbstractConsumerMetricsManager,
     time_between_network_thread_poll_sensor: Arc<Sensor>,
     application_event_queue_size_sensor: Arc<Sensor>,
     application_event_queue_time_sensor: Arc<Sensor>,
@@ -73,27 +75,28 @@ impl AsyncConsumerMetrics {
 
     /// Java: `AsyncConsumerMetrics(Metrics metrics, String groupName)`.
     pub(crate) fn new(metrics: Arc<Metrics>, group_name: &str) -> Self {
+        // Java: `this(new MetricsLedger(metrics), groupName)` → `super(metrics)` (KAFKA-19542).
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(metrics));
+        let metrics = inner.metrics();
         let time_between_network_thread_poll_sensor = metrics
             .sensor(AsyncConsumerMetrics::TIME_BETWEEN_NETWORK_THREAD_POLL_SENSOR_NAME)
             .expect("creating time-between-network-thread-poll sensor");
         time_between_network_thread_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-network-thread-poll-avg",
                     group_name,
                     "The average time taken, in milliseconds, between each poll in the network thread.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding time-between-network-thread-poll-avg");
         time_between_network_thread_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-network-thread-poll-max",
                     group_name,
                     "The maximum time taken, in milliseconds, between each poll in the network thread.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -104,11 +107,10 @@ impl AsyncConsumerMetrics {
             .expect("creating application-event-queue-size sensor");
         application_event_queue_size_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     AsyncConsumerMetrics::APPLICATION_EVENT_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
-                    "The current number of events in the queue to send from the application thread to the background thread.",
-                    BTreeMap::new(),
+                    "The current number of events in the queue to send from the application thread to the background thread."
                 ),
                 Box::new(Value::new()),
             )
@@ -119,22 +121,20 @@ impl AsyncConsumerMetrics {
             .expect("creating application-event-queue-time sensor");
         application_event_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "application-event-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that application events are taking to be dequeued.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding application-event-queue-time-avg");
         application_event_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "application-event-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that an application event took to be dequeued.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -145,22 +145,20 @@ impl AsyncConsumerMetrics {
             .expect("creating application-event-queue-processing-time sensor");
         application_event_queue_processing_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "application-event-queue-processing-time-avg",
                     group_name,
-                    "The average time, in milliseconds, that the background thread takes to process all available application events.",
-                    BTreeMap::new(),
+                    "The average time, in milliseconds, that the background thread takes to process all available application events."
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding application-event-queue-processing-time-avg");
         application_event_queue_processing_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "application-event-queue-processing-time-max",
                     group_name,
-                    "The maximum time, in milliseconds, that the background thread took to process all available application events.",
-                    BTreeMap::new(),
+                    "The maximum time, in milliseconds, that the background thread took to process all available application events."
                 ),
                 Box::new(Max::new()),
             )
@@ -171,11 +169,10 @@ impl AsyncConsumerMetrics {
             .expect("creating application-events-expired-count sensor");
         application_event_expired_size_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     AsyncConsumerMetrics::APPLICATION_EVENT_EXPIRED_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of expired application events.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Value::new()),
             )
@@ -186,11 +183,10 @@ impl AsyncConsumerMetrics {
             .expect("creating unsent-requests-queue-size sensor");
         unsent_requests_queue_size_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     AsyncConsumerMetrics::UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
                     "The current number of unsent requests in the background thread.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Value::new()),
             )
@@ -201,22 +197,20 @@ impl AsyncConsumerMetrics {
             .expect("creating unsent-requests-queue-time sensor");
         unsent_requests_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "unsent-requests-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that requests are taking to be sent in the background thread.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding unsent-requests-queue-time-avg");
         unsent_requests_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "unsent-requests-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that a request remained unsent in the background thread.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -227,11 +221,10 @@ impl AsyncConsumerMetrics {
             .expect("creating background-event-queue-size sensor");
         background_event_queue_size_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     AsyncConsumerMetrics::BACKGROUND_EVENT_QUEUE_SIZE_SENSOR_NAME,
                     group_name,
-                    "The current number of events in the queue to send from the background thread to the application thread.",
-                    BTreeMap::new(),
+                    "The current number of events in the queue to send from the background thread to the application thread."
                 ),
                 Box::new(Value::new()),
             )
@@ -242,22 +235,20 @@ impl AsyncConsumerMetrics {
             .expect("creating background-event-queue-time sensor");
         background_event_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "background-event-queue-time-avg",
                     group_name,
                     "The average time, in milliseconds, that background events are taking to be dequeued.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding background-event-queue-time-avg");
         background_event_queue_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "background-event-queue-time-max",
                     group_name,
                     "The maximum time, in milliseconds, that background events are taking to be dequeued.",
-                    BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -268,29 +259,27 @@ impl AsyncConsumerMetrics {
             .expect("creating background-event-queue-processing-time sensor");
         background_event_queue_processing_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "background-event-queue-processing-time-avg",
                     group_name,
-                    "The average time, in milliseconds, that the consumer took to process all available background events.",
-                    BTreeMap::new(),
+                    "The average time, in milliseconds, that the consumer took to process all available background events."
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding background-event-queue-processing-time-avg");
         background_event_queue_processing_time_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "background-event-queue-processing-time-max",
                     group_name,
-                    "The maximum time, in milliseconds, that the consumer took to process all available background events.",
-                    BTreeMap::new(),
+                    "The maximum time, in milliseconds, that the consumer took to process all available background events."
                 ),
                 Box::new(Max::new()),
             )
             .expect("adding background-event-queue-processing-time-max");
 
         Self {
-            metrics,
+            inner,
             time_between_network_thread_poll_sensor,
             application_event_queue_size_sensor,
             application_event_queue_time_sensor,
@@ -358,22 +347,11 @@ impl AsyncConsumerMetrics {
             .record_value(processing_time as f64);
     }
 
-    /// Java: `close()` (`AutoCloseable`). Removes all ten sensors.
+    /// Removes every sensor and metric this manager registered. Since
+    /// KAFKA-19542 Java inherits `AbstractConsumerMetricsManager.close()`
+    /// instead of removing its ten sensors by name.
     pub(crate) fn close(&self) {
-        for name in [
-            self.time_between_network_thread_poll_sensor.name(),
-            self.application_event_queue_size_sensor.name(),
-            self.application_event_queue_time_sensor.name(),
-            self.application_event_queue_processing_time_sensor.name(),
-            self.application_event_expired_size_sensor.name(),
-            self.background_event_queue_size_sensor.name(),
-            self.background_event_queue_time_sensor.name(),
-            self.background_event_queue_processing_time_sensor.name(),
-            self.unsent_requests_queue_size_sensor.name(),
-            self.unsent_requests_queue_time_sensor.name(),
-        ] {
-            self.metrics.remove_sensor(name);
-        }
+        self.inner.close();
     }
 }
 
@@ -556,5 +534,19 @@ mod tests {
             assert_metric_value(&metrics, "background-event-queue-processing-time-avg", group_name);
             assert_metric_value(&metrics, "background-event-queue-processing-time-max", group_name);
         }
+    }
+
+    /// `AsyncConsumerMetricsTest.testCleanup`, inherited from
+    /// `AbstractConsumerMetricsManagerTest` (KAFKA-19542): the override builds
+    /// `new AsyncConsumerMetrics(metrics, groupDescription)`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AbstractConsumerMetricsManagerTest#testCleanup")]
+    fn test_cleanup() {
+        crate::consumer::internals::metrics::abstract_consumer_metrics_manager::tests::test_cleanup(
+            |metrics, group_description| {
+                let manager = AsyncConsumerMetrics::new(Arc::clone(metrics), group_description);
+                Box::new(move || manager.close())
+            },
+        );
     }
 }

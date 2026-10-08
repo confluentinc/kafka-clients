@@ -45,8 +45,8 @@ use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 
 use super::CoordinatorRequestManager;
-use super::HeartbeatMetricsManager;
 use super::HeartbeatRequestState;
+use super::metrics::HeartbeatMetricsManager;
 use super::{PollResult, UnsentRequest};
 
 /// Java's `Errors.exception(String message)` (`Errors.java:468-475`): a null

@@ -304,12 +304,15 @@ rust/src/consumer/               # 22 files + 51 internals + 9 events
     │                                # bytes for the admin group-describe path
     ├── deserializers.rs, consumer_interceptors.rs, consumer_utils.rs
     ├── wakeup_trigger.rs, request_state.rs, timed_request_state.rs
-    ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs,
-    │   fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
-    │   fetch_metrics_registry.rs, heartbeat_metrics_manager.rs,
-    │   offset_commit_metrics_manager.rs,
-    │   consumer_rebalance_metrics_manager.rs,
-    │   rebalance_callback_metrics_manager.rs, sensor_builder.rs
+    ├── fetch_metrics_manager.rs, fetch_metrics_aggregator.rs,
+    │   fetch_metrics_registry.rs
+    ├── metrics/                     # consumer.internals.metrics (KAFKA-19542)
+    │   ├── metrics_ledger.rs, abstract_consumer_metrics_manager.rs
+    │   ├── async_consumer_metrics.rs, kafka_consumer_metrics.rs
+    │   ├── heartbeat_metrics_manager.rs, offset_commit_metrics_manager.rs
+    │   ├── consumer_rebalance_metrics_manager.rs,
+    │   │   rebalance_callback_metrics_manager.rs
+    │   └── sensor_builder.rs
     └── events/
         ├── application_event.rs, application_event_handler.rs,
         │   application_event_processor.rs

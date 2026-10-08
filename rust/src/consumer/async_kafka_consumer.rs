@@ -72,7 +72,6 @@ use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
-use crate::consumer::internals::AsyncConsumerMetrics;
 use crate::consumer::internals::ConsumerInterceptors;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::ConsumerRebalanceListenerInvoker;
@@ -81,7 +80,6 @@ use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchCollector;
 use crate::consumer::internals::FetchMetricsManager;
 use crate::consumer::internals::FetchMetricsRegistry;
-use crate::consumer::internals::KafkaConsumerMetrics;
 use crate::consumer::internals::MemberState;
 use crate::consumer::internals::MemberStateListener;
 use crate::consumer::internals::OffsetAndTimestampInternal;
@@ -96,6 +94,9 @@ use crate::consumer::internals::events::CompletableEvent;
 use crate::consumer::internals::events::CompletableEventReaper;
 use crate::consumer::internals::events::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
+use crate::consumer::internals::metrics::KafkaConsumerMetrics;
+use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
@@ -1243,6 +1244,17 @@ where
     /// removed in `close`.
     async_consumer_metrics: Arc<AsyncConsumerMetrics>,
 
+    /// The fetch metrics manager (Java `private final FetchMetricsManager
+    /// fetchMetricsManager`, a field since KAFKA-19542). The fetch path holds
+    /// clones of the same `Arc`; the consumer keeps one to close it.
+    fetch_metrics_manager: Arc<FetchMetricsManager>,
+
+    /// The rebalance-callback metrics manager (Java `private final
+    /// RebalanceCallbackMetricsManager rebalanceCallbackMetricsManager`, a field
+    /// since KAFKA-19542). Shared with the rebalance listener invoker; the
+    /// consumer keeps one to close it.
+    rebalance_callback_metrics_manager: Arc<RebalanceCallbackMetricsManager>,
+
     /// Shared mirror of the background-event queue depth (Java reads
     /// `backgroundEventQueue.size()`; tokio mpsc has no `len()`). Bumped by
     /// `BackgroundEventHandler::add` on the bg task, reset to 0 by
@@ -1622,6 +1634,12 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// Async-consumer background-task / event-queue metrics
     /// (`AsyncConsumerMetrics`), recording into the same `metrics` registry.
     pub async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    /// The fetch metrics manager (Java's test constructor takes it since
+    /// KAFKA-19542).
+    pub fetch_metrics_manager: Arc<FetchMetricsManager>,
+    /// The rebalance-callback metrics manager (Java's test constructor takes it
+    /// since KAFKA-19542).
+    pub rebalance_callback_metrics_manager: Arc<RebalanceCallbackMetricsManager>,
     /// Shared mirror of the background-event queue depth.
     pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
@@ -1908,18 +1926,14 @@ where
         // M7 over THIS same registry — no re-plumb.
         let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
 
-        // M4: the consumer-level + heartbeat + offset-commit metrics managers
-        // all register against the SAME `Arc<Metrics>` registry. Java
-        // constructs each from `metrics` in the relevant constructor
-        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
-        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
-        // wired into their bg-task request managers post-construction (the
-        // request managers are built below), mirroring the coordinator/
-        // interceptor-hook setter pattern.
+        // M4: the consumer-level metrics register against the SAME
+        // `Arc<Metrics>` registry as every other manager. The heartbeat and
+        // offset-commit metrics managers are built below, only when their
+        // request manager is: Java builds each inside that request manager's
+        // constructor (`CommitRequestManager.java:172`,
+        // `ConsumerHeartbeatRequestManager.java:72`), so a consumer without a
+        // `group.id` never registers them, and nothing removes them on close.
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
-        let offset_commit_metrics_manager =
-            Arc::new(crate::consumer::internals::OffsetCommitMetricsManager::new(&metrics));
-        let heartbeat_metrics_manager = Arc::new(crate::consumer::internals::HeartbeatMetricsManager::new(&metrics));
 
         // M6: the async-consumer background-task / event-queue metrics
         // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
@@ -2194,11 +2208,14 @@ where
                 as Arc<dyn crate::consumer::internals::AutoCommitInterceptorHook>);
         }
 
-        // M4: wire the OffsetCommitMetricsManager into the commit manager so
-        // the commit-response handler records per-commit request latency
-        // (`CommitRequestManager.java:767`).
+        // M4: build the OffsetCommitMetricsManager for the commit manager
+        // (Java: in the `CommitRequestManager` constructor,
+        // `CommitRequestManager.java:172`), so the commit-response handler
+        // records per-commit request latency (`CommitRequestManager.java:864`).
         if let Some(commit_arc) = commit.as_ref() {
-            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+            commit_arc.set_offset_commit_metrics_manager(Arc::new(
+                crate::consumer::internals::metrics::OffsetCommitMetricsManager::new(&metrics),
+            ));
         }
 
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
@@ -2234,10 +2251,12 @@ where
                 // the consumer's shared Arc<Metrics> (M3 field). Java builds the
                 // ConsumerRebalanceMetricsManager inside the membership-manager
                 // constructor; we build it here and pass it in.
-                Some(Arc::new(crate::consumer::internals::ConsumerRebalanceMetricsManager::new(
-                    &metrics,
-                    Arc::clone(&subscriptions),
-                ))),
+                Some(Arc::new(
+                    crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
                 Arc::clone(&time),
             ))),
             _ => None,
@@ -2257,10 +2276,14 @@ where
                         Arc::clone(membership),
                         Arc::clone(&background_event_handler),
                     );
-                    // M4: wire the HeartbeatMetricsManager so the send/response
-                    // paths record `last-heartbeat-seconds-ago` /
-                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
-                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    // M4: build the HeartbeatMetricsManager (Java: in the
+                    // `ConsumerHeartbeatRequestManager` constructor,
+                    // `ConsumerHeartbeatRequestManager.java:72`) so the
+                    // send/response paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:309,323,335`).
+                    hb.set_metrics_manager(Arc::new(
+                        crate::consumer::internals::metrics::HeartbeatMetricsManager::new(&metrics),
+                    ));
                     // Wake the bg task when the heartbeat response forwarder (a
                     // spawned task) has queued a completion, so a new
                     // assignment, fence or fatal error is applied at once
@@ -2495,11 +2518,11 @@ where
         // wire them post-construction so the no-arg `new` stays usable in
         // tests. The metrics manager registers against the consumer's shared
         // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
+        // Java keeps the manager in a field since KAFKA-19542 so `close()` can
+        // close it (`AsyncKafkaConsumer.java:568`).
+        let rebalance_callback_metrics_manager = Arc::new(RebalanceCallbackMetricsManager::new(&metrics));
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
-        rebalance_listener_invoker.set_metrics(
-            crate::consumer::internals::RebalanceCallbackMetricsManager::new(&metrics),
-            Arc::clone(&time),
-        );
+        rebalance_listener_invoker.set_metrics(Arc::clone(&rebalance_callback_metrics_manager), Arc::clone(&time));
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
         // `CompletableEventReaper` as the application reaper since the
@@ -2656,6 +2679,8 @@ where
             metrics,
             kafka_consumer_metrics,
             async_consumer_metrics,
+            fetch_metrics_manager,
+            rebalance_callback_metrics_manager,
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
@@ -2742,6 +2767,8 @@ where
             metrics: components.metrics,
             kafka_consumer_metrics: components.kafka_consumer_metrics,
             async_consumer_metrics: components.async_consumer_metrics,
+            fetch_metrics_manager: components.fetch_metrics_manager,
+            rebalance_callback_metrics_manager: components.rebalance_callback_metrics_manager,
             background_event_queue_size: components.background_event_queue_size,
             client_id: components.client_id,
             group_id: components.group_id,
@@ -5891,6 +5918,14 @@ where
         // registry. `close()` is infallible here.
         self.async_consumer_metrics.close();
 
+        // Java (KAFKA-19542): `closeQuietly(fetchMetricsManager, "consumer fetch
+        // metrics", firstException)` and `closeQuietly(rebalanceCallbackMetricsManager,
+        // "consumer rebalance callback metrics")` (`AsyncKafkaConsumer.java:1676-1677`)
+        // — remove the fetch metrics, including the per-topic / per-partition
+        // ones, and the rebalance-callback latency metrics. Both infallible.
+        self.fetch_metrics_manager.close();
+        self.rebalance_callback_metrics_manager.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
@@ -6537,6 +6572,7 @@ mod tests {
             Arc::clone(&metrics),
             crate::consumer::internals::ConsumerUtils::CONSUMER_METRIC_GROUP,
         ));
+        let rebalance_callback_metrics_manager = Arc::new(RebalanceCallbackMetricsManager::new(&metrics));
         let background_event_queue_size = Arc::new(AtomicI64::new(0));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
@@ -6584,6 +6620,11 @@ mod tests {
             metrics,
             kafka_consumer_metrics,
             async_consumer_metrics,
+            // Java's test constructor takes `mock(FetchMetricsManager.class)` /
+            // `mock(RebalanceCallbackMetricsManager.class)` here; the real
+            // managers over the fixture's registry stand in for the mocks.
+            fetch_metrics_manager,
+            rebalance_callback_metrics_manager,
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,

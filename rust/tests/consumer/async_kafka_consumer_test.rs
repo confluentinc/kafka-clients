@@ -160,3 +160,77 @@ async fn test_pause_flag_preserved_for_retained_partition_on_manual_assignment_c
 
     consumer.close().await.expect("close");
 }
+
+/// Asserts the shape of `consumer.metrics()`: the `kafka-metrics-count`
+/// meta-metric is always there, and the rest is non-empty before `close()`
+/// and empty after it. Translates the `assertMetricsMap` helper of
+/// `KafkaConsumerTest` (KAFKA-19542, 9a28bd23ad), messages included.
+fn assert_metrics_map(
+    consumer: &dyn confluent_kafka::consumer::Consumer<String, String>,
+    metrics_should_be_present: bool,
+) {
+    // Copy the map because we're going to modify it.
+    let mut metrics = consumer.metrics();
+
+    // There's a meta-metric named "count" that is automatically added to the metrics map.
+    let count_metric_name = metrics
+        .keys()
+        .find(|metric_name| metric_name.name() == "count" && metric_name.group() == "kafka-metrics-count")
+        .cloned();
+
+    // Make sure the meta-metric is present and has an entry.
+    let count_metric_name =
+        count_metric_name.expect("The \"count\" meta-metric was unexpectedly missing from the Consumer metrics");
+    assert!(
+        metrics.remove(&count_metric_name).is_some(),
+        "The \"count\" meta-metric key was removed from the Consumer metrics map, but it unexpectedly had no entry"
+    );
+
+    if metrics_should_be_present {
+        assert!(
+            !metrics.is_empty(),
+            "The consumer should have created metrics, but they are unexpectedly empty"
+        );
+    } else {
+        let expected: Vec<String> = Vec::new();
+        let mut actual: Vec<String> = metrics
+            .keys()
+            .map(|metric_name| format!("{}:{}", metric_name.group(), metric_name.name()))
+            .collect();
+        actual.sort();
+        assert_eq!(
+            expected, actual,
+            "The consumer should have removed its metrics on close(), but there are metrics remaining"
+        );
+    }
+}
+
+/// Translated from `KafkaConsumerTest.testMetricsRemovedOnClose` (KAFKA-19542,
+/// 9a28bd23ad), CONSUMER arm (the CLASSIC arm is out of scope,
+/// consumer-threading.md §20): after `close()` the only metric left in
+/// `metrics()` is the `kafka-metrics-count` meta-metric. Like Java, the
+/// consumer has no `group.id`, so no group request manager is built.
+#[tokio::test(flavor = "multi_thread")]
+#[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testMetricsRemovedOnClose")]
+async fn test_metrics_removed_on_close() {
+    use confluent_kafka::consumer::CloseOptions;
+    use std::time::Duration;
+
+    let props = HashMap::from([
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("bootstrap.servers".to_string(), "localhost:9999".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        ConsumerConfig::new(&props).expect("config should validate"),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("KafkaConsumer::new");
+
+    assert_metrics_map(consumer.as_ref(), true);
+    consumer
+        .close_with_options(CloseOptions::new_timeout(Duration::ZERO))
+        .await
+        .expect("close");
+    assert_metrics_map(consumer.as_ref(), false);
+}

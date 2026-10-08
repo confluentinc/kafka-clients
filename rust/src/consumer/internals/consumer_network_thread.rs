@@ -207,7 +207,7 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
     /// post-construction by the live consumer (M4/M5 setter precedent);
     /// tests leave it unset and the bg-loop record points are no-ops.
-    async_consumer_metrics: Option<Arc<super::AsyncConsumerMetrics>>,
+    async_consumer_metrics: Option<Arc<super::metrics::AsyncConsumerMetrics>>,
     /// Shared mirror of the application-event queue depth, written by
     /// [`super::events::ApplicationEventHandler::add`]
     /// and reset to 0 by `process_application_events` (Java's
@@ -277,7 +277,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// Java passes `AsyncConsumerMetrics` to the constructor.
     pub(crate) fn set_async_consumer_metrics(
         &mut self,
-        metrics: Arc<super::AsyncConsumerMetrics>,
+        metrics: Arc<super::metrics::AsyncConsumerMetrics>,
         application_event_queue_size: Arc<AtomicI64>,
     ) {
         self.async_consumer_metrics = Some(metrics);
@@ -2281,9 +2281,9 @@ mod tests {
 
     use crate::common::Metric;
     use crate::common::metrics::Metrics;
-    use crate::consumer::internals::AsyncConsumerMetrics;
     use crate::consumer::internals::ConsumerUtils;
     use crate::consumer::internals::events::AsyncPollState;
+    use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
     /// Java parameterizes both metric tests over
     /// `AsyncConsumerMetricsTest#groupNameProvider`; we loop the same two groups.
