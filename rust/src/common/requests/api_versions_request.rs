@@ -80,10 +80,23 @@ impl ApiVersionsRequest {
 
     /// Whether the request is valid.
     ///
-    /// For version >= 3, the client software name and version must match the
-    /// `SOFTWARE_NAME_VERSION_PATTERN` regex.
+    /// For version >= 5, either both the cluster id and the node id are
+    /// specified, or neither is (KIP-1242). For version >= 3, the client
+    /// software name and version must match the `SOFTWARE_NAME_VERSION_PATTERN`
+    /// regex.
+    ///
+    /// Translated from `ApiVersionsRequest.isValid` (`ApiVersionsRequest.java:104-117`).
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest#isValid")]
     pub fn is_valid(&self) -> bool {
+        if self.version >= 5 {
+            // Either cluster ID and node ID are both specified, or neither is.
+            if (self.data.cluster_id.is_none() && self.data.node_id != -1)
+                || (self.data.cluster_id.is_some() && self.data.node_id == -1)
+            {
+                return false;
+            }
+        }
+
         if self.version >= 3 {
             SOFTWARE_NAME_VERSION_PATTERN.is_match(&self.data.client_software_name)
                 && SOFTWARE_NAME_VERSION_PATTERN.is_match(&self.data.client_software_version)
@@ -197,6 +210,25 @@ impl Builder {
         latest_allowed_version: i16,
     ) -> Self {
         Self { data, oldest_allowed_version, latest_allowed_version }
+    }
+
+    /// Sets the cluster id the client expects the broker to belong to (v5+,
+    /// KIP-1242). Provide it together with [`Self::set_node_id`]: a v5 request
+    /// with only one of the two is invalid ([`ApiVersionsRequest::is_valid`]).
+    ///
+    /// Translated from `ApiVersionsRequest.Builder.setClusterId` (`ApiVersionsRequest.java:59-61`).
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder#setClusterId")]
+    pub fn set_cluster_id(&mut self, cluster_id: Option<&str>) {
+        self.data.set_cluster_id(cluster_id.map(str::to_string));
+    }
+
+    /// Sets the node id the client expects the broker to have (v5+,
+    /// KIP-1242). Provide it together with [`Self::set_cluster_id`].
+    ///
+    /// Translated from `ApiVersionsRequest.Builder.setNodeId` (`ApiVersionsRequest.java:63-65`).
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder#setNodeId")]
+    pub fn set_node_id(&mut self, node_id: i32) {
+        self.data.set_node_id(node_id);
     }
 }
 
@@ -368,6 +400,64 @@ mod tests {
             0x00, // top-level tagged fields
         ];
         assert_eq!(request.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
+    /// The builder setters (KIP-1242, `ApiVersionsRequest.Builder.setClusterId` /
+    /// `setNodeId`) reach the wire: the v5 request built from a default builder
+    /// carries the cluster id and node id in place of `null` / -1. The software
+    /// name and version are the builder's defaults, `confluent-kafka-rust` and
+    /// the crate version.
+    #[test]
+    fn test_builder_set_cluster_id_and_node_id_known_byte_vector_v5() {
+        let mut builder = Builder::new();
+        builder.set_cluster_id(Some("c"));
+        builder.set_node_id(7);
+        let AbstractRequest::ApiVersions(built) = builder.build_version(5).unwrap() else {
+            panic!("expected an ApiVersions request");
+        };
+        assert!(built.is_valid());
+        let mut request = AbstractRequest::ApiVersions(built);
+
+        let name = DEFAULT_CLIENT_SOFTWARE_NAME.as_bytes();
+        let version = env!("CARGO_PKG_VERSION").as_bytes();
+        let mut expected = vec![(name.len() + 1) as u8];
+        expected.extend_from_slice(name);
+        expected.push((version.len() + 1) as u8);
+        expected.extend_from_slice(version);
+        expected.extend_from_slice(&[
+            0x02, 0x63, // cluster_id "c"
+            0x00, 0x00, 0x00, 0x07, // node_id 7
+            0x00, // top-level tagged fields
+        ]);
+        assert_eq!(request.serialize().unwrap().into_buffer().as_slice(), expected.as_slice());
+    }
+
+    /// v5 requires the cluster id and node id together (KIP-1242,
+    /// `ApiVersionsRequest.isValid`): both or neither is valid, one alone is
+    /// not. Below v5 the pair is not checked.
+    #[test]
+    fn test_is_valid_v5_requires_cluster_id_and_node_id_together() {
+        let request = |cluster_id: Option<&str>, node_id: i32, version: i16| {
+            let mut data = ApiVersionsRequestData::new();
+            data.set_client_software_name("a".to_string())
+                .set_client_software_version("1".to_string())
+                .set_cluster_id(cluster_id.map(str::to_string))
+                .set_node_id(node_id);
+            ApiVersionsRequest::new(data, version)
+        };
+        assert!(request(None, -1, 5).is_valid());
+        assert!(request(Some("c"), 0, 5).is_valid());
+        assert!(!request(None, 0, 5).is_valid());
+        assert!(!request(Some("c"), -1, 5).is_valid());
+        assert!(request(None, 0, 4).is_valid());
+        assert!(request(Some("c"), -1, 4).is_valid());
+        // The pair check comes first, but the v3 software-name check still applies.
+        let mut data = ApiVersionsRequestData::new();
+        data.set_client_software_name("my client!".to_string())
+            .set_client_software_version("1".to_string())
+            .set_cluster_id(Some("c".to_string()))
+            .set_node_id(0);
+        assert!(!ApiVersionsRequest::new(data, 5).is_valid());
     }
 
     /// The v5 bytes parse back to the same `ClusterId` / `NodeId`.
