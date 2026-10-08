@@ -124,6 +124,47 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
     Error::local_illegal_state(format!("Rust panic caught at the FFI boundary in {fn_name}: {message}"))
 }
 
+/// Spawns the task a callback-style entry point hands its callback to,
+/// aborting the process if the spawn panics.
+///
+/// `#[ffi_guard(on_panic = ...)]` fires the entry point's callback when the
+/// body panics, which is right only while no task can fire it as well. Tokio
+/// can panic inside `spawn` after the task is queued: the C caller's thread is
+/// not one of the runtime's workers, so the task is queued and a worker is then
+/// woken, and a failed wake is `expect("failed to wake I/O driver")`
+/// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would fire
+/// the callback from `on_panic` while the queued task fires it too, and would
+/// skip the producer's `pending_tasks` registration after the spawn, which
+/// `destroy` relies on. So the process aborts, as every panic at the boundary
+/// did before `#[ffi_guard]`: the OS refused to wake the runtime. See §4 item 6
+/// of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn spawn_callback_task<F>(runtime: &tokio::runtime::Handle, task: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    spawn_or_abort(|| runtime.spawn(task))
+}
+
+/// Runs `spawn` and aborts the process if it panics: the body of
+/// [`spawn_callback_task`], taking the spawn as a closure so a test can make it
+/// panic.
+fn spawn_or_abort<J>(spawn: impl FnOnce() -> J) -> J {
+    match std::panic::catch_unwind(AssertUnwindSafe(spawn)) {
+        Ok(join) => join,
+        // The payload is not dropped: nothing runs after the abort.
+        Err(_) => {
+            log::error!(
+                "aborting: tokio panicked while spawning a task that owns a C callback, which may already be \
+                 queued; unwinding would let the FFI guard fire that callback a second time"
+            );
+            std::process::abort()
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error handle
 // ---------------------------------------------------------------------------
@@ -3967,6 +4008,20 @@ mod tests {
         panic!("custom path");
     }
 
+    /// A callback-style entry point whose spawn panics the way tokio's can after
+    /// queueing the task. `on_panic` prints instead of firing a callback, so the
+    /// child process of `spawn_panic_aborts_before_the_guard` can show it never ran.
+    ///
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard(on_panic = |err| println!("on_panic fired: {}", err.message()))]
+    unsafe extern "C" fn guarded_spawn_panics() {
+        println!("spawning");
+        spawn_or_abort::<()>(|| panic!("failed to wake I/O driver"));
+    }
+
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
@@ -4191,6 +4246,61 @@ mod tests {
         assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
         // No `out_error` store is generated around an explicit closure.
         assert!(out_error.is_null());
+    }
+
+    #[test]
+    fn spawn_callback_task_runs_the_task() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        // From a thread that is not one of the runtime's workers, like a C caller's.
+        let task = spawn_callback_task(runtime.handle(), async { 7 });
+        assert_eq!(runtime.block_on(task).expect("the task ran"), 7);
+    }
+
+    /// A panic inside the spawn aborts the process before the guard sees it: the
+    /// queued task would fire the callback, so `on_panic` firing it as well would
+    /// be a second completion (§4 item 6 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`). The abort would end
+    /// this test binary, so the test runs itself again in a child process, which
+    /// takes the `CHILD` branch.
+    #[test]
+    fn spawn_panic_aborts_before_the_guard() {
+        const CHILD: &str = "CONFLUENT_KAFKA_SPAWN_PANIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // SAFETY: Test code: `guarded_spawn_panics` takes no arguments and has no
+            // preconditions; the call is `unsafe` solely because it is declared `unsafe
+            // extern "C"`.
+            unsafe { guarded_spawn_panics() };
+            println!("returned");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .args(["--exact", "ffi::common::tests::spawn_panic_aborts_before_the_guard"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("run the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("spawning"),
+            "the child never reached the spawn:\n{stdout}\n{stderr}"
+        );
+        assert!(stderr.contains("failed to wake I/O driver"), "no panic in the child:\n{stderr}");
+        assert!(!stdout.contains("on_panic fired"), "the panic reached the guard:\n{stdout}");
+        assert!(!stdout.contains("returned"), "the entry point returned:\n{stdout}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // SIGABRT (6 on Linux and macOS), which `std::process::abort` raises.
+            assert_eq!(
+                output.status.signal(),
+                Some(6),
+                "child exited with {}:\n{stderr}",
+                output.status
+            );
+        }
+        #[cfg(not(unix))]
+        assert!(!output.status.success(), "child exited with {}", output.status);
     }
 
     #[test]

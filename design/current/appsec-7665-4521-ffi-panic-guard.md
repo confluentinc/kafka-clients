@@ -265,24 +265,27 @@ proved wrong or incomplete). The Manager keeps §5.
 5. **Panics inside tokio tasks spawned by the FFI** are contained by tokio
    and surface as a dropped completion; this plan does not change that path.
    It is pre-existing and separate from the boundary guard.
-6. **Known limitation, decision deferred to the user (Critic 79 Note C): at a
-   D4 site, a panic after the spawn fires the callback twice.** Where the D4
-   hand-off is a `tokio::spawn`, the spawn can unwind after it has queued the
-   task. The C caller's thread is not one of the runtime's workers, so tokio
-   schedules the task through `schedule_task`'s remote path, and
+6. **Fixed 2026-10-07 (Critic 79 Note C): at a D4 site, a panic inside the
+   spawn fired the callback twice.** Where the D4 hand-off is a
+   `tokio::spawn`, the spawn can unwind after it has queued the task. The C
+   caller's thread is not one of the runtime's workers, so tokio schedules
+   the task through `schedule_task`'s remote path, and
    `expect("failed to wake I/O driver")` (`runtime/io/driver.rs:260`, tokio
    1.52.0) fires after `push_remote_task` has put the task on the inject
-   queue (§6 note 22). The task then runs and fires the callback, and the
-   guard's `on_panic` fires it too, so a callback that releases `user_data`
-   releases it twice. Before 4521 the same panic aborted the process.
-   Example: `kafka_producer_FutureRecordMetadata_get_async`
-   (`src/ffi/producer.rs:2124-2143` after loop 79's round 4, `2111-2130`
-   before it), whose `on_panic` and spawned task share no at-most-once flag.
-   The trigger is the same OS-level wake failure as note 22's post-hand-off
-   panics. Candidate fix: an at-most-once flag shared by the spawned task and
-   `on_panic`, for example set just before the spawn, with `on_panic` firing
-   only while it is clear. That is a D4 amendment touching `ffi-macros` and
-   the 80 `on_panic` sites, so loop 79 does not make it; the user decides.
+   queue (§6 note 22). The task then ran and fired the callback, and the
+   guard's `on_panic` fired it too, so a callback that releases `user_data`
+   released it twice. Before 4521 the same panic aborted the process.
+   Example: `kafka_common_KafkaFuture_RecordMetadata_get_async`
+   (`src/ffi/producer.rs`; `kafka_producer_FutureRecordMetadata_get_async`
+   before the master merge), whose `on_panic` and spawned task shared no
+   at-most-once flag. The trigger is the same OS-level wake failure as note
+   22's post-hand-off panics. Loop 79's candidate fix was such a flag, set
+   just before the spawn, with `on_panic` firing only while it is clear. The
+   user chose to abort instead: every D4 spawn now goes through
+   `spawn_callback_task` (`src/ffi/common.rs`), which aborts the process if
+   the spawn panics, as before 4521. The flag would also have left a second
+   effect of the same panic open, at the producer's task registration (§6
+   note 27).
 7. **Pre-existing, outside 4521 (Critic 79 Note B): `send_async` and
    `send_batch_async` do not document their "producer is closed" failure.**
    When the submission task has gone, `send_async` stores
@@ -395,6 +398,9 @@ proved wrong or incomplete). The Manager keeps §5.
   `--allow-dirty`, which would package any uncommitted change, so the
   pipeline also refuses to package or publish when the tree differs from the
   commit by more than that edit (same note, "The guard").
+- 2026-10-07: Note C (§4 item 6) fixed directly at the user's request,
+  without a review loop. The user chose to abort when a D4 spawn panics
+  rather than add the at-most-once flag (§6 note 27).
 
 ## 6. Implementation notes (Actor 79)
 
@@ -1168,3 +1174,57 @@ code and record the difference here.
       `lib.rs`, an extra line in the edited `Cargo.toml`, a staged new file,
       and a cargo run before the check (`rust/target/`). Both jobs then
       passed again with the guard in place.
+27. **Follow-up, 2026-10-07 (no review loop; the user chose the approach) —
+    a panic inside a D4 spawn aborts the process (Note C, §4 item 6).**
+    - **Where.** The 78 `on_panic` entry points (note 8 counted 80 before the
+      master merge) hand their callback to a task through ten `spawn` calls:
+      six in shared helpers (`admin_async_future_op`, `admin_async_void_op`,
+      `async_void_op`, `async_value_op`, `flush_or_close_async`,
+      `with_txn_control_async`) and four in entry points
+      (`kafka_consumer_Consumer_poll_async`,
+      `kafka_common_KafkaFuture_RecordMetadata_get_async`, `..._get_all_async`,
+      `kafka_producer_Producer_partitions_for_async`). All ten now call
+      `spawn_callback_task`, which runs the spawn under `catch_unwind` and
+      calls `std::process::abort` on a panic, so a panic the guard catches at
+      a D4 site always comes from before the hand-off. The macro and the 78
+      entry points' code are unchanged; the `// SAFETY:` text their
+      `on_panic` closures share names `spawn_callback_task` where it named
+      Note C as the exception.
+    - **Why abort, not the flag.** At the three producer spawns that register
+      their task for `destroy` (`flush_or_close_async`,
+      `partitions_for_async`, `with_txn_control_async`: eight entry points),
+      the same panic also skipped `pending.push(task)`, so `destroy` would not
+      join a task that holds a raw `&'static` reference into the producer
+      (`pending_tasks`' docs). A flag that only silences `on_panic` leaves
+      that open, and closing it too means registering before the spawn, which
+      changes `destroy`'s join. The abort closes both. Tokio treats the failed
+      wake as unrecoverable (an `expect`), no caller, broker or network can
+      cause it, and before 4521 the process aborted there. The abort also
+      removes the early error callback that let a C caller treat a consumer
+      or admin operation as finished, and destroy the handle, while its task
+      still ran.
+    - **Not changed.** `build_producer_handle`'s submission-task spawn owns
+      no callback: a panic there leaks the new handle, whose pointer never
+      reaches C. The plain-guard sites (note 8) keep their documented
+      post-hand-off firing (notes 22–24).
+    - **Tests** (`src/ffi/common.rs`). `spawn_callback_task_runs_the_task`.
+      `spawn_panic_aborts_before_the_guard` runs a guarded callback-style
+      entry point whose spawn panics with tokio's message in a child copy of
+      the test binary, and asserts SIGABRT, the panic message on stderr, and
+      that neither `on_panic` nor the rest of the entry point ran. Tokio's
+      wake cannot be made to fail, so the child drives `spawn_or_abort`, the
+      function `spawn_callback_task` wraps, with a panicking spawn. With the
+      abort replaced by `resume_unwind`, the test fails on "the panic reached
+      the guard" (checked).
+    - **Gates** (logs in the session scratchpad, `clone/`). The macOS
+      `/private/tmp` cleanup had deleted files of the working checkout, so
+      the gates ran in a fresh clone of `dc77835f` with this change applied:
+      `make verify` clean — build, format-check, check-generated,
+      `cargo xtask lint` (its three Java-reference checks included) and
+      clippy; `cargo test --all-features` 4483 / 0 / 3 ignored (lib, the two
+      new tests included), 36 (consumer tests), 204 / 0 / 1 ignored
+      (integration) and the two remaining targets 8 / 0 and 5 / 0 / 7
+      ignored; C ctest 7/7; Python 369 passed, 2 skipped; `check-static` 29
+      passed. The C and Python gRPC arms skip themselves on macOS.
+      `make doc-check` clean. The change adds no public item and changes no
+      exported function's `///` docs, so the generated C header is unchanged.

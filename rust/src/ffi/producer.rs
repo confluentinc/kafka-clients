@@ -140,7 +140,7 @@ use crate::ffi::common::kafka_common_ErrorCode_t::{
 };
 use crate::ffi::common::{
     self, CompletionJob, MetricMapInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
+    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t, spawn_callback_task,
 };
 #[cfg(test)]
 use crate::ffi::common::{
@@ -998,7 +998,8 @@ struct ProducerHandle {
 /// returned guard across its `spawn` and then `push`es the new `JoinHandle`, which
 /// cannot fail because the room is already reserved. Everything that can panic —
 /// the lock (poisoned by an earlier caught panic) and the allocation — therefore
-/// happens *before* the task exists. That is what lets `#[ffi_guard]` fire a
+/// happens *before* the task exists, and a panic in the spawn itself aborts the
+/// process ([`spawn_callback_task`]). That is what lets `#[ffi_guard]` fire a
 /// callback-style entry point's callback on a panic without a task already
 /// spawned delivering a second completion (D4 of
 /// `design/current/appsec-7665-4521-ffi-panic-guard.md`). The spawned tasks never
@@ -2611,8 +2612,8 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_all(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -2645,7 +2646,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_async(
     let tx = f.completion_tx.clone();
     let target = RecordCallbackTarget { callback, user_data };
 
-    f.runtime_handle.spawn(async move {
+    spawn_callback_task(&f.runtime_handle, async move {
         let target = target;
         // No `.await` follows the handle construction below, so the raw
         // pointers never cross a suspension point.
@@ -2725,9 +2726,9 @@ unsafe fn fire_get_all_callback_with_error(
     // aggregate shape the function's callback contract documents (`count` null metadata
     // entries and `count` fresh error handles the callback owns), under that helper's own
     // `# Safety` (the same requirements as this function's callback contract). The panic
-    // aborted the body before its own callback path ran, so this is the single invocation
-    // (the one known exception is the remote double-fire window recorded as Note C in
-    // `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // aborted the body before its own callback path ran, so this is the single invocation:
+    // a panic in the spawn that hands the callback to a task aborts the process instead
+    // (`spawn_callback_task`).
     unsafe { fire_get_all_callback_with_error(callback, count, err, user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -2794,7 +2795,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_all_async(
     };
 
     let target = RecordBatchCallbackTarget { callback, user_data };
-    runtime.spawn(async move {
+    spawn_callback_task(&runtime, async move {
         let target = target;
         // Await all futures first, collecting owned (Send) results so no raw
         // pointers are held across a suspension point.
@@ -3718,7 +3719,7 @@ fn flush_or_close_async(
     // Two-phase registration (see `reserve_pending_task`): nothing that can panic
     // runs after the spawn, so a caught panic never races this task's completion.
     let mut pending = reserve_pending_task(handle);
-    let task = runtime.spawn(async move {
+    let task = spawn_callback_task(&runtime, async move {
         let target = target;
         // SAFETY: the handle outlives this task — it is registered via
         // `reserve_pending_task` and `destroy` joins it before dropping the
@@ -3792,8 +3793,8 @@ fn flush_or_close_async(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -3820,8 +3821,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -3890,8 +3891,8 @@ unsafe impl Send for PartitionInfoListCallbackTarget {}
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -3931,7 +3932,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     // Two-phase registration (see `reserve_pending_task`): nothing that can panic
     // runs after the spawn, so a caught panic never races this task's completion.
     let mut pending = reserve_pending_task(handle);
-    let task = runtime.spawn(async move {
+    let task = spawn_callback_task(&runtime, async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
         // dropped before the `.await` (CLAUDE.md §11.6).
@@ -4719,7 +4720,7 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
     // Two-phase registration (see `reserve_pending_task`): nothing that can panic
     // runs after the spawn, so a caught panic never races this task's completion.
     let mut pending = reserve_pending_task(handle);
-    let task = runtime.spawn(async move {
+    let task = spawn_callback_task(&runtime, async move {
         let target = target;
         // Releases `txn_control_busy` on every exit of this task: the normal path
         // drops it explicitly before delivering completion (so the flag is free by
@@ -4797,8 +4798,8 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4852,8 +4853,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_async(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4933,8 +4934,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -5086,8 +5087,8 @@ unsafe fn send_offsets_to_transaction_async_inner(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -5148,8 +5149,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_async(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]

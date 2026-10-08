@@ -176,7 +176,7 @@ use crate::consumer::OffsetAndMetadata;
 
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
+    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t, spawn_callback_task,
 };
 use super::consumer::kafka_common_Node_t;
 use super::ffi_guard;
@@ -741,8 +741,8 @@ pub type kafka_admin_AdminClient_close_callback_t =
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -831,7 +831,7 @@ unsafe fn admin_async_void_op<F, Fut>(
     // `&'static dyn Admin` is `Send` because `Admin: Send + Sync`; resolving it
     // here keeps the (non-`Sync`) handle itself out of the spawned task.
     let client: &'static dyn Admin = h.admin();
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         let error = match op(client).await {
             Ok(()) => std::ptr::null_mut(),
@@ -933,7 +933,7 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
     };
     let tx = h.completion_tx.clone();
     let ud = SendUserData(user_data);
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let ud = ud;
         let result = future.await;
         let job: CompletionJob = Box::new(move || complete(result, ud.into_ptr()));
@@ -4240,8 +4240,8 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4383,8 +4383,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4503,8 +4503,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4630,8 +4630,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4772,8 +4772,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -4894,8 +4894,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -5059,8 +5059,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -5209,8 +5209,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -6365,8 +6365,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -6732,8 +6732,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -7073,8 +7073,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -7353,8 +7353,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -7703,8 +7703,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -8139,8 +8139,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -8577,8 +8577,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -10219,8 +10219,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -10431,8 +10431,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -10608,8 +10608,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -10783,8 +10783,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -14577,8 +14577,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -14750,8 +14750,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -14905,8 +14905,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -15088,8 +15088,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -15285,8 +15285,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -15472,8 +15472,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -15633,8 +15633,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -15819,8 +15819,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -18344,8 +18344,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -18538,8 +18538,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -18721,8 +18721,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -18908,8 +18908,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -19116,8 +19116,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -20685,8 +20685,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -20910,8 +20910,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -21162,8 +21162,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -21334,8 +21334,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -21494,8 +21494,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -21673,8 +21673,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -21831,8 +21831,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -22006,8 +22006,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25124,8 +25124,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25280,8 +25280,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25429,8 +25429,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25579,8 +25579,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25727,8 +25727,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
@@ -25906,8 +25906,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     // pair on the calling thread, exactly as the function's callback contract documents for
     // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
     // panic aborted the body before its own callback path ran, so this is the single
-    // invocation (the one known exception is the remote double-fire window recorded as Note
-    // C in `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
     unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
 })]
 #[unsafe(no_mangle)]
