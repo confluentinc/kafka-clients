@@ -115,7 +115,7 @@ mod tests {
     /// was split into one file per error class.
     ///
     /// Java: `CommitFailedException()` uses the long default message
-    /// (`CommitFailedException.java:33-39`).
+    /// (`CommitFailedException.java:47-53`).
     #[test]
     fn test_commit_failed_default_message() {
         let e = ConsumerCommitFailedError::with_default_message();

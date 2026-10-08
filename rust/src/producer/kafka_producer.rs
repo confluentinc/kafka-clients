@@ -788,7 +788,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// ```
     /// (`KafkaProducer.java:398-399`)
     ///
-    /// `key.serializer` is a `Type.CLASS` entry (`ProducerConfig.java:479-482`),
+    /// `key.serializer` is a `Type.CLASS` entry (`ProducerConfig.java:526-529`),
     /// so honouring those constructors means loading and instantiating a class
     /// named by a string at run time. Rust has no reflection, and — unlike
     /// `partitioner.type`, where the built-in names can be mapped to concrete

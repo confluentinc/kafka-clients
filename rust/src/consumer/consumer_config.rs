@@ -707,7 +707,7 @@ impl ConsumerConfig {
                     // `AsyncKafkaConsumer.initializeGroupMetadata` is what
                     // rejects it — `throw new InvalidGroupIdException("The
                     // configured group.id should not be an empty string or
-                    // whitespace.")` (`AsyncKafkaConsumer.java:747-757`).
+                    // whitespace.")` (`AsyncKafkaConsumer.java:839-844`).
                     // Coercing to `None` here silently turned that hard
                     // configuration error into "no group", so a consumer
                     // configured with an empty `group.id` became a groupless
@@ -1388,7 +1388,7 @@ mod tests {
 
     /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
     /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
-    /// (`AsyncKafkaConsumer.java:747-757`). Coercing it to `None` here would
+    /// (`AsyncKafkaConsumer.java:839-844`). Coercing it to `None` here would
     /// turn a hard configuration error into a groupless consumer, which then
     /// fails much later and much less legibly.
     #[test]
