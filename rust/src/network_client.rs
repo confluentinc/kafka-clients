@@ -5397,7 +5397,8 @@ mod tests {
         client.ready(&node1, now).await;
         client.poll(0, now).await;
         client.poll(0, now).await;
-        let api_versions_correlation_id = client.in_flight_requests.last_sent(node1.id_string()).header.correlation_id();
+        let api_versions_correlation_id =
+            client.in_flight_requests.last_sent(node1.id_string()).header.correlation_id();
         let mut error_data = ApiVersionsResponseData::new();
         error_data.set_error_code(Errors::RebootstrapRequired.code());
         let mut error_response = ApiVersionsResponse::new(error_data);
