@@ -400,6 +400,16 @@ impl KafkaAdminClient {
     /// `ready`, which treat a node with an in-flight request as busy only when the
     /// connection cannot take another one.
     ///
+    /// The `NetworkClient`'s default request timeout is one hour,
+    /// `(int) TimeUnit.HOURS.toMillis(1)` (`:562`), not `request.timeout.ms`.
+    /// Every admin call is sent with its own timeout, `min(request.timeout.ms,
+    /// time left to the call deadline)` (`sendEligibleCalls`), so the default
+    /// bounds only what the `NetworkClient` sends on its own, the `ApiVersions`
+    /// handshake, and caps its `poll` timeout. A broker that takes longer than
+    /// `request.timeout.ms` to answer the handshake is therefore waited for, not
+    /// disconnected; the admin loop still bounds each call by its deadline and
+    /// each node assignment by `request.timeout.ms` (`nodeReadyDeadlines`).
+    ///
     /// `createNetworkClient` also passes `metadata.recovery.rebootstrap.trigger.ms`
     /// and `metadata.recovery.strategy` (`ClientUtils.java:223-224`), which drive
     /// the `NetworkClient`'s trigger-based rebootstrap through the admin
@@ -422,7 +432,7 @@ impl KafkaAdminClient {
             config.reconnect_backoff_max_ms(),
             USE_DEFAULT_BUFFER_SIZE,
             USE_DEFAULT_BUFFER_SIZE,
-            config.request_timeout_ms(),
+            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:562`)
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
             true, // discover_broker_versions
@@ -14616,6 +14626,155 @@ mod tests {
                 assert_eq!(fetched_node_ids(&manager), vec![0, 1, 2], "strategy none: no rebootstrap");
             }
         }
+    }
+
+    /// A broker that answers the `ApiVersions` handshake after `request.timeout.ms`
+    /// still serves the admin client, as in Java.
+    ///
+    /// Java builds the admin `NetworkClient` with a one-hour default request
+    /// timeout (`KafkaAdminClient.java:562`), which is the timeout of the
+    /// handshake. With `request.timeout.ms=5000`, a `listTopics` against a broker
+    /// that answers the handshake after 8 s succeeds: the bootstrap metadata call
+    /// times out at 5 s and is retried on the same, still-handshaking connection.
+    /// With `request.timeout.ms` as the default, the handshake timed out at 5 s,
+    /// the node was disconnected, and every reconnect hit the same slow answer, so
+    /// the call failed with "Timed out waiting for a node assignment.".
+    ///
+    /// Stepped with `run_once` over a `NetworkClient` built by
+    /// `create_network_client` on a `MockSelector` and mock time.
+    #[tokio::test]
+    async fn a_slow_api_versions_answer_does_not_disconnect_the_admin_client() {
+        use crate::api_message_type::ListenerType;
+        use crate::common::network::{MockSelector, NetworkReceive};
+        use crate::common::requests::{ApiVersionsResponse, RequestTestUtils, ResponseHeader};
+
+        let time = mock_time(1000);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "5000".to_string());
+        props.insert("default.api.timeout.ms".to_string(), "20000".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        let manager = AdminMetadataManager::new(
+            config.retry_backoff_ms(),
+            config.metadata_max_age_ms(),
+            false,
+            LogContext::empty(),
+        );
+        manager.update(bootstrap_cluster(), time.milliseconds());
+        let mut client = KafkaAdminClient::create_network_client(
+            &config,
+            MockSelector::new(),
+            manager.updater(),
+            "admin",
+            Arc::new(ApiVersions::new()),
+            DefaultHostResolver::new(),
+            LogContext::empty(),
+        );
+        client.set_time(Arc::clone(&time) as Arc<dyn Time>);
+        let (admin, mut runnable) = KafkaAdminClient::build(
+            client,
+            manager.clone(),
+            &config,
+            "admin".to_string(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            LogContext::empty(),
+        )
+        .unwrap();
+
+        // Delivers a response on `node`'s connection, as the broker would.
+        fn respond(
+            runnable: &mut AdminClientRunnable<NetworkClient<MockSelector, DefaultHostResolver>>,
+            node: &str,
+            correlation_id: i32,
+            api_key: ApiKeys,
+            response: ConcreteResponse,
+        ) {
+            let version = api_key.latest_version();
+            let header = ResponseHeader::with_correlation_id(correlation_id, api_key.response_header_version(version));
+            let mut response = response;
+            let bytes = response.serialize_with_header(&header, version).unwrap().into_buffer();
+            runnable
+                .client_mut()
+                .selector_mut()
+                .complete_receive(NetworkReceive::with_source_buffer(node, bytes));
+        }
+        // Three `processRequests` iterations. The mock selector keeps completed
+        // sends until cleared, where a real selector reports each send once.
+        async fn step(runnable: &mut AdminClientRunnable<NetworkClient<MockSelector, DefaultHostResolver>>) {
+            for _ in 0..3 {
+                runnable.run_once().await;
+                runnable.client_mut().selector_mut().clear_completed_sends();
+            }
+        }
+        fn api_versions() -> ConcreteResponse {
+            ConcreteResponse::ApiVersions(ApiVersionsResponse::default_api_versions_response(ListenerType::Broker))
+        }
+
+        let result = admin.list_topics_with_options(ListTopicsOptions::new());
+
+        // The bootstrap metadata call connects to node -1 and sends ApiVersions.
+        step(&mut runnable).await;
+        assert_eq!(
+            runnable.client_mut().in_flight_request_count_for_node("-1"),
+            1,
+            "ApiVersions sent"
+        );
+
+        // Past request.timeout.ms the metadata call times out, but the handshake
+        // is still awaited on the same connection.
+        time.sleep(5_001);
+        step(&mut runnable).await;
+        assert_eq!(
+            runnable.client_mut().in_flight_request_count_for_node("-1"),
+            1,
+            "the handshake outlives request.timeout.ms"
+        );
+        assert!(
+            !runnable
+                .client_mut()
+                .connection_failed(&Node::new(-1, "localhost".to_string(), 9092))
+        );
+
+        // The broker answers at 8 s; the retried metadata call then goes out on
+        // node -1 and discovers broker 0.
+        time.sleep(2_999);
+        respond(&mut runnable, "-1", 0, ApiKeys::API_VERSIONS, api_versions());
+        step(&mut runnable).await;
+        let broker = Node::new(0, "localhost".to_string(), 9092);
+        respond(
+            &mut runnable,
+            "-1",
+            1,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        step(&mut runnable).await;
+        assert_eq!(fetched_node_ids(&manager), vec![0], "the bootstrap metadata call completed");
+
+        // listTopics goes to broker 0: handshake, then its Metadata request.
+        respond(&mut runnable, "0", 2, ApiKeys::API_VERSIONS, api_versions());
+        step(&mut runnable).await;
+        respond(
+            &mut runnable,
+            "0",
+            3,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        step(&mut runnable).await;
+        let names = result.names().get().await.expect("listTopics succeeds");
+        assert!(names.is_empty());
     }
 
     // --- shutdown ------------------------------------------------------------
