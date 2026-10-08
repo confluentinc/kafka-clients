@@ -1,4 +1,4 @@
-# The public API is not stable yet (0.1.0), so clippy should lint exported
+# The public API is not stable yet, so clippy should lint exported
 # items like any other code. With the default `true`, clippy silently skips
 # every lint whose fix would change an exported signature — which is how
 # `wrong_self_convention` on `TimeUnit::to_millis`

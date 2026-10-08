@@ -3,11 +3,11 @@ members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test
 
 [package]
 name = "confluent-kafka"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Confluent Rust implementation of the Kafka client, translated from the Apache Kafka Java client."
-repository = "https://github.com/confluentinc/kafka-clients/rust"
+repository = "https://github.com/confluentinc/kafka-clients"
 # What `cargo package` ships: the library, and the generator with the message
 # specs `build.rs` compiles into the protocol code. Tests, examples, test-only
 # modules and the test message specs stay out. `build.rs` skips the test specs
