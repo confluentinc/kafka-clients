@@ -2301,6 +2301,74 @@ mod tests {
         }
     }
 
+    /// The admin client builds its `NetworkClient` with a one-hour default request
+    /// timeout (`KafkaAdminClient.java:562`), not `request.timeout.ms`. The
+    /// `ApiVersions` handshake is sent with that default
+    /// (`NetworkClient.handleInitiateApiVersionRequests`), so a broker that answers
+    /// it after `request.timeout.ms` is waited for and the node becomes ready; the
+    /// handshake is cut off only after the hour. With `request.timeout.ms` as the
+    /// default the node was disconnected at 5 s and every reconnect hit the same
+    /// slow answer.
+    #[tokio::test]
+    async fn test_admin_api_versions_handshake_waits_past_request_timeout_ms() {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let mut props = std::collections::HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "5000".to_string());
+        let config = crate::admin::AdminClientConfig::new(&props).unwrap();
+        let new_client = || {
+            let mut client = crate::admin::KafkaAdminClient::create_network_client(
+                &config,
+                MockSelector::new(),
+                Box::new(TestMetadataUpdater::new(vec![node.clone()])),
+                "admin",
+                Arc::new(ApiVersions::new()),
+                TestHostResolver::new(),
+                LogContext::empty(),
+            );
+            client.set_mock_time();
+            client
+        };
+
+        // The broker answers the handshake 8 s after it was sent.
+        let mut client = new_client();
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert!(client.has_in_flight_requests_for_node(node.id_string()), "ApiVersions sent");
+
+        client.poll(0, 5_001).await;
+        assert!(
+            client.has_in_flight_requests_for_node(node.id_string()),
+            "the handshake is still awaited after request.timeout.ms"
+        );
+        assert!(!client.connection_failed(&node), "the node is not disconnected");
+
+        let mut response = default_api_versions_response();
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut response,
+        );
+        client.poll(0, 8_000).await;
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.is_ready(&node, 8_000), "the late answer makes the node ready");
+
+        // A handshake that is never answered is cut off after the hour.
+        let mut client = new_client();
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        client.poll(0, 3_600_000).await;
+        assert!(
+            client.has_in_flight_requests_for_node(node.id_string()),
+            "not past the hour yet"
+        );
+        client.poll(0, 3_600_001).await;
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.connection_failed(&node), "disconnected once the hour has passed");
+    }
+
     /// Translated from `NetworkClientTest.testConnectionDelay`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelay")]
