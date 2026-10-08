@@ -1266,7 +1266,7 @@ Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `1
   | 5 DoD #10 after-measure | 00:26 | 00:29 | 3 |
   | 6 gates (format-check, full test, lint), Java-name fixup | 00:29 | 00:36 | 7 |
   | 7 producer broker tests (under the lock), stopped waiting on a hung test | 00:38 | 01:19 | 41 |
-  | 8 `make -k verify` | not run | | |
+  | 8 Critic 97 round 1 fixes; `make -k verify` | 02:00 | 10:45 | (interrupted; verify 9) |
 
 - **Verification:**
   - `cargo build` passes. `cargo xtask format-check` passes.
@@ -1286,8 +1286,20 @@ Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `1
     - So this looks like a consumer-side busy loop (possibly from the KIP-909 / Phase 2 merge) and
       not this phase. It is **unverified**: the process could not be stopped from here to re-run
       the test alone.
-  - `make -k verify`: **not run**. The hung test binary still holds
-    `/private/tmp/claude-501/m16-broker.lock`, and verify needs that lock.
+  - The hung run was ended externally (SIGTERM, about 10:39). By then it had also reported
+    `test_send_offsets_with_group_metadata` FAILED, under three-cluster load. That test passed in the
+    verify run below.
+  - `make -k verify` (2026-10-08 10:36-10:45): `lockf -t 60` timed out while the hung binary held the
+    lock. Per the Manager's instruction it then ran without `lockf`, at load 5.1. Results:
+    - lib: 4613 passed, 3 ignored.
+    - Integration: 305 passed, 0 failed, 2 ignored. This includes
+      `test_read_committed_consumer_should_not_see_undecided_data` and
+      `test_send_offsets_with_group_metadata`, both ok.
+    - Python: 363 passed, 2 skipped.
+    - check-bindings: 29 + 29.
+    - soak: 156.
+    - It failed only in `build-c` (`cmake: command not found`, the environment) and `lint` (the 13
+      §5.1 rows).
 
 ### Phase 8 — Producer: KIP-1332 part B — accumulator, batch, producer wiring (agent 98)
 
