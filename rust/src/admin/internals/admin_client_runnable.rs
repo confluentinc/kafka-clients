@@ -288,6 +288,24 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         !self.pending_calls.is_empty() || !self.calls_to_send.is_empty() || !self.correlation_id_to_calls.is_empty()
     }
 
+    /// The deadlines of the active internal metadata calls (`fetchMetadata`),
+    /// wherever they are — pending, assigned to a node, or in flight — sorted
+    /// (visible for testing). A metadata call that timed out and was replaced
+    /// by a fresh one shows up as a later deadline.
+    #[cfg(test)]
+    pub(crate) fn metadata_call_deadlines_for_test(&self) -> Vec<i64> {
+        let mut deadlines: Vec<i64> = self
+            .pending_calls
+            .iter()
+            .chain(self.calls_to_send.values().flat_map(|node_calls| node_calls.calls.iter()))
+            .chain(self.correlation_id_to_calls.values().map(|in_flight| &in_flight.call))
+            .filter(|call| call.internal)
+            .map(|call| call.deadline_ms)
+            .collect();
+        deadlines.sort_unstable();
+        deadlines
+    }
+
     /// The main run loop. Translated from `AdminClientRunnable.run` /
     /// `processRequests`.
     pub(crate) async fn run(&mut self) {
