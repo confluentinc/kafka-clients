@@ -5176,6 +5176,46 @@ uint64_t chaos_decode_index(const uint8_t* bytes) {
   return index;
 }
 
+WorkloadEvent chaos_corrupted(std::string topic, int32_t partition, int64_t offset,
+                              std::string detail) {
+  WorkloadEvent event;
+  auto* corrupted = event.mutable_corrupted();
+  corrupted->set_topic(std::move(topic));
+  corrupted->set_partition(partition);
+  corrupted->set_offset(offset);
+  corrupted->set_detail(std::move(detail));
+  return event;
+}
+
+// Whether a consumed record is what a producer wrote: an 8-byte big-endian
+// index key, and a value that is that index's 8 bytes zero-padded to msg_size
+// (or their first msg_size bytes when smaller). Returns an empty string and
+// sets *index if so, otherwise what is wrong. Mirrors the Rust harness's
+// check_record (rust/tests/chaos/workload.rs), messages included. A null
+// pointer is an absent key or value.
+std::string chaos_check_record(const uint8_t* key, int32_t key_len, const uint8_t* value,
+                               int32_t value_len, uint32_t msg_size, uint64_t* index) {
+  if (key == nullptr) return "key is missing (expected the 8-byte index)";
+  if (key_len != 8) {
+    return "key is " + std::to_string(key_len) + " byte(s), expected the 8-byte index";
+  }
+  *index = chaos_decode_index(key);
+  if (value == nullptr) {
+    if (msg_size == 0) return std::string();
+    return "value is missing (expected " + std::to_string(msg_size) +
+           " byte(s) encoding index " + std::to_string(*index) + ")";
+  }
+  bool matches = value_len >= 0 && static_cast<uint32_t>(value_len) == msg_size;
+  for (uint32_t i = 0; matches && i < msg_size; i++) {
+    const uint8_t expected = i < 8 ? static_cast<uint8_t>(*index >> (8 * (7 - i))) : 0;
+    matches = value[i] == expected;
+  }
+  if (matches) return std::string();
+  return "value of " + std::to_string(value_len) +
+         " byte(s) does not match the producer's encoding of index " + std::to_string(*index) +
+         " (" + std::to_string(msg_size) + " byte(s))";
+}
+
 // ── Producer ──
 
 // Callback state of one producer workload: user_data of the close callback,
@@ -5869,6 +5909,7 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     }
 
     const int64_t poll_timeout_ms = req.poll_timeout_ms();
+    const uint32_t msg_size = req.msg_size();
     const std::chrono::milliseconds check_interval(req.commit_check_interval_ms());
     const bool sync_commit = req.commit_mode() == COMMIT_MODE_SYNC;
     ChaosClock::time_point last_check = ChaosClock::now();
@@ -5883,18 +5924,27 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
         continue;
       }
       const int32_t n = kafka_consumer_ConsumerRecords_count(records);
-      // One Consumed per harness record: those with an 8-byte key.
+      // One event per record: Consumed when it is what a producer wrote,
+      // Corrupted otherwise (see chaos_check_record).
       for (int32_t i = 0; i < n; i++) {
         const kafka_consumer_ConsumerRecord_t* rec = kafka_consumer_ConsumerRecords_get(records, i);
         int32_t key_len = 0;
         const uint8_t* rec_key = kafka_consumer_ConsumerRecord_key(rec, &key_len);
-        if (rec_key == nullptr || key_len != 8) continue;
+        int32_t value_len = 0;
+        const uint8_t* rec_value = kafka_consumer_ConsumerRecord_value(rec, &value_len);
         int32_t topic_len = 0;
         const char* rec_topic = kafka_consumer_ConsumerRecord_topic(rec, &topic_len);
-        events->push(chaos_consumed(
-            chaos_decode_index(rec_key),
-            rec_topic ? std::string(rec_topic, topic_len) : std::string(),
-            kafka_consumer_ConsumerRecord_partition(rec), kafka_consumer_ConsumerRecord_offset(rec)));
+        std::string topic = rec_topic ? std::string(rec_topic, topic_len) : std::string();
+        const int32_t partition = kafka_consumer_ConsumerRecord_partition(rec);
+        const int64_t offset = kafka_consumer_ConsumerRecord_offset(rec);
+        uint64_t index = 0;
+        std::string detail =
+            chaos_check_record(rec_key, key_len, rec_value, value_len, msg_size, &index);
+        if (detail.empty()) {
+          events->push(chaos_consumed(index, std::move(topic), partition, offset));
+        } else {
+          events->push(chaos_corrupted(std::move(topic), partition, offset, std::move(detail)));
+        }
       }
       kafka_consumer_ConsumerRecords_destroy(records);
       if (n == 0) continue;

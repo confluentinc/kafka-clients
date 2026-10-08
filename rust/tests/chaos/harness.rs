@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, CreateTopicsResult, NewTopic};
-use confluent_kafka::common::{TopicCollection, Uuid};
+use confluent_kafka::common::{Error, TopicCollection, Uuid};
 
 use super::common::broker_control::BrokerControl;
 use super::common::cluster_config::kip848_3_broker;
@@ -473,21 +473,9 @@ impl ChaosHarness {
     async fn resolve_topic_id(&self, topic: &str) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let described = self
-                .admin
-                .describe_topics_with_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
-                .all_topic_names()
-                .expect("describe by name yields a name-keyed result")
-                .get()
-                .await;
-            if let Ok(map) = described
-                && let Some(desc) = map.get(topic)
-            {
-                let id = desc.topic_id();
-                if id != Uuid::zero() {
-                    self.set_topic_id(topic, id).await;
-                    return;
-                }
+            if let Some(id) = self.describe_topic_id(topic).await {
+                self.set_topic_id(topic, id).await;
+                return;
             }
             if std::time::Instant::now() >= deadline {
                 eprintln!(
@@ -498,6 +486,20 @@ impl ChaosHarness {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+
+    /// `topic`'s id from one `describe_topics`, or `None` when the describe
+    /// fails, does not find it, or returns the zero id.
+    async fn describe_topic_id(&self, topic: &str) -> Option<Uuid> {
+        let described = self
+            .admin
+            .describe_topics_with_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
+            .all_topic_names()
+            .expect("describe by name yields a name-keyed result")
+            .get()
+            .await;
+        let id = described.ok()?.get(topic)?.topic_id();
+        (id != Uuid::zero()).then_some(id)
     }
 
     fn current_topic_id(&self, topic: &str) -> Uuid {
@@ -599,7 +601,7 @@ impl ChaosHarness {
         // (librdkafka restarts the topic's producer here; our in-process
         // producer keeps running against the same topic name.) From here on the
         // producer stamps acks and the consumer keys reads with the new id.
-        self.create_topic_retrying(topic, Duration::from_secs(30)).await;
+        self.create_topic_retrying(topic, old_id, Duration::from_secs(30)).await;
         let new_id = self.current_topic_id(topic);
 
         eprintln!("chaos: topic {topic} recreated: id {old_id} -> {new_id}");
@@ -678,10 +680,19 @@ impl ChaosHarness {
     }
 
     /// Create `topic`, retrying while the broker still reports the previous
-    /// generation as pending deletion (`TopicAlreadyExists`), and cache the new
-    /// generation's id from the create response (see
+    /// generation (`old_id`) as pending deletion (`TopicAlreadyExists`), and
+    /// cache the new generation's id from the create response (see
     /// [`Self::cache_created_topic_id`]).
-    async fn create_topic_retrying(&self, topic: &str, timeout: Duration) {
+    ///
+    /// An attempt the controller committed but whose response was lost (a
+    /// request timeout, or its broker going down mid-roll) makes every later
+    /// attempt fail with `TopicAlreadyExists` for the generation it created. So
+    /// on that error the topic is described, and an id other than `old_id`
+    /// is that generation: the recreate succeeded, and its id is cached from
+    /// the describe. The producer may already have been acknowledged by it
+    /// under the old id by then; that window is the lost response's, and only
+    /// this case has it.
+    async fn create_topic_retrying(&self, topic: &str, old_id: Uuid, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let new_topic = NewTopic::with_num_partitions_replication_factor(
@@ -693,6 +704,18 @@ impl ChaosHarness {
             match result.all().get().await {
                 Ok(()) => {
                     self.cache_created_topic_id(topic, &result).await;
+                    return;
+                },
+                Err(Error::TopicExists(_))
+                    if old_id != Uuid::zero()
+                        && let Some(id) = self.describe_topic_id(topic).await
+                        && id != old_id =>
+                {
+                    eprintln!(
+                        "chaos: create of {topic} reported TopicAlreadyExists, but the topic is a new generation \
+                         ({id}): an earlier attempt succeeded and its response was lost"
+                    );
+                    self.set_topic_id(topic, id).await;
                     return;
                 },
                 Err(err) => {

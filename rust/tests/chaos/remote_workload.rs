@@ -264,6 +264,7 @@ impl RemoteWorkload {
                         } as i32,
                         poll_timeout_ms: millis(POLL_TIMEOUT),
                         commit_check_interval_ms: millis(COMMIT_CHECK_INTERVAL),
+                        msg_size: u32::try_from(self.ctx.msg_size).expect("--msg-size fits in u32"),
                     })
                     .await?
             },
@@ -371,6 +372,20 @@ impl RemoteWorkload {
                 topic: consumed.topic,
                 partition: consumed.partition,
                 offset: consumed.offset,
+            },
+            Event::Corrupted(corrupted) => {
+                // Same line as the in-process consumer (`record_consumed`).
+                eprintln!(
+                    "chaos {label}: corrupted record at {}-{} offset {}: {}",
+                    corrupted.topic, corrupted.partition, corrupted.offset, corrupted.detail
+                );
+                WorkloadEvent::Corrupted {
+                    consumer: label,
+                    topic: corrupted.topic,
+                    partition: corrupted.partition,
+                    offset: corrupted.offset,
+                    detail: corrupted.detail,
+                }
             },
             Event::Rebalance(rebalance) => {
                 let callback = match proto::RebalanceKind::try_from(rebalance.kind) {
@@ -729,6 +744,38 @@ mod tests {
             .find(|r| r.starts_with("failed sends"))
             .expect("failed-sends reason");
         assert!(reason.contains("t#4: ") && reason.contains("Expiring 1 record(s)"), "{reason}");
+    }
+
+    /// A remote consumer's `Corrupted` fails the run, as the Rust consumer's
+    /// does, and is not counted as a consumption.
+    #[tokio::test]
+    async fn a_remote_corrupted_record_fails_the_run() {
+        let verifier = Arc::new(ConservationVerifier::new());
+        let w = workload(
+            Role::Consumer,
+            ids_with("t", Uuid::with_bytes([1u8; 16])),
+            verifier.clone(),
+            unused_channel(),
+        );
+        w.record(Event::Corrupted(proto::Corrupted {
+            topic: "t".into(),
+            partition: 2,
+            offset: 9,
+            detail: "key is 3 byte(s), expected the 8-byte index".into(),
+        }));
+
+        let verdict = verifier.verdict(0);
+        assert_eq!(verdict.corrupted_records, 1, "{verdict}");
+        assert!(!verdict.is_pass(), "{verdict}");
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("corrupted records"))
+            .expect("corrupted-records reason");
+        assert!(
+            reason.contains("consumer-python-1: t-2 offset 9: key is 3 byte(s), expected the 8-byte index"),
+            "{reason}"
+        );
     }
 
     /// A remote consumer's listener events drive the same checks as the Rust

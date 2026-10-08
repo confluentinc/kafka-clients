@@ -363,6 +363,7 @@ async fn chaos_run() {
         eprintln!("chaos: configuration OK");
         return;
     }
+    isolation::claim_process_for_scenario("run_test::chaos_run");
     // Before any cluster exists: a Ctrl-C / SIGTERM at any point of the run
     // must tear its cluster down (see `isolation::signals`).
     signals::install();

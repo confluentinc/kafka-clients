@@ -27,10 +27,11 @@
 //!     `cargo test`), and
 //!   - every scenario is `#[ignore]`.
 //!
-//! Run explicitly:
+//! Run explicitly, one scenario per process (a second one in the same process
+//! is refused, see `isolation::claim_process_for_scenario`):
 //!
 //! ```text
-//! cargo test --features integration-tests --test chaos -- --ignored --nocapture
+//! cargo test --features integration-tests --test chaos -- --ignored --nocapture --exact run_test::chaos_run
 //! ```
 //!
 //! or via `cargo xtask chaos`.
