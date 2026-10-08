@@ -2216,7 +2216,9 @@ where
             (Some(gid), Some(commit_arc)) => Some(Arc::new(ConsumerMembershipManager::new(
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
-                None, // rack_id — Java reads from ConsumerConfig.CLIENT_RACK_CONFIG
+                // Java's `GroupRebalanceConfig.rackId` (`GroupRebalanceConfig.java:57-58`):
+                // `client.rack`, absent when empty.
+                Some(config.client_rack()).filter(|rack| !rack.is_empty()).map(str::to_string),
                 config.max_poll_interval_ms(),
                 config.group_remote_assignor().map(|s| s.to_string()),
                 Arc::clone(&subscriptions),
@@ -7176,6 +7178,52 @@ mod tests {
             "The configured group.id should not be an empty string or whitespace.",
             cause.message()
         );
+    }
+
+    /// `client.rack` reaches the membership manager as Java's
+    /// `GroupRebalanceConfig.rackId` (`GroupRebalanceConfig.java:57-58`),
+    /// trimmed, and an empty one (the default) is no rack. Before Critic 96 F3
+    /// the constructor always passed `None`, so a KIP-848 heartbeat never
+    /// carried the consumer's rack.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rack_reaches_the_membership_manager() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        for (configured, expected) in [(Some(" rack-1 "), Some("rack-1")), (None, None), (Some(""), None)] {
+            let mut props = HashMap::from([
+                ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+                ("group.id".to_string(), "rack-group".to_string()),
+                ("group.protocol".to_string(), "consumer".to_string()),
+                ("enable.auto.commit".to_string(), "false".to_string()),
+            ]);
+            if let Some(rack) = configured {
+                props.insert(ConsumerConfig::CLIENT_RACK_CONFIG.to_string(), rack.to_string());
+            }
+            let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+                ConsumerConfig::new(&props).expect("config validates"),
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .expect("ctor should succeed against a refused broker");
+            let membership = consumer
+                .request_managers
+                .lock()
+                .unwrap()
+                .consumer_membership
+                .clone()
+                .expect("group.id set → membership must be Some");
+            assert_eq!(expected, membership.rack_id(), "client.rack = {configured:?}");
+            consumer.close().await.expect("close");
+        }
     }
 
     /// Java validates `group.instance.id` again in the constructor

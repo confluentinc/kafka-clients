@@ -217,7 +217,7 @@ impl Default for ConsumerConfig {
             bootstrap_servers: Vec::new(),
             client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
-            client_rack: String::new(),
+            client_rack: Self::DEFAULT_CLIENT_RACK.to_string(),
 
             enable_auto_commit: true,
             auto_commit_interval_ms: 5_000,
@@ -307,7 +307,9 @@ impl ConsumerConfig {
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
-    pub const CLIENT_RACK_CONFIG: &'static str = "client.rack";
+    pub const CLIENT_RACK_CONFIG: &'static str = crate::CommonClientConfigs::CLIENT_RACK_CONFIG;
+    /// Default value of `client.rack`: no rack (`ConsumerConfig.java:267`).
+    pub const DEFAULT_CLIENT_RACK: &'static str = crate::CommonClientConfigs::DEFAULT_CLIENT_RACK;
 
     /// Config key: `enable.auto.commit`.
     pub const ENABLE_AUTO_COMMIT_CONFIG: &'static str = "enable.auto.commit";
@@ -428,6 +430,10 @@ impl ConsumerConfig {
     /// `client.id`.
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+    /// `client.rack`, empty when unset ([`Self::DEFAULT_CLIENT_RACK`]).
+    pub(crate) fn client_rack(&self) -> &str {
+        &self.client_rack
     }
     /// `group.id`, if any.
     pub fn group_id(&self) -> Option<&str> {
@@ -640,7 +646,8 @@ impl ConsumerConfig {
                     config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
-                    config.client_rack = value.clone();
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    config.client_rack = value.trim().to_string();
                 },
                 Self::GROUP_ID_CONFIG => {
                     // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
@@ -1557,6 +1564,22 @@ mod tests {
         sequence_suffix(config.client_id(), "consumer-test-group-");
         let padded = props_with(&[(ConsumerConfig::CLIENT_ID_CONFIG, " my-consumer ")]);
         assert_eq!(ConsumerConfig::new(&padded).unwrap().client_id(), "my-consumer");
+    }
+
+    /// `client.rack` is a `Type.STRING`, so `ConfigDef.parseType` trims it
+    /// (Critic 96 F3); unset, it is `DEFAULT_CLIENT_RACK`, the empty string.
+    #[test]
+    fn test_client_rack_is_trimmed_and_defaults_to_empty() {
+        assert_eq!("client.rack", ConsumerConfig::CLIENT_RACK_CONFIG);
+        assert_eq!("", ConsumerConfig::DEFAULT_CLIENT_RACK);
+        assert_eq!(
+            ConsumerConfig::DEFAULT_CLIENT_RACK,
+            ConsumerConfig::new(&props_with(&[])).unwrap().client_rack()
+        );
+        let padded = props_with(&[(ConsumerConfig::CLIENT_RACK_CONFIG, " rack-1 ")]);
+        assert_eq!("rack-1", ConsumerConfig::new(&padded).unwrap().client_rack());
+        let blank = props_with(&[(ConsumerConfig::CLIENT_RACK_CONFIG, "  ")]);
+        assert_eq!("", ConsumerConfig::new(&blank).unwrap().client_rack());
     }
 
     /// `group.instance.id` is trimmed before Java's `NonEmptyString` check, so
