@@ -213,6 +213,11 @@ struct AdminHandle {
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// Dispatcher thread join handle; detached on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Join handles for the task of every `_async` operation that borrows the
+    /// admin client, i.e. every [`admin_async_void_op`] (`close_async`).
+    /// `destroy` joins them before freeing the handle. Finished ones are pruned
+    /// as new ones are registered ([`reserve_pending_task`]).
+    pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Whether this handle wraps a [`MockAdminClient`]. Read by the
     /// `kafka_admin_MockAdminClient_*` driver functions.
     is_mock: bool,
@@ -226,6 +231,26 @@ impl AdminHandle {
             AdminKind::Mock(mock) => mock.as_ref(),
         }
     }
+}
+
+/// Locks `pending_tasks` and reserves room for one more task, so the caller can
+/// register an `_async` operation's task for `destroy` to join before the
+/// handle is freed. Prunes finished handles first, so the list does not grow
+/// over the client's lifetime.
+///
+/// This is the first half of the producer's two-phase registration: the caller
+/// keeps the returned guard across its `spawn` and then `push`es the new
+/// `JoinHandle`, which cannot fail because the room is already reserved. What
+/// can panic (the lock, poisoned by an earlier caught panic, and the
+/// allocation) therefore runs before the task exists, and a panic in the spawn
+/// itself aborts ([`spawn_callback_task`]), so `#[ffi_guard]` never fires a
+/// callback that a spawned task also fires. The tasks never take this lock, so
+/// holding it across the `spawn` cannot deadlock.
+fn reserve_pending_task(h: &AdminHandle) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
+    let mut tasks = h.pending_tasks.lock().unwrap();
+    tasks.retain(|t| !t.is_finished());
+    tasks.reserve(1);
+    tasks
 }
 
 /// Builds an [`AdminHandle`] around an [`AdminKind`], spawning the callback
@@ -249,6 +274,7 @@ fn build_admin_handle(
         runtime_handle,
         completion_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
+        pending_tasks: Mutex::new(Vec::new()),
         is_mock,
     });
     Box::into_raw(handle) as *mut kafka_admin_AdminClient_t
@@ -264,9 +290,11 @@ unsafe fn handle_ref(admin: *const kafka_admin_AdminClient_t) -> &'static AdminH
     // admin-client constructor, i.e. it is the `Box<AdminHandle>` leaked by `Box::into_raw`
     // in `build_admin_handle` and freed only by `kafka_admin_AdminClient_destroy`, so the
     // pointer is aligned and points at a live `AdminHandle`. The `'static` lifetime is
-    // nominal: each caller may use the reference only while the C caller guarantees the
-    // handle is alive, which for every caller except `admin_async_void_op` means the
-    // duration of its own synchronous call.
+    // nominal: each caller may use the reference only while the handle is alive, which for
+    // every caller except `admin_async_void_op` means the duration of its own synchronous
+    // call. `admin_async_void_op` hands the client to a task that uses it until it
+    // finishes, and `kafka_admin_AdminClient_destroy` joins that task before freeing the
+    // handle.
     unsafe { &*(admin as *const AdminHandle) }
 }
 
@@ -621,40 +649,99 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 
 /// Destroys an admin-client handle, freeing all associated resources.
 ///
-/// Safe to call with a null pointer (no-op). Destroying concurrently with an
-/// in-flight `_async` operation is a C lifetime precondition the caller must
-/// uphold (CLAUDE.md FFI §4).
+/// Safe to call with a null pointer (no-op).
+///
+/// A [`kafka_admin_AdminClient_close_async`] still in flight is waited for
+/// until it completes, since a close cannot be interrupted. Its callback still
+/// fires exactly once, possibly after this function has returned. The other
+/// `_async` operations hold no reference into the handle and are not waited
+/// for: one whose callback has not fired yet may be dropped with the runtime,
+/// and then its callback never fires. To have every callback fire, wait for
+/// them all before destroying the handle.
+///
+/// Called inside a tokio runtime, where that wait is impossible
+/// (`Runtime::block_on` panics there), this function returns at once, and the
+/// wait and the free happen on a new thread.
 ///
 /// # Safety
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
-/// After this call the pointer is invalid. No `_async` operation on the handle
-/// may still be in flight: the `close_async` awaiter task borrows the client
-/// until its callback has fired, and this function does not wait for it, so it
-/// must only be called once every pending callback has been delivered.
+/// The pointer is invalid from the moment this function is called: no other
+/// call on the handle may run concurrently with it or start after it, on any
+/// thread. That includes a synchronous call still running on another thread,
+/// which this function does not wait for, and a call from a callback that fires
+/// after this function was called.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_destroy(admin: *mut kafka_admin_AdminClient_t) {
     if admin.is_null() {
         return;
     }
-    // SAFETY: `admin` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from an admin-client constructor, i.e. the `Box<AdminHandle>` leaked by
-    // `Box::into_raw` in `build_admin_handle`. This is the single, final use: the contract
-    // states the pointer is invalid after this call and no other function frees it. The
-    // reclaimed handle is torn down in order (runtime, client, completion channel);
-    // `runtime.shutdown_background()` does not wait for an awaiter task that is already
-    // mid-poll, so the documented C precondition that no `_async` operation is in flight
-    // while destroying is what keeps `drop(kind)` from racing the `close_async` awaiter
-    // spawned by `admin_async_void_op`.
-    let handle = unsafe { Box::from_raw(admin as *mut AdminHandle) };
+    if common::in_tokio_runtime() {
+        // `Runtime::block_on` panics inside a tokio runtime, so the wait and the free move
+        // to a thread of their own. No admin task waits on the dispatcher thread, so unlike
+        // the consumer's `destroy` this one may wait there.
+        // SAFETY: `teardown_admin`'s `# Safety` holds on any thread outside a tokio runtime,
+        // which the new thread is: `admin` is non-null (checked above) and, per this
+        // function's `# Safety`, a live handle from an admin-client constructor that no call
+        // uses after this one but the tasks the teardown joins, and this is its only
+        // teardown.
+        unsafe { common::spawn_teardown("kafka-admin-destroy", admin as usize, teardown_admin) };
+    } else {
+        // SAFETY: as for the hand-off above, `admin` is a live handle that no call uses after
+        // this one but the tasks the teardown joins, and this is its only teardown; this
+        // thread is not inside a tokio runtime (checked above).
+        unsafe { teardown_admin(admin as usize) };
+    }
+}
+
+/// The body of [`kafka_admin_AdminClient_destroy`]: joins the tasks of the
+/// handle's in-flight [`admin_async_void_op`] operations, then frees it. Runs
+/// on the thread that called `destroy`, or on a thread of its own when that one
+/// is inside a tokio runtime.
+///
+/// # Safety
+///
+/// `addr` must be the address of a live handle from an admin-client
+/// constructor that nothing uses any more except its operations' tasks, and
+/// this must be its only teardown. The calling thread must not be inside a
+/// tokio runtime.
+unsafe fn teardown_admin(addr: usize) {
+    // SAFETY: per this function's `# Safety`, `addr` is a live, non-null handle from an
+    // admin-client constructor, which is what `handle_ref` requires. The shared reference
+    // is used only to join the tasks below, which hold shared references of their own, and
+    // is dead before the `Box` is reclaimed.
+    let h = unsafe { handle_ref(addr as *const kafka_admin_AdminClient_t) };
+    // Read poison-tolerantly, as the producer's `destroy` does: a lock is poisoned only by
+    // a panic `#[ffi_guard]` caught, after which the C caller is told to destroy the
+    // handle, so this must still work on a poisoned handle. Reading poison as "no tasks"
+    // would free the handle under a task still using it.
+    let mut tasks = std::mem::take(&mut *h.pending_tasks.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    tasks.retain(|t| !t.is_finished());
+    if !tasks.is_empty() {
+        // Each task borrows the admin client until it finishes, and a close cannot be
+        // interrupted, so this waits until it completes. A task finishes right after
+        // queuing its callback, so this does not wait for the callback itself, which may
+        // run on the dispatcher thread after the handle is gone: no completion job touches
+        // the handle.
+        h.runtime.block_on(async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        });
+    }
+    // SAFETY: per this function's `# Safety`, `addr` is the `Box::into_raw` of
+    // `build_admin_handle` and this is its only teardown, so reclaiming the `Box` is the
+    // single, final use. Every task that borrowed the client was joined above: each
+    // `admin_async_void_op` call registers its task before returning, and no call may
+    // start once `destroy` has been called. The other `_async` tasks capture nothing from
+    // the handle. `h` is not used past this point.
+    let handle = unsafe { Box::from_raw(addr as *mut AdminHandle) };
     let AdminHandle { kind, runtime, completion_tx, dispatcher, .. } = *handle;
 
-    // 1. Shut down the runtime first. `shutdown_background` drops every awaiter
-    //    task that is not being polled at this instant and does not wait for one
-    //    that is, which is why the `# Safety` contract requires that no `_async`
-    //    operation is still in flight: the `close_async` awaiter borrows the
-    //    admin client that is dropped next.
+    // 1. Shut down the runtime. No task that borrows the client is left (all were joined
+    //    above), and `shutdown_background` drops the remaining awaiter tasks, and whatever
+    //    the client spawned on it, without waiting.
     runtime.shutdown_background();
     // 2. Drop the admin client.
     drop(kind);
@@ -730,12 +817,14 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// publish everything the callback needs (including `user_data`) before calling
 /// rather than after.
 ///
+/// [`kafka_admin_AdminClient_destroy`] called while the close is in flight
+/// waits for it to complete.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
-/// The handle must not be destroyed until `callback` has fired: the awaiter task
-/// borrows the client until then. `callback` must be a valid function pointer
-/// and `user_data` must stay valid until the callback has run.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
     // pair on the calling thread, exactly as the function's callback contract documents for
@@ -759,9 +848,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
     // itself, firing `callback` inline for a NULL handle. `callback` was supplied by the C
     // caller along with `user_data`, and the helper fires it exactly once with a null or
     // freshly boxed error handle the callback owns. The `close_with_timeout` future borrows
-    // the admin client from a spawned task, so the handle must not be destroyed before the
-    // callback fires, which is the C precondition documented on
-    // `kafka_admin_AdminClient_destroy`.
+    // the admin client from a spawned task, which the helper registers for
+    // `kafka_admin_AdminClient_destroy` to join before it frees the handle.
     unsafe {
         admin_async_void_op(admin, callback, user_data, move |a| async move {
             a.close_with_timeout(timeout).await;
@@ -786,6 +874,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
 /// `close`). `op` runs on the runtime and the callback fires on the dispatcher
 /// thread — except for a NULL `admin`, which fires the callback inline on the
 /// calling thread (see the module docs, *Callback thread*).
+///
+/// `op` borrows the admin client from the spawned task, so the task is
+/// registered in `pending_tasks` for `destroy` to join before the handle is
+/// freed.
 ///
 /// # Safety
 ///
@@ -819,19 +911,19 @@ unsafe fn admin_async_void_op<F, Fut>(
     // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
     // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
     // handle. `h` itself is used only within this call (cloning `completion_tx`, resolving
-    // `h.admin()`, spawning on `runtime_handle`), but the `&'static dyn Admin` derived from
-    // it (`client`) is captured by the spawned task and used until `op(client)` completes.
-    // No join registry or `Arc` keeps the client alive for that task: the keep-alive is the
-    // C precondition documented on `kafka_admin_AdminClient_destroy` that the handle is not
-    // destroyed while an `_async` operation is in flight, together with
-    // `runtime.shutdown_background()` cancelling awaiter tasks that are not currently being
-    // polled.
+    // `h.admin()`, registering and spawning the task), but the `&'static dyn Admin` derived
+    // from it (`client`) is captured by the spawned task and used until `op(client)`
+    // completes. The task is registered in `pending_tasks` before this call returns, and
+    // `kafka_admin_AdminClient_destroy` joins every registered task before it frees the
+    // handle, so the client outlives the task. No call may start once `destroy` has been
+    // called, which means no task is registered after `destroy` has taken the list.
     let h = unsafe { handle_ref(admin) };
     let tx = h.completion_tx.clone();
     // `&'static dyn Admin` is `Send` because `Admin: Send + Sync`; resolving it
     // here keeps the (non-`Sync`) handle itself out of the spawned task.
     let client: &'static dyn Admin = h.admin();
-    spawn_callback_task(&h.runtime_handle, async move {
+    let mut pending = reserve_pending_task(h);
+    let task = spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         let error = match op(client).await {
             Ok(()) => std::ptr::null_mut(),
@@ -849,6 +941,7 @@ unsafe fn admin_async_void_op<F, Fut>(
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
         enqueue_or_run_inline(&tx, job);
     });
+    pending.push(task);
 }
 
 /// A raw `user_data` pointer wrapped so it can cross into the spawned task and
@@ -15856,17 +15949,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     // (`submit_remove_members_from_consumer_group`) on the calling thread while the C
     // caller keeps the handle alive; the spawned awaiter owns only the `'static` future, a
     // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
-    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
-    // must not destroy the handle while an `_async` operation is in flight. A `group` or
-    // `options` marshaling error makes `submit` return `Err`, so the callback fires inline.
-    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
-    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
-    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_remove_members_from_consumer_group_result` and `box_error` build fresh
-    // `kafka_admin_RemoveMembersFromConsumerGroupResult_t` / `kafka_common_Error_t`
-    // handles, exactly one non-null, whose ownership transfers to the callee; the C user is
-    // responsible for the thread-safety of `user_data`.
+    // reference escapes, and `kafka_admin_AdminClient_destroy` therefore need not wait for
+    // the awaiter. A `group` or `options` marshaling error makes `submit` return `Err`, so
+    // the callback fires inline. `callback` was supplied by the C caller along with
+    // `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_remove_members_from_consumer_group_result`
+    // and `box_error` build fresh `kafka_admin_RemoveMembersFromConsumerGroupResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -18388,14 +18480,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     // from `handle_ref` is used only inside `submit` (`submit_create_acls`) on the calling
     // thread while the C caller keeps the handle alive; the spawned awaiter owns only the
     // `'static` future, a `completion_tx` clone and `user_data` wrapped in `SendUserData`,
-    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` documents that
-    // the C caller must not destroy the handle while an `_async` operation is in flight.
-    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
-    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
-    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_create_acls_result` and `box_error` build fresh
-    // `kafka_admin_CreateAclsResult_t` / `kafka_common_Error_t` handles, exactly one
+    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` therefore need
+    // not wait for the awaiter. `callback` was supplied by the C caller along with
+    // `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_create_acls_result` and `box_error` build
+    // fresh `kafka_admin_CreateAclsResult_t` / `kafka_common_Error_t` handles, exactly one
     // non-null, whose ownership transfers to the callee; the C user is responsible for the
     // thread-safety of `user_data`.
     unsafe {
@@ -18580,15 +18671,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
     // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
     // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
-    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
-    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
-    // if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_describe_acls_result` and `box_error` build fresh
-    // `kafka_admin_DescribeAclsResult_t` / `kafka_common_Error_t` handles, exactly one
-    // non-null, whose ownership transfers to the callee; the C user is responsible for the
-    // thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states. `box_describe_acls_result` and
+    // `box_error` build fresh `kafka_admin_DescribeAclsResult_t` / `kafka_common_Error_t`
+    // handles, exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -18765,14 +18855,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     // from `handle_ref` is used only inside `submit` (`submit_delete_acls`) on the calling
     // thread while the C caller keeps the handle alive; the spawned awaiter owns only the
     // `'static` future, a `completion_tx` clone and `user_data` wrapped in `SendUserData`,
-    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` documents that
-    // the C caller must not destroy the handle while an `_async` operation is in flight.
-    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
-    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
-    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_delete_acls_result` and `box_error` build fresh
-    // `kafka_admin_DeleteAclsResult_t` / `kafka_common_Error_t` handles, exactly one
+    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` therefore need
+    // not wait for the awaiter. `callback` was supplied by the C caller along with
+    // `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_delete_acls_result` and `box_error` build
+    // fresh `kafka_admin_DeleteAclsResult_t` / `kafka_common_Error_t` handles, exactly one
     // non-null, whose ownership transfers to the callee; the C user is responsible for the
     // thread-safety of `user_data`.
     unsafe {
@@ -18939,15 +19028,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
     // the calling thread while the C caller keeps the handle alive; the spawned awaiter
     // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
-    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
-    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
-    // if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_describe_client_quotas_result` and `box_error` build fresh
-    // `kafka_admin_DescribeClientQuotasResult_t` / `kafka_common_Error_t` handles, exactly
-    // one non-null, whose ownership transfers to the callee; the C user is responsible for
-    // the thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states. `box_describe_client_quotas_result`
+    // and `box_error` build fresh `kafka_admin_DescribeClientQuotasResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -19163,15 +19251,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
     // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
-    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
-    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
-    // if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_alter_client_quotas_result` and `box_error` build fresh
-    // `kafka_admin_AlterClientQuotasResult_t` / `kafka_common_Error_t` handles, exactly one
-    // non-null, whose ownership transfers to the callee; the C user is responsible for the
-    // thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states. `box_alter_client_quotas_result` and
+    // `box_error` build fresh `kafka_admin_AlterClientQuotasResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -20711,15 +20798,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     // (`submit_describe_user_scram_credentials`) on the calling thread while the C caller
     // keeps the handle alive; the spawned awaiter owns only the `'static` future, a
     // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
-    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
-    // must not destroy the handle while an `_async` operation is in flight. The `impl
-    // Future + Send + use<>` that `submit` returns captures no borrow of the handle, which
-    // the helper's `Fut: 'static` bound also enforces. `callback` was supplied by the C
-    // caller along with `user_data` and is invoked exactly once by `complete`: on the
-    // dispatcher thread normally, inline on the calling thread when `admin` is NULL or
-    // marshaling failed, or on a tokio worker thread if the completion queue is
-    // unreachable, as this function's callback-thread documentation states.
-    // `box_describe_user_scram_credentials_result` and `box_error` build fresh
+    // reference escapes, and `kafka_admin_AdminClient_destroy` therefore need not wait for
+    // the awaiter. The `impl Future + Send + use<>` that `submit` returns captures no
+    // borrow of the handle, which the helper's `Fut: 'static` bound also enforces.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_describe_user_scram_credentials_result` and `box_error` build fresh
     // `kafka_admin_DescribeUserScramCredentialsResult_t` / `kafka_common_Error_t` handles,
     // exactly one non-null, whose ownership transfers to the callee; the C user is
     // responsible for the thread-safety of `user_data`.
@@ -20961,15 +21047,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     // (`submit_alter_user_scram_credentials`) on the calling thread while the C caller
     // keeps the handle alive; the spawned awaiter owns only the `'static` future, a
     // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
-    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
-    // must not destroy the handle while an `_async` operation is in flight. `callback` was
-    // supplied by the C caller along with `user_data` and is invoked exactly once by
-    // `complete`: on the dispatcher thread normally, inline on the calling thread when
-    // `admin` is NULL or marshaling failed, or on a tokio worker thread if the completion
-    // queue is unreachable, as this function's callback-thread documentation states.
-    // `box_alter_user_scram_credentials_result` and `box_error` build fresh
-    // `kafka_admin_AlterUserScramCredentialsResult_t` / `kafka_common_Error_t` handles,
-    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // reference escapes, and `kafka_admin_AdminClient_destroy` therefore need not wait for
+    // the awaiter. `callback` was supplied by the C caller along with `user_data` and is
+    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
+    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
+    // if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_alter_user_scram_credentials_result` and `box_error` build
+    // fresh `kafka_admin_AlterUserScramCredentialsResult_t` / `kafka_common_Error_t`
+    // handles, exactly one non-null, whose ownership transfers to the callee; the C user is
     // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
@@ -21199,16 +21284,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
     // the calling thread while the C caller keeps the handle alive; the spawned awaiter
     // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. A `renewers` marshaling error makes `submit` return `Err`, so the
-    // callback fires inline. `callback` was supplied by the C caller along with `user_data`
-    // and is invoked exactly once by `complete`: on the dispatcher thread normally, inline
-    // on the calling thread when `admin` is NULL or marshaling failed, or on a tokio worker
-    // thread if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_create_delegation_token_result` and `box_error` build
-    // fresh `kafka_admin_CreateDelegationTokenResult_t` / `kafka_common_Error_t` handles,
-    // exactly one non-null, whose ownership transfers to the callee; the C user is
-    // responsible for the thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. A `renewers` marshaling error makes `submit`
+    // return `Err`, so the callback fires inline. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states. `box_create_delegation_token_result`
+    // and `box_error` build fresh `kafka_admin_CreateDelegationTokenResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -21361,16 +21445,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
     // the calling thread while the C caller keeps the handle alive; the spawned awaiter
     // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `hmac` is an owned `Vec<u8>` copied before the call, not C memory.
-    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
-    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
-    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_renew_delegation_token_result` and `box_error` build fresh
-    // `kafka_admin_RenewDelegationTokenResult_t` / `kafka_common_Error_t` handles, exactly
-    // one non-null, whose ownership transfers to the callee; the C user is responsible for
-    // the thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `hmac` is an owned `Vec<u8>` copied before
+    // the call, not C memory. `callback` was supplied by the C caller along with
+    // `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_renew_delegation_token_result` and
+    // `box_error` build fresh `kafka_admin_RenewDelegationTokenResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -21521,16 +21604,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token_async(
     // the calling thread while the C caller keeps the handle alive; the spawned awaiter
     // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `hmac` is an owned `Vec<u8>` copied before the call, not C memory.
-    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
-    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
-    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_expire_delegation_token_result` and `box_error` build fresh
-    // `kafka_admin_ExpireDelegationTokenResult_t` / `kafka_common_Error_t` handles, exactly
-    // one non-null, whose ownership transfers to the callee; the C user is responsible for
-    // the thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `hmac` is an owned `Vec<u8>` copied before
+    // the call, not C memory. `callback` was supplied by the C caller along with
+    // `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_expire_delegation_token_result` and
+    // `box_error` build fresh `kafka_admin_ExpireDelegationTokenResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -21703,14 +21785,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async
     // on the calling thread while the C caller keeps the handle alive; the spawned awaiter
     // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. An `owners` marshaling error makes `submit` return `Err`, so the
-    // callback fires inline. `callback` was supplied by the C caller along with `user_data`
-    // and is invoked exactly once by `complete`: on the dispatcher thread normally, inline
-    // on the calling thread when `admin` is NULL or marshaling failed, or on a tokio worker
-    // thread if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_describe_delegation_token_result` and `box_error` build
-    // fresh `kafka_admin_DescribeDelegationTokenResult_t` / `kafka_common_Error_t` handles,
+    // therefore need not wait for the awaiter. An `owners` marshaling error makes `submit`
+    // return `Err`, so the callback fires inline. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states.
+    // `box_describe_delegation_token_result` and `box_error` build fresh
+    // `kafka_admin_DescribeDelegationTokenResult_t` / `kafka_common_Error_t` handles,
     // exactly one non-null, whose ownership transfers to the callee; the C user is
     // responsible for the thread-safety of `user_data`.
     unsafe {
@@ -21852,15 +21934,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
     // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
     // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
-    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
-    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
-    // if the completion queue is unreachable, as this function's callback-thread
-    // documentation states. `box_describe_features_result` and `box_error` build fresh
-    // `kafka_admin_DescribeFeaturesResult_t` / `kafka_common_Error_t` handles, exactly one
-    // non-null, whose ownership transfers to the callee; the C user is responsible for the
-    // thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. `callback` was supplied by the C caller
+    // along with `user_data` and is invoked exactly once by `complete`: on the dispatcher
+    // thread normally, inline on the calling thread when `admin` is NULL or marshaling
+    // failed, or on a tokio worker thread if the completion queue is unreachable, as this
+    // function's callback-thread documentation states. `box_describe_features_result` and
+    // `box_error` build fresh `kafka_admin_DescribeFeaturesResult_t` /
+    // `kafka_common_Error_t` handles, exactly one non-null, whose ownership transfers to
+    // the callee; the C user is responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -22036,17 +22117,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
     // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
     // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
-    // documents that the C caller must not destroy the handle while an `_async` operation
-    // is in flight. An `updates` marshaling error, or `submit_update_features`' own
-    // client-side validation error, makes `submit` return `Err`, so the callback fires
-    // inline. `callback` was supplied by the C caller along with `user_data` and is invoked
-    // exactly once by `complete`: on the dispatcher thread normally, inline on the calling
-    // thread when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
-    // completion queue is unreachable, as this function's callback-thread documentation
-    // states. `box_update_features_result` and `box_error` build fresh
-    // `kafka_admin_UpdateFeaturesResult_t` / `kafka_common_Error_t` handles, exactly one
-    // non-null, whose ownership transfers to the callee; the C user is responsible for the
-    // thread-safety of `user_data`.
+    // therefore need not wait for the awaiter. An `updates` marshaling error, or
+    // `submit_update_features`' own client-side validation error, makes `submit` return
+    // `Err`, so the callback fires inline. `callback` was supplied by the C caller along
+    // with `user_data` and is invoked exactly once by `complete`: on the dispatcher thread
+    // normally, inline on the calling thread when `admin` is NULL or marshaling failed, or
+    // on a tokio worker thread if the completion queue is unreachable, as this function's
+    // callback-thread documentation states. `box_update_features_result` and `box_error`
+    // build fresh `kafka_admin_UpdateFeaturesResult_t` / `kafka_common_Error_t` handles,
+    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -25156,12 +25236,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     // thread only to run `submit_describe_producers` (which borrows the owned `requested`
     // for that call and returns an owned `'static` `KafkaFuture`) and to spawn on the
     // handle's runtime; the task captures only that future, a clone of `completion_tx` and
-    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
-    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
-    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
-    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
-    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
-    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `SendUserData(user_data)`, never the handle reference, so
+    // `kafka_admin_AdminClient_destroy` need not wait for the task. `callback` was supplied
+    // by the C caller along with `user_data` and fires exactly once through the single
+    // `FnOnce` completion: on the dispatcher thread, inline on the calling thread for a
+    // NULL `admin`, or on a tokio worker only if the dispatcher terminated abnormally, as
+    // the callback contract documents. The `result` handle from
     // `box_describe_producers_result` is freshly allocated and handed over, and any error
     // handle is likewise owned by the callee; the raw pointers are owned handles moved to
     // the dispatcher thread, and the C user is responsible for the thread-safety of
@@ -25308,12 +25388,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     // thread only to run `submit_describe_transactions` (which borrows the owned `ids` for
     // that call and returns an owned `'static` `KafkaFuture`) and to spawn on the handle's
     // runtime; the task captures only that future, a clone of `completion_tx` and
-    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
-    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
-    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
-    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
-    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
-    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `SendUserData(user_data)`, never the handle reference, so
+    // `kafka_admin_AdminClient_destroy` need not wait for the task. `callback` was supplied
+    // by the C caller along with `user_data` and fires exactly once through the single
+    // `FnOnce` completion: on the dispatcher thread, inline on the calling thread for a
+    // NULL `admin`, or on a tokio worker only if the dispatcher terminated abnormally, as
+    // the callback contract documents. The `result` handle from
     // `box_describe_transactions_result` is freshly allocated and handed over, and any
     // error handle is likewise owned by the callee; the raw pointers are owned handles
     // moved to the dispatcher thread, and the C user is responsible for the thread-safety
@@ -25462,15 +25542,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
     // `&'static AdminHandle` is used on the calling thread only to run
     // `submit_abort_transaction` (returning an owned `'static` `KafkaFuture`) and to spawn
     // on the handle's runtime; the task captures only that future, a clone of
-    // `completion_tx` and `SendUserData(user_data)`, never the handle reference, and
-    // destroying the handle with an operation in flight is a documented C lifetime
-    // precondition (CLAUDE.md FFI §4). `callback` was supplied by the C caller along with
-    // `user_data` and fires exactly once through the single `FnOnce` completion: on the
-    // dispatcher thread, inline for the synchronous-failure paths, or on a tokio worker
-    // only if the dispatcher terminated abnormally. A non-null error handle from
-    // `box_error` is freshly allocated and owned by the callee; the raw pointers are owned
-    // handles moved to the dispatcher thread, and the C user is responsible for the
-    // thread-safety of `user_data`, which must stay valid until the callback fires.
+    // `completion_tx` and `SendUserData(user_data)`, never the handle reference, so
+    // `kafka_admin_AdminClient_destroy` need not wait for the task. `callback` was supplied
+    // by the C caller along with `user_data` and fires exactly once through the single
+    // `FnOnce` completion: on the dispatcher thread, inline for the synchronous-failure
+    // paths, or on a tokio worker only if the dispatcher terminated abnormally. A non-null
+    // error handle from `box_error` is freshly allocated and owned by the callee; the raw
+    // pointers are owned handles moved to the dispatcher thread, and the C user is
+    // responsible for the thread-safety of `user_data`, which must stay valid until the
+    // callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -25607,15 +25687,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_asy
     // used on the calling thread only to run `submit_force_terminate_transaction`
     // (returning an owned `'static` `KafkaFuture`) and to spawn on the handle's runtime;
     // the task captures only that future, a clone of `completion_tx` and
-    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
-    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
-    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
-    // through the single `FnOnce` completion: on the dispatcher thread, inline for the
-    // synchronous-failure paths, or on a tokio worker only if the dispatcher terminated
-    // abnormally. A non-null error handle from `box_error` is freshly allocated and owned
-    // by the callee; the raw pointers are owned handles moved to the dispatcher thread, and
-    // the C user is responsible for the thread-safety of `user_data`, which must stay valid
-    // until the callback fires.
+    // `SendUserData(user_data)`, never the handle reference, so
+    // `kafka_admin_AdminClient_destroy` need not wait for the task. `callback` was supplied
+    // by the C caller along with `user_data` and fires exactly once through the single
+    // `FnOnce` completion: on the dispatcher thread, inline for the synchronous-failure
+    // paths, or on a tokio worker only if the dispatcher terminated abnormally. A non-null
+    // error handle from `box_error` is freshly allocated and owned by the callee; the raw
+    // pointers are owned handles moved to the dispatcher thread, and the C user is
+    // responsible for the thread-safety of `user_data`, which must stay valid until the
+    // callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -25755,16 +25835,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     // thread only to run `submit_fence_producers` (which borrows the owned `ids` for that
     // call and returns an owned `'static + Send` future that does not capture the handle)
     // and to spawn on the handle's runtime; the task captures only that future, a clone of
-    // `completion_tx` and `SendUserData(user_data)`, and destroying the handle with an
-    // operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
-    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
-    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
-    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
-    // terminated abnormally, as the callback contract documents. The `result` handle from
-    // `box_fence_producers_result` is freshly allocated and handed over, and any error
-    // handle is likewise owned by the callee; the raw pointers are owned handles moved to
-    // the dispatcher thread, and the C user is responsible for the thread-safety of
-    // `user_data`, which must stay valid until the callback fires.
+    // `completion_tx` and `SendUserData(user_data)`, so `kafka_admin_AdminClient_destroy`
+    // need not wait for the task. `callback` was supplied by the C caller along with
+    // `user_data` and fires exactly once through the single `FnOnce` completion: on the
+    // dispatcher thread, inline on the calling thread for a NULL `admin`, or on a tokio
+    // worker only if the dispatcher terminated abnormally, as the callback contract
+    // documents. The `result` handle from `box_fence_producers_result` is freshly allocated
+    // and handed over, and any error handle is likewise owned by the callee; the raw
+    // pointers are owned handles moved to the dispatcher thread, and the C user is
+    // responsible for the thread-safety of `user_data`, which must stay valid until the
+    // callback fires.
     unsafe {
         admin_async_future_op(
             admin,
@@ -25949,16 +26029,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     // thread only to run `submit_list_transactions` (which takes the owned `options` by
     // value and returns an owned `'static + Send` future that does not capture the handle)
     // and to spawn on the handle's runtime; the task captures only that future, a clone of
-    // `completion_tx` and `SendUserData(user_data)`, and destroying the handle with an
-    // operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
-    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
-    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
-    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
-    // terminated abnormally, as the callback contract documents. The `result` handle from
-    // `box_list_transactions_result` is freshly allocated and handed over, and any error
-    // handle is likewise owned by the callee; the raw pointers are owned handles moved to
-    // the dispatcher thread, and the C user is responsible for the thread-safety of
-    // `user_data`, which must stay valid until the callback fires.
+    // `completion_tx` and `SendUserData(user_data)`, so `kafka_admin_AdminClient_destroy`
+    // need not wait for the task. `callback` was supplied by the C caller along with
+    // `user_data` and fires exactly once through the single `FnOnce` completion: on the
+    // dispatcher thread, inline on the calling thread for a NULL `admin`, or on a tokio
+    // worker only if the dispatcher terminated abnormally, as the callback contract
+    // documents. The `result` handle from `box_list_transactions_result` is freshly
+    // allocated and handed over, and any error handle is likewise owned by the callee; the
+    // raw pointers are owned handles moved to the dispatcher thread, and the C user is
+    // responsible for the thread-safety of `user_data`, which must stay valid until the
+    // callback fires.
     unsafe {
         admin_async_future_op(
             admin,
@@ -30506,5 +30586,306 @@ mod tests {
             kafka_admin_DescribeFeaturesResult_destroy(std::ptr::null_mut());
             kafka_admin_UpdateFeaturesResult_destroy(std::ptr::null_mut());
         }
+    }
+
+    // -- destroy with an `_async` operation in flight ------------------------
+
+    /// Logs the invocations of [`log_close_callback`].
+    #[derive(Default)]
+    struct CloseCallbackLog {
+        calls: std::sync::atomic::AtomicI32,
+        errors: std::sync::atomic::AtomicI32,
+        /// The error message of the last invocation that carried an error.
+        message: Mutex<Option<String>>,
+    }
+
+    /// A close callback that logs itself in the [`CloseCallbackLog`] passed as
+    /// `user_data`, freeing the error handle if it is given one, as a C caller must.
+    ///
+    /// # Safety
+    ///
+    /// Called by the library through `kafka_admin_AdminClient_close_callback_t`:
+    /// `error` must be null or an owned handle (destroyed here) and `user_data` a
+    /// leaked, so never freed, `&CloseCallbackLog`.
+    unsafe extern "C" fn log_close_callback(error: *mut kafka_common_Error_t, user_data: *mut c_void) {
+        // SAFETY: Test callback: `user_data` is the leaked `&CloseCallbackLog` the test
+        // passed to `kafka_admin_AdminClient_close_async`, live whenever this fires, even
+        // after the test returns; the shared reborrow is used only for atomic writes and
+        // the `message` lock.
+        let log = unsafe { &*(user_data as *const CloseCallbackLog) };
+        if !error.is_null() {
+            // SAFETY: Test callback: `error` is non-null (checked above) and owned by this
+            // callback per `kafka_admin_AdminClient_close_callback_t`, live until the
+            // destroy below; the message is copied into an owned `String` before that.
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            // SAFETY: Test callback: `error` is owned by this callback (see above); this is
+            // its single destroy, after its last read.
+            unsafe { common::kafka_common_Error_destroy(error) };
+            *log.message.lock().unwrap() = Some(message);
+            log.errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // Last, so a test that sees the count also sees the error and its message.
+        log.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A `list_topics` callback that only frees whichever handle it is given.
+    ///
+    /// # Safety
+    ///
+    /// Called by the library through `kafka_admin_AdminClient_list_topics_callback_t`:
+    /// `result` and `error` must each be null or an owned handle (both are destroyed
+    /// here).
+    unsafe extern "C" fn discard_list_topics(
+        result: *mut kafka_admin_ListTopicsResult_t,
+        error: *mut kafka_common_Error_t,
+        _user_data: *mut c_void,
+    ) {
+        // SAFETY: Test callback: `result` and `error` are each null or owned by this
+        // callback per `kafka_admin_AdminClient_list_topics_callback_t`, both destroy
+        // functions accept null, and this is the single destroy of each.
+        unsafe {
+            kafka_admin_ListTopicsResult_destroy(result);
+            common::kafka_common_Error_destroy(error);
+        }
+    }
+
+    /// Waits up to `timeout` for `done` to hold, checking every 10 ms.
+    fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while !done() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// Builds a production admin client on an unreachable bootstrap server with
+    /// one `list_topics_async` that can never be answered, so a close waits out
+    /// its whole timeout for that call before failing it, as Java's does.
+    fn unreachable_admin_with_a_pending_call() -> *mut kafka_admin_AdminClient_t {
+        let props = kafka_admin_AdminClientProperties_new();
+        let key = CString::new("bootstrap.servers").unwrap();
+        let value = CString::new("127.0.0.1:1").unwrap();
+        // SAFETY: Test: `props` is the live handle `kafka_admin_AdminClientProperties_new`
+        // returned above, and `key` / `value` are owned NUL-terminated `CString`s that
+        // outlive the call, which copies them.
+        unsafe { kafka_admin_AdminClientProperties_put(props, key.as_ptr(), value.as_ptr()) };
+        let mut error = std::ptr::null_mut();
+        // SAFETY: Test: `props` is the live properties handle filled above and `error` a
+        // writable local slot for one error handle, as `kafka_admin_AdminClient_new`
+        // requires; the constructor only borrows `props`.
+        let admin = unsafe { kafka_admin_AdminClient_new(props, &mut error) };
+        // SAFETY: Test: `props` is the handle `kafka_admin_AdminClientProperties_new`
+        // returned, no longer borrowed by the client, and this is its single destroy.
+        unsafe { kafka_admin_AdminClientProperties_destroy(props) };
+        assert!(error.is_null() && !admin.is_null(), "admin client construction failed");
+        // SAFETY: Test: `admin` is the live handle built above and `discard_list_topics` a
+        // valid `extern "C"` function of the `list_topics` callback signature, which never
+        // reads `user_data`.
+        unsafe {
+            kafka_admin_AdminClient_list_topics_async(admin, 60_000, false, discard_list_topics, std::ptr::null_mut())
+        };
+        // Let the I/O task move the call to its pending list first. Its loop checks
+        // whether to exit before taking in new calls (Java takes them in first), so a
+        // close submitted in the same poll would fail the call at once, not wait for it.
+        std::thread::sleep(Duration::from_millis(300));
+        admin
+    }
+
+    /// Takes the dispatcher's join handle out of `admin`, so a test can watch the
+    /// dispatcher exit, which it does only once `destroy` has freed the handle and
+    /// so dropped its completion sender. `destroy` only detaches it anyway.
+    fn take_dispatcher(admin: *const kafka_admin_AdminClient_t) -> std::thread::JoinHandle<()> {
+        // SAFETY: Test: `admin` is a live handle from an admin-client constructor, as
+        // `handle_ref` requires, and the reference is used only for this one lock.
+        let h = unsafe { handle_ref(admin) };
+        h.dispatcher.lock().unwrap().take().unwrap()
+    }
+
+    /// Submits a 1 s `close_async`, which waits for the pending call, and checks it
+    /// is still in flight. Returns the leaked callback log.
+    fn submit_close(admin: *const kafka_admin_AdminClient_t) -> &'static CloseCallbackLog {
+        let log: &'static CloseCallbackLog = Box::leak(Box::default());
+        // SAFETY: Test: `admin` is a live handle from an admin-client constructor,
+        // `log_close_callback` a valid `extern "C"` function of the close-callback
+        // signature, and `user_data` the leaked `log`, valid for as long as the callback
+        // may fire.
+        unsafe {
+            kafka_admin_AdminClient_close_async(
+                admin,
+                1_000,
+                log_close_callback,
+                log as *const CloseCallbackLog as *mut c_void,
+            )
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            log.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the close must still be in flight"
+        );
+        log
+    }
+
+    /// Asserts that the in-flight close logged by `log` completed, firing its
+    /// callback once without an error, and that the handle was then freed.
+    fn assert_close_fired_once_and_handle_freed(log: &CloseCallbackLog, dispatcher: std::thread::JoinHandle<()>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        assert!(
+            wait_until(Duration::from_secs(10), || log.calls.load(SeqCst) > 0),
+            "the in-flight close's callback must still fire"
+        );
+        assert_eq!(
+            log.errors.load(SeqCst),
+            0,
+            "Java's `close` is void, so its callback carries no error"
+        );
+        assert!(
+            wait_until(Duration::from_secs(10), || dispatcher.is_finished()),
+            "destroy must free the handle once the close's task has finished"
+        );
+        dispatcher.join().unwrap();
+        assert_eq!(log.calls.load(SeqCst), 1, "the close callback must fire exactly once");
+    }
+
+    /// `destroy` with a `close_async` in flight waits for the close to complete
+    /// before freeing the handle, whose admin client the close's task borrows until
+    /// it finishes. Shutting the runtime down under it instead dropped the task, so
+    /// the callback never fired, or let it run on into the freed client.
+    #[test]
+    fn test_destroy_waits_for_an_in_flight_close_async() {
+        let admin = unreachable_admin_with_a_pending_call();
+        let dispatcher = take_dispatcher(admin);
+        let log = submit_close(admin);
+        // SAFETY: Test: `admin` is the live handle built above and this is its single
+        // destroy, called outside any tokio runtime with no other call running on it; the
+        // pointer is not used afterwards.
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        assert_close_fired_once_and_handle_freed(log, dispatcher);
+    }
+
+    /// `destroy` inside a tokio runtime, where `Runtime::block_on` panics, hands the
+    /// wait and the free to a thread of its own: the close still completes, its
+    /// callback fires once, and the handle is still freed.
+    #[test]
+    fn test_destroy_inside_a_tokio_runtime_hands_the_teardown_off() {
+        let admin = unreachable_admin_with_a_pending_call();
+        let dispatcher = take_dispatcher(admin);
+        let log = submit_close(admin);
+        let outer = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        outer.block_on(async {
+            // SAFETY: Test: `admin` is the live handle built above and this is its single
+            // destroy, with no other call running on it; the pointer is not used afterwards.
+            // Calling it inside the outer runtime is the point of the test.
+            unsafe { kafka_admin_AdminClient_destroy(admin) }
+        });
+        drop(outer);
+        assert_close_fired_once_and_handle_freed(log, dispatcher);
+    }
+
+    /// `destroy` on the dispatcher thread, as from inside a callback, waits there
+    /// for the in-flight close (no admin task waits on that thread), frees the
+    /// handle and returns; the close's callback, queued behind it, then fires.
+    #[test]
+    fn test_destroy_on_the_dispatcher_thread_waits_for_an_in_flight_close_async() {
+        let admin = unreachable_admin_with_a_pending_call();
+        let dispatcher = take_dispatcher(admin);
+        let log = submit_close(admin);
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel::<()>();
+        let addr = admin as usize;
+        let destroy_job: CompletionJob = Box::new(move || {
+            // SAFETY: Test: `addr` is the live handle built above and this is its single
+            // destroy; the test thread no longer uses it, and its only other user is the
+            // close's task, which `destroy` must wait for.
+            unsafe { kafka_admin_AdminClient_destroy(addr as *mut kafka_admin_AdminClient_t) };
+            returned_tx.send(()).unwrap();
+        });
+        // SAFETY: Test: `admin` is the live handle built above, as `handle_ref` requires;
+        // the reference is used only to clone the sender, before `destroy_job` can run.
+        let tx = unsafe { handle_ref(admin) }.completion_tx.clone();
+        enqueue_or_run_inline(&tx, destroy_job);
+        drop(tx);
+        assert!(
+            returned_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "destroy on the dispatcher thread must return once the close completes"
+        );
+        assert_close_fired_once_and_handle_freed(log, dispatcher);
+    }
+
+    /// Poisons `lock` the way a panic caught by `#[ffi_guard]` does: by panicking
+    /// while holding it.
+    fn poison<T>(lock: &Mutex<T>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("poisoning the lock for a test");
+        }));
+        assert!(result.is_err(), "the poisoning closure must panic");
+        assert!(lock.is_poisoned(), "the lock must be poisoned");
+    }
+
+    /// Regression for the two-phase task registration: with `pending_tasks`
+    /// poisoned, `close_async` must fail *before* it spawns its task.
+    /// `#[ffi_guard]` then reports the panic through the callback, which must fire
+    /// exactly once, before the call returns, and `destroy` must still free the
+    /// handle.
+    #[test]
+    fn test_close_async_with_poisoned_task_list_fires_callback_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        let dispatcher = take_dispatcher(admin);
+        // SAFETY: Test: `admin` is the live mock handle created above, as `handle_ref`
+        // requires, and the reference is last used before the destroy at the end.
+        let h = unsafe { handle_ref(admin) };
+        poison(&h.pending_tasks);
+        let log: &'static CloseCallbackLog = Box::leak(Box::default());
+        // SAFETY: Test: `admin` is the live mock handle, `log_close_callback` a valid
+        // `extern "C"` function of the close-callback signature, and `user_data` the leaked
+        // `log`, valid for as long as the callback may fire.
+        unsafe {
+            kafka_admin_AdminClient_close_async(
+                admin,
+                1_000,
+                log_close_callback,
+                log as *const CloseCallbackLog as *mut c_void,
+            )
+        };
+        assert_eq!(log.calls.load(SeqCst), 1, "the panic must be reported before the call returns");
+        // Give a stray task ample time to deliver a second completion.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(log.calls.load(SeqCst), 1, "the callback must fire exactly once");
+        let msg = log
+            .message
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the callback must deliver the panic error");
+        assert!(
+            msg.starts_with("Rust panic caught at the FFI boundary in kafka_admin_AdminClient_close_async:"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("PoisonError"), "unexpected error message: {msg}");
+        assert!(
+            h.pending_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "no task may be registered"
+        );
+
+        // SAFETY: Test: `admin` is the mock handle created above and this is its single
+        // destroy, called outside any tokio runtime with no operation in flight (the failed
+        // call spawned none); `destroy` reads the poisoned `pending_tasks` lock
+        // poison-tolerantly. Neither the pointer nor `h` is used afterwards.
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+        assert!(
+            wait_until(Duration::from_secs(5), || dispatcher.is_finished()),
+            "destroy must free a handle whose task list is poisoned"
+        );
+        dispatcher.join().unwrap();
     }
 }

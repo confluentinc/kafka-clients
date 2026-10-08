@@ -134,8 +134,8 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
 /// woken, and a failed wake is `expect("failed to wake I/O driver")`
 /// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would fire
 /// the callback from `on_panic` while the queued task fires it too, and would
-/// skip the `pending_tasks` registration after the spawn (producer and
-/// consumer), which `destroy` relies on. So the process aborts, as every
+/// skip the `pending_tasks` registration after the spawn (producer, consumer
+/// and admin), which `destroy` relies on. So the process aborts, as every
 /// panic at the boundary did before `#[ffi_guard]`: the OS refused to wake the
 /// runtime. See §4 item 6 of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
 ///
