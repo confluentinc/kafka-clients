@@ -60,7 +60,7 @@ use super::{PollResult, UnsentRequest};
 /// defers the state-update to the next bg-task `poll()` cycle. The
 /// rationale (per Phase 12.5 PLAN §"2. consumer_heartbeat_request_manager"
 /// "Structural decision"): the success path calls
-/// `membership_manager.on_heartbeat_success(...)`, and the membership
+/// `membership_manager.abstract_mm.on_heartbeat_success(...)`, and the membership
 /// manager owns its own `Arc<Mutex<...>>`. Channel-back ensures no
 /// heartbeat-side guard is held when the cross-RM call fires
 /// (consumer-threading.md §16).
@@ -484,7 +484,7 @@ impl ConsumerHeartbeatRequestManager {
     /// **§16 audit**: between draining the channel and the cross-RM
     /// `membership_manager.on_heartbeat_*` call, NO `Mutex::lock()`
     /// invocation is made. The membership manager's own `Mutex` is
-    /// acquired only inside its `on_heartbeat_success` /
+    /// acquired only inside its `abstract_mm.on_heartbeat_success` /
     /// `on_heartbeat_failure` methods.
     fn drain_pending_completions(&mut self, _current_time_ms: i64) {
         while let Ok(completion) = self.pending_completion_rx.try_recv() {
@@ -514,7 +514,7 @@ impl ConsumerHeartbeatRequestManager {
             let member_id = self.membership_manager.member_id();
             self.inner
                 .on_successful_response(&member_id, new_interval_ms, completion_time_ms);
-            if let Err(e) = self.membership_manager.on_heartbeat_success(response) {
+            if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_success(response) {
                 log::error!("on_heartbeat_success failed: {}", e);
                 let _ = self
                     .inner
@@ -1877,7 +1877,7 @@ mod tests {
     /// `PendingHeartbeatCompletion::Response` envelope. On the next
     /// `poll(now)`, the drain at the top invokes
     /// `on_response` → `inner.on_successful_response` +
-    /// `membership_manager.on_heartbeat_success(response)`. The
+    /// `membership_manager.abstract_mm.on_heartbeat_success(response)`. The
     /// membership state advances past JOINING.
     ///
     /// This is the test that would have caught the Phase-12 audit

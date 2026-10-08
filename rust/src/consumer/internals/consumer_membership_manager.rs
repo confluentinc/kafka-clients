@@ -28,7 +28,6 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 
@@ -389,90 +388,53 @@ impl ConsumerMembershipManager {
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
     }
 
-    /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)`.
-    /// Updates member info and state from a successful response.
+    /// The heartbeat response's error code, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
     ///
-    /// Returns `Err(Error)` for unexpected errors in the response
-    /// body — Java throws `IllegalArgumentException`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#onHeartbeatSuccess")]
-    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
-        let data = response.data();
-        if data.error_code != Errors::None.code() {
-            return Err(Error::local_illegal_argument(format!(
-                "Unexpected error in Heartbeat response. Expected no error, but received: {:?}",
-                Errors::for_code(data.error_code)
-            )));
-        }
-        // Short-circuit decisions based on current state.
-        let mut guard = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let state = guard.state;
-        if state == MemberState::Leaving {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} with epoch {} is already leaving the group.",
-                guard.member_id,
-                guard.member_epoch
-            );
-            return Ok(());
-        }
-        if state == MemberState::Unsubscribed && data.member_epoch < 0 {
-            // Java: maybeCompleteLeaveInProgress (we don't track the
-            // leave future here — Phase 10 wires the close handshake).
-            log::debug!(
-                "Member {} with epoch {} received a successful response to the heartbeat to leave the group.",
-                guard.member_id,
-                guard.member_epoch
-            );
-            return Ok(());
-        }
-        if guard.is_not_in_group() {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} is in {} state so it's not a member of the group.",
-                guard.member_id,
-                state
-            );
-            return Ok(());
-        }
-        if data.member_epoch < 0 {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} with epoch {} is in {} state and the member epoch is invalid: {}.",
-                guard.member_id,
-                guard.member_epoch,
-                state,
-                data.member_epoch
-            );
-            return Ok(());
-        }
+    /// Java: `protected short errorCode(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:211-214`), the override of the
+    /// abstract hook.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#errorCode")]
+    pub(crate) fn error_code(response: &ConsumerGroupHeartbeatResponse) -> i16 {
+        response.data().error_code
+    }
 
-        guard.update_member_epoch(data.member_epoch);
+    /// The member epoch the heartbeat response carries, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
+    /// Named after CLAUDE.md §2's overload rule: Java's `memberEpoch(R)` sits
+    /// beside the `memberEpoch()` getter ([`Self::member_epoch`]).
+    ///
+    /// Java: `protected int memberEpoch(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:216-219`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#memberEpoch")]
+    pub(crate) fn member_epoch_with_response(response: &ConsumerGroupHeartbeatResponse) -> i32 {
+        response.data().member_epoch
+    }
 
-        // Assignment field is only populated when there's a new target
-        // assignment for the member.
-        if data.assignment.is_some() && !state.can_handle_new_assignment() {
-            log::debug!(
-                "Ignoring new assignment received from server because member is in {} state.",
-                state
-            );
-            return Ok(());
+    /// The new target assignment the heartbeat response carries, if any, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681). The
+    /// field is only populated when there is a new target assignment for the
+    /// member.
+    ///
+    /// Java builds each topic's partitions as a `TreeSet`, so they come out
+    /// sorted and without duplicates whatever order the broker sent; the
+    /// `Vec` here is sorted and deduplicated to match. That matters because
+    /// [`LocalAssignment::update_with`] compares the `Vec`s by value.
+    ///
+    /// Java: `protected Optional<Map<Uuid, SortedSet<Integer>>>
+    /// extractAssignment(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:221-231`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#extractAssignment")]
+    pub(crate) fn extract_assignment(response: &ConsumerGroupHeartbeatResponse) -> Option<HashMap<Uuid, Vec<i32>>> {
+        let assignment = response.data().assignment.as_ref()?;
+        let mut new_assignment = HashMap::with_capacity(assignment.topic_partitions.len());
+        for topic_partition in &assignment.topic_partitions {
+            let mut partitions = topic_partition.partitions.clone();
+            partitions.sort_unstable();
+            partitions.dedup();
+            new_assignment.insert(topic_partition.topic_id, partitions);
         }
-
-        // Build the new assignment from the response (release the
-        // lock first; we'll re-acquire inside process_assignment_received).
-        let new_assignment = data.assignment.as_ref().map(|assignment| {
-            let mut map: HashMap<Uuid, Vec<i32>> = HashMap::new();
-            for tp in &assignment.topic_partitions {
-                map.insert(tp.topic_id, tp.partitions.clone());
-            }
-            map
-        });
-        drop(guard);
-
-        if let Some(assignment) = new_assignment {
-            self.abstract_mm.process_assignment_received(assignment)?;
-        }
-        Ok(())
+        Some(new_assignment)
     }
 
     /// Java: `transitionToFatal()` (override that wires Consumer-specific
@@ -2076,6 +2038,7 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::Errors;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
     use crate::consumer::internals::AutoOffsetResetStrategy;
@@ -2892,7 +2855,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
         // Member stays in PREPARE_LEAVING; the new assignment is
         // ignored because the state can't accept new assignments.
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
@@ -3183,7 +3146,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive a heartbeat with a full multi-topic target assignment.
@@ -3207,7 +3170,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive an empty target assignment (revoke everything).
@@ -3221,7 +3184,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Drive `reconcile(0, can_commit)` on a bg task, expecting exactly
@@ -5720,7 +5683,7 @@ mod tests {
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         // Leave response received -> remains UNSUBSCRIBED.
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
     }
 
@@ -5936,11 +5899,13 @@ mod tests {
 
         // A non-leave success response is ignored (member already
         // UNSUBSCRIBED with a positive epoch in the response).
-        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        mgr.abstract_mm
+            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
+            .unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // The leave response completes the leave.
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
@@ -5994,7 +5959,9 @@ mod tests {
             }
             // A response with a positive epoch + an assignment should be
             // ignored; the state must be unchanged.
-            mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5)).unwrap();
+            mgr.abstract_mm
+                .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5))
+                .unwrap();
             assert_eq!(mgr.state(), state, "response must be ignored in {state:?}");
         }
     }
@@ -6013,11 +5980,13 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // A previous (non-leave) heartbeat response is ignored.
-        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        mgr.abstract_mm
+            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
+            .unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // The leave response is processed (still UNSUBSCRIBED).
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // Subscription updated + poll -> rejoin.
@@ -6074,12 +6043,46 @@ mod tests {
         data.member_id = Some(mgr.member_id());
         data.member_epoch = 5;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        let err = mgr.on_heartbeat_success(&resp).unwrap_err();
-        // Error message content is part of the contract (DoD §3).
+        let err = mgr.abstract_mm.on_heartbeat_success(&resp).unwrap_err();
+        // Error message content is part of the contract (DoD §3). Java formats
+        // the `Errors` constant with `%s`, i.e. its enum name
+        // (`AbstractMembershipManager.java:342-349`).
         assert!(
-            err.to_string().contains("Unexpected error in Heartbeat response"),
-            "unexpected error message: {err}",
+            matches!(err, Error::LocalIllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
         );
+        assert_eq!(
+            "Unexpected error in Heartbeat response. Expected no error, but received: UNKNOWN_MEMBER_ID",
+            err.message()
+        );
+        assert_eq!(
+            MemberState::Joining,
+            mgr.state(),
+            "a rejected response leaves the state unchanged"
+        );
+    }
+
+    /// `ConsumerMembershipManager.extractAssignment` (KAFKA-20681) builds each
+    /// topic's partitions as a `TreeSet`: sorted and deduplicated whatever
+    /// order the broker sent. An absent assignment is `Optional.empty()`.
+    #[test]
+    fn extract_assignment_sorts_and_deduplicates_partitions_like_java_tree_set() {
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        assert_eq!(
+            None,
+            ConsumerMembershipManager::extract_assignment(&ConsumerGroupHeartbeatResponse::new(data.clone()))
+        );
+
+        let topic_id = Uuid::random_uuid();
+        let mut topic_partitions = TopicPartitions::new();
+        topic_partitions.topic_id = topic_id;
+        topic_partitions.partitions = vec![2, 0, 1, 1];
+        data.assignment = Some(Assignment { topic_partitions: vec![topic_partitions], unknown_tagged_fields: vec![] });
+        let assignment = ConsumerMembershipManager::extract_assignment(&ConsumerGroupHeartbeatResponse::new(data));
+        assert_eq!(Some(HashMap::from([(topic_id, vec![0, 1, 2])])), assignment);
     }
 
     /// Translated from
@@ -6119,7 +6122,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
         // Empty assignment for a JOINING member: target changes (epoch
         // bumps via update_with), so we transition to RECONCILING.
         assert_eq!(mgr.state(), MemberState::Reconciling);
