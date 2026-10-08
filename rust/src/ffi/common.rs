@@ -86,15 +86,12 @@ use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_ErrorCode_e::*;
 
-/// Initialize the default stderr log backend if RUST_LOG is set.
-/// Idempotent: succeeds once, silently no-ops on subsequent calls.
-/// A custom log backend (e.g. Python logging bridge) can be set before
-/// the first producer/consumer is created to override this default.
+/// Initializes the default stderr log backend, honouring `RUST_LOG`, the first
+/// time a client is created from C. Idempotent: `try_init` succeeds once and
+/// is a silent no-op afterwards, so a logger a binding installed beforehand
+/// stays in place.
 pub(crate) fn init_default_logger() {
-    #[cfg(feature = "ffi")]
-    {
-        let _ = env_logger::try_init();
-    }
+    let _ = env_logger::try_init();
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,87 +1226,6 @@ pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Err
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Async (callback-based) delivery machinery
-// ---------------------------------------------------------------------------
-//
-// The async API mirrors the librdkafka delivery-report model: each operation
-// returns immediately and its result is delivered later through a C callback.
-// All callbacks are invoked from a single per-handle **dispatcher thread**
-// that drains a completion queue, so user callbacks run on one predictable
-// thread and never on a tokio worker (a slow callback cannot stall I/O).
-
-/// A unit of work executed by the dispatcher thread. Each async operation
-/// captures its own C callback, `user_data`, and owned result handles into the
-/// closure and bakes in the correct invocation, so the queue stays uniform
-/// (one element type) while every operation delivers exactly the outputs its
-/// sync counterpart produces.
-pub(crate) type CompletionJob = Box<dyn FnOnce() + Send>;
-
-/// Spawns a dispatcher thread that drains the completion queue, running each
-/// queued [`CompletionJob`] in order. The thread exits once all senders are
-/// dropped (after draining any queued jobs).
-///
-/// Returns the sender half of the completion queue and the thread join handle.
-/// The caller stores the sender on its handle (cloned into each async op) and
-/// keeps the join handle for teardown.
-pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<CompletionJob>, std::thread::JoinHandle<()>) {
-    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
-    let dispatcher = std::thread::Builder::new()
-        .name(name.to_string())
-        .spawn(move || {
-            // Run each completion closure; exits once all senders are dropped
-            // (after draining any queued jobs).
-            while let Ok(job) = completion_rx.recv() {
-                job();
-            }
-        })
-        .expect("failed to spawn FFI callback dispatcher thread");
-    (completion_tx, dispatcher)
-}
-
-/// Enqueues a [`CompletionJob`] on the dispatcher's completion queue. If the
-/// dispatcher is gone (post-teardown), runs the job inline to honor the
-/// callback obligation rather than leak the owned handles it captured.
-pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>, job: CompletionJob) {
-    if let Err(returned) = tx.send(job) {
-        (returned.0)();
-    }
-}
-
-/// Canonical operation callback signature (not exported). A null `error` means
-/// success. The public per-method typedefs alias this shape.
-pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
-
-/// Owned operation completion payload, fired by the dispatcher thread for
-/// void-returning operations (`flush` / `close` / consumer void ops).
-pub(crate) struct OperationCompletion {
-    pub(crate) callback: OperationCallbackFn,
-    pub(crate) user_data: *mut std::ffi::c_void,
-    pub(crate) error: *mut kafka_common_Error_t,
-}
-// SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
-// the C user is responsible for the thread-safety of `user_data`.
-unsafe impl Send for OperationCompletion {}
-impl OperationCompletion {
-    /// # Safety
-    /// Must be called exactly once, on the dispatcher thread.
-    pub(crate) unsafe fn fire(self) {
-        unsafe { (self.callback)(self.error, self.user_data) };
-    }
-}
-
-/// A C operation-callback target (function pointer + opaque `user_data`).
-/// Wrapped so it can cross the tokio task / dispatcher thread boundary.
-#[derive(Clone, Copy)]
-pub(crate) struct OperationCallbackTarget {
-    pub(crate) callback: OperationCallbackFn,
-    pub(crate) user_data: *mut std::ffi::c_void,
-}
-// SAFETY: the C user owns the thread-safety of `user_data`; the function
-// pointer is trivially shareable.
-unsafe impl Send for OperationCallbackTarget {}
 
 #[cfg(test)]
 mod tests {

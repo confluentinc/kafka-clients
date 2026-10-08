@@ -36,8 +36,10 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -1281,44 +1283,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
 // Consumer service
 // ---------------------------------------------------------------------------
 
-// Build parallel (topics, partitions) C arrays from a repeated TopicPartition.
-// The char* point into the proto strings, which outlive the synchronous FFI
-// call, and the FFI copies them into owned Rust data before returning. Used by
-// the admin service's still-old-style entry points (the consumer ones take
-// `kafka_List_t`s now, see TpList below).
-struct TpArrays {
-  std::vector<const char*> topics;
-  std::vector<int32_t> partitions;
-  int32_t count() const { return static_cast<int32_t>(topics.size()); }
-};
-
-TpArrays tp_arrays(
-    const ::google::protobuf::RepeatedPtrField<TopicPartition>& tps) {
-  TpArrays a;
-  a.topics.reserve(tps.size());
-  a.partitions.reserve(tps.size());
-  for (const auto& tp : tps) {
-    a.topics.push_back(tp.topic().c_str());
-    a.partitions.push_back(tp.partition());
-  }
-  return a;
-}
-
-// Borrows a `repeated string` field as the `const char* const*` array the
-// admin C entry points take. The pointers alias the protobuf-owned strings,
-// which outlive the call, so nothing is copied; an empty field yields a null
-// pointer with count 0, which every entry point reads as "no values".
-struct StringArray {
-  explicit StringArray(const ::google::protobuf::RepeatedPtrField<std::string>& values) {
-    ptrs.reserve(values.size());
-    for (const std::string& value : values) ptrs.push_back(value.c_str());
-  }
-  const char* const* data() const { return ptrs.empty() ? nullptr : ptrs.data(); }
-  int32_t count() const { return static_cast<int32_t>(ptrs.size()); }
-
-  std::vector<const char*> ptrs;
-};
-
 // A consumer as CreateConsumer built it. `view` is the `Consumer` interface
 // handle (`kafka_consumer_Consumer_t`, Rust's `Box<dyn Consumer>`) every
 // operation takes. For a MockConsumer it is the `__as_Consumer` view BORROWED
@@ -2245,965 +2209,1325 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   std::atomic<uint64_t> next_id_{1};
 };
 
-// Drives the **bare sync** admin C entry points (kafka_admin_AdminClient_*),
-// as the producer and consumer services above do for theirs. The `_async`
-// variants are covered by the committed C unit tests; re-testing them here
-// would trade differential coverage for redundancy.
+// ---------------------------------------------------------------------------
+// Admin service.
+//
+// Drives the sync admin C API (kafka_admin_Admin_*): every RPC returns a
+// `*Result_t` immediately, holding one `kafka_common_KafkaFuture_t` per key,
+// and the server blocks on those futures the way the Java tests call
+// `KafkaFuture.get()`. Values delivered by `kafka_common_KafkaFuture_get` are
+// borrowed from the future and die with it, so each handler copies them into
+// the proto before the future is destroyed.
+// ---------------------------------------------------------------------------
+
+// Deleter that forwards to a C `_destroy` function, tolerating null.
+template <auto Destroy>
+struct CDeleter {
+  template <typename T>
+  void operator()(T* p) const {
+    if (p != nullptr) Destroy(p);
+  }
+};
+
+template <typename T, auto Destroy>
+using Owned = std::unique_ptr<T, CDeleter<Destroy>>;
+
+// Rust-built containers own their elements: destroying them frees the
+// elements too (futures, keys, data classes).
+using OwnedFuture = Owned<kafka_common_KafkaFuture_t, kafka_common_KafkaFuture_destroy>;
+using OwnedMap = Owned<kafka_Map_t, kafka_Map_destroy>;
+using OwnedList = Owned<kafka_List_t, kafka_List_destroy>;
+using OwnedUuid = Owned<kafka_common_Uuid_t, kafka_common_Uuid_destroy>;
+using OwnedCString = Owned<char, kafka_string_destroy>;
+using OwnedError = Owned<kafka_common_Error_t, kafka_common_Error_destroy>;
+
+// Handles built by the server for an input container; freed when the
+// container is no longer needed (the FFI copies what it keeps).
+template <typename T, auto Destroy>
+struct OwnedHandles {
+  OwnedHandles() = default;
+  ~OwnedHandles() {
+    for (T* h : handles) {
+      if (h != nullptr) Destroy(h);
+    }
+  }
+  OwnedHandles(const OwnedHandles&) = delete;
+  OwnedHandles& operator=(const OwnedHandles&) = delete;
+
+  T* add(T* h) {
+    handles.push_back(h);
+    return h;
+  }
+  std::vector<T*> handles;
+};
+
+// A C-built `kafka_List_t`: the list owns nothing, elements are borrowed.
+struct CList {
+  CList() : list(kafka_List_new()) {}
+  ~CList() { kafka_List_destroy(list); }
+  CList(const CList&) = delete;
+  CList& operator=(const CList&) = delete;
+
+  void add(const void* value) { kafka_List_add(list, const_cast<void*>(value)); }
+  kafka_List_t* list;
+};
+
+// A C-built `kafka_Map_t`: the map owns nothing, keys and values are borrowed.
+struct CMap {
+  CMap() : map(kafka_Map_new()) {}
+  ~CMap() { kafka_Map_destroy(map); }
+  CMap(const CMap&) = delete;
+  CMap& operator=(const CMap&) = delete;
+
+  void put(const void* key, const void* value) {
+    kafka_Map_put(map, const_cast<void*>(key), const_cast<void*>(value));
+  }
+  kafka_Map_t* map;
+};
+
+// Stable storage for boxed scalars passed through `kafka_List_t` /
+// `kafka_Map_t` (`int32_t *` broker ids, `int64_t *` producer ids, ...).
+// A deque never relocates, so the pointers stay valid while it lives.
+struct ScalarArena {
+  int32_t* i32(int32_t v) {
+    i32s.push_back(v);
+    return &i32s.back();
+  }
+  int64_t* i64(int64_t v) {
+    i64s.push_back(v);
+    return &i64s.back();
+  }
+  std::deque<int32_t> i32s;
+  std::deque<int64_t> i64s;
+};
+
+// Lists of boxed `int32_t *` nested in a `kafka_List_t` / `kafka_Map_t`
+// (replica assignments). Each inner list is C-built and borrows its ints.
+struct Int32ListArena {
+  ~Int32ListArena() {
+    for (kafka_List_t* l : lists) kafka_List_destroy(l);
+  }
+  kafka_List_t* list_of(const ::google::protobuf::RepeatedField<int32_t>& ids) {
+    kafka_List_t* l = kafka_List_new();
+    for (int32_t id : ids) kafka_List_add(l, scalars.i32(id));
+    lists.push_back(l);
+    return l;
+  }
+  ScalarArena scalars;
+  std::vector<kafka_List_t*> lists;
+};
+
+std::string cstr(const char* s) { return s == nullptr ? std::string() : std::string(s); }
+
+// Copies a borrowed error handle into its proto without destroying it.
+void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
+  if (err == nullptr) {
+    *dst = make_synthetic_error("null error handle");
+    return;
+  }
+  dst->set_code(kafka_common_Error_code(err));
+  dst->set_message(cstr(kafka_common_Error_message(err)));
+}
+
+// Awaits a future; on success `*out` is the borrowed value (null for a Void
+// future). The returned error is owned by the caller.
+template <typename T>
+kafka_common_Error_t* future_get(const kafka_common_KafkaFuture_t* future, const T** out) {
+  void* value = nullptr;
+  kafka_common_Error_t* err = kafka_common_KafkaFuture_get(future, &value);
+  *out = static_cast<const T*>(value);
+  return err;
+}
+
+kafka_common_Error_t* future_await(const kafka_common_KafkaFuture_t* future) {
+  void* value = nullptr;
+  return kafka_common_KafkaFuture_get(future, &value);
+}
+
+// Awaits a Void future and reports its failure on the proto's error slot.
+template <typename HasError>
+void await_into(const kafka_common_KafkaFuture_t* future, HasError* dst) {
+  kafka_common_Error_t* err = future_await(future);
+  if (err != nullptr) fill_proto_error(dst->mutable_error(), err);
+}
+
+// ---- ResultKey setters -----------------------------------------------------
+
+void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
+
+void set_topic_id_key(ResultKey* key, const kafka_common_Uuid_t* id) {
+  OwnedCString s(kafka_common_Uuid_to_string(id));
+  key->set_topic_id(cstr(s.get()));
+}
+
+void set_partition_key(ResultKey* key, const kafka_common_TopicPartition_t* tp) {
+  tp_to_proto(tp, key->mutable_partition());
+}
+
+void set_broker_key(ResultKey* key, const int32_t* broker) { key->set_broker_id(*broker); }
+
+void config_resource_to_proto(const kafka_common_config_ConfigResource_t* r,
+                              ConfigResource* dst) {
+  dst->set_resource_type(kafka_common_config_ConfigResource_Type_id(
+      kafka_common_config_ConfigResource_type(r)));
+  dst->set_name(cstr(kafka_common_config_ConfigResource_name(r)));
+}
+
+void set_config_resource_key(ResultKey* key, const kafka_common_config_ConfigResource_t* r) {
+  config_resource_to_proto(r, key->mutable_config_resource());
+}
+
+void replica_to_proto(const kafka_common_TopicPartitionReplica_t* r, TopicPartitionReplica* dst) {
+  dst->set_topic(cstr(kafka_common_TopicPartitionReplica_topic(r)));
+  dst->set_partition(kafka_common_TopicPartitionReplica_partition(r));
+  dst->set_broker_id(kafka_common_TopicPartitionReplica_broker_id(r));
+}
+
+void set_replica_key(ResultKey* key, const kafka_common_TopicPartitionReplica_t* r) {
+  replica_to_proto(r, key->mutable_replica());
+}
+
+void acl_binding_to_proto(const kafka_common_acl_AclBinding_t* b, AclBinding* dst) {
+  const kafka_common_resource_ResourcePattern_t* pattern = kafka_common_acl_AclBinding_pattern(b);
+  const kafka_common_acl_AccessControlEntry_t* entry = kafka_common_acl_AclBinding_entry(b);
+  dst->set_resource_type(kafka_common_resource_ResourceType_code(
+      kafka_common_resource_ResourcePattern_resource_type(pattern)));
+  dst->set_resource_name(cstr(kafka_common_resource_ResourcePattern_name(pattern)));
+  dst->set_pattern_type(kafka_common_resource_PatternType_code(
+      kafka_common_resource_ResourcePattern_pattern_type(pattern)));
+  dst->set_principal(cstr(kafka_common_acl_AccessControlEntry_principal(entry)));
+  dst->set_host(cstr(kafka_common_acl_AccessControlEntry_host(entry)));
+  dst->set_operation(kafka_common_acl_AclOperation_code(
+      kafka_common_acl_AccessControlEntry_operation(entry)));
+  dst->set_permission_type(kafka_common_acl_AclPermissionType_code(
+      kafka_common_acl_AccessControlEntry_permission_type(entry)));
+}
+
+void set_acl_binding_key(ResultKey* key, const kafka_common_acl_AclBinding_t* b) {
+  acl_binding_to_proto(b, key->mutable_acl_binding());
+}
+
+void acl_filter_to_proto(const kafka_common_acl_AclBindingFilter_t* f, AclBindingFilter* dst) {
+  const kafka_common_resource_ResourcePatternFilter_t* pf =
+      kafka_common_acl_AclBindingFilter_pattern_filter(f);
+  const kafka_common_acl_AccessControlEntryFilter_t* ef =
+      kafka_common_acl_AclBindingFilter_entry_filter(f);
+  dst->set_resource_type(kafka_common_resource_ResourceType_code(
+      kafka_common_resource_ResourcePatternFilter_resource_type(pf)));
+  const char* name = kafka_common_resource_ResourcePatternFilter_name(pf);
+  if (name != nullptr) dst->set_resource_name(name);
+  dst->set_pattern_type(kafka_common_resource_PatternType_code(
+      kafka_common_resource_ResourcePatternFilter_pattern_type(pf)));
+  const char* principal = kafka_common_acl_AccessControlEntryFilter_principal(ef);
+  if (principal != nullptr) dst->set_principal(principal);
+  const char* host = kafka_common_acl_AccessControlEntryFilter_host(ef);
+  if (host != nullptr) dst->set_host(host);
+  dst->set_operation(kafka_common_acl_AclOperation_code(
+      kafka_common_acl_AccessControlEntryFilter_operation(ef)));
+  dst->set_permission_type(kafka_common_acl_AclPermissionType_code(
+      kafka_common_acl_AccessControlEntryFilter_permission_type(ef)));
+}
+
+void set_acl_filter_key(ResultKey* key, const kafka_common_acl_AclBindingFilter_t* f) {
+  acl_filter_to_proto(f, key->mutable_acl_binding_filter());
+}
+
+void quota_entity_to_proto(const kafka_common_quota_ClientQuotaEntity_t* e, ClientQuotaEntity* dst) {
+  OwnedMap entries(kafka_common_quota_ClientQuotaEntity_entries(e));
+  const int32_t n = kafka_Map_size(entries.get());
+  for (int32_t i = 0; i < n; i++) {
+    auto* entry = dst->add_entries();
+    entry->set_entity_type(cstr(static_cast<const char*>(kafka_Map_key(entries.get(), i))));
+    const char* name = static_cast<const char*>(kafka_Map_value(entries.get(), i));
+    if (name != nullptr) entry->set_entity_name(name);
+  }
+}
+
+void set_quota_entity_key(ResultKey* key, const kafka_common_quota_ClientQuotaEntity_t* e) {
+  quota_entity_to_proto(e, key->mutable_client_quota_entity());
+}
+
+// ---- Keyed-result walkers --------------------------------------------------
+
+// Walks an owned `kafka_Map_t` of key -> `kafka_common_KafkaFuture_t *`: for
+// each pair adds an entry, sets its key, awaits the future and either fills
+// the entry's error or hands the borrowed value to `fill`.
+template <typename K, typename V, typename AddEntry, typename SetKey, typename Fill>
+void keyed_futures_to_proto(const kafka_Map_t* map, AddEntry add_entry, SetKey set_key,
+                            Fill fill) {
+  if (map == nullptr) return;
+  const int32_t n = kafka_Map_size(map);
+  for (int32_t i = 0; i < n; i++) {
+    auto* entry = add_entry();
+    set_key(entry->mutable_key(), static_cast<const K*>(kafka_Map_key(map, i)));
+    const auto* future = static_cast<const kafka_common_KafkaFuture_t*>(kafka_Map_value(map, i));
+    const V* value = nullptr;
+    kafka_common_Error_t* err = future_get<V>(future, &value);
+    if (err != nullptr) {
+      fill_proto_error(entry->mutable_error(), err);
+    } else {
+      fill(entry, value);
+    }
+  }
+}
+
+// Same for Void futures: each entry carries only its key and optional error.
+template <typename K, typename AddEntry, typename SetKey>
+void void_futures_to_proto(const kafka_Map_t* map, AddEntry add_entry, SetKey set_key) {
+  if (map == nullptr) return;
+  const int32_t n = kafka_Map_size(map);
+  for (int32_t i = 0; i < n; i++) {
+    auto* entry = add_entry();
+    set_key(entry->mutable_key(), static_cast<const K*>(kafka_Map_key(map, i)));
+    await_into(static_cast<const kafka_common_KafkaFuture_t*>(kafka_Map_value(map, i)), entry);
+  }
+}
+
+// ---- Enum name mappings (the proto carries Java enum constant names) -------
+
+const char* config_source_name(const kafka_admin_ConfigEntry_ConfigSource_t* s) {
+  switch (kafka_admin_ConfigEntry_ConfigSource__enum(s)) {
+    case kafka_admin_ConfigEntry_ConfigSource_e_default_config: return "DEFAULT_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_config: return "DYNAMIC_BROKER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_broker_logger_config:
+      return "DYNAMIC_BROKER_LOGGER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_client_metrics_config:
+      return "DYNAMIC_CLIENT_METRICS_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_default_broker_config:
+      return "DYNAMIC_DEFAULT_BROKER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_group_config: return "DYNAMIC_GROUP_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_dynamic_topic_config: return "DYNAMIC_TOPIC_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_static_broker_config: return "STATIC_BROKER_CONFIG";
+    case kafka_admin_ConfigEntry_ConfigSource_e_unknown: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+const char* config_type_name(const kafka_admin_ConfigEntry_ConfigType_t* t) {
+  switch (kafka_admin_ConfigEntry_ConfigType__enum(t)) {
+    case kafka_admin_ConfigEntry_ConfigType_e_boolean: return "BOOLEAN";
+    case kafka_admin_ConfigEntry_ConfigType_e_class_: return "CLASS";
+    case kafka_admin_ConfigEntry_ConfigType_e_double_: return "DOUBLE";
+    case kafka_admin_ConfigEntry_ConfigType_e_int_: return "INT";
+    case kafka_admin_ConfigEntry_ConfigType_e_list: return "LIST";
+    case kafka_admin_ConfigEntry_ConfigType_e_long_: return "LONG";
+    case kafka_admin_ConfigEntry_ConfigType_e_password: return "PASSWORD";
+    case kafka_admin_ConfigEntry_ConfigType_e_short_: return "SHORT";
+    case kafka_admin_ConfigEntry_ConfigType_e_string: return "STRING";
+    case kafka_admin_ConfigEntry_ConfigType_e_unknown: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+std::string transaction_state_name(const kafka_admin_TransactionState_t* s) {
+  OwnedCString name(kafka_admin_TransactionState_to_string(s));
+  return cstr(name.get());
+}
+
+// ---- Data-class converters -------------------------------------------------
+
+void config_entry_to_proto(const kafka_admin_ConfigEntry_t* e, ConfigEntry* dst) {
+  dst->set_name(cstr(kafka_admin_ConfigEntry_name(e)));
+  const char* value = kafka_admin_ConfigEntry_value(e);
+  if (value != nullptr) dst->set_value(value);
+  dst->set_is_default(kafka_admin_ConfigEntry_is_default(e) != 0);
+  dst->set_is_sensitive(kafka_admin_ConfigEntry_is_sensitive(e) != 0);
+  dst->set_is_read_only(kafka_admin_ConfigEntry_is_read_only(e) != 0);
+  dst->set_source(config_source_name(kafka_admin_ConfigEntry_source(e)));
+  dst->set_config_type(config_type_name(kafka_admin_ConfigEntry_type(e)));
+  const char* doc = kafka_admin_ConfigEntry_documentation(e);
+  if (doc != nullptr) dst->set_documentation(doc);
+  OwnedList synonyms(kafka_admin_ConfigEntry_synonyms(e));
+  if (synonyms) {
+    const int32_t n = kafka_List_size(synonyms.get());
+    for (int32_t i = 0; i < n; i++) {
+      const auto* s = static_cast<const kafka_admin_ConfigEntry_ConfigSynonym_t*>(
+          kafka_List_get(synonyms.get(), i));
+      ConfigSynonym* ps = dst->add_synonyms();
+      ps->set_name(cstr(kafka_admin_ConfigEntry_ConfigSynonym_name(s)));
+      const char* sv = kafka_admin_ConfigEntry_ConfigSynonym_value(s);
+      if (sv != nullptr) ps->set_value(sv);
+      ps->set_source(config_source_name(kafka_admin_ConfigEntry_ConfigSynonym_source(s)));
+    }
+  }
+}
+
+template <typename AddEntry>
+void config_to_proto(const kafka_admin_Config_t* config, AddEntry add_entry) {
+  OwnedList entries(kafka_admin_Config_entries(config));
+  if (!entries) return;
+  const int32_t n = kafka_List_size(entries.get());
+  for (int32_t i = 0; i < n; i++) {
+    config_entry_to_proto(
+        static_cast<const kafka_admin_ConfigEntry_t*>(kafka_List_get(entries.get(), i)),
+        add_entry());
+  }
+}
+
+// Calls `f(element)` for every element of a borrowed list (null = empty).
+template <typename T, typename F>
+void for_each_in_list(const kafka_List_t* list, F f) {
+  if (list == nullptr) return;
+  const int32_t n = kafka_List_size(list);
+  for (int32_t i = 0; i < n; i++) f(static_cast<const T*>(kafka_List_get(list, i)));
+}
+
+// Fills an AclOperationList from a borrowed list of AclOperation singletons.
+// Callers decide the proto field stays unset when the list is Java null.
+void acl_operations_to_proto(const kafka_List_t* ops, AclOperationList* dst) {
+  for_each_in_list<kafka_common_acl_AclOperation_t>(ops, [dst](const kafka_common_acl_AclOperation_t* op) {
+    dst->add_operations(kafka_common_acl_AclOperation_code(op));
+  });
+}
+
+// Copies a borrowed list of TopicPartition handles into the protos `add()` returns.
+template <typename Add>
+void tp_list_to_proto(const kafka_List_t* tps, Add add) {
+  for_each_in_list<kafka_common_TopicPartition_t>(
+      tps, [&add](const kafka_common_TopicPartition_t* tp) { tp_to_proto(tp, add()); });
+}
+
+void topic_partition_info_to_proto(const kafka_common_TopicPartitionInfo_t* info,
+                                   TopicPartitionInfo* dst) {
+  dst->set_partition(kafka_common_TopicPartitionInfo_partition(info));
+  const kafka_common_Node_t* leader = kafka_common_TopicPartitionInfo_leader(info);
+  if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
+  node_list_to_proto(kafka_common_TopicPartitionInfo_replicas(info),
+                     [dst] { return dst->add_replicas(); });
+  node_list_to_proto(kafka_common_TopicPartitionInfo_isr(info), [dst] { return dst->add_isr(); });
+  kafka_List_t* elr = kafka_common_TopicPartitionInfo_elr(info);
+  if (elr != nullptr) {
+    NodeList* out = dst->mutable_elr();
+    node_list_to_proto(elr, [out] { return out->add_nodes(); });
+  }
+  kafka_List_t* last_known_elr = kafka_common_TopicPartitionInfo_last_known_elr(info);
+  if (last_known_elr != nullptr) {
+    NodeList* out = dst->mutable_last_known_elr();
+    node_list_to_proto(last_known_elr, [out] { return out->add_nodes(); });
+  }
+}
+
+void topic_description_to_proto(const kafka_admin_TopicDescription_t* d, TopicDescription* dst) {
+  dst->set_name(cstr(kafka_admin_TopicDescription_name(d)));
+  OwnedUuid id(kafka_admin_TopicDescription_topic_id(d));
+  OwnedCString id_str(kafka_common_Uuid_to_string(id.get()));
+  dst->set_topic_id(cstr(id_str.get()));
+  dst->set_is_internal(kafka_admin_TopicDescription_is_internal(d) != 0);
+  OwnedList partitions(kafka_admin_TopicDescription_partitions(d));
+  if (partitions) {
+    const int32_t n = kafka_List_size(partitions.get());
+    for (int32_t i = 0; i < n; i++) {
+      topic_partition_info_to_proto(static_cast<const kafka_common_TopicPartitionInfo_t*>(
+                                        kafka_List_get(partitions.get(), i)),
+                                    dst->add_partitions());
+    }
+  }
+  OwnedList ops(kafka_admin_TopicDescription_authorized_operations(d));
+  if (ops) acl_operations_to_proto(ops.get(), dst->mutable_authorized_operations());
+}
+
+void member_description_to_proto(const kafka_admin_MemberDescription_t* m, MemberDescription* dst) {
+  dst->set_consumer_id(cstr(kafka_admin_MemberDescription_consumer_id(m)));
+  const char* instance = kafka_admin_MemberDescription_group_instance_id(m);
+  if (instance != nullptr) dst->set_group_instance_id(instance);
+  const char* rack = kafka_admin_MemberDescription_rack_id(m);
+  if (rack != nullptr) dst->set_rack_id(rack);
+  dst->set_client_id(cstr(kafka_admin_MemberDescription_client_id(m)));
+  dst->set_host(cstr(kafka_admin_MemberDescription_host(m)));
+  const kafka_admin_MemberAssignment_t* assignment = kafka_admin_MemberDescription_assignment(m);
+  MemberAssignment* pa = dst->mutable_assignment();
+  if (assignment != nullptr) {
+    OwnedList tps(kafka_admin_MemberAssignment_topic_partitions(assignment));
+    tp_list_to_proto(tps.get(), [pa] { return pa->add_topic_partitions(); });
+  }
+  const kafka_admin_MemberAssignment_t* target = kafka_admin_MemberDescription_target_assignment(m);
+  if (target != nullptr) {
+    MemberAssignment* pt = dst->mutable_target_assignment();
+    OwnedList tps(kafka_admin_MemberAssignment_topic_partitions(target));
+    tp_list_to_proto(tps.get(), [pt] { return pt->add_topic_partitions(); });
+  }
+  const int32_t epoch = kafka_admin_MemberDescription_member_epoch(m);
+  if (epoch >= 0) dst->set_member_epoch(epoch);
+  const int8_t upgraded = kafka_admin_MemberDescription_upgraded(m);
+  if (upgraded >= 0) dst->set_upgraded(upgraded != 0);
+}
+
+template <typename Add>
+void member_list_to_proto(kafka_List_t* members, Add add) {
+  OwnedList owned(members);
+  if (!owned) return;
+  const int32_t n = kafka_List_size(owned.get());
+  for (int32_t i = 0; i < n; i++) {
+    member_description_to_proto(
+        static_cast<const kafka_admin_MemberDescription_t*>(kafka_List_get(owned.get(), i)), add());
+  }
+}
+
+void consumer_group_description_to_proto(const kafka_admin_ConsumerGroupDescription_t* d,
+                                         ConsumerGroupDescription* dst) {
+  dst->set_group_id(cstr(kafka_admin_ConsumerGroupDescription_group_id(d)));
+  dst->set_is_simple_consumer_group(kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(d) != 0);
+  member_list_to_proto(kafka_admin_ConsumerGroupDescription_members(d),
+                       [dst] { return dst->add_members(); });
+  dst->set_partition_assignor(cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(d)));
+  dst->set_group_type(cstr(kafka_common_GroupType_name(kafka_admin_ConsumerGroupDescription_type(d))));
+  dst->set_group_state(
+      cstr(kafka_common_GroupState_name(kafka_admin_ConsumerGroupDescription_group_state(d))));
+  const kafka_common_Node_t* coordinator = kafka_admin_ConsumerGroupDescription_coordinator(d);
+  if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
+  OwnedList ops(kafka_admin_ConsumerGroupDescription_authorized_operations(d));
+  if (ops) acl_operations_to_proto(ops.get(), dst->mutable_authorized_operations());
+  const int32_t group_epoch = kafka_admin_ConsumerGroupDescription_group_epoch(d);
+  if (group_epoch >= 0) dst->set_group_epoch(group_epoch);
+  const int32_t target_epoch = kafka_admin_ConsumerGroupDescription_target_assignment_epoch(d);
+  if (target_epoch >= 0) dst->set_target_assignment_epoch(target_epoch);
+}
+
+void classic_group_description_to_proto(const kafka_admin_ClassicGroupDescription_t* d,
+                                        ClassicGroupDescription* dst) {
+  dst->set_group_id(cstr(kafka_admin_ClassicGroupDescription_group_id(d)));
+  dst->set_protocol(cstr(kafka_admin_ClassicGroupDescription_protocol(d)));
+  dst->set_protocol_data(cstr(kafka_admin_ClassicGroupDescription_protocol_data(d)));
+  dst->set_is_simple_consumer_group(kafka_admin_ClassicGroupDescription_is_simple_consumer_group(d) != 0);
+  member_list_to_proto(kafka_admin_ClassicGroupDescription_members(d),
+                       [dst] { return dst->add_members(); });
+  dst->set_state(
+      cstr(kafka_common_ClassicGroupState_name(kafka_admin_ClassicGroupDescription_state(d))));
+  const kafka_common_Node_t* coordinator = kafka_admin_ClassicGroupDescription_coordinator(d);
+  if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
+  OwnedList ops(kafka_admin_ClassicGroupDescription_authorized_operations(d));
+  if (ops) acl_operations_to_proto(ops.get(), dst->mutable_authorized_operations());
+}
+
+void principal_to_proto(const kafka_common_security_auth_KafkaPrincipal_t* p, KafkaPrincipal* dst) {
+  dst->set_principal_type(cstr(kafka_common_security_auth_KafkaPrincipal_principal_type(p)));
+  dst->set_name(cstr(kafka_common_security_auth_KafkaPrincipal_name(p)));
+  dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(p) != 0);
+}
+
+void delegation_token_to_proto(const kafka_common_security_token_delegation_DelegationToken_t* t,
+                               DelegationToken* dst) {
+  const kafka_common_security_token_delegation_TokenInformation_t* info =
+      kafka_common_security_token_delegation_DelegationToken_token_info(t);
+  TokenInformation* pi = dst->mutable_token_information();
+  pi->set_token_id(cstr(kafka_common_security_token_delegation_TokenInformation_token_id(info)));
+  const kafka_common_security_auth_KafkaPrincipal_t* owner =
+      kafka_common_security_token_delegation_TokenInformation_owner(info);
+  if (owner != nullptr) principal_to_proto(owner, pi->mutable_owner());
+  const kafka_common_security_auth_KafkaPrincipal_t* requester =
+      kafka_common_security_token_delegation_TokenInformation_token_requester(info);
+  if (requester != nullptr) principal_to_proto(requester, pi->mutable_token_requester());
+  OwnedList renewers(kafka_common_security_token_delegation_TokenInformation_renewers(info));
+  if (renewers) {
+    const int32_t n = kafka_List_size(renewers.get());
+    for (int32_t i = 0; i < n; i++) {
+      principal_to_proto(static_cast<const kafka_common_security_auth_KafkaPrincipal_t*>(
+                             kafka_List_get(renewers.get(), i)),
+                         pi->add_renewers());
+    }
+  }
+  pi->set_issue_timestamp(
+      kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info));
+  pi->set_max_timestamp(kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
+  pi->set_expiry_timestamp(
+      kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info));
+  const kafka_Bytes_t hmac = kafka_common_security_token_delegation_DelegationToken_hmac(t);
+  dst->set_hmac(hmac.data, hmac.len > 0 ? static_cast<size_t>(hmac.len) : 0);
+  OwnedCString b64(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(t));
+  dst->set_hmac_as_base64(cstr(b64.get()));
+}
+
+// Applies the proto's optional timeout to any `*Options_t` handle; an
+// absent field leaves Java's default (the client's request timeout).
+template <typename Req, typename Opts, typename SetTimeout>
+void apply_timeout(const Req& req, Opts* opts, SetTimeout set_timeout) {
+  if (req.has_timeout_ms()) set_timeout(opts, req.timeout_ms());
+}
+
+// Java's `Optional<Boolean> retryOnQuotaViolation` defaults to true.
+template <typename Req>
+bool retry_on_quota(const Req& req) {
+  return req.has_retry_on_quota_violation() ? req.retry_on_quota_violation() : true;
+}
+
+// Builds a TopicCollection from the request's `oneof topics`: topic ids are
+// parsed into owned Uuid handles; names alias the proto strings.
+struct TopicCollectionArg {
+  template <typename Req>
+  explicit TopicCollectionArg(const Req& req) {
+    by_ids = req.has_topic_ids();
+    if (by_ids) {
+      for (const std::string& id : req.topic_ids().values()) {
+        kafka_common_Uuid_t* uuid = nullptr;
+        kafka_common_Error_t* err = kafka_common_Uuid_from_string(id.c_str(), &uuid);
+        if (err != nullptr) {
+          error.reset(err);
+          return;
+        }
+        ids.add(uuid);
+        list.add(uuid);
+      }
+      collection.reset(kafka_common_TopicCollection_of_topic_ids(list.list));
+    } else {
+      for (const std::string& name : req.names().values()) list.add(name.c_str());
+      collection.reset(kafka_common_TopicCollection_of_topic_names(list.list));
+    }
+  }
+
+  bool by_ids = false;
+  OwnedError error;
+  OwnedHandles<kafka_common_Uuid_t, kafka_common_Uuid_destroy> ids;
+  CList list;
+  Owned<kafka_common_TopicCollection_t, kafka_common_TopicCollection_destroy> collection;
+};
+
+// Either a real `AdminClient` (owned) or a `MockAdminClient` seen through
+// its `__as_Admin` view, as the request's config selects.
+struct AdminEntry {
+  kafka_admin_MockAdminClient_t* mock = nullptr;
+  kafka_admin_Admin_t* owned = nullptr;
+  const kafka_admin_Admin_t* view = nullptr;
+
+  void destroy() {
+    if (mock != nullptr) {
+      kafka_admin_MockAdminClient_destroy(mock);
+    } else if (owned != nullptr) {
+      kafka_admin_Admin_destroy(owned);
+    }
+    mock = nullptr;
+    owned = nullptr;
+    view = nullptr;
+  }
+};
+
 class AdminServiceImpl final : public AdminService::Service {
  public:
   grpc::Status CreateAdmin(grpc::ServerContext*, const CreateAdminRequest* req,
                            CreateAdminResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = nullptr;
+    AdminEntry entry;
     if (selects_mock(req->config())) {
-      // Absent num_brokers means 1.
       const int32_t num_brokers = req->has_num_brokers() ? req->num_brokers() : 1;
-      admin = kafka_admin_MockAdminClient_new(num_brokers);
-      if (admin == nullptr) {
-        // The constructor reports failure by returning NULL without an error
-        // handle (a Rust panic must not unwind across the C boundary), so the
-        // message is synthesised here.
-        *resp->mutable_error() = make_synthetic_error(
-            "MockAdminClient_new returned null for num_brokers " + std::to_string(num_brokers),
-            kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
-        return grpc::Status::OK;
-      }
-    } else {
-      kafka_admin_AdminClientProperties_t* props = kafka_admin_AdminClientProperties_new();
-      for (const auto& kv : req->config()) {
-        kafka_admin_AdminClientProperties_put(props, kv.first.c_str(), kv.second.c_str());
-      }
-      kafka_common_Error_t* err = nullptr;
-      admin = kafka_admin_AdminClient_new(props, &err);
-      kafka_admin_AdminClientProperties_destroy(props);
-      if (admin == nullptr) {
+      kafka_common_Error_t* err = kafka_admin_MockAdminClient_create(num_brokers, &entry.mock);
+      if (err != nullptr) {
         fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
+      entry.view = kafka_admin_MockAdminClient__as_Admin(entry.mock);
+    } else {
+      // The map aliases the proto strings; AdminClientConfig_new copies them.
+      CMap props;
+      for (const auto& kv : req->config()) props.put(kv.first.c_str(), kv.second.c_str());
+      kafka_admin_AdminClientConfig_t* config = nullptr;
+      kafka_common_Error_t* err = kafka_admin_AdminClientConfig_new(props.map, &config);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      err = kafka_admin_AdminClient_create(config, &entry.owned);
+      kafka_admin_AdminClientConfig_destroy(config);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      entry.view = entry.owned;
     }
     const uint64_t id = next_id_.fetch_add(1);
     {
       std::lock_guard<std::mutex> lock(mu_);
-      admins_[id] = admin;
+      admins_[id] = entry;
     }
     resp->set_admin_id(id);
     std::cerr << "c server: created admin " << id << std::endl;
     return grpc::Status::OK;
   }
 
-  // -- Topics & partitions (slice G1) ---------------------------------------
-  //
-  // Every handler: resolve the handle, call the **bare sync** entry point
-  // (which blocks this gRPC worker thread until every per-key future has
-  // resolved, exactly as the FFI contract says), then walk the flattened result
-  // handle into the per-key envelope and destroy it.
-  //
-  // The sync entry points distinguish the two failure levels for us: a non-null
-  // return means the request could not be submitted at all, which is the
-  // response's top-level `error`; a per-key failure comes back inside the result
-  // handle with a null return.
-
   grpc::Status CreateTopics(grpc::ServerContext*, const CreateTopicsRequest* req,
                             CreateTopicsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
 
-    // Build the NewTopic handles, keeping them alive until the call returns.
-    std::vector<kafka_admin_NewTopic_t*> owned;
-    owned.reserve(req->topics_size());
+    // Build the NewTopic handles, kept alive until the call returns.
+    OwnedHandles<kafka_admin_NewTopic_t, kafka_admin_NewTopic_destroy> topics;
+    CList topic_list;
+    Int32ListArena assignments;
+    std::vector<std::unique_ptr<CMap>> maps;
     for (const auto& spec : req->topics()) {
-      // -1 is the wire's "absent"; kafka_admin_NewTopic_new reads a negative
-      // value as unset, so the sentinel passes straight through.
-      kafka_admin_NewTopic_t* topic = kafka_admin_NewTopic_new(
-          spec.name().c_str(), spec.num_partitions(),
-          static_cast<int16_t>(spec.replication_factor()));
-      for (const auto& kv : spec.configs()) {
-        kafka_admin_NewTopic_put_config(topic, kv.first.c_str(), kv.second.c_str());
-      }
-      // Setting any assignment switches the entry to Java's
-      // NewTopic(name, Map<Integer, List<Integer>>) form.
-      for (const auto& assignment : spec.replicas_assignments()) {
-        std::vector<int32_t> brokers(assignment.broker_ids().begin(),
-                                     assignment.broker_ids().end());
-        kafka_admin_NewTopic_set_replicas_assignment(
-            topic, assignment.partition(), brokers.data(),
-            static_cast<int32_t>(brokers.size()));
-      }
-      owned.push_back(topic);
-    }
-    std::vector<const kafka_admin_NewTopic_t*> topics(owned.begin(), owned.end());
-
-    kafka_admin_CreateTopicsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_create_topics(
-        admin, topics.data(), static_cast<int32_t>(topics.size()),
-        timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
-    for (kafka_admin_NewTopic_t* topic : owned) kafka_admin_NewTopic_destroy(topic);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_CreateTopicsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      CreateTopicsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(), kafka_admin_CreateTopicsResult_get_key(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_CreateTopicsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-      } else {
-        // get_value is non-null exactly when get_error is null (the FFI builds
-        // the two vectors complementarily), but a null here would be a segfault
-        // inside the oracle, so report it as an error instead.
-        const kafka_admin_TopicMetadataAndConfig_t* value =
-            kafka_admin_CreateTopicsResult_get_value(result, i);
-        if (value == nullptr) {
-          *entry->mutable_error() = make_synthetic_error("createTopics entry has neither value nor error");
-        } else {
-          metadata_to_proto(value, entry->mutable_value());
+      kafka_admin_NewTopic_t* topic = nullptr;
+      if (spec.replicas_assignments_size() > 0) {
+        // Any assignment selects Java's NewTopic(name, Map<Integer, List<Integer>>).
+        maps.push_back(std::make_unique<CMap>());
+        CMap& replicas = *maps.back();
+        for (const auto& assignment : spec.replicas_assignments()) {
+          replicas.put(assignments.scalars.i32(assignment.partition()),
+                       assignments.list_of(assignment.broker_ids()));
         }
+        topic = kafka_admin_NewTopic_with_replicas_assignments(spec.name().c_str(), replicas.map);
+      } else {
+        // -1 is the wire's "absent" and the C constructor's empty Optional.
+        topic = kafka_admin_NewTopic_with_num_partitions_replication_factor(
+            spec.name().c_str(), spec.num_partitions(),
+            static_cast<int16_t>(spec.replication_factor()));
       }
+      if (!spec.configs().empty()) {
+        maps.push_back(std::make_unique<CMap>());
+        CMap& configs = *maps.back();
+        for (const auto& kv : spec.configs()) configs.put(kv.first.c_str(), kv.second.c_str());
+        kafka_admin_NewTopic_set_configs(topic, configs.map);
+      }
+      topic_list.add(topics.add(topic));
     }
-    kafka_admin_CreateTopicsResult_destroy(result);
+
+    Owned<kafka_admin_CreateTopicsOptions_t, kafka_admin_CreateTopicsOptions_destroy> opts(
+        kafka_admin_CreateTopicsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_CreateTopicsOptions_set_timeout_ms);
+    kafka_admin_CreateTopicsOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
+    kafka_admin_CreateTopicsOptions_set_retry_on_quota_violation(opts.get(),
+                                                                 retry_on_quota(*req) ? 1 : 0);
+    Owned<kafka_admin_CreateTopicsResult_t, kafka_admin_CreateTopicsResult_destroy> result(
+        kafka_admin_Admin_create_topics_with_options(admin, topic_list.list, opts.get()));
+
+    OwnedMap values(kafka_admin_CreateTopicsResult_values(result.get()));
+    const int32_t n = kafka_Map_size(values.get());
+    for (int32_t i = 0; i < n; i++) {
+      const char* topic = static_cast<const char*>(kafka_Map_key(values.get(), i));
+      CreateTopicsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), topic);
+      kafka_common_Error_t* err = future_await(
+          static_cast<const kafka_common_KafkaFuture_t*>(kafka_Map_value(values.get(), i)));
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      metadata_to_proto(result.get(), topic, entry->mutable_value());
+    }
     return grpc::Status::OK;
   }
 
   grpc::Status DeleteTopics(grpc::ServerContext*, const DeleteTopicsRequest* req,
                             VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const bool by_ids = req->has_topic_ids();
-    std::vector<std::string> owned(by_ids ? req->topic_ids().values().begin()
-                                          : req->names().values().begin(),
-                                   by_ids ? req->topic_ids().values().end()
-                                          : req->names().values().end());
-    std::vector<const char*> keys;
-    keys.reserve(owned.size());
-    for (const std::string& key : owned) keys.push_back(key.c_str());
-
-    kafka_admin_DeleteTopicsResult_t* result = nullptr;
-    kafka_common_Error_t* err =
-        by_ids ? kafka_admin_AdminClient_delete_topics_by_ids(
-                     admin, keys.data(), static_cast<int32_t>(keys.size()),
-                     timeout_ms(*req), retry_on_quota(*req), &result)
-               : kafka_admin_AdminClient_delete_topics(
-                     admin, keys.data(), static_cast<int32_t>(keys.size()),
-                     timeout_ms(*req), retry_on_quota(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
+    TopicCollectionArg topics(*req);
+    if (topics.error) {
+      fill_proto_error(resp->mutable_error(), topics.error.release());
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_DeleteTopicsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_keyed(entry->mutable_key(), kafka_admin_DeleteTopicsResult_get_key(result, i), by_ids);
-      // No value for a KafkaFuture<Void>: an absent error is the success signal.
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DeleteTopicsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    Owned<kafka_admin_DeleteTopicsOptions_t, kafka_admin_DeleteTopicsOptions_destroy> opts(
+        kafka_admin_DeleteTopicsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DeleteTopicsOptions_set_timeout_ms);
+    kafka_admin_DeleteTopicsOptions_set_retry_on_quota_violation(opts.get(),
+                                                                 retry_on_quota(*req) ? 1 : 0);
+    Owned<kafka_admin_DeleteTopicsResult_t, kafka_admin_DeleteTopicsResult_destroy> result(
+        kafka_admin_Admin_delete_topics_with_options(admin, topics.collection.get(), opts.get()));
+    if (topics.by_ids) {
+      OwnedMap values(kafka_admin_DeleteTopicsResult_topic_id_values(result.get()));
+      void_futures_to_proto<kafka_common_Uuid_t>(
+          values.get(), [resp] { return resp->add_entries(); }, set_topic_id_key);
+    } else {
+      OwnedMap values(kafka_admin_DeleteTopicsResult_topic_name_values(result.get()));
+      void_futures_to_proto<char>(values.get(), [resp] { return resp->add_entries(); }, set_name_key);
     }
-    kafka_admin_DeleteTopicsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status ListTopics(grpc::ServerContext*, const AdminListTopicsRequest* req,
                           AdminListTopicsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    kafka_admin_ListTopicsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_topics(
-        admin, timeout_ms(*req), req->list_internal(), &result);
+    Owned<kafka_admin_ListTopicsOptions_t, kafka_admin_ListTopicsOptions_destroy> opts(
+        kafka_admin_ListTopicsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListTopicsOptions_set_timeout_ms);
+    kafka_admin_ListTopicsOptions_set_list_internal(opts.get(), req->list_internal() ? 1 : 0);
+    Owned<kafka_admin_ListTopicsResult_t, kafka_admin_ListTopicsResult_destroy> result(
+        kafka_admin_Admin_list_topics_with_options(admin, opts.get()));
+
+    OwnedFuture listings(kafka_admin_ListTopicsResult_listings(result.get()));
+    const kafka_List_t* list = nullptr;
+    kafka_common_Error_t* err = future_get(listings.get(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    // Whole-value response: Java's ListTopicsResult holds one future for the
-    // entire map, so no listing can fail on its own.
-    const int32_t count = kafka_admin_ListTopicsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_admin_TopicListing_t* listing =
-          kafka_admin_ListTopicsResult_get_value(result, i);
-      if (listing == nullptr) {
-        // Unreachable for i < count (ListTopicsResultInner.values is a
-        // Vec<TopicListingInner>, not Vec<Option<_>>, so only a negative or
-        // out-of-range index yields null). Reported anyway, and as a *whole-call*
-        // error since a whole-value response has no per-entry error arm: the
-        // previous `continue` returned a syntactically valid, error-free response
-        // one listing short, which is the one failure mode that produces false
-        // agreement between backends instead of a loud disagreement. Both Python
-        // servers already surface this condition at whole-call level.
-        resp->clear_listings();
-        *resp->mutable_error() = make_synthetic_error("listTopics entry has no listing");
-        break;
-      }
+    for_each_in_list<kafka_admin_TopicListing_t>(list, [resp](const kafka_admin_TopicListing_t* l) {
       AdminTopicListing* dst = resp->add_listings();
-      dst->set_name(cstr(kafka_admin_TopicListing_name(listing)));
-      dst->set_topic_id(cstr(kafka_admin_TopicListing_topic_id(listing)));
-      dst->set_is_internal(kafka_admin_TopicListing_is_internal(listing));
-    }
-    kafka_admin_ListTopicsResult_destroy(result);
+      dst->set_name(cstr(kafka_admin_TopicListing_name(l)));
+      OwnedUuid id(kafka_admin_TopicListing_topic_id(l));
+      OwnedCString id_str(kafka_common_Uuid_to_string(id.get()));
+      dst->set_topic_id(cstr(id_str.get()));
+      dst->set_is_internal(kafka_admin_TopicListing_is_internal(l) != 0);
+    });
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeTopics(grpc::ServerContext*, const DescribeTopicsRequest* req,
                               DescribeTopicsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const bool by_ids = req->has_topic_ids();
-    std::vector<std::string> owned(by_ids ? req->topic_ids().values().begin()
-                                          : req->names().values().begin(),
-                                   by_ids ? req->topic_ids().values().end()
-                                          : req->names().values().end());
-    std::vector<const char*> keys;
-    keys.reserve(owned.size());
-    for (const std::string& key : owned) keys.push_back(key.c_str());
-    // A negative limit leaves Java's default (2000) in place, which is what an
-    // absent field means.
-    const int32_t limit = req->has_partition_size_limit_per_response()
-                              ? req->partition_size_limit_per_response()
-                              : -1;
-
-    kafka_admin_DescribeTopicsResult_t* result = nullptr;
-    kafka_common_Error_t* err =
-        by_ids ? kafka_admin_AdminClient_describe_topics_by_ids(
-                     admin, keys.data(), static_cast<int32_t>(keys.size()),
-                     timeout_ms(*req), req->include_authorized_operations(), limit, &result)
-               : kafka_admin_AdminClient_describe_topics(
-                     admin, keys.data(), static_cast<int32_t>(keys.size()),
-                     timeout_ms(*req), req->include_authorized_operations(), limit, &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
+    TopicCollectionArg topics(*req);
+    if (topics.error) {
+      fill_proto_error(resp->mutable_error(), topics.error.release());
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_DescribeTopicsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeTopicsEntry* entry = resp->add_entries();
-      set_keyed(entry->mutable_key(), kafka_admin_DescribeTopicsResult_get_key(result, i), by_ids);
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeTopicsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-      } else {
-        const kafka_admin_TopicDescription_t* value =
-            kafka_admin_DescribeTopicsResult_get_value(result, i);
-        if (value == nullptr) {
-          *entry->mutable_error() = make_synthetic_error("describeTopics entry has neither value nor error");
-        } else {
-          description_to_proto(value, entry->mutable_value());
-        }
-      }
+    Owned<kafka_admin_DescribeTopicsOptions_t, kafka_admin_DescribeTopicsOptions_destroy> opts(
+        kafka_admin_DescribeTopicsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeTopicsOptions_set_timeout_ms);
+    kafka_admin_DescribeTopicsOptions_set_include_authorized_operations(
+        opts.get(), req->include_authorized_operations() ? 1 : 0);
+    // An absent limit leaves Java's default (2000) in place.
+    if (req->has_partition_size_limit_per_response()) {
+      kafka_admin_DescribeTopicsOptions_set_partition_size_limit_per_response(
+          opts.get(), req->partition_size_limit_per_response());
     }
-    kafka_admin_DescribeTopicsResult_destroy(result);
+    Owned<kafka_admin_DescribeTopicsResult_t, kafka_admin_DescribeTopicsResult_destroy> result(
+        kafka_admin_Admin_describe_topics_with_topics_options(admin, topics.collection.get(),
+                                                              opts.get()));
+    auto fill = [](DescribeTopicsEntry* entry, const kafka_admin_TopicDescription_t* d) {
+      topic_description_to_proto(d, entry->mutable_value());
+    };
+    if (topics.by_ids) {
+      OwnedMap values(kafka_admin_DescribeTopicsResult_topic_id_values(result.get()));
+      keyed_futures_to_proto<kafka_common_Uuid_t, kafka_admin_TopicDescription_t>(
+          values.get(), [resp] { return resp->add_entries(); }, set_topic_id_key, fill);
+    } else {
+      OwnedMap values(kafka_admin_DescribeTopicsResult_topic_name_values(result.get()));
+      keyed_futures_to_proto<char, kafka_admin_TopicDescription_t>(
+          values.get(), [resp] { return resp->add_entries(); }, set_name_key, fill);
+    }
     return grpc::Status::OK;
   }
 
   grpc::Status CreatePartitions(grpc::ServerContext*, const CreatePartitionsRequest* req,
                                 VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    std::vector<std::string> topic_names;
-    std::vector<kafka_admin_NewPartitions_t*> owned;
-    topic_names.reserve(req->partitions_size());
-    owned.reserve(req->partitions_size());
+    OwnedHandles<kafka_admin_NewPartitions_t, kafka_admin_NewPartitions_destroy> handles;
+    Int32ListArena assignments;
+    std::vector<std::unique_ptr<CList>> outer_lists;
+    CMap new_partitions;
     for (const auto& spec : req->partitions()) {
-      topic_names.push_back(spec.topic());
-      // has_new_assignments() is the discriminant, passed through verbatim:
-      // Java's increaseTo(int, List<List<Integer>>) with an *empty* list is a
-      // different broker request from increaseTo(int), which leaves
-      // newAssignments null. Deriving it from the number of add_assignment calls
-      // would collapse the two.
-      kafka_admin_NewPartitions_t* np =
-          kafka_admin_NewPartitions_new(spec.total_count(), spec.has_new_assignments());
+      kafka_admin_NewPartitions_t* np = nullptr;
       if (spec.has_new_assignments()) {
-        for (const auto& row : spec.new_assignments().assignments()) {
-          std::vector<int32_t> brokers(row.broker_ids().begin(), row.broker_ids().end());
-          kafka_admin_NewPartitions_add_assignment(
-              np, brokers.data(), static_cast<int32_t>(brokers.size()));
+        outer_lists.push_back(std::make_unique<CList>());
+        CList& outer = *outer_lists.back();
+        for (const auto& brokers : spec.new_assignments().assignments()) {
+          outer.add(assignments.list_of(brokers.broker_ids()));
         }
+        np = kafka_admin_NewPartitions_increase_to_with_new_assignments(spec.total_count(),
+                                                                        outer.list);
+      } else {
+        np = kafka_admin_NewPartitions_increase_to(spec.total_count());
       }
-      owned.push_back(np);
+      new_partitions.put(spec.topic().c_str(), handles.add(np));
     }
-    std::vector<const char*> topics;
-    std::vector<const kafka_admin_NewPartitions_t*> counts(owned.begin(), owned.end());
-    topics.reserve(topic_names.size());
-    for (const std::string& name : topic_names) topics.push_back(name.c_str());
-
-    kafka_admin_CreatePartitionsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_create_partitions(
-        admin, topics.data(), counts.data(), static_cast<int32_t>(topics.size()),
-        timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
-    for (kafka_admin_NewPartitions_t* np : owned) kafka_admin_NewPartitions_destroy(np);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_CreatePartitionsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(), kafka_admin_CreatePartitionsResult_get_key(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_CreatePartitionsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_CreatePartitionsResult_destroy(result);
+    Owned<kafka_admin_CreatePartitionsOptions_t, kafka_admin_CreatePartitionsOptions_destroy> opts(
+        kafka_admin_CreatePartitionsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_CreatePartitionsOptions_set_timeout_ms);
+    kafka_admin_CreatePartitionsOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
+    kafka_admin_CreatePartitionsOptions_set_retry_on_quota_violation(
+        opts.get(), retry_on_quota(*req) ? 1 : 0);
+    Owned<kafka_admin_CreatePartitionsResult_t, kafka_admin_CreatePartitionsResult_destroy> result(
+        kafka_admin_Admin_create_partitions_with_options(admin, new_partitions.map, opts.get()));
+    OwnedMap values(kafka_admin_CreatePartitionsResult_values(result.get()));
+    void_futures_to_proto<char>(values.get(), [resp] { return resp->add_entries(); }, set_name_key);
     return grpc::Status::OK;
   }
 
   grpc::Status DeleteRecords(grpc::ServerContext*, const DeleteRecordsRequest* req,
                              DeleteRecordsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // The entry point takes three parallel arrays rather than a map.
-    std::vector<std::string> topic_names;
-    std::vector<int32_t> partitions;
-    std::vector<int64_t> before_offsets;
-    topic_names.reserve(req->records_size());
+    OwnedHandles<kafka_common_TopicPartition_t, kafka_common_TopicPartition_destroy> tps;
+    OwnedHandles<kafka_admin_RecordsToDelete_t, kafka_admin_RecordsToDelete_destroy> records;
+    CMap records_to_delete;
     for (const auto& spec : req->records()) {
-      topic_names.push_back(spec.partition().topic());
-      partitions.push_back(spec.partition().partition());
-      before_offsets.push_back(spec.before_offset());
+      records_to_delete.put(
+          tps.add(kafka_common_TopicPartition_new(spec.partition().topic().c_str(),
+                                                  spec.partition().partition())),
+          records.add(kafka_admin_RecordsToDelete_with_offset(spec.before_offset())));
     }
-    std::vector<const char*> topics;
-    topics.reserve(topic_names.size());
-    for (const std::string& name : topic_names) topics.push_back(name.c_str());
-
-    kafka_admin_DeleteRecordsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_records(
-        admin, topics.data(), partitions.data(), before_offsets.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DeleteRecordsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DeleteRecordsEntry* entry = resp->add_entries();
-      TopicPartition* tp = entry->mutable_key()->mutable_partition();
-      tp->set_topic(cstr(kafka_admin_DeleteRecordsResult_get_topic(result, i)));
-      tp->set_partition(kafka_admin_DeleteRecordsResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DeleteRecordsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-      } else {
-        entry->mutable_value()->set_low_watermark(
-            kafka_admin_DeleteRecordsResult_get_low_watermark(result, i));
-      }
-    }
-    kafka_admin_DeleteRecordsResult_destroy(result);
+    Owned<kafka_admin_DeleteRecordsOptions_t, kafka_admin_DeleteRecordsOptions_destroy> opts(
+        kafka_admin_DeleteRecordsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DeleteRecordsOptions_set_timeout_ms);
+    Owned<kafka_admin_DeleteRecordsResult_t, kafka_admin_DeleteRecordsResult_destroy> result(
+        kafka_admin_Admin_delete_records_with_options(admin, records_to_delete.map, opts.get()));
+    OwnedMap values(kafka_admin_DeleteRecordsResult_low_watermarks(result.get()));
+    keyed_futures_to_proto<kafka_common_TopicPartition_t, kafka_admin_DeletedRecords_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_partition_key,
+        [](DeleteRecordsEntry* entry, const kafka_admin_DeletedRecords_t* d) {
+          entry->mutable_value()->set_low_watermark(kafka_admin_DeletedRecords_low_watermark(d));
+        });
     return grpc::Status::OK;
   }
 
-  // -- Cluster, configs & log dirs (slice G2) -------------------------------
-  //
-  // Same three steps as G1. The two whole-value RPCs (describeCluster,
-  // listConfigResources) have no per-key errors at all, so for them the sync entry point's return value carries *every*
-  // failure; the per-key RPCs keep the two-level split.
-
   grpc::Status DescribeCluster(grpc::ServerContext*, const DescribeClusterRequest* req,
                                DescribeClusterResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    kafka_admin_DescribeClusterResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_cluster(
-        admin, timeout_ms(*req), req->include_authorized_operations(),
-        req->include_fenced_brokers(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
+    Owned<kafka_admin_DescribeClusterOptions_t, kafka_admin_DescribeClusterOptions_destroy> opts(
+        kafka_admin_DescribeClusterOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeClusterOptions_set_timeout_ms);
+    kafka_admin_DescribeClusterOptions_set_include_authorized_operations(
+        opts.get(), req->include_authorized_operations() ? 1 : 0);
+    kafka_admin_DescribeClusterOptions_set_include_fenced_brokers(
+        opts.get(), req->include_fenced_brokers() ? 1 : 0);
+    Owned<kafka_admin_DescribeClusterResult_t, kafka_admin_DescribeClusterResult_destroy> result(
+        kafka_admin_Admin_describe_cluster_with_options(admin, opts.get()));
+
     ClusterDescription* dst = resp->mutable_description();
-    dst->set_cluster_id(cstr(kafka_admin_DescribeClusterResult_cluster_id(result)));
-    const int32_t nodes = kafka_admin_DescribeClusterResult_node_count(result);
-    for (int32_t i = 0; i < nodes; i++) {
-      node_to_proto(kafka_admin_DescribeClusterResult_get_node(result, i), dst->add_nodes());
-    }
-    // Java's controller() is nullable: a null handle means no current
-    // controller, and must not become a fabricated Node.
-    const kafka_common_Node_t* controller = kafka_admin_DescribeClusterResult_controller(result);
-    if (controller != nullptr) node_to_proto(controller, dst->mutable_controller());
-    // Absent means the broker did not report the operations, which is not the
-    // same as reporting that none are authorized — hence the has_* predicate
-    // rather than a count of 0.
-    if (kafka_admin_DescribeClusterResult_has_authorized_operations(result)) {
-      AclOperationList* ops = dst->mutable_authorized_operations();
-      const int32_t n = kafka_admin_DescribeClusterResult_authorized_operation_count(result);
-      for (int32_t i = 0; i < n; i++) {
-        ops->add_operations(kafka_admin_DescribeClusterResult_authorized_operation(result, i));
+    {
+      OwnedFuture f(kafka_admin_DescribeClusterResult_cluster_id(result.get()));
+      const char* cluster_id = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &cluster_id);
+      if (err != nullptr) {
+        resp->clear_description();
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
       }
+      dst->set_cluster_id(cstr(cluster_id));
     }
-    kafka_admin_DescribeClusterResult_destroy(result);
+    {
+      OwnedFuture f(kafka_admin_DescribeClusterResult_nodes(result.get()));
+      const kafka_List_t* nodes = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &nodes);
+      if (err != nullptr) {
+        resp->clear_description();
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      for_each_in_list<kafka_common_Node_t>(
+          nodes, [dst](const kafka_common_Node_t* n) { node_to_proto(n, dst->add_nodes()); });
+    }
+    {
+      // Java's controller() is nullable: a null handle means no current
+      // controller, and must not become a fabricated Node.
+      OwnedFuture f(kafka_admin_DescribeClusterResult_controller(result.get()));
+      const kafka_common_Node_t* controller = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &controller);
+      if (err != nullptr) {
+        resp->clear_description();
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      if (controller != nullptr) node_to_proto(controller, dst->mutable_controller());
+    }
+    {
+      // A null list is Java's null: the operations were not requested, which
+      // is not the same as none being authorized.
+      OwnedFuture f(kafka_admin_DescribeClusterResult_authorized_operations(result.get()));
+      const kafka_List_t* ops = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &ops);
+      if (err != nullptr) {
+        resp->clear_description();
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      if (ops != nullptr) acl_operations_to_proto(ops, dst->mutable_authorized_operations());
+    }
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeConfigs(grpc::ServerContext*, const DescribeConfigsRequest* req,
                                DescribeConfigsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    std::vector<int32_t> types;
-    std::vector<std::string> owned_names;
-    types.reserve(req->resources_size());
-    owned_names.reserve(req->resources_size());
-    for (const auto& resource : req->resources()) {
-      types.push_back(resource.resource_type());
-      owned_names.push_back(resource.name());
+    OwnedHandles<kafka_common_config_ConfigResource_t, kafka_common_config_ConfigResource_destroy>
+        resources;
+    CList resource_list;
+    for (const auto& r : req->resources()) {
+      resource_list.add(resources.add(kafka_common_config_ConfigResource_new(
+          kafka_common_config_ConfigResource_Type_for_id(static_cast<int8_t>(r.resource_type())),
+          r.name().c_str())));
     }
-    std::vector<const char*> names;
-    names.reserve(owned_names.size());
-    for (const std::string& name : owned_names) names.push_back(name.c_str());
-
-    kafka_admin_DescribeConfigsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_configs(
-        admin, types.data(), names.data(), static_cast<int32_t>(types.size()),
-        timeout_ms(*req), req->include_synonyms(), req->include_documentation(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeConfigsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeConfigsEntry* entry = resp->add_entries();
-      set_config_resource_key(entry->mutable_key(),
-                              kafka_admin_DescribeConfigsResult_get_key_type(result, i),
-                              kafka_admin_DescribeConfigsResult_get_key_name(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeConfigsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-      } else {
-        const kafka_admin_Config_t* config =
-            kafka_admin_DescribeConfigsResult_get_value(result, i);
-        if (config == nullptr) {
-          *entry->mutable_error() = make_synthetic_error("describeConfigs entry has neither value nor error");
-        } else if (!config_to_proto(config, entry->mutable_value())) {
-          entry->clear_value();
-          *entry->mutable_error() = make_synthetic_error("describeConfigs entry has an unreadable config entry");
-        }
-      }
-    }
-    kafka_admin_DescribeConfigsResult_destroy(result);
+    Owned<kafka_admin_DescribeConfigsOptions_t, kafka_admin_DescribeConfigsOptions_destroy> opts(
+        kafka_admin_DescribeConfigsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeConfigsOptions_set_timeout_ms);
+    kafka_admin_DescribeConfigsOptions_set_include_synonyms(opts.get(),
+                                                            req->include_synonyms() ? 1 : 0);
+    kafka_admin_DescribeConfigsOptions_set_include_documentation(
+        opts.get(), req->include_documentation() ? 1 : 0);
+    Owned<kafka_admin_DescribeConfigsResult_t, kafka_admin_DescribeConfigsResult_destroy> result(
+        kafka_admin_Admin_describe_configs_with_options(admin, resource_list.list, opts.get()));
+    OwnedMap values(kafka_admin_DescribeConfigsResult_values(result.get()));
+    keyed_futures_to_proto<kafka_common_config_ConfigResource_t, kafka_admin_Config_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_config_resource_key,
+        [](DescribeConfigsEntry* entry, const kafka_admin_Config_t* config) {
+          AdminConfig* dst = entry->mutable_value();
+          config_to_proto(config, [dst] { return dst->add_entries(); });
+        });
     return grpc::Status::OK;
   }
 
   grpc::Status IncrementalAlterConfigs(grpc::ServerContext*,
                                        const IncrementalAlterConfigsRequest* req,
                                        VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // The entry point takes five parallel arrays with **one row per operation**;
-    // rows naming the same resource are grouped in order on the Rust side.
-    std::vector<int32_t> types;
-    std::vector<int32_t> op_types;
-    std::vector<std::string> owned_resources;
-    std::vector<std::string> owned_config_names;
-    // A null config value is what DELETE carries, so the value column has to be
-    // able to hold a real NULL rather than an empty string.
-    std::vector<std::string> owned_config_values;
-    std::vector<bool> value_present;
-    for (const auto& config : req->configs()) {
-      for (const auto& op : config.ops()) {
-        types.push_back(config.resource().resource_type());
-        owned_resources.push_back(config.resource().name());
-        owned_config_names.push_back(op.name());
-        owned_config_values.push_back(op.has_value() ? op.value() : std::string());
-        value_present.push_back(op.has_value());
-        op_types.push_back(op.op_type());
+    OwnedHandles<kafka_common_config_ConfigResource_t, kafka_common_config_ConfigResource_destroy>
+        resources;
+    OwnedHandles<kafka_admin_ConfigEntry_t, kafka_admin_ConfigEntry_destroy> entries;
+    OwnedHandles<kafka_admin_AlterConfigOp_t, kafka_admin_AlterConfigOp_destroy> ops;
+    std::vector<std::unique_ptr<CList>> op_lists;
+    CMap configs;
+    for (const auto& spec : req->configs()) {
+      op_lists.push_back(std::make_unique<CList>());
+      CList& op_list = *op_lists.back();
+      for (const auto& op : spec.ops()) {
+        const kafka_admin_AlterConfigOp_OpType_t* type =
+            kafka_admin_AlterConfigOp_OpType_for_id(static_cast<int8_t>(op.op_type()));
+        if (type == nullptr) {
+          *resp->mutable_error() =
+              make_synthetic_error("unknown AlterConfigOp.OpType id " + std::to_string(op.op_type()),
+                                   kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
+          return grpc::Status::OK;
+        }
+        kafka_admin_ConfigEntry_t* entry = entries.add(
+            kafka_admin_ConfigEntry_new(op.name().c_str(), op.has_value() ? op.value().c_str() : nullptr));
+        op_list.add(ops.add(kafka_admin_AlterConfigOp_new(entry, type)));
       }
+      configs.put(resources.add(kafka_common_config_ConfigResource_new(
+                      kafka_common_config_ConfigResource_Type_for_id(
+                          static_cast<int8_t>(spec.resource().resource_type())),
+                      spec.resource().name().c_str())),
+                  op_list.list);
     }
-    std::vector<const char*> resources;
-    std::vector<const char*> config_names;
-    std::vector<const char*> config_values;
-    resources.reserve(owned_resources.size());
-    config_names.reserve(owned_config_names.size());
-    config_values.reserve(owned_config_values.size());
-    for (size_t i = 0; i < owned_resources.size(); i++) {
-      resources.push_back(owned_resources[i].c_str());
-      config_names.push_back(owned_config_names[i].c_str());
-      config_values.push_back(value_present[i] ? owned_config_values[i].c_str() : nullptr);
-    }
-
-    kafka_admin_AlterConfigsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_incremental_alter_configs(
-        admin, types.data(), resources.data(), config_names.data(), config_values.data(),
-        op_types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req),
-        req->validate_only(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterConfigsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_config_resource_key(entry->mutable_key(),
-                              kafka_admin_AlterConfigsResult_get_key_type(result, i),
-                              kafka_admin_AlterConfigsResult_get_key_name(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterConfigsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_AlterConfigsResult_destroy(result);
+    Owned<kafka_admin_AlterConfigsOptions_t, kafka_admin_AlterConfigsOptions_destroy> opts(
+        kafka_admin_AlterConfigsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterConfigsOptions_set_timeout_ms);
+    kafka_admin_AlterConfigsOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
+    Owned<kafka_admin_AlterConfigsResult_t, kafka_admin_AlterConfigsResult_destroy> result(
+        kafka_admin_Admin_incremental_alter_configs_with_options(admin, configs.map, opts.get()));
+    OwnedMap values(kafka_admin_AlterConfigsResult_values(result.get()));
+    void_futures_to_proto<kafka_common_config_ConfigResource_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_config_resource_key);
     return grpc::Status::OK;
   }
 
   grpc::Status ListConfigResources(grpc::ServerContext*, const ListConfigResourcesRequest* req,
                                    ListConfigResourcesResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // An empty array is Java's empty Set: every type the cluster supports.
-    std::vector<int32_t> types(req->resource_types().begin(), req->resource_types().end());
-    kafka_admin_ListConfigResourcesResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_config_resources(
-        admin, types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req), &result);
+    CList types;  // borrowed Type singletons
+    for (int32_t t : req->resource_types()) {
+      types.add(kafka_common_config_ConfigResource_Type_for_id(static_cast<int8_t>(t)));
+    }
+    Owned<kafka_admin_ListConfigResourcesOptions_t, kafka_admin_ListConfigResourcesOptions_destroy>
+        opts(kafka_admin_ListConfigResourcesOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListConfigResourcesOptions_set_timeout_ms);
+    Owned<kafka_admin_ListConfigResourcesResult_t, kafka_admin_ListConfigResourcesResult_destroy>
+        result(kafka_admin_Admin_list_config_resources_with_options(admin, types.list, opts.get()));
+    OwnedFuture all(kafka_admin_ListConfigResourcesResult_all(result.get()));
+    const kafka_List_t* list = nullptr;
+    kafka_common_Error_t* err = future_get(all.get(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    const int32_t count = kafka_admin_ListConfigResourcesResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      ConfigResource* dst = resp->add_resources();
-      dst->set_resource_type(kafka_admin_ListConfigResourcesResult_get_type(result, i));
-      dst->set_name(cstr(kafka_admin_ListConfigResourcesResult_get_name(result, i)));
-    }
-    kafka_admin_ListConfigResourcesResult_destroy(result);
+    for_each_in_list<kafka_common_config_ConfigResource_t>(
+        list, [resp](const kafka_common_config_ConfigResource_t* r) {
+          config_resource_to_proto(r, resp->add_resources());
+        });
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeLogDirs(grpc::ServerContext*, const DescribeLogDirsRequest* req,
                                DescribeLogDirsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    std::vector<int32_t> brokers(req->brokers().begin(), req->brokers().end());
-    kafka_admin_DescribeLogDirsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_log_dirs(
-        admin, brokers.data(), static_cast<int32_t>(brokers.size()), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeLogDirsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeLogDirsEntry* entry = resp->add_entries();
-      entry->mutable_key()->set_broker_id(
-          kafka_admin_DescribeLogDirsResult_get_broker(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeLogDirsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-        continue;
-      }
-      const kafka_admin_LogDirDescriptionMap_t* map =
-          kafka_admin_DescribeLogDirsResult_get_value(result, i);
-      if (map == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("describeLogDirs entry has neither value nor error");
-        continue;
-      }
-      // The nested level: one description per log-dir path.
-      LogDirDescriptionMap* dst = entry->mutable_value();
-      const int32_t dirs = kafka_admin_LogDirDescriptionMap_count(map);
-      for (int32_t d = 0; d < dirs; d++) {
-        const kafka_admin_LogDirDescription_t* description =
-            kafka_admin_LogDirDescriptionMap_get_value(map, d);
-        if (description == nullptr) {
-          // Unreachable for d < dirs, but reported rather than skipped: dropping
-          // the log dir would return a successful per-broker value with silently
-          // reduced cardinality. This entry does have an error arm, so use it.
-          entry->clear_value();
-          *entry->mutable_error() = make_synthetic_error("describeLogDirs entry has an unreadable log dir");
-          break;
-        }
-        log_dir_description_to_proto(
-            description,
-            &(*dst->mutable_log_dirs())[cstr(kafka_admin_LogDirDescriptionMap_get_key(map, d))]);
-      }
-    }
-    kafka_admin_DescribeLogDirsResult_destroy(result);
+    ScalarArena scalars;
+    CList brokers;
+    for (int32_t b : req->brokers()) brokers.add(scalars.i32(b));
+    Owned<kafka_admin_DescribeLogDirsOptions_t, kafka_admin_DescribeLogDirsOptions_destroy> opts(
+        kafka_admin_DescribeLogDirsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeLogDirsOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeLogDirsResult_t, kafka_admin_DescribeLogDirsResult_destroy> result(
+        kafka_admin_Admin_describe_log_dirs_with_options(admin, brokers.list, opts.get()));
+    // Broker id -> future of Map<String, LogDirDescription>.
+    OwnedMap descriptions(kafka_admin_DescribeLogDirsResult_descriptions(result.get()));
+    keyed_futures_to_proto<int32_t, kafka_Map_t>(
+        descriptions.get(), [resp] { return resp->add_entries(); }, set_broker_key,
+        [](DescribeLogDirsEntry* entry, const kafka_Map_t* dirs) {
+          // The nested level: one description per log-dir path, borrowed
+          // from the future together with the map.
+          LogDirDescriptionMap* dst = entry->mutable_value();
+          const int32_t n = kafka_Map_size(dirs);
+          for (int32_t d = 0; d < n; d++) {
+            const char* path = static_cast<const char*>(kafka_Map_key(dirs, d));
+            log_dir_description_to_proto(
+                static_cast<const kafka_admin_LogDirDescription_t*>(kafka_Map_value(dirs, d)),
+                &(*dst->mutable_log_dirs())[cstr(path)]);
+          }
+        });
     return grpc::Status::OK;
   }
 
   grpc::Status AlterReplicaLogDirs(grpc::ServerContext*, const AlterReplicaLogDirsRequest* req,
                                    VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    std::vector<std::string> owned_topics;
-    std::vector<std::string> owned_log_dirs;
-    std::vector<int32_t> partitions;
-    std::vector<int32_t> broker_ids;
-    for (const auto& assignment : req->assignments()) {
-      owned_topics.push_back(assignment.replica().topic());
-      partitions.push_back(assignment.replica().partition());
-      broker_ids.push_back(assignment.replica().broker_id());
-      owned_log_dirs.push_back(assignment.log_dir());
+    OwnedHandles<kafka_common_TopicPartitionReplica_t, kafka_common_TopicPartitionReplica_destroy>
+        replicas;
+    CMap assignment;  // replica -> borrowed log dir string
+    for (const auto& a : req->assignments()) {
+      assignment.put(replicas.add(kafka_common_TopicPartitionReplica_new(
+                         a.replica().topic().c_str(), a.replica().partition(),
+                         a.replica().broker_id())),
+                     a.log_dir().c_str());
     }
-    std::vector<const char*> topics;
-    std::vector<const char*> log_dirs;
-    topics.reserve(owned_topics.size());
-    log_dirs.reserve(owned_log_dirs.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-    for (const std::string& dir : owned_log_dirs) log_dirs.push_back(dir.c_str());
-
-    kafka_admin_AlterReplicaLogDirsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_replica_log_dirs(
-        admin, topics.data(), partitions.data(), broker_ids.data(), log_dirs.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterReplicaLogDirsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_replica_key(entry->mutable_key(),
-                      kafka_admin_AlterReplicaLogDirsResult_get_topic(result, i),
-                      kafka_admin_AlterReplicaLogDirsResult_get_partition(result, i),
-                      kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterReplicaLogDirsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_AlterReplicaLogDirsResult_destroy(result);
+    Owned<kafka_admin_AlterReplicaLogDirsOptions_t, kafka_admin_AlterReplicaLogDirsOptions_destroy>
+        opts(kafka_admin_AlterReplicaLogDirsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterReplicaLogDirsOptions_set_timeout_ms);
+    Owned<kafka_admin_AlterReplicaLogDirsResult_t, kafka_admin_AlterReplicaLogDirsResult_destroy>
+        result(kafka_admin_Admin_alter_replica_log_dirs_with_options(admin, assignment.map,
+                                                                     opts.get()));
+    OwnedMap values(kafka_admin_AlterReplicaLogDirsResult_values(result.get()));
+    void_futures_to_proto<kafka_common_TopicPartitionReplica_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_replica_key);
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeReplicaLogDirs(grpc::ServerContext*,
                                       const DescribeReplicaLogDirsRequest* req,
                                       DescribeReplicaLogDirsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    std::vector<std::string> owned_topics;
-    std::vector<int32_t> partitions;
-    std::vector<int32_t> broker_ids;
-    for (const auto& replica : req->replicas()) {
-      owned_topics.push_back(replica.topic());
-      partitions.push_back(replica.partition());
-      broker_ids.push_back(replica.broker_id());
+    OwnedHandles<kafka_common_TopicPartitionReplica_t, kafka_common_TopicPartitionReplica_destroy>
+        replicas;
+    CList replica_list;
+    for (const auto& r : req->replicas()) {
+      replica_list.add(replicas.add(
+          kafka_common_TopicPartitionReplica_new(r.topic().c_str(), r.partition(), r.broker_id())));
     }
-    std::vector<const char*> topics;
-    topics.reserve(owned_topics.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-
-    kafka_admin_DescribeReplicaLogDirsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_replica_log_dirs(
-        admin, topics.data(), partitions.data(), broker_ids.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeReplicaLogDirsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeReplicaLogDirsEntry* entry = resp->add_entries();
-      set_replica_key(entry->mutable_key(),
-                      kafka_admin_DescribeReplicaLogDirsResult_get_topic(result, i),
-                      kafka_admin_DescribeReplicaLogDirsResult_get_partition(result, i),
-                      kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeReplicaLogDirsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-        continue;
-      }
-      const kafka_admin_ReplicaLogDirInfo_t* info =
-          kafka_admin_DescribeReplicaLogDirsResult_get_value(result, i);
-      if (info == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("describeReplicaLogDirs entry has neither value nor error");
-        continue;
-      }
-      ReplicaLogDirInfo* dst = entry->mutable_value();
-      // Both dirs are nullable in Java: no replica hosted here, and no pending
-      // move, respectively. A null must stay absent rather than become "".
-      const char* current = kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info);
-      if (current != nullptr) dst->set_current_replica_log_dir(std::string(current));
-      dst->set_current_replica_offset_lag(
-          kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info));
-      const char* future = kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info);
-      if (future != nullptr) dst->set_future_replica_log_dir(std::string(future));
-      dst->set_future_replica_offset_lag(
-          kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info));
-    }
-    kafka_admin_DescribeReplicaLogDirsResult_destroy(result);
+    Owned<kafka_admin_DescribeReplicaLogDirsOptions_t,
+          kafka_admin_DescribeReplicaLogDirsOptions_destroy>
+        opts(kafka_admin_DescribeReplicaLogDirsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeReplicaLogDirsOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeReplicaLogDirsResult_t,
+          kafka_admin_DescribeReplicaLogDirsResult_destroy>
+        result(kafka_admin_Admin_describe_replica_log_dirs_with_options(admin, replica_list.list,
+                                                                        opts.get()));
+    OwnedMap values(kafka_admin_DescribeReplicaLogDirsResult_values(result.get()));
+    keyed_futures_to_proto<kafka_common_TopicPartitionReplica_t,
+                           kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_replica_key,
+        [](DescribeReplicaLogDirsEntry* entry,
+           const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t* info) {
+          ReplicaLogDirInfo* dst = entry->mutable_value();
+          // Java's current/futureReplicaLogDir are nullable strings.
+          const char* current =
+              kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_log_dir(info);
+          if (current != nullptr) dst->set_current_replica_log_dir(current);
+          dst->set_current_replica_offset_lag(
+              kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_offset_lag(
+                  info));
+          const char* future =
+              kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_log_dir(info);
+          if (future != nullptr) dst->set_future_replica_log_dir(future);
+          dst->set_future_replica_offset_lag(
+              kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_offset_lag(
+                  info));
+        });
     return grpc::Status::OK;
   }
 
-  // -- Elections, reassignments & offsets (slice G3) -------------------------
-  //
-  // electLeaders and alterPartitionReassignments both answer with the shared
-  // VoidKeyedResponse, but their two error levels do not mean the same thing:
-  // alterPartitionReassignments has one Java future per partition, whereas
-  // electLeaders has *one* future for the whole map, so the sync entry point's
-  // non-null return is a whole-call failure that leaves `entries` empty.
-  // listPartitionReassignments is whole-value (its result handle has no
-  // _get_error(i) at all), listOffsets is an ordinary per-key result.
-
   grpc::Status ElectLeaders(grpc::ServerContext*, const ElectLeadersRequest* req,
                             VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // An absent partition set is Java's **null** Set: elect a leader for every
-    // partition in the cluster. It crosses to the entry point as the explicit
-    // `all_partitions` flag, which makes the arrays unread, so it can never be
-    // confused with the present-but-empty case (an empty selection). Testing
-    // `partitions().partitions_size() == 0` instead would collapse the two.
-    const bool all_partitions = !req->has_partitions();
-    std::vector<std::string> owned_topics;
-    std::vector<int32_t> partitions;
-    if (!all_partitions) {
-      for (const auto& tp : req->partitions().partitions()) {
-        owned_topics.push_back(tp.topic());
-        partitions.push_back(tp.partition());
-      }
-    }
-    std::vector<const char*> topics;
-    topics.reserve(owned_topics.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-
-    kafka_admin_ElectLeadersResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_elect_leaders(
-        admin, req->election_type(), all_partitions, topics.data(), partitions.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    const kafka_common_ElectionType_t* election_type = nullptr;
+    kafka_common_Error_t* err = kafka_common_ElectionType_value_of(
+        static_cast<int8_t>(req->election_type()), &election_type);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    // An absent partition set is Java's **null** Set: elect a leader for every
+    // partition in the cluster. It crosses as a NULL list, which can never be
+    // confused with the present-but-empty case (an empty selection). Testing
+    // `partitions().partitions_size() == 0` instead would collapse the two.
+    std::unique_ptr<TpList> partitions;
+    if (req->has_partitions()) partitions = std::make_unique<TpList>(req->partitions().partitions());
+    Owned<kafka_admin_ElectLeadersOptions_t, kafka_admin_ElectLeadersOptions_destroy> opts(
+        kafka_admin_ElectLeadersOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ElectLeadersOptions_set_timeout_ms);
+    Owned<kafka_admin_ElectLeadersResult_t, kafka_admin_ElectLeadersResult_destroy> result(
+        kafka_admin_Admin_elect_leaders_with_options(
+            admin, election_type, partitions ? partitions->list : nullptr, opts.get()));
 
-    const int32_t count = kafka_admin_ElectLeadersResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    OwnedFuture f(kafka_admin_ElectLeadersResult_partitions(result.get()));
+    const kafka_Map_t* outcomes = nullptr;
+    err = future_get(f.get(), &outcomes);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    const int32_t n = outcomes == nullptr ? 0 : kafka_Map_size(outcomes);
+    for (int32_t i = 0; i < n; i++) {
       VoidResultEntry* entry = resp->add_entries();
       set_partition_key(entry->mutable_key(),
-                        kafka_admin_ElectLeadersResult_get_topic(result, i),
-                        kafka_admin_ElectLeadersResult_get_partition(result, i));
+                        static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(outcomes, i)));
       // Java's Optional<Throwable> per partition: a null handle means the
       // election succeeded for that partition, which is the absent error.
-      const kafka_common_Error_t* key_err =
-          kafka_admin_ElectLeadersResult_get_error(result, i);
+      const auto* key_err = static_cast<const kafka_common_Error_t*>(kafka_Map_value(outcomes, i));
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
-    kafka_admin_ElectLeadersResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status AlterPartitionReassignments(grpc::ServerContext*,
                                            const AlterPartitionReassignmentsRequest* req,
                                            VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const size_t n = static_cast<size_t>(req->reassignments_size());
-    std::vector<std::string> owned_topics;
-    std::vector<int32_t> partitions;
-    // std::vector<bool> is a bit-field and has no `bool*` to hand the entry
-    // point, hence a plain array.
-    std::unique_ptr<bool[]> cancel(new bool[n == 0 ? 1 : n]);
-    std::vector<std::vector<int32_t>> owned_replicas;
-    std::vector<const int32_t*> replica_ptrs;
-    std::vector<int32_t> replica_counts;
-    owned_topics.reserve(n);
-    owned_replicas.reserve(n);
+    OwnedHandles<kafka_common_TopicPartition_t, kafka_common_TopicPartition_destroy> tps;
+    OwnedHandles<kafka_admin_NewPartitionReassignment_t, kafka_admin_NewPartitionReassignment_destroy>
+        reassignments;
+    Int32ListArena replicas;
+    CMap map;  // partition -> NewPartitionReassignment, or NULL to cancel
     for (const auto& spec : req->reassignments()) {
-      owned_topics.push_back(spec.partition().topic());
-      partitions.push_back(spec.partition().partition());
-      // An absent reassignment is Java's empty Optional, which **cancels** this
-      // partition's reassignment. It becomes the entry point's `cancel[i]` flag
-      // rather than an empty replica list, because a present-but-empty list is a
-      // different thing that Java rejects — read_reassignments does not read the
-      // replica columns at all when the flag is set.
-      cancel[owned_replicas.size()] = !spec.has_reassignment();
-      owned_replicas.emplace_back(spec.reassignment().target_replicas().begin(),
-                                  spec.reassignment().target_replicas().end());
+      kafka_admin_NewPartitionReassignment_t* reassignment = nullptr;
+      // An absent reassignment is Java's Optional.empty(): cancel the ongoing one.
+      if (spec.has_reassignment()) {
+        kafka_common_Error_t* err = kafka_admin_NewPartitionReassignment_new(
+            replicas.list_of(spec.reassignment().target_replicas()), &reassignment);
+        if (err != nullptr) {
+          fill_proto_error(resp->mutable_error(), err);
+          return grpc::Status::OK;
+        }
+        reassignments.add(reassignment);
+      }
+      map.put(tps.add(kafka_common_TopicPartition_new(spec.partition().topic().c_str(),
+                                                      spec.partition().partition())),
+              reassignment);
     }
-    std::vector<const char*> topics;
-    topics.reserve(owned_topics.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-    replica_ptrs.reserve(owned_replicas.size());
-    replica_counts.reserve(owned_replicas.size());
-    for (const std::vector<int32_t>& replicas : owned_replicas) {
-      replica_ptrs.push_back(replicas.empty() ? nullptr : replicas.data());
-      replica_counts.push_back(static_cast<int32_t>(replicas.size()));
+    Owned<kafka_admin_AlterPartitionReassignmentsOptions_t,
+          kafka_admin_AlterPartitionReassignmentsOptions_destroy>
+        opts(kafka_admin_AlterPartitionReassignmentsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterPartitionReassignmentsOptions_set_timeout_ms);
+    if (req->has_allow_replication_factor_change()) {
+      kafka_admin_AlterPartitionReassignmentsOptions_set_allow_replication_factor_change(
+          opts.get(), req->allow_replication_factor_change() ? 1 : 0);
     }
-    // Java's allowReplicationFactorChange defaults to true, so an absent field
-    // is true rather than proto3's implicit false.
-    const bool allow_rf_change = req->has_allow_replication_factor_change()
-                                     ? req->allow_replication_factor_change()
-                                     : true;
-
-    kafka_admin_AlterPartitionReassignmentsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_partition_reassignments(
-        admin, topics.data(), partitions.data(), cancel.get(), replica_ptrs.data(),
-        replica_counts.data(), static_cast<int32_t>(topics.size()), timeout_ms(*req),
-        allow_rf_change, &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterPartitionReassignmentsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_partition_key(
-          entry->mutable_key(),
-          kafka_admin_AlterPartitionReassignmentsResult_get_topic(result, i),
-          kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterPartitionReassignmentsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
+    Owned<kafka_admin_AlterPartitionReassignmentsResult_t,
+          kafka_admin_AlterPartitionReassignmentsResult_destroy>
+        result(kafka_admin_Admin_alter_partition_reassignments_with_options(admin, map.map,
+                                                                            opts.get()));
+    OwnedMap values(kafka_admin_AlterPartitionReassignmentsResult_values(result.get()));
+    void_futures_to_proto<kafka_common_TopicPartition_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_partition_key);
     return grpc::Status::OK;
   }
 
   grpc::Status ListPartitionReassignments(grpc::ServerContext*,
                                           const ListPartitionReassignmentsRequest* req,
                                           ListPartitionReassignmentsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // Absent is Java's Optional.empty(): list every ongoing reassignment. Same
-    // explicit-flag treatment as ElectLeaders above.
-    const bool all_partitions = !req->has_partitions();
-    std::vector<std::string> owned_topics;
-    std::vector<int32_t> partitions;
-    if (!all_partitions) {
-      for (const auto& tp : req->partitions().partitions()) {
-        owned_topics.push_back(tp.topic());
-        partitions.push_back(tp.partition());
-      }
+    Owned<kafka_admin_ListPartitionReassignmentsOptions_t,
+          kafka_admin_ListPartitionReassignmentsOptions_destroy>
+        opts(kafka_admin_ListPartitionReassignmentsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListPartitionReassignmentsOptions_set_timeout_ms);
+    // An absent set is Java's zero-arg overload (every reassignment); a
+    // present one, even empty, is the Set<TopicPartition> overload.
+    Owned<kafka_admin_ListPartitionReassignmentsResult_t,
+          kafka_admin_ListPartitionReassignmentsResult_destroy>
+        result;
+    if (req->has_partitions()) {
+      TpList partitions(req->partitions().partitions());
+      result.reset(kafka_admin_Admin_list_partition_reassignments_with_partitions_options(
+          admin, partitions.list, opts.get()));
+    } else {
+      result.reset(kafka_admin_Admin_list_partition_reassignments_with_options(admin, opts.get()));
     }
-    std::vector<const char*> topics;
-    topics.reserve(owned_topics.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-
-    kafka_admin_ListPartitionReassignmentsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_partition_reassignments(
-        admin, all_partitions, topics.data(), partitions.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    OwnedFuture f(kafka_admin_ListPartitionReassignmentsResult_reassignments(result.get()));
+    const kafka_Map_t* reassignments = nullptr;
+    kafka_common_Error_t* err = future_get(f.get(), &reassignments);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    // Whole-value response: one Java future for the entire map, so no entry can
-    // carry an error of its own. Only partitions with an ongoing reassignment
-    // appear, so this can be shorter than the request.
-    const int32_t count = kafka_admin_ListPartitionReassignmentsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_admin_PartitionReassignment_t* value =
-          kafka_admin_ListPartitionReassignmentsResult_get_value(result, i);
-      if (value == nullptr) {
-        // Unreachable for i < count, but reporting the whole call as failed is
-        // the only honest answer: there is no per-entry error arm here, and
-        // skipping the entry would return an error-free response one item short.
-        resp->clear_reassignments();
-        *resp->mutable_error() = make_synthetic_error("listPartitionReassignments entry has no reassignment");
-        break;
-      }
+    const int32_t n = reassignments == nullptr ? 0 : kafka_Map_size(reassignments);
+    for (int32_t i = 0; i < n; i++) {
       OngoingPartitionReassignment* dst = resp->add_reassignments();
-      TopicPartition* tp = dst->mutable_partition();
-      tp->set_topic(cstr(kafka_admin_ListPartitionReassignmentsResult_get_topic(result, i)));
-      tp->set_partition(kafka_admin_ListPartitionReassignmentsResult_get_partition(result, i));
-      PartitionReassignment* reassignment = dst->mutable_reassignment();
-      const int32_t replicas = kafka_admin_PartitionReassignment_replica_count(value);
-      for (int32_t r = 0; r < replicas; r++) {
-        reassignment->add_replicas(kafka_admin_PartitionReassignment_replica(value, r));
-      }
-      const int32_t adding = kafka_admin_PartitionReassignment_adding_replica_count(value);
-      for (int32_t r = 0; r < adding; r++) {
-        reassignment->add_adding_replicas(
-            kafka_admin_PartitionReassignment_adding_replica(value, r));
-      }
-      const int32_t removing = kafka_admin_PartitionReassignment_removing_replica_count(value);
-      for (int32_t r = 0; r < removing; r++) {
-        reassignment->add_removing_replicas(
-            kafka_admin_PartitionReassignment_removing_replica(value, r));
-      }
+      tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(reassignments, i)),
+                  dst->mutable_partition());
+      const auto* r =
+          static_cast<const kafka_admin_PartitionReassignment_t*>(kafka_Map_value(reassignments, i));
+      PartitionReassignment* pr = dst->mutable_reassignment();
+      int32_list_to_proto(kafka_admin_PartitionReassignment_replicas(r),
+                          [pr](int32_t id) { pr->add_replicas(id); });
+      int32_list_to_proto(kafka_admin_PartitionReassignment_adding_replicas(r),
+                          [pr](int32_t id) { pr->add_adding_replicas(id); });
+      int32_list_to_proto(kafka_admin_PartitionReassignment_removing_replicas(r),
+                          [pr](int32_t id) { pr->add_removing_replicas(id); });
     }
-    kafka_admin_ListPartitionReassignmentsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status ListOffsets(grpc::ServerContext*, const ListOffsetsRequest* req,
                            ListOffsetsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const size_t n = static_cast<size_t>(req->specs_size());
-    std::vector<std::string> owned_topics;
-    std::vector<int32_t> partitions;
-    // Same reason as AlterPartitionReassignments' `cancel`: no bool* out of
-    // std::vector<bool>.
-    std::unique_ptr<bool[]> is_timestamp(new bool[n == 0 ? 1 : n]);
-    std::vector<int64_t> values;
-    owned_topics.reserve(n);
-    values.reserve(n);
+    OwnedHandles<kafka_common_TopicPartition_t, kafka_common_TopicPartition_destroy> tps;
+    OwnedHandles<kafka_admin_OffsetSpec_t, kafka_admin_OffsetSpec_destroy> timestamp_specs;
+    CMap specs;  // partition -> borrowed OffsetSpec (singleton or owned above)
     for (const auto& spec : req->specs()) {
-      bool spec_is_timestamp = false;
-      int64_t value = 0;
-      if (!offset_spec_columns(spec.spec(), &spec_is_timestamp, &value)) {
+      const kafka_admin_OffsetSpec_t* offset_spec = offset_spec_for(spec.spec(), &timestamp_specs);
+      if (offset_spec == nullptr) {
         // A KIND_UNSPECIFIED or an unknown kind, or FOR_TIMESTAMP with no
-        // timestamp: a protocol error, never a defaulted variant.
-        //
-        // Whole-call, and with the LOCAL_ILLEGAL_ARGUMENT **code** — which is
-        // the part that has to match, since the code is now the sole
-        // discriminator the Rust client decodes. Both Python servers raise
-        // `AdminRequestError` for the same condition, which
-        // `_kafka_error_to_proto` maps to LOCAL_ILLEGAL_ARGUMENT; an earlier
-        // revision of this comment claimed only that the two agreed on the
-        // *level*, and they did not agree on the class at all (Python fell
-        // through to ILLEGAL_STATE).
+        // timestamp: a protocol error, never a defaulted variant. Whole-call,
+        // with the LOCAL_ILLEGAL_ARGUMENT code, which is what the Python
+        // servers' AdminRequestError maps to for the same condition.
         *resp->mutable_error() = make_synthetic_error(
             "OffsetSpec for " + spec.partition().topic() + "-" +
                 std::to_string(spec.partition().partition()) + " has no usable kind (" +
@@ -3211,692 +3535,508 @@ class AdminServiceImpl final : public AdminService::Service {
             kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
-      is_timestamp[values.size()] = spec_is_timestamp;
-      values.push_back(value);
-      owned_topics.push_back(spec.partition().topic());
-      partitions.push_back(spec.partition().partition());
+      specs.put(tps.add(kafka_common_TopicPartition_new(spec.partition().topic().c_str(),
+                                                        spec.partition().partition())),
+                offset_spec);
     }
-    std::vector<const char*> topics;
-    topics.reserve(owned_topics.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-
-    kafka_admin_ListOffsetsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_offsets(
-        admin, topics.data(), partitions.data(), is_timestamp.get(), values.data(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), req->isolation_level(), &result);
+    const kafka_common_IsolationLevel_t* isolation_level = nullptr;
+    kafka_common_Error_t* err = kafka_common_IsolationLevel_for_id(
+        static_cast<int8_t>(req->isolation_level()), &isolation_level);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
+    Owned<kafka_admin_ListOffsetsOptions_t, kafka_admin_ListOffsetsOptions_destroy> opts(
+        kafka_admin_ListOffsetsOptions_with_isolation_level(isolation_level));
+    apply_timeout(*req, opts.get(), kafka_admin_ListOffsetsOptions_set_timeout_ms);
+    Owned<kafka_admin_ListOffsetsResult_t, kafka_admin_ListOffsetsResult_destroy> result(
+        kafka_admin_Admin_list_offsets_with_options(admin, specs.map, opts.get()));
 
-    const int32_t count = kafka_admin_ListOffsetsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    // One entry per requested partition, through the per-key future so a
+    // partition's own failure stays on its entry.
+    for (kafka_common_TopicPartition_t* tp : tps.handles) {
       ListOffsetsEntry* entry = resp->add_entries();
-      set_partition_key(entry->mutable_key(),
-                        kafka_admin_ListOffsetsResult_get_topic(result, i),
-                        kafka_admin_ListOffsetsResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_ListOffsetsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_partition_key(entry->mutable_key(), tp);
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      err = kafka_admin_ListOffsetsResult_partition_result(result.get(), tp, &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      const kafka_admin_ListOffsetsResultInfo_t* info =
-          kafka_admin_ListOffsetsResult_get_value(result, i);
-      if (info == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("listOffsets entry has neither value nor error");
+      OwnedFuture f(raw);
+      const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t* info = nullptr;
+      err = future_get(f.get(), &info);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
       ListOffsetsResultInfo* dst = entry->mutable_value();
-      dst->set_offset(kafka_admin_ListOffsetsResultInfo_offset(info));
-      dst->set_timestamp(kafka_admin_ListOffsetsResultInfo_timestamp(info));
-      // Java's leaderEpoch() is an Optional<Integer>; a false return is
-      // Optional.empty(), which must stay absent rather than become epoch 0.
-      int32_t leader_epoch = 0;
-      if (kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &leader_epoch)) {
-        dst->set_leader_epoch(leader_epoch);
-      }
+      dst->set_offset(kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(info));
+      dst->set_timestamp(kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_timestamp(info));
+      // Java's Optional<Integer> leaderEpoch: -1 is empty.
+      const int32_t epoch = kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch(info);
+      if (epoch >= 0) dst->set_leader_epoch(epoch);
     }
-    kafka_admin_ListOffsetsResult_destroy(result);
     return grpc::Status::OK;
   }
-
-  // -- Groups & offsets (slice G4) -------------------------------------------
-  //
-  // listGroups is the only RPC so far whose result handle has no keys at all: Java splits one future into valid() and an *unkeyed*
-  // errors() collection, which the C handle exposes as `_valid_count` /
-  // `_get_valid` next to `_error_count` / `_get_error`. The two lists are
-  // independent and generally of different length, so nothing is zipped.
-  //
-  // The other seven are ordinary keyed handles. The three whose Java result holds
-  // ONE future over the whole map (alter/deleteConsumerGroupOffsets,
-  // removeMembersFromConsumerGroup) report that future's failure through the
-  // entry point's non-null return, i.e. the response's top-level error — and with
-  // an empty input the handle is empty, so that is the only observable.
 
   grpc::Status ListGroups(grpc::ServerContext*, const ListGroupsRequest* req,
                           ListGroupsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // The three filters cross as the Java enums' toString() names; an empty
-    // array is Java's empty set, i.e. the filter left unset.
-    StringArray states(req->group_states());
-    StringArray protocols(req->protocol_types());
-    StringArray types(req->types());
-
-    kafka_admin_ListGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_groups(
-        admin, states.data(), states.count(), protocols.data(), protocols.count(),
-        types.data(), types.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
+    Owned<kafka_admin_ListGroupsOptions_t, kafka_admin_ListGroupsOptions_destroy> opts(
+        kafka_admin_ListGroupsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListGroupsOptions_set_timeout_ms);
+    // The three filters cross as the Java enums' names; an empty list is
+    // Java's empty set, i.e. the filter left unset.
+    CList states;  // borrowed GroupState singletons
+    for (const std::string& name : req->group_states()) {
+      states.add(kafka_common_GroupState_parse(name.c_str()));
     }
+    if (req->group_states_size() > 0) kafka_admin_ListGroupsOptions_in_group_states(opts.get(), states.list);
+    BorrowedStringList protocols(req->protocol_types());
+    if (req->protocol_types_size() > 0) {
+      kafka_admin_ListGroupsOptions_with_protocol_types(opts.get(), protocols.list);
+    }
+    CList types;  // borrowed GroupType singletons
+    for (const std::string& name : req->types()) types.add(kafka_common_GroupType_parse(name.c_str()));
+    if (req->types_size() > 0) kafka_admin_ListGroupsOptions_with_types(opts.get(), types.list);
 
-    const int32_t valid = kafka_admin_ListGroupsResult_valid_count(result);
-    for (int32_t i = 0; i < valid; i++) {
-      const kafka_admin_GroupListing_t* listing =
-          kafka_admin_ListGroupsResult_get_valid(result, i);
-      if (listing == nullptr) {
-        // Unreachable for i < valid, but a skipped entry would return a
-        // successful listing one item short, so fail the whole call instead.
-        resp->clear_valid();
-        resp->clear_listing_errors();
-        *resp->mutable_error() = make_synthetic_error("listGroups valid entry is null");
-        kafka_admin_ListGroupsResult_destroy(result);
+    Owned<kafka_admin_ListGroupsResult_t, kafka_admin_ListGroupsResult_destroy> result(
+        kafka_admin_Admin_list_groups_with_options(admin, opts.get()));
+    {
+      OwnedFuture f(kafka_admin_ListGroupsResult_valid(result.get()));
+      const kafka_List_t* valid = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &valid);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
-      GroupListing* dst = resp->add_valid();
-      dst->set_group_id(cstr(kafka_admin_GroupListing_group_id(listing)));
-      dst->set_protocol(cstr(kafka_admin_GroupListing_protocol(listing)));
-      dst->set_is_simple_consumer_group(
-          kafka_admin_GroupListing_is_simple_consumer_group(listing));
-      // group_type / group_state are Java Optionals: NULL is an empty one and
-      // must stay absent rather than becoming "".
-      const char* group_type = kafka_admin_GroupListing_group_type(listing);
-      if (group_type != nullptr) dst->set_group_type(std::string(group_type));
-      const char* group_state = kafka_admin_GroupListing_group_state(listing);
-      if (group_state != nullptr) dst->set_group_state(std::string(group_state));
+      for_each_in_list<kafka_admin_GroupListing_t>(valid, [resp](const kafka_admin_GroupListing_t* l) {
+        GroupListing* dst = resp->add_valid();
+        dst->set_group_id(cstr(kafka_admin_GroupListing_group_id(l)));
+        dst->set_protocol(cstr(kafka_admin_GroupListing_protocol(l)));
+        dst->set_is_simple_consumer_group(kafka_admin_GroupListing_is_simple_consumer_group(l) != 0);
+        // type / groupState are Java Optionals: NULL is an empty one and
+        // must stay absent rather than becoming "".
+        const kafka_common_GroupType_t* type = kafka_admin_GroupListing_type(l);
+        if (type != nullptr) dst->set_group_type(cstr(kafka_common_GroupType_name(type)));
+        const kafka_common_GroupState_t* state = kafka_admin_GroupListing_group_state(l);
+        if (state != nullptr) dst->set_group_state(cstr(kafka_common_GroupState_name(state)));
+      });
     }
-    const int32_t errors = kafka_admin_ListGroupsResult_error_count(result);
-    for (int32_t i = 0; i < errors; i++) {
-      const kafka_common_Error_t* listing_err =
-          kafka_admin_ListGroupsResult_get_error(result, i);
-      if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
+    {
+      OwnedFuture f(kafka_admin_ListGroupsResult_errors(result.get()));
+      const kafka_List_t* errors = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &errors);
+      if (err != nullptr) {
+        resp->clear_valid();
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      for_each_in_list<kafka_common_Error_t>(errors, [resp](const kafka_common_Error_t* e) {
+        copy_proto_error(resp->add_listing_errors(), e);
+      });
     }
-    kafka_admin_ListGroupsResult_destroy(result);
     return grpc::Status::OK;
   }
 
-  grpc::Status DescribeConsumerGroups(grpc::ServerContext*,
-                                      const DescribeConsumerGroupsRequest* req,
+  grpc::Status DescribeConsumerGroups(grpc::ServerContext*, const DescribeConsumerGroupsRequest* req,
                                       DescribeConsumerGroupsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    StringArray group_ids(req->group_ids());
-
-    kafka_admin_DescribeConsumerGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_consumer_groups(
-        admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
-        req->include_authorized_operations(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeConsumerGroupsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeConsumerGroupsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeConsumerGroupsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-        continue;
-      }
-      const kafka_admin_ConsumerGroupDescription_t* description =
-          kafka_admin_DescribeConsumerGroupsResult_get_value(result, i);
-      if (description == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("describeConsumerGroups entry has neither value nor error");
-        continue;
-      }
-      consumer_group_description_to_proto(description, entry->mutable_value());
-    }
-    kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+    BorrowedStringList group_ids(req->group_ids());
+    Owned<kafka_admin_DescribeConsumerGroupsOptions_t, kafka_admin_DescribeConsumerGroupsOptions_destroy>
+        opts(kafka_admin_DescribeConsumerGroupsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeConsumerGroupsOptions_set_timeout_ms);
+    kafka_admin_DescribeConsumerGroupsOptions_set_include_authorized_operations(
+        opts.get(), req->include_authorized_operations() ? 1 : 0);
+    Owned<kafka_admin_DescribeConsumerGroupsResult_t, kafka_admin_DescribeConsumerGroupsResult_destroy>
+        result(kafka_admin_Admin_describe_consumer_groups_with_options(admin, group_ids.list,
+                                                                       opts.get()));
+    OwnedMap groups(kafka_admin_DescribeConsumerGroupsResult_described_groups(result.get()));
+    keyed_futures_to_proto<char, kafka_admin_ConsumerGroupDescription_t>(
+        groups.get(), [resp] { return resp->add_entries(); }, set_name_key,
+        [](DescribeConsumerGroupsEntry* entry, const kafka_admin_ConsumerGroupDescription_t* d) {
+          consumer_group_description_to_proto(d, entry->mutable_value());
+        });
     return grpc::Status::OK;
   }
 
-  grpc::Status DescribeClassicGroups(grpc::ServerContext*,
-                                     const DescribeClassicGroupsRequest* req,
+  grpc::Status DescribeClassicGroups(grpc::ServerContext*, const DescribeClassicGroupsRequest* req,
                                      DescribeClassicGroupsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    StringArray group_ids(req->group_ids());
-
-    kafka_admin_DescribeClassicGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_classic_groups(
-        admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
-        req->include_authorized_operations(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeClassicGroupsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DescribeClassicGroupsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DescribeClassicGroupsResult_get_group_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeClassicGroupsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-        continue;
-      }
-      const kafka_admin_ClassicGroupDescription_t* description =
-          kafka_admin_DescribeClassicGroupsResult_get_value(result, i);
-      if (description == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("describeClassicGroups entry has neither value nor error");
-        continue;
-      }
-      classic_group_description_to_proto(description, entry->mutable_value());
-    }
-    kafka_admin_DescribeClassicGroupsResult_destroy(result);
+    BorrowedStringList group_ids(req->group_ids());
+    Owned<kafka_admin_DescribeClassicGroupsOptions_t, kafka_admin_DescribeClassicGroupsOptions_destroy>
+        opts(kafka_admin_DescribeClassicGroupsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeClassicGroupsOptions_set_timeout_ms);
+    kafka_admin_DescribeClassicGroupsOptions_set_include_authorized_operations(
+        opts.get(), req->include_authorized_operations() ? 1 : 0);
+    Owned<kafka_admin_DescribeClassicGroupsResult_t, kafka_admin_DescribeClassicGroupsResult_destroy>
+        result(kafka_admin_Admin_describe_classic_groups_with_options(admin, group_ids.list,
+                                                                      opts.get()));
+    OwnedMap groups(kafka_admin_DescribeClassicGroupsResult_described_groups(result.get()));
+    keyed_futures_to_proto<char, kafka_admin_ClassicGroupDescription_t>(
+        groups.get(), [resp] { return resp->add_entries(); }, set_name_key,
+        [](DescribeClassicGroupsEntry* entry, const kafka_admin_ClassicGroupDescription_t* d) {
+          classic_group_description_to_proto(d, entry->mutable_value());
+        });
     return grpc::Status::OK;
   }
 
   grpc::Status ListConsumerGroupOffsets(grpc::ServerContext*,
                                         const ListConsumerGroupOffsetsRequest* req,
                                         ListConsumerGroupOffsetsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // One ragged partition list per group. An absent `topic_partitions` is
-    // Java's *unset* collection ("every partition the group has committed
-    // offsets for") and reaches the entry point as the explicit
-    // `all_partitions[i]` flag, which makes that group's arrays unread — so it
-    // can never be confused with a present-but-empty selection. Testing
-    // `partitions_size() == 0` instead would collapse the two.
-    const size_t n = static_cast<size_t>(req->group_specs_size());
-    std::vector<std::string> owned_group_ids;
-    std::unique_ptr<bool[]> all_partitions(new bool[n == 0 ? 1 : n]);
-    std::vector<std::vector<std::string>> owned_topics;
-    std::vector<std::vector<const char*>> topic_ptrs;
-    std::vector<std::vector<int32_t>> owned_partitions;
-    std::vector<int32_t> partition_counts;
-    owned_group_ids.reserve(n);
-    owned_topics.reserve(n);
-    owned_partitions.reserve(n);
+    OwnedHandles<kafka_admin_ListConsumerGroupOffsetsSpec_t,
+                 kafka_admin_ListConsumerGroupOffsetsSpec_destroy>
+        specs;
+    std::vector<std::unique_ptr<TpList>> partition_lists;
+    CMap group_specs;  // borrowed group id -> spec
     for (const auto& spec : req->group_specs()) {
-      all_partitions[owned_group_ids.size()] = !spec.has_topic_partitions();
-      owned_group_ids.push_back(spec.group_id());
-      std::vector<std::string> topics;
-      std::vector<int32_t> partitions;
+      kafka_admin_ListConsumerGroupOffsetsSpec_t* s =
+          specs.add(kafka_admin_ListConsumerGroupOffsetsSpec_new());
+      // An absent list is Java's null (all partitions of the group); a
+      // present one, even empty, is an explicit selection.
       if (spec.has_topic_partitions()) {
-        for (const auto& tp : spec.topic_partitions().partitions()) {
-          topics.push_back(tp.topic());
-          partitions.push_back(tp.partition());
-        }
+        partition_lists.push_back(std::make_unique<TpList>(spec.topic_partitions().partitions()));
+        kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_partitions(s, partition_lists.back()->list);
       }
-      partition_counts.push_back(static_cast<int32_t>(partitions.size()));
-      owned_topics.push_back(std::move(topics));
-      owned_partitions.push_back(std::move(partitions));
+      group_specs.put(spec.group_id().c_str(), s);
     }
-    // Second pass: the inner vectors must already be at their final addresses
-    // before any pointer into them is taken.
-    std::vector<const char*> group_ids;
-    std::vector<const char* const*> topics_per_group;
-    std::vector<const int32_t*> partitions_per_group;
-    group_ids.reserve(n);
-    topic_ptrs.reserve(n);
-    topics_per_group.reserve(n);
-    partitions_per_group.reserve(n);
-    for (const std::string& group_id : owned_group_ids) group_ids.push_back(group_id.c_str());
-    for (const std::vector<std::string>& topics : owned_topics) {
-      std::vector<const char*> ptrs;
-      ptrs.reserve(topics.size());
-      for (const std::string& topic : topics) ptrs.push_back(topic.c_str());
-      topic_ptrs.push_back(std::move(ptrs));
-    }
-    for (size_t i = 0; i < topic_ptrs.size(); i++) {
-      topics_per_group.push_back(topic_ptrs[i].empty() ? nullptr : topic_ptrs[i].data());
-      partitions_per_group.push_back(
-          owned_partitions[i].empty() ? nullptr : owned_partitions[i].data());
-    }
+    Owned<kafka_admin_ListConsumerGroupOffsetsOptions_t,
+          kafka_admin_ListConsumerGroupOffsetsOptions_destroy>
+        opts(kafka_admin_ListConsumerGroupOffsetsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListConsumerGroupOffsetsOptions_set_timeout_ms);
+    kafka_admin_ListConsumerGroupOffsetsOptions_set_require_stable(opts.get(),
+                                                                   req->require_stable() ? 1 : 0);
+    Owned<kafka_admin_ListConsumerGroupOffsetsResult_t,
+          kafka_admin_ListConsumerGroupOffsetsResult_destroy>
+        result(kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options(
+            admin, group_specs.map, opts.get()));
 
-    kafka_admin_ListConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_consumer_group_offsets(
-        admin, group_ids.data(), all_partitions.get(), topics_per_group.data(),
-        partitions_per_group.data(), partition_counts.data(),
-        static_cast<int32_t>(group_ids.size()), timeout_ms(*req), req->require_stable(),
-        &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_ListConsumerGroupOffsetsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    // One entry per requested group, through the per-group future so a
+    // group's own failure stays on its entry.
+    for (const auto& spec : req->group_specs()) {
       ListConsumerGroupOffsetsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_name_key(entry->mutable_key(), spec.group_id().c_str());
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      kafka_common_Error_t* err =
+          kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(
+              result.get(), spec.group_id().c_str(), &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      const kafka_admin_OffsetAndMetadataMap_t* map =
-          kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, i);
-      if (map == nullptr) {
-        *entry->mutable_error() = make_synthetic_error("listConsumerGroupOffsets entry has neither value nor error");
+      OwnedFuture f(raw);
+      const kafka_Map_t* offsets = nullptr;
+      err = future_get(f.get(), &offsets);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
       // The nested level: one committed offset per partition, each nullable.
-      GroupOffsets* offsets = entry->mutable_value();
-      const int32_t partitions = kafka_admin_OffsetAndMetadataMap_count(map);
-      for (int32_t p = 0; p < partitions; p++) {
-        GroupOffset* pair = offsets->add_offsets();
-        TopicPartition* tp = pair->mutable_partition();
-        tp->set_topic(cstr(kafka_admin_OffsetAndMetadataMap_get_topic(map, p)));
-        tp->set_partition(kafka_admin_OffsetAndMetadataMap_get_partition(map, p));
-        // Java's map value is nullable: a false `has_offset` means the group has
-        // no committed offset for this partition, which is not offset 0, so the
-        // whole OffsetAndMetadata stays absent.
-        if (!kafka_admin_OffsetAndMetadataMap_has_offset(map, p)) continue;
-        OffsetAndMetadata* offset = pair->mutable_offset();
-        offset->set_offset(kafka_admin_OffsetAndMetadataMap_get_offset(map, p));
-        offset->set_metadata(cstr(kafka_admin_OffsetAndMetadataMap_get_metadata(map, p)));
-        int32_t leader_epoch = 0;
-        if (kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, p, &leader_epoch)) {
-          offset->set_leader_epoch(leader_epoch);
-        }
+      GroupOffsets* dst = entry->mutable_value();
+      const int32_t n = offsets == nullptr ? 0 : kafka_Map_size(offsets);
+      for (int32_t p = 0; p < n; p++) {
+        GroupOffset* pair = dst->add_offsets();
+        tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, p)),
+                    pair->mutable_partition());
+        // Java's map value is nullable: a null means the group has no
+        // committed offset for this partition, which is not offset 0, so
+        // the whole OffsetAndMetadata stays absent.
+        const auto* oam =
+            static_cast<const kafka_consumer_OffsetAndMetadata_t*>(kafka_Map_value(offsets, p));
+        if (oam != nullptr) oam_to_proto(oam, pair->mutable_offset());
       }
     }
-    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status AlterConsumerGroupOffsets(grpc::ServerContext*,
                                          const AlterConsumerGroupOffsetsRequest* req,
                                          VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const size_t n = static_cast<size_t>(req->offsets_size());
-    std::vector<std::string> owned_topics;
-    std::vector<std::string> owned_metadata;
-    std::vector<int32_t> partitions;
-    std::vector<int64_t> offsets;
-    std::vector<int32_t> leader_epochs;
-    // Same reason as ListOffsets' `is_timestamp`: no bool* out of
-    // std::vector<bool>.
-    std::unique_ptr<bool[]> has_leader_epoch(new bool[n == 0 ? 1 : n]);
-    owned_topics.reserve(n);
-    owned_metadata.reserve(n);
+    OwnedHandles<kafka_common_TopicPartition_t, kafka_common_TopicPartition_destroy> tps;
+    OwnedHandles<kafka_consumer_OffsetAndMetadata_t, kafka_consumer_OffsetAndMetadata_destroy> oams;
+    CMap offsets;
     for (const auto& commit : req->offsets()) {
-      owned_topics.push_back(commit.partition().topic());
-      partitions.push_back(commit.partition().partition());
-      offsets.push_back(commit.offset().offset());
-      owned_metadata.push_back(commit.offset().metadata());
-      // Java's leaderEpoch() is an Optional<Integer>, and the entry point takes
-      // a present-flag of its own so an absent epoch cannot become epoch 0.
-      has_leader_epoch[offsets.size() - 1] = commit.offset().has_leader_epoch();
-      leader_epochs.push_back(commit.offset().leader_epoch());
+      const OffsetAndMetadata& o = commit.offset();
+      kafka_consumer_OffsetAndMetadata_t* oam = nullptr;
+      // An absent leader_epoch is Java's Optional.empty(); the constructor
+      // validates the offset (negative -> IllegalArgumentException).
+      kafka_common_Error_t* err =
+          o.has_leader_epoch()
+              ? kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
+                    o.offset(), o.leader_epoch(), o.metadata().c_str(), &oam)
+              : kafka_consumer_OffsetAndMetadata_with_metadata(o.offset(), o.metadata().c_str(), &oam);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      offsets.put(tps.add(kafka_common_TopicPartition_new(commit.partition().topic().c_str(),
+                                                          commit.partition().partition())),
+                  oams.add(oam));
     }
-    std::vector<const char*> topics;
-    std::vector<const char*> metadata;
-    topics.reserve(owned_topics.size());
-    metadata.reserve(owned_metadata.size());
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-    for (const std::string& value : owned_metadata) metadata.push_back(value.c_str());
-
-    kafka_admin_AlterConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_consumer_group_offsets(
-        admin, req->group_id().c_str(), topics.data(), partitions.data(), offsets.data(),
-        metadata.data(), leader_epochs.data(), has_leader_epoch.get(),
-        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterConsumerGroupOffsetsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    Owned<kafka_admin_AlterConsumerGroupOffsetsOptions_t,
+          kafka_admin_AlterConsumerGroupOffsetsOptions_destroy>
+        opts(kafka_admin_AlterConsumerGroupOffsetsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterConsumerGroupOffsetsOptions_set_timeout_ms);
+    Owned<kafka_admin_AlterConsumerGroupOffsetsResult_t,
+          kafka_admin_AlterConsumerGroupOffsetsResult_destroy>
+        result(kafka_admin_Admin_alter_consumer_group_offsets_with_options(
+            admin, req->group_id().c_str(), offsets.map, opts.get()));
+    // One entry per requested partition through its own future.
+    for (kafka_common_TopicPartition_t* tp : tps.handles) {
       VoidResultEntry* entry = resp->add_entries();
-      set_partition_key(
-          entry->mutable_key(),
-          kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(result, i),
-          kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+      set_partition_key(entry->mutable_key(), tp);
+      OwnedFuture f(kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(result.get(), tp));
+      await_into(f.get(), entry);
     }
-    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status DeleteConsumerGroupOffsets(grpc::ServerContext*,
                                           const DeleteConsumerGroupOffsetsRequest* req,
                                           VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    TpArrays tps = tp_arrays(req->partitions());
-
-    kafka_admin_DeleteConsumerGroupOffsetsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_consumer_group_offsets(
-        admin, req->group_id().c_str(), tps.topics.data(), tps.partitions.data(),
-        tps.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DeleteConsumerGroupOffsetsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    TpList partitions(req->partitions());
+    Owned<kafka_admin_DeleteConsumerGroupOffsetsOptions_t,
+          kafka_admin_DeleteConsumerGroupOffsetsOptions_destroy>
+        opts(kafka_admin_DeleteConsumerGroupOffsetsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DeleteConsumerGroupOffsetsOptions_set_timeout_ms);
+    Owned<kafka_admin_DeleteConsumerGroupOffsetsResult_t,
+          kafka_admin_DeleteConsumerGroupOffsetsResult_destroy>
+        result(kafka_admin_Admin_delete_consumer_group_offsets_with_options(
+            admin, req->group_id().c_str(), partitions.list, opts.get()));
+    for (kafka_common_TopicPartition_t* tp : partitions.handles) {
       VoidResultEntry* entry = resp->add_entries();
-      set_partition_key(
-          entry->mutable_key(),
-          kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(result, i),
-          kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status DeleteConsumerGroups(grpc::ServerContext*,
-                                    const DeleteConsumerGroupsRequest* req,
-                                    VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    StringArray group_ids(req->group_ids());
-
-    kafka_admin_DeleteConsumerGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_consumer_groups(
-        admin, group_ids.data(), group_ids.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DeleteConsumerGroupsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DeleteConsumerGroupsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_DeleteConsumerGroupsResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status RemoveMembersFromConsumerGroup(
-      grpc::ServerContext*, const RemoveMembersFromConsumerGroupRequest* req,
-      VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    // An absent member list is Java's no-argument
-    // RemoveMembersFromConsumerGroupOptions(), i.e. removeAll, and it crosses to
-    // the entry point as the explicit `remove_all` flag. Present-but-empty is the
-    // Collection constructor, which Java rejects with IllegalArgumentException;
-    // `remove_members_options` reproduces exactly that, so testing
-    // `members().members_size() == 0` here instead would silently turn a rejected
-    // request into a destructive one.
-    const bool remove_all = !req->has_members();
-    std::vector<std::string> owned_ids;
-    if (!remove_all) {
-      for (const auto& member : req->members().members()) {
-        owned_ids.push_back(member.group_instance_id());
+      set_partition_key(entry->mutable_key(), tp);
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      kafka_common_Error_t* err =
+          kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(result.get(), tp, &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
       }
+      OwnedFuture f(raw);
+      await_into(f.get(), entry);
     }
-    std::vector<const char*> ids;
-    ids.reserve(owned_ids.size());
-    for (const std::string& id : owned_ids) ids.push_back(id.c_str());
-    // An absent reason is Java's unset reason, which the entry point spells NULL.
-    const std::string reason = req->has_reason() ? req->reason() : std::string();
+    return grpc::Status::OK;
+  }
 
-    kafka_admin_RemoveMembersFromConsumerGroupResult_t* result = nullptr;
-    kafka_common_Error_t* err =
-        kafka_admin_AdminClient_remove_members_from_consumer_group(
-            admin, req->group_id().c_str(), remove_all, ids.data(),
-            static_cast<int32_t>(ids.size()),
-            req->has_reason() ? reason.c_str() : nullptr, timeout_ms(*req), &result);
+  grpc::Status DeleteConsumerGroups(grpc::ServerContext*, const DeleteConsumerGroupsRequest* req,
+                                    VoidKeyedResponse* resp) override {
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    BorrowedStringList group_ids(req->group_ids());
+    Owned<kafka_admin_DeleteConsumerGroupsOptions_t, kafka_admin_DeleteConsumerGroupsOptions_destroy>
+        opts(kafka_admin_DeleteConsumerGroupsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DeleteConsumerGroupsOptions_set_timeout_ms);
+    Owned<kafka_admin_DeleteConsumerGroupsResult_t, kafka_admin_DeleteConsumerGroupsResult_destroy>
+        result(kafka_admin_Admin_delete_consumer_groups_with_options(admin, group_ids.list,
+                                                                     opts.get()));
+    OwnedMap deleted(kafka_admin_DeleteConsumerGroupsResult_deleted_groups(result.get()));
+    void_futures_to_proto<char>(deleted.get(), [resp] { return resp->add_entries(); }, set_name_key);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status RemoveMembersFromConsumerGroup(grpc::ServerContext*,
+                                              const RemoveMembersFromConsumerGroupRequest* req,
+                                              VoidKeyedResponse* resp) override {
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An absent member list is Java's removeAll constructor
+    // (`new RemoveMembersFromConsumerGroupOptions()`), which removes every
+    // member of the group; a present-but-empty one is rejected by Java with
+    // "Invalid empty members has been provided".
+    const bool remove_all = !req->has_members();
+    OwnedHandles<kafka_admin_MemberToRemove_t, kafka_admin_MemberToRemove_destroy> members;
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_t* raw_opts = nullptr;
+    kafka_common_Error_t* err = nullptr;
+    if (remove_all) {
+      raw_opts = kafka_admin_RemoveMembersFromConsumerGroupOptions_new();
+    } else {
+      CList member_list;
+      for (const auto& m : req->members().members()) {
+        member_list.add(members.add(kafka_admin_MemberToRemove_new(m.group_instance_id().c_str())));
+      }
+      err = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(member_list.list, &raw_opts);
+    }
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    // In removeAll mode the handle carries no keys at all (Java's memberResult is
-    // not applicable there), so `entries` comes back empty and the only outcome
-    // was the non-null return checked above.
-    const int32_t count = kafka_admin_RemoveMembersFromConsumerGroupResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_name_key(
-          entry->mutable_key(),
-          kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    Owned<kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
+          kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy>
+        opts(raw_opts);
+    apply_timeout(*req, opts.get(), kafka_admin_RemoveMembersFromConsumerGroupOptions_set_timeout_ms);
+    if (req->has_reason()) {
+      kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(opts.get(), req->reason().c_str());
     }
-    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+    Owned<kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+          kafka_admin_RemoveMembersFromConsumerGroupResult_destroy>
+        result(kafka_admin_Admin_remove_members_from_consumer_group_with_options(
+            admin, req->group_id().c_str(), opts.get()));
+    if (remove_all) {
+      // In removeAll mode Java's memberResult is not applicable (the result
+      // carries no keys), so `entries` stays empty and the only outcome is
+      // `all()`, reported on the response.
+      OwnedFuture all(kafka_admin_RemoveMembersFromConsumerGroupResult_all(result.get()));
+      await_into(all.get(), resp);
+      return grpc::Status::OK;
+    }
+    for (kafka_admin_MemberToRemove_t* member : members.handles) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), kafka_admin_MemberToRemove_group_instance_id(member));
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      err = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(result.get(), member, &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      OwnedFuture f(raw);
+      await_into(f.get(), entry);
+    }
     return grpc::Status::OK;
   }
-
-  // -- ACLs, quotas, SCRAM, delegation tokens & features (slice G5) -----------
-  //
-  // Six of the thirteen have no keys at all — their Java result holds a single
-  // future — so the whole-call error is the entry point's non-null return and
-  // there is no per-key slot: describeAcls, describeClientQuotas,
-  // createDelegationToken, renew/expireDelegationToken, describeDelegationToken
-  // and describeFeatures.
-  //
-  // deleteAcls is the only *two-level* keyed handle in this slice, and the inner
-  // level is the value-carries-its-own-error case: `_get_error(i)` is the
-  // filter's own failure while `_get_result_error(i, j)` is the failure of one
-  // ACL the filter matched. Both cross.
-  //
-  // The request direction is where this slice is heaviest: seven parallel arrays
-  // for the ACL RPCs (three of them nullable for the filter form), ragged 2-D
-  // arrays for alterClientQuotas, and byte arrays with lengths for the SCRAM
-  // passwords and salts.
 
   grpc::Status CreateAcls(grpc::ServerContext*, const CreateAclsRequest* req,
                           VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    AclBindingColumns cols(req->acls());
-
-    kafka_admin_CreateAclsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_create_acls(
-        admin, cols.resource_types.data(), cols.resource_names.data(),
-        cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
-        cols.operations.data(), cols.permission_types.data(), cols.count(),
-        timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_CreateAclsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      const kafka_common_acl_AclBinding_t* binding =
-          kafka_admin_CreateAclsResult_get_binding(result, i);
-      if (binding == nullptr) {
-        // Unreachable for i < count, but a keyless entry would be silently
-        // dropped by the client's map, so fail the whole call instead.
-        resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error("createAcls entry has no binding key");
-        kafka_admin_CreateAclsResult_destroy(result);
+    AclBindingArgs bindings;
+    CList acl_list;
+    for (const AclBinding& b : req->acls()) {
+      kafka_common_acl_AclBinding_t* binding = nullptr;
+      kafka_common_Error_t* err = bindings.build(b, &binding);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
         return grpc::Status::OK;
       }
-      acl_binding_to_proto(binding, entry->mutable_key()->mutable_acl_binding());
-      const kafka_common_Error_t* key_err =
-          kafka_admin_CreateAclsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+      acl_list.add(binding);
     }
-    kafka_admin_CreateAclsResult_destroy(result);
+    Owned<kafka_admin_CreateAclsOptions_t, kafka_admin_CreateAclsOptions_destroy> opts(
+        kafka_admin_CreateAclsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_CreateAclsOptions_set_timeout_ms);
+    Owned<kafka_admin_CreateAclsResult_t, kafka_admin_CreateAclsResult_destroy> result(
+        kafka_admin_Admin_create_acls_with_options(admin, acl_list.list, opts.get()));
+    OwnedMap values(kafka_admin_CreateAclsResult_values(result.get()));
+    void_futures_to_proto<kafka_common_acl_AclBinding_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_acl_binding_key);
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeAcls(grpc::ServerContext*, const DescribeAclsRequest* req,
                             DescribeAclsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // Java takes one filter, so this is the scalar form of the seven columns.
-    // The three nullable strings pass a NULL pointer when absent, which is
-    // Java's match-any; an empty std::string would match only the literally
-    // empty name.
-    const AclBindingFilter& f = req->filter();
-    kafka_admin_DescribeAclsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_acls(
-        admin, f.resource_type(),
-        f.has_resource_name() ? f.resource_name().c_str() : nullptr,
-        f.pattern_type(),
-        f.has_principal() ? f.principal().c_str() : nullptr,
-        f.has_host() ? f.host().c_str() : nullptr,
-        f.operation(), f.permission_type(), timeout_ms(*req), &result);
+    AclFilterArgs filters;
+    const kafka_common_acl_AclBindingFilter_t* filter = filters.build(req->filter());
+    Owned<kafka_admin_DescribeAclsOptions_t, kafka_admin_DescribeAclsOptions_destroy> opts(
+        kafka_admin_DescribeAclsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeAclsOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeAclsResult_t, kafka_admin_DescribeAclsResult_destroy> result(
+        kafka_admin_Admin_describe_acls_with_options(admin, filter, opts.get()));
+    // The values future is borrowed from the result handle, never destroyed.
+    const kafka_List_t* acls = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_DescribeAclsResult_values(result.get()), &acls);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_DescribeAclsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_common_acl_AclBinding_t* binding =
-          kafka_admin_DescribeAclsResult_get_binding(result, i);
-      if (binding == nullptr) {
-        resp->clear_acls();
-        *resp->mutable_error() = make_synthetic_error("describeAcls binding is null");
-        kafka_admin_DescribeAclsResult_destroy(result);
-        return grpc::Status::OK;
-      }
-      acl_binding_to_proto(binding, resp->add_acls());
-    }
-    kafka_admin_DescribeAclsResult_destroy(result);
+    for_each_in_list<kafka_common_acl_AclBinding_t>(acls, [resp](const kafka_common_acl_AclBinding_t* b) {
+      acl_binding_to_proto(b, resp->add_acls());
+    });
     return grpc::Status::OK;
   }
 
   grpc::Status DeleteAcls(grpc::ServerContext*, const DeleteAclsRequest* req,
                           DeleteAclsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    AclFilterColumns cols(req->filters());
-
-    kafka_admin_DeleteAclsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_delete_acls(
-        admin, cols.resource_types.data(), cols.resource_names.data(),
-        cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
-        cols.operations.data(), cols.permission_types.data(), cols.count(),
-        timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DeleteAclsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      DeleteAclsEntry* entry = resp->add_entries();
-      const kafka_common_acl_AclBindingFilter_t* filter =
-          kafka_admin_DeleteAclsResult_get_filter(result, i);
-      if (filter == nullptr) {
-        resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error("deleteAcls entry has no filter key");
-        kafka_admin_DeleteAclsResult_destroy(result);
-        return grpc::Status::OK;
-      }
-      acl_filter_to_proto(filter, entry->mutable_key()->mutable_acl_binding_filter());
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DeleteAclsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
-        continue;
-      }
-      // The filter's future succeeded: it matched. Each matched ACL still
-      // reports separately whether it was actually deleted, which is the
-      // value-level error of envelope exception 3. Neither half of a DeletedAcl
-      // is written unless the handle has it, so a backend that reported both or
-      // neither stays visible to the scenario.
-      FilterResults* value = entry->mutable_value();
-      const int32_t inner = kafka_admin_DeleteAclsResult_get_result_count(result, i);
-      for (int32_t j = 0; j < inner; j++) {
-        DeletedAcl* deleted = value->add_values();
-        const kafka_common_acl_AclBinding_t* deleted_binding =
-            kafka_admin_DeleteAclsResult_get_binding(result, i, j);
-        if (deleted_binding != nullptr) {
-          acl_binding_to_proto(deleted_binding, deleted->mutable_binding());
-        }
-        const kafka_common_Error_t* inner_err =
-            kafka_admin_DeleteAclsResult_get_result_error(result, i, j);
-        if (inner_err != nullptr) copy_proto_error(deleted->mutable_exception(), inner_err);
-      }
-    }
-    kafka_admin_DeleteAclsResult_destroy(result);
+    AclFilterArgs filters;
+    CList filter_list;
+    for (const AclBindingFilter& f : req->filters()) filter_list.add(filters.build(f));
+    Owned<kafka_admin_DeleteAclsOptions_t, kafka_admin_DeleteAclsOptions_destroy> opts(
+        kafka_admin_DeleteAclsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DeleteAclsOptions_set_timeout_ms);
+    Owned<kafka_admin_DeleteAclsResult_t, kafka_admin_DeleteAclsResult_destroy> result(
+        kafka_admin_Admin_delete_acls_with_options(admin, filter_list.list, opts.get()));
+    OwnedMap values(kafka_admin_DeleteAclsResult_values(result.get()));
+    keyed_futures_to_proto<kafka_common_acl_AclBindingFilter_t, kafka_admin_DeleteAclsResult_FilterResults_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_acl_filter_key,
+        [](DeleteAclsEntry* entry, const kafka_admin_DeleteAclsResult_FilterResults_t* results) {
+          // The inner level: one result per ACL the filter matched, each
+          // carrying either the deleted binding or its own failure.
+          FilterResults* dst = entry->mutable_value();
+          OwnedList list(kafka_admin_DeleteAclsResult_FilterResults_values(results));
+          for_each_in_list<kafka_admin_DeleteAclsResult_FilterResult_t>(
+              list.get(), [dst](const kafka_admin_DeleteAclsResult_FilterResult_t* r) {
+                DeletedAcl* deleted = dst->add_values();
+                const kafka_common_acl_AclBinding_t* binding =
+                    kafka_admin_DeleteAclsResult_FilterResult_binding(r);
+                if (binding != nullptr) acl_binding_to_proto(binding, deleted->mutable_binding());
+                const kafka_common_Error_t* err = kafka_admin_DeleteAclsResult_FilterResult_error(r);
+                if (err != nullptr) copy_proto_error(deleted->mutable_exception(), err);
+              });
+        });
     return grpc::Status::OK;
   }
 
-  grpc::Status DescribeClientQuotas(grpc::ServerContext*,
-                                    const DescribeClientQuotasRequest* req,
+  grpc::Status DescribeClientQuotas(grpc::ServerContext*, const DescribeClientQuotasRequest* req,
                                     DescribeClientQuotasResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // The named ClientQuotaMatchKind is resolved to Kafka's MATCH_TYPE_* wire
-    // constants by *this* table, written here rather than forwarded from the
-    // harness, so it is independent of the one grpc_translate.py reaches through
-    // admin.py's factories. MATCH_KIND_UNSPECIFIED is rejected rather than
-    // defaulted: a defaulted EXACT would turn a dropped field into a valid
-    // filter.
-    std::vector<std::string> owned_types;
-    std::vector<const char*> entity_types;
-    std::vector<int32_t> match_types;
-    std::vector<std::string> owned_names;
-    std::vector<const char*> match_names;
-    owned_types.reserve(req->components_size());
-    owned_names.reserve(req->components_size());
-    for (const ClientQuotaFilterComponent& c : req->components()) {
-      owned_types.push_back(c.entity_type());
-      int32_t match_type = 0;
+    // The three match kinds are the three Java factories; MATCH_KIND_UNSPECIFIED
+    // is rejected rather than defaulted.
+    OwnedHandles<kafka_common_quota_ClientQuotaFilterComponent_t,
+                 kafka_common_quota_ClientQuotaFilterComponent_destroy>
+        components;
+    CList component_list;
+    for (const auto& c : req->components()) {
+      kafka_common_quota_ClientQuotaFilterComponent_t* component = nullptr;
       switch (c.match_kind()) {
         case MATCH_KIND_EXACT:
           if (!c.has_match_name()) {
@@ -3905,16 +4045,16 @@ class AdminServiceImpl final : public AdminService::Service {
                 kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
             return grpc::Status::OK;
           }
-          match_type = 0;  // DescribeClientQuotasRequest.MATCH_TYPE_EXACT
-          owned_names.push_back(c.match_name());
+          component = kafka_common_quota_ClientQuotaFilterComponent_of_entity(
+              c.entity_type().c_str(), c.match_name().c_str());
           break;
         case MATCH_KIND_DEFAULT:
-          match_type = 1;  // MATCH_TYPE_DEFAULT
-          owned_names.emplace_back();
+          component =
+              kafka_common_quota_ClientQuotaFilterComponent_of_default_entity(c.entity_type().c_str());
           break;
         case MATCH_KIND_ANY:
-          match_type = 2;  // MATCH_TYPE_SPECIFIED (Java's null name)
-          owned_names.emplace_back();
+          component =
+              kafka_common_quota_ClientQuotaFilterComponent_of_entity_type(c.entity_type().c_str());
           break;
         default:
           *resp->mutable_error() = make_synthetic_error(
@@ -3923,1166 +4063,755 @@ class AdminServiceImpl final : public AdminService::Service {
               kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
       }
-      match_types.push_back(match_type);
+      component_list.add(components.add(component));
     }
-    // Pointers are taken only after both vectors have stopped growing, so no
-    // reallocation can dangle them.
-    for (size_t i = 0; i < owned_types.size(); i++) {
-      entity_types.push_back(owned_types[i].c_str());
-      // The C reader ignores the name for the two nameless match types, so a
-      // NULL there can never be mistaken for an EXACT match on "".
-      match_names.push_back(match_types[i] == 0 ? owned_names[i].c_str() : nullptr);
-    }
-
-    kafka_admin_DescribeClientQuotasResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_client_quotas(
-        admin, entity_types.empty() ? nullptr : entity_types.data(),
-        match_types.empty() ? nullptr : match_types.data(),
-        match_names.empty() ? nullptr : match_names.data(),
-        static_cast<int32_t>(entity_types.size()), req->strict(), timeout_ms(*req), &result);
+    // Java's ClientQuotaFilter.containsOnly is the strict form of contains.
+    Owned<kafka_common_quota_ClientQuotaFilter_t, kafka_common_quota_ClientQuotaFilter_destroy> filter(
+        req->strict() ? kafka_common_quota_ClientQuotaFilter_contains_only(component_list.list)
+                      : kafka_common_quota_ClientQuotaFilter_contains(component_list.list));
+    Owned<kafka_admin_DescribeClientQuotasOptions_t, kafka_admin_DescribeClientQuotasOptions_destroy>
+        opts(kafka_admin_DescribeClientQuotasOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeClientQuotasOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeClientQuotasResult_t, kafka_admin_DescribeClientQuotasResult_destroy>
+        result(kafka_admin_Admin_describe_client_quotas_with_options(admin, filter.get(), opts.get()));
+    // The entities future is borrowed from the result handle, never destroyed.
+    const kafka_Map_t* entities = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_DescribeClientQuotasResult_entities(result.get()), &entities);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_DescribeClientQuotasResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_common_quota_ClientQuotaEntity_t* entity =
-          kafka_admin_DescribeClientQuotasResult_get_entity(result, i);
-      if (entity == nullptr) {
-        resp->clear_entities();
-        *resp->mutable_error() = make_synthetic_error("describeClientQuotas entity is null");
-        kafka_admin_DescribeClientQuotasResult_destroy(result);
-        return grpc::Status::OK;
-      }
+    const int32_t n = entities == nullptr ? 0 : kafka_Map_size(entities);
+    for (int32_t i = 0; i < n; i++) {
       EntityQuotas* reported = resp->add_entities();
-      quota_entity_to_proto(entity, reported->mutable_entity());
-      const int32_t quotas = kafka_admin_DescribeClientQuotasResult_get_quota_count(result, i);
-      for (int32_t j = 0; j < quotas; j++) {
-        double value = 0.0;
-        if (!kafka_admin_DescribeClientQuotasResult_get_quota_value(result, i, j, &value)) {
-          continue;
-        }
+      quota_entity_to_proto(
+          static_cast<const kafka_common_quota_ClientQuotaEntity_t*>(kafka_Map_key(entities, i)),
+          reported->mutable_entity());
+      const auto* quotas = static_cast<const kafka_Map_t*>(kafka_Map_value(entities, i));
+      const int32_t m = quotas == nullptr ? 0 : kafka_Map_size(quotas);
+      for (int32_t j = 0; j < m; j++) {
         QuotaValue* pair = reported->add_values();
-        pair->set_key(cstr(kafka_admin_DescribeClientQuotasResult_get_quota_key(result, i, j)));
-        pair->set_value(value);
+        pair->set_key(cstr(static_cast<const char*>(kafka_Map_key(quotas, j))));
+        pair->set_value(*static_cast<const double*>(kafka_Map_value(quotas, j)));
       }
     }
-    kafka_admin_DescribeClientQuotasResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status AlterClientQuotas(grpc::ServerContext*, const AlterClientQuotasRequest* req,
                                  VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // Ragged 2-D arrays: one entity (type, name) list and one op (key, value)
-    // list per alteration. `op_has_values` is the *dedicated discriminant* for
-    // Java's null Double, which removes the quota — reading `op_values[j]`
-    // unconditionally would turn every removal into a set-to-zero.
-    const size_t n = static_cast<size_t>(req->entries_size());
-    std::vector<std::vector<std::string>> owned_entity_types(n), owned_entity_names(n);
-    std::vector<std::vector<const char*>> entity_type_ptrs(n), entity_name_ptrs(n);
-    std::vector<int32_t> entity_counts(n, 0);
-    std::vector<std::vector<std::string>> owned_op_keys(n);
-    std::vector<std::vector<const char*>> op_key_ptrs(n);
-    std::vector<std::vector<double>> op_values(n);
-    // Two independent presence flags, each named after what it carries: whether
-    // the entity name was set (absent = Java's default entity) and whether the op
-    // had a value (absent = Java's null Double, i.e. *remove* the quota).
-    // `std::vector<bool>` is a bit-proxy with no contiguous buffer, so the op
-    // flags the entry point reads need a real `bool[]` per row.
-    std::vector<std::vector<char>> has_entity_name(n);
-    std::vector<std::unique_ptr<bool[]>> op_has_values_storage(n);
-    std::vector<int32_t> op_counts(n, 0);
-    for (size_t i = 0; i < n; i++) {
-      const ClientQuotaAlteration& a = req->entries(static_cast<int>(i));
-      for (const auto& e : a.entity().entries()) {
-        owned_entity_types[i].push_back(e.entity_type());
-        owned_entity_names[i].push_back(e.has_entity_name() ? e.entity_name() : std::string());
-        has_entity_name[i].push_back(e.has_entity_name() ? 1 : 0);
+    OwnedHandles<kafka_common_quota_ClientQuotaEntity_t, kafka_common_quota_ClientQuotaEntity_destroy>
+        entities;
+    OwnedHandles<kafka_common_quota_ClientQuotaAlteration_Op_t,
+                 kafka_common_quota_ClientQuotaAlteration_Op_destroy>
+        ops;
+    OwnedHandles<kafka_common_quota_ClientQuotaAlteration_t, kafka_common_quota_ClientQuotaAlteration_destroy>
+        alterations;
+    std::vector<std::unique_ptr<CList>> op_lists;
+    CList alteration_list;
+    for (const ClientQuotaAlteration& a : req->entries()) {
+      kafka_common_quota_ClientQuotaEntity_t* entity = entities.add(quota_entity_from_proto(a.entity()));
+      op_lists.push_back(std::make_unique<CList>());
+      CList& op_list = *op_lists.back();
+      for (const auto& op : a.ops()) {
+        // An absent value is Java's null Double: remove the quota, which
+        // the C constructor spells NAN.
+        op_list.add(ops.add(kafka_common_quota_ClientQuotaAlteration_Op_new(
+            op.key().c_str(), op.has_value() ? op.value() : NAN)));
       }
-      entity_counts[i] = static_cast<int32_t>(owned_entity_types[i].size());
-      const size_t ops = static_cast<size_t>(a.ops_size());
-      op_has_values_storage[i].reset(new bool[ops == 0 ? 1 : ops]);
-      for (size_t j = 0; j < ops; j++) {
-        const auto& op = a.ops(static_cast<int>(j));
-        owned_op_keys[i].push_back(op.key());
-        op_values[i].push_back(op.has_value() ? op.value() : 0.0);
-        op_has_values_storage[i][j] = op.has_value();
-      }
-      op_counts[i] = static_cast<int32_t>(ops);
+      alteration_list.add(
+          alterations.add(kafka_common_quota_ClientQuotaAlteration_new(entity, op_list.list)));
     }
-    // Second pass: the owned strings have stopped moving, so their pointers are
-    // stable. An absent entity name stays a NULL pointer — Java's built-in
-    // default entity, distinct from the entity named "".
-    std::vector<const char* const*> entity_types(n, nullptr), entity_names(n, nullptr);
-    std::vector<const char* const*> op_keys(n, nullptr);
-    std::vector<const double*> op_value_ptrs(n, nullptr);
-    std::vector<const bool*> op_has_values(n, nullptr);
-    for (size_t i = 0; i < n; i++) {
-      const size_t entities = owned_entity_types[i].size();
-      for (size_t j = 0; j < entities; j++) {
-        entity_type_ptrs[i].push_back(owned_entity_types[i][j].c_str());
-        entity_name_ptrs[i].push_back(has_entity_name[i][j] ? owned_entity_names[i][j].c_str()
-                                                            : nullptr);
-      }
-      entity_types[i] = entity_type_ptrs[i].empty() ? nullptr : entity_type_ptrs[i].data();
-      entity_names[i] = entity_name_ptrs[i].empty() ? nullptr : entity_name_ptrs[i].data();
-
-      for (const std::string& key : owned_op_keys[i]) op_key_ptrs[i].push_back(key.c_str());
-      op_keys[i] = op_key_ptrs[i].empty() ? nullptr : op_key_ptrs[i].data();
-      op_value_ptrs[i] = op_values[i].empty() ? nullptr : op_values[i].data();
-      op_has_values[i] = op_has_values_storage[i].get();
-    }
-
-    kafka_admin_AlterClientQuotasResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_client_quotas(
-        admin, entity_types.empty() ? nullptr : entity_types.data(),
-        entity_names.empty() ? nullptr : entity_names.data(),
-        entity_counts.empty() ? nullptr : entity_counts.data(),
-        op_keys.empty() ? nullptr : op_keys.data(),
-        op_value_ptrs.empty() ? nullptr : op_value_ptrs.data(),
-        op_has_values.empty() ? nullptr : op_has_values.data(),
-        op_counts.empty() ? nullptr : op_counts.data(),
-        static_cast<int32_t>(n), timeout_ms(*req), req->validate_only(), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterClientQuotasResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_common_quota_ClientQuotaEntity_t* entity =
-          kafka_admin_AlterClientQuotasResult_get_entity(result, i);
-      if (entity == nullptr) {
-        resp->clear_entries();
-        *resp->mutable_error() = make_synthetic_error("alterClientQuotas entry has no entity key");
-        kafka_admin_AlterClientQuotasResult_destroy(result);
-        return grpc::Status::OK;
-      }
-      VoidResultEntry* entry = resp->add_entries();
-      quota_entity_to_proto(entity, entry->mutable_key()->mutable_client_quota_entity());
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterClientQuotasResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_AlterClientQuotasResult_destroy(result);
+    Owned<kafka_admin_AlterClientQuotasOptions_t, kafka_admin_AlterClientQuotasOptions_destroy> opts(
+        kafka_admin_AlterClientQuotasOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterClientQuotasOptions_set_timeout_ms);
+    kafka_admin_AlterClientQuotasOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
+    Owned<kafka_admin_AlterClientQuotasResult_t, kafka_admin_AlterClientQuotasResult_destroy> result(
+        kafka_admin_Admin_alter_client_quotas_with_options(admin, alteration_list.list, opts.get()));
+    OwnedMap values(kafka_admin_AlterClientQuotasResult_values(result.get()));
+    void_futures_to_proto<kafka_common_quota_ClientQuotaEntity_t>(
+        values.get(), [resp] { return resp->add_entries(); }, set_quota_entity_key);
     return grpc::Status::OK;
   }
 
-  grpc::Status DescribeUserScramCredentials(
-      grpc::ServerContext*, const DescribeUserScramCredentialsRequest* req,
-      DescribeUserScramCredentialsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+  grpc::Status DescribeUserScramCredentials(grpc::ServerContext*,
+                                            const DescribeUserScramCredentialsRequest* req,
+                                            DescribeUserScramCredentialsResponse* resp) override {
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // An empty `users` is Java's no-argument overload: describe every user.
-    StringArray users(req->users());
+    // An empty user list is Java's no-arg overload: describe every user.
+    const bool all_users = req->users_size() == 0;
+    BorrowedStringList users(req->users());
+    Owned<kafka_admin_DescribeUserScramCredentialsOptions_t,
+          kafka_admin_DescribeUserScramCredentialsOptions_destroy>
+        opts(kafka_admin_DescribeUserScramCredentialsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeUserScramCredentialsOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeUserScramCredentialsResult_t,
+          kafka_admin_DescribeUserScramCredentialsResult_destroy>
+        result(kafka_admin_Admin_describe_user_scram_credentials_with_users_options(
+            admin, all_users ? nullptr : users.list, opts.get()));
 
-    kafka_admin_DescribeUserScramCredentialsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_user_scram_credentials(
-        admin, users.data(), users.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
+    std::vector<std::string> names;
+    if (all_users) {
+      // The users the broker reported, then one description each.
+      OwnedFuture f(kafka_admin_DescribeUserScramCredentialsResult_users(result.get()));
+      const kafka_List_t* found = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &found);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      for_each_in_list<char>(found, [&names](const char* user) { names.push_back(cstr(user)); });
+    } else {
+      names.assign(req->users().begin(), req->users().end());
     }
-
-    const int32_t count = kafka_admin_DescribeUserScramCredentialsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    for (const std::string& user : names) {
       DescribeUserScramCredentialsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeUserScramCredentialsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_name_key(entry->mutable_key(), user.c_str());
+      OwnedFuture f(kafka_admin_DescribeUserScramCredentialsResult_description(result.get(), user.c_str()));
+      const kafka_admin_UserScramCredentialsDescription_t* d = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &d);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      // A user with zero credentials is a *successful* description ("the broker
-      // reports none"), not an error — Java's `all()` treats RESOURCE_NOT_FOUND
-      // that way. The salted password and salt are never returned, so there is
-      // nothing else to carry.
-      UserScramCredentialsDescription* value = entry->mutable_value();
-      value->set_name(cstr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i)));
-      const int32_t infos =
-          kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, i);
-      for (int32_t j = 0; j < infos; j++) {
-        ScramCredentialInfo* info = value->add_credential_infos();
-        info->set_mechanism(
-            kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, i, j));
-        info->set_iterations(
-            kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, i, j));
-      }
+      UserScramCredentialsDescription* dst = entry->mutable_value();
+      dst->set_name(cstr(kafka_admin_UserScramCredentialsDescription_name(d)));
+      OwnedList infos(kafka_admin_UserScramCredentialsDescription_credential_infos(d));
+      for_each_in_list<kafka_admin_ScramCredentialInfo_t>(
+          infos.get(), [dst](const kafka_admin_ScramCredentialInfo_t* info) {
+            ScramCredentialInfo* pi = dst->add_credential_infos();
+            pi->set_mechanism(kafka_admin_ScramMechanism_type(kafka_admin_ScramCredentialInfo_mechanism(info)));
+            pi->set_iterations(kafka_admin_ScramCredentialInfo_iterations(info));
+          });
     }
-    kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status AlterUserScramCredentials(grpc::ServerContext*,
                                          const AlterUserScramCredentialsRequest* req,
                                          VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // `is_deletions` is the discriminant Java's two subclasses become at the C
-    // boundary; it cannot be inferred from an absent password, since a malformed
-    // upsertion also has none. `has_salts` is the second discriminant, passed
-    // through from has_salt() verbatim: Java's four-argument constructor accepts
-    // a zero-length salt, so an empty-but-present salt must not be read as
-    // "generate one" — a length of 0 cannot tell the two apart.
-    const size_t n = static_cast<size_t>(req->alterations_size());
-    std::vector<std::string> owned_users;
-    std::vector<const char*> users;
-    std::unique_ptr<bool[]> is_deletions(new bool[n == 0 ? 1 : n]);
-    std::unique_ptr<bool[]> has_salts(new bool[n == 0 ? 1 : n]);
-    std::vector<int32_t> mechanisms, iterations, password_lens, salt_lens;
-    std::vector<std::string> owned_passwords, owned_salts;
-    std::vector<const uint8_t*> passwords, salts;
-    owned_users.reserve(n);
-    owned_passwords.reserve(n);
-    owned_salts.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-      const auto& a = req->alterations(static_cast<int>(i));
-      owned_users.push_back(a.user());
-      is_deletions[i] = a.is_deletion();
-      has_salts[i] = a.has_salt();
-      mechanisms.push_back(a.mechanism());
-      iterations.push_back(a.iterations());
-      owned_passwords.push_back(a.has_password() ? a.password() : std::string());
-      owned_salts.push_back(a.has_salt() ? a.salt() : std::string());
-      password_lens.push_back(a.has_password() ? static_cast<int32_t>(a.password().size()) : 0);
-      salt_lens.push_back(a.has_salt() ? static_cast<int32_t>(a.salt().size()) : 0);
+    OwnedHandles<kafka_admin_ScramCredentialInfo_t, kafka_admin_ScramCredentialInfo_destroy> infos;
+    OwnedHandles<kafka_admin_UserScramCredentialUpsertion_t, kafka_admin_UserScramCredentialUpsertion_destroy>
+        upsertions;
+    OwnedHandles<kafka_admin_UserScramCredentialDeletion_t, kafka_admin_UserScramCredentialDeletion_destroy>
+        deletions;
+    OwnedHandles<kafka_admin_UserScramCredentialAlteration_t, kafka_admin_UserScramCredentialAlteration_destroy>
+        alterations;
+    CList alteration_list;
+    for (const UserScramCredentialAlteration& a : req->alterations()) {
+      const kafka_admin_ScramMechanism_t* mechanism =
+          kafka_admin_ScramMechanism_from_type(static_cast<int8_t>(a.mechanism()));
+      kafka_admin_UserScramCredentialAlteration_t* alteration = nullptr;
+      if (a.is_deletion()) {
+        alteration = kafka_admin_UserScramCredentialAlteration_deletion(
+            deletions.add(kafka_admin_UserScramCredentialDeletion_new(a.user().c_str(), mechanism)));
+      } else {
+        kafka_admin_ScramCredentialInfo_t* info =
+            infos.add(kafka_admin_ScramCredentialInfo_new(mechanism, a.iterations()));
+        const kafka_Bytes_t password = bytes_of(a.has_password() ? a.password() : std::string());
+        kafka_admin_UserScramCredentialUpsertion_t* upsertion =
+            a.has_salt() ? kafka_admin_UserScramCredentialUpsertion_with_salt(
+                               a.user().c_str(), info, password, bytes_of(a.salt()))
+                         : kafka_admin_UserScramCredentialUpsertion_with_bytes(a.user().c_str(), info,
+                                                                               password);
+        alteration = kafka_admin_UserScramCredentialAlteration_upsertion(upsertions.add(upsertion));
+      }
+      alteration_list.add(alterations.add(alteration));
     }
-    for (size_t i = 0; i < n; i++) {
-      const auto& a = req->alterations(static_cast<int>(i));
-      users.push_back(owned_users[i].c_str());
-      passwords.push_back(a.has_password()
-                              ? reinterpret_cast<const uint8_t*>(owned_passwords[i].data())
-                              : nullptr);
-      salts.push_back(a.has_salt() ? reinterpret_cast<const uint8_t*>(owned_salts[i].data())
-                                   : nullptr);
-    }
-
-    kafka_admin_AlterUserScramCredentialsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users.empty() ? nullptr : users.data(), is_deletions.get(),
-        mechanisms.empty() ? nullptr : mechanisms.data(),
-        iterations.empty() ? nullptr : iterations.data(),
-        passwords.empty() ? nullptr : passwords.data(),
-        password_lens.empty() ? nullptr : password_lens.data(),
-        salts.empty() ? nullptr : salts.data(),
-        salt_lens.empty() ? nullptr : salt_lens.data(), has_salts.get(),
-        static_cast<int32_t>(n), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_AlterUserScramCredentialsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_AlterUserScramCredentialsResult_get_user(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_AlterUserScramCredentialsResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+    Owned<kafka_admin_AlterUserScramCredentialsOptions_t,
+          kafka_admin_AlterUserScramCredentialsOptions_destroy>
+        opts(kafka_admin_AlterUserScramCredentialsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AlterUserScramCredentialsOptions_set_timeout_ms);
+    Owned<kafka_admin_AlterUserScramCredentialsResult_t, kafka_admin_AlterUserScramCredentialsResult_destroy>
+        result(kafka_admin_Admin_alter_user_scram_credentials_with_options(admin, alteration_list.list,
+                                                                           opts.get()));
+    OwnedMap values(kafka_admin_AlterUserScramCredentialsResult_values(result.get()));
+    void_futures_to_proto<char>(values.get(), [resp] { return resp->add_entries(); }, set_name_key);
     return grpc::Status::OK;
   }
 
-  grpc::Status CreateDelegationToken(grpc::ServerContext*,
-                                     const CreateDelegationTokenRequest* req,
+  grpc::Status CreateDelegationToken(grpc::ServerContext*, const CreateDelegationTokenRequest* req,
                                      CreateDelegationTokenResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    PrincipalColumns renewers(req->renewers());
-    // An absent owner leaves Java's field empty, which makes the *requesting*
-    // principal the owner. Both halves are NULL together — a half-set owner is
-    // not a state Java has.
-    const char* owner_type = req->has_owner() ? req->owner().principal_type().c_str() : nullptr;
-    const char* owner_name = req->has_owner() ? req->owner().name().c_str() : nullptr;
-
-    kafka_admin_CreateDelegationTokenResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_create_delegation_token(
-        admin, renewers.types, renewers.names, renewers.count(),
-        owner_type, owner_name, req->max_lifetime_ms(), timeout_ms(*req), &result);
+    OwnedHandles<kafka_common_security_auth_KafkaPrincipal_t, kafka_common_security_auth_KafkaPrincipal_destroy>
+        principals;
+    CList renewers;
+    for (const KafkaPrincipal& p : req->renewers()) {
+      renewers.add(principals.add(
+          kafka_common_security_auth_KafkaPrincipal_new(p.principal_type().c_str(), p.name().c_str())));
+    }
+    Owned<kafka_admin_CreateDelegationTokenOptions_t, kafka_admin_CreateDelegationTokenOptions_destroy>
+        opts(kafka_admin_CreateDelegationTokenOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_CreateDelegationTokenOptions_set_timeout_ms);
+    kafka_admin_CreateDelegationTokenOptions_set_renewers(opts.get(), renewers.list);
+    // An absent owner is Java's null: the token is created for the caller.
+    if (req->has_owner()) {
+      kafka_admin_CreateDelegationTokenOptions_set_owner(
+          opts.get(), principals.add(kafka_common_security_auth_KafkaPrincipal_new(
+                          req->owner().principal_type().c_str(), req->owner().name().c_str())));
+    }
+    kafka_admin_CreateDelegationTokenOptions_set_max_lifetime_ms(opts.get(), req->max_lifetime_ms());
+    Owned<kafka_admin_CreateDelegationTokenResult_t, kafka_admin_CreateDelegationTokenResult_destroy>
+        result(kafka_admin_Admin_create_delegation_token_with_options(admin, opts.get()));
+    // Borrowed future, never destroyed.
+    const kafka_common_security_token_delegation_DelegationToken_t* token = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_CreateDelegationTokenResult_delegation_token(result.get()), &token);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const kafka_common_security_token_delegation_DelegationToken_t* token =
-        kafka_admin_CreateDelegationTokenResult_get_token(result);
-    if (token == nullptr) {
-      *resp->mutable_error() = make_synthetic_error("createDelegationToken returned neither a token nor an error");
-    } else if (!delegation_token_to_proto(token, resp->mutable_token())) {
-      resp->clear_token();
-      *resp->mutable_error() = make_synthetic_error("createDelegationToken token has no token_info");
-    }
-    kafka_admin_CreateDelegationTokenResult_destroy(result);
+    if (token != nullptr) delegation_token_to_proto(token, resp->mutable_token());
     return grpc::Status::OK;
   }
 
-  grpc::Status RenewDelegationToken(grpc::ServerContext*,
-                                    const RenewDelegationTokenRequest* req,
+  grpc::Status RenewDelegationToken(grpc::ServerContext*, const RenewDelegationTokenRequest* req,
                                     DelegationTokenExpiryResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    kafka_admin_RenewDelegationTokenResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_renew_delegation_token(
-        admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
-        static_cast<int32_t>(req->hmac().size()), req->renew_time_period_ms(),
-        timeout_ms(*req), &result);
+    Owned<kafka_admin_RenewDelegationTokenOptions_t, kafka_admin_RenewDelegationTokenOptions_destroy>
+        opts(kafka_admin_RenewDelegationTokenOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_RenewDelegationTokenOptions_set_timeout_ms);
+    kafka_admin_RenewDelegationTokenOptions_set_renew_time_period_ms(opts.get(),
+                                                                     req->renew_time_period_ms());
+    Owned<kafka_admin_RenewDelegationTokenResult_t, kafka_admin_RenewDelegationTokenResult_destroy>
+        result(kafka_admin_Admin_renew_delegation_token_with_options(admin, bytes_of(req->hmac()),
+                                                                     opts.get()));
+    const int64_t* expiry = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result.get()), &expiry);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    resp->set_expiry_timestamp_ms(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result));
-    kafka_admin_RenewDelegationTokenResult_destroy(result);
+    resp->set_expiry_timestamp_ms(expiry != nullptr ? *expiry : 0);
     return grpc::Status::OK;
   }
 
-  grpc::Status ExpireDelegationToken(grpc::ServerContext*,
-                                     const ExpireDelegationTokenRequest* req,
+  grpc::Status ExpireDelegationToken(grpc::ServerContext*, const ExpireDelegationTokenRequest* req,
                                      DelegationTokenExpiryResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    kafka_admin_ExpireDelegationTokenResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_expire_delegation_token(
-        admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
-        static_cast<int32_t>(req->hmac().size()), req->expiry_time_period_ms(),
-        timeout_ms(*req), &result);
+    Owned<kafka_admin_ExpireDelegationTokenOptions_t, kafka_admin_ExpireDelegationTokenOptions_destroy>
+        opts(kafka_admin_ExpireDelegationTokenOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ExpireDelegationTokenOptions_set_timeout_ms);
+    kafka_admin_ExpireDelegationTokenOptions_set_expiry_time_period_ms(opts.get(),
+                                                                       req->expiry_time_period_ms());
+    Owned<kafka_admin_ExpireDelegationTokenResult_t, kafka_admin_ExpireDelegationTokenResult_destroy>
+        result(kafka_admin_Admin_expire_delegation_token_with_options(admin, bytes_of(req->hmac()),
+                                                                      opts.get()));
+    const int64_t* expiry = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result.get()), &expiry);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    resp->set_expiry_timestamp_ms(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result));
-    kafka_admin_ExpireDelegationTokenResult_destroy(result);
+    resp->set_expiry_timestamp_ms(expiry != nullptr ? *expiry : 0);
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeDelegationToken(grpc::ServerContext*,
                                        const DescribeDelegationTokenRequest* req,
                                        DescribeDelegationTokenResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // `has_owners_filter` is the dedicated discriminant: an absent wrapper is
-    // Java's unset filter (every token the caller may see) and a present-empty
-    // one is an explicit empty filter. Testing `principals_size() == 0` would
-    // collapse the two.
-    const bool has_owners = req->has_owners();
-    static const ::google::protobuf::RepeatedPtrField<KafkaPrincipal> kNoPrincipals;
-    PrincipalColumns owners(has_owners ? req->owners().principals() : kNoPrincipals);
-
-    kafka_admin_DescribeDelegationTokenResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_delegation_token(
-        admin, has_owners, owners.types, owners.names, owners.count(),
-        timeout_ms(*req), &result);
+    Owned<kafka_admin_DescribeDelegationTokenOptions_t, kafka_admin_DescribeDelegationTokenOptions_destroy>
+        opts(kafka_admin_DescribeDelegationTokenOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeDelegationTokenOptions_set_timeout_ms);
+    // An absent owner list is Java's null (every token); a present one, even
+    // empty, is an explicit selection.
+    OwnedHandles<kafka_common_security_auth_KafkaPrincipal_t, kafka_common_security_auth_KafkaPrincipal_destroy>
+        principals;
+    CList owners;
+    if (req->has_owners()) {
+      for (const KafkaPrincipal& p : req->owners().principals()) {
+        owners.add(principals.add(kafka_common_security_auth_KafkaPrincipal_new(
+            p.principal_type().c_str(), p.name().c_str())));
+      }
+      kafka_admin_DescribeDelegationTokenOptions_set_owners(opts.get(), owners.list);
+    }
+    Owned<kafka_admin_DescribeDelegationTokenResult_t, kafka_admin_DescribeDelegationTokenResult_destroy>
+        result(kafka_admin_Admin_describe_delegation_token_with_options(admin, opts.get()));
+    const kafka_List_t* tokens = nullptr;
+    kafka_common_Error_t* err =
+        future_get(kafka_admin_DescribeDelegationTokenResult_delegation_tokens(result.get()), &tokens);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_DescribeDelegationTokenResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      const kafka_common_security_token_delegation_DelegationToken_t* token =
-          kafka_admin_DescribeDelegationTokenResult_get_token(result, i);
-      if (token == nullptr || !delegation_token_to_proto(token, resp->add_tokens())) {
-        resp->clear_tokens();
-        *resp->mutable_error() = make_synthetic_error("describeDelegationToken token is null or has no token_info");
-        kafka_admin_DescribeDelegationTokenResult_destroy(result);
-        return grpc::Status::OK;
-      }
-    }
-    kafka_admin_DescribeDelegationTokenResult_destroy(result);
+    for_each_in_list<kafka_common_security_token_delegation_DelegationToken_t>(
+        tokens, [resp](const kafka_common_security_token_delegation_DelegationToken_t* t) {
+          delegation_token_to_proto(t, resp->add_tokens());
+        });
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeFeatures(grpc::ServerContext*, const DescribeFeaturesRequest* req,
                                 DescribeFeaturesResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // `has_node_id` carries the absence: node id 0 is a legal broker, so it
-    // cannot be encoded as a sentinel value.
-    kafka_admin_DescribeFeaturesResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_features(
-        admin, req->has_node_id(), req->has_node_id() ? req->node_id() : 0, timeout_ms(*req),
-        &result);
+    Owned<kafka_admin_DescribeFeaturesOptions_t, kafka_admin_DescribeFeaturesOptions_destroy> opts(
+        kafka_admin_DescribeFeaturesOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeFeaturesOptions_set_timeout_ms);
+    if (req->has_node_id()) kafka_admin_DescribeFeaturesOptions_set_node_id(opts.get(), req->node_id());
+    Owned<kafka_admin_DescribeFeaturesResult_t, kafka_admin_DescribeFeaturesResult_destroy> result(
+        kafka_admin_Admin_describe_features_with_options(admin, opts.get()));
+    OwnedFuture f(kafka_admin_DescribeFeaturesResult_feature_metadata(result.get()));
+    const kafka_admin_FeatureMetadata_t* metadata = nullptr;
+    kafka_common_Error_t* err = future_get(f.get(), &metadata);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    FeatureMetadata* metadata = resp->mutable_metadata();
-    const int32_t finalized = kafka_admin_DescribeFeaturesResult_finalized_count(result);
-    for (int32_t i = 0; i < finalized; i++) {
-      const std::string feature =
-          cstr(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, i));
-      FinalizedVersionRange& range = (*metadata->mutable_finalized_features())[feature];
-      range.set_min_version_level(
-          kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, i));
-      range.set_max_version_level(
-          kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, i));
+    FeatureMetadata* dst = resp->mutable_metadata();
+    {
+      OwnedMap finalized(kafka_admin_FeatureMetadata_finalized_features(metadata));
+      const int32_t n = finalized ? kafka_Map_size(finalized.get()) : 0;
+      for (int32_t i = 0; i < n; i++) {
+        const char* name = static_cast<const char*>(kafka_Map_key(finalized.get(), i));
+        const auto* range =
+            static_cast<const kafka_admin_FinalizedVersionRange_t*>(kafka_Map_value(finalized.get(), i));
+        FinalizedVersionRange* pr = &(*dst->mutable_finalized_features())[cstr(name)];
+        pr->set_min_version_level(kafka_admin_FinalizedVersionRange_min_version_level(range));
+        pr->set_max_version_level(kafka_admin_FinalizedVersionRange_max_version_level(range));
+      }
     }
-    const int32_t supported = kafka_admin_DescribeFeaturesResult_supported_count(result);
-    for (int32_t i = 0; i < supported; i++) {
-      const std::string feature =
-          cstr(kafka_admin_DescribeFeaturesResult_get_supported_feature(result, i));
-      SupportedVersionRange& range = (*metadata->mutable_supported_features())[feature];
-      range.set_min_version(
-          kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, i));
-      range.set_max_version(
-          kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, i));
+    // Java's Optional<Long> finalizedFeaturesEpoch: -1 is empty.
+    const int64_t epoch = kafka_admin_FeatureMetadata_finalized_features_epoch(metadata);
+    if (epoch >= 0) dst->set_finalized_features_epoch(epoch);
+    {
+      OwnedMap supported(kafka_admin_FeatureMetadata_supported_features(metadata));
+      const int32_t n = supported ? kafka_Map_size(supported.get()) : 0;
+      for (int32_t i = 0; i < n; i++) {
+        const char* name = static_cast<const char*>(kafka_Map_key(supported.get(), i));
+        const auto* range =
+            static_cast<const kafka_admin_SupportedVersionRange_t*>(kafka_Map_value(supported.get(), i));
+        SupportedVersionRange* pr = &(*dst->mutable_supported_features())[cstr(name)];
+        pr->set_min_version(kafka_admin_SupportedVersionRange_min_version(range));
+        pr->set_max_version(kafka_admin_SupportedVersionRange_max_version(range));
+      }
     }
-    // The epoch's presence is its own boolean return, not a sentinel: an absent
-    // Optional<Long> must not decode as epoch 0.
-    int64_t epoch = 0;
-    if (kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &epoch)) {
-      metadata->set_finalized_features_epoch(epoch);
-    }
-    kafka_admin_DescribeFeaturesResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status UpdateFeatures(grpc::ServerContext*, const UpdateFeaturesRequest* req,
                               VoidKeyedResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // An empty map is forwarded rather than short-circuited: the real client
-    // answers Java's IllegalArgumentException ("Feature updates can not be null
-    // or empty.") and the mock yields an empty result, and both are faithful.
-    std::vector<std::string> owned_features;
-    std::vector<const char*> features;
-    std::vector<int16_t> max_version_levels;
-    std::vector<int32_t> upgrade_types;
-    owned_features.reserve(req->feature_updates_size());
+    OwnedHandles<kafka_admin_FeatureUpdate_t, kafka_admin_FeatureUpdate_destroy> updates;
+    CMap update_map;
     for (const auto& kv : req->feature_updates()) {
-      owned_features.push_back(kv.first);
-      max_version_levels.push_back(static_cast<int16_t>(kv.second.max_version_level()));
-      upgrade_types.push_back(kv.second.upgrade_type());
+      kafka_admin_FeatureUpdate_t* update = nullptr;
+      // FeatureUpdate's constructor validates the pair (IllegalArgumentException
+      // for a bad level or an UNKNOWN upgrade type).
+      kafka_common_Error_t* err = kafka_admin_FeatureUpdate_new(
+          static_cast<int16_t>(kv.second.max_version_level()),
+          kafka_admin_FeatureUpdate_UpgradeType_from_code(kv.second.upgrade_type()), &update);
+      if (err != nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+      update_map.put(kv.first.c_str(), updates.add(update));
     }
-    for (const std::string& feature : owned_features) features.push_back(feature.c_str());
-
-    kafka_admin_UpdateFeaturesResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_update_features(
-        admin, features.empty() ? nullptr : features.data(),
-        max_version_levels.empty() ? nullptr : max_version_levels.data(),
-        upgrade_types.empty() ? nullptr : upgrade_types.data(),
-        static_cast<int32_t>(features.size()), timeout_ms(*req), req->validate_only(), &result);
+    Owned<kafka_admin_UpdateFeaturesOptions_t, kafka_admin_UpdateFeaturesOptions_destroy> opts(
+        kafka_admin_UpdateFeaturesOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_UpdateFeaturesOptions_set_timeout_ms);
+    kafka_admin_UpdateFeaturesOptions_set_validate_only(opts.get(), req->validate_only() ? 1 : 0);
+    // The only RPC whose Java method validates its arguments up front
+    // (IllegalArgumentException on an empty map), hence the error return.
+    kafka_admin_UpdateFeaturesResult_t* raw = nullptr;
+    kafka_common_Error_t* err =
+        kafka_admin_Admin_update_features_with_options(admin, update_map.map, opts.get(), &raw);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_UpdateFeaturesResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      VoidResultEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(), kafka_admin_UpdateFeaturesResult_get_feature(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_UpdateFeaturesResult_get_error(result, i);
-      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
-    }
-    kafka_admin_UpdateFeaturesResult_destroy(result);
+    Owned<kafka_admin_UpdateFeaturesResult_t, kafka_admin_UpdateFeaturesResult_destroy> result(raw);
+    OwnedMap values(kafka_admin_UpdateFeaturesResult_values(result.get()));
+    void_futures_to_proto<char>(values.get(), [resp] { return resp->add_entries(); }, set_name_key);
     return grpc::Status::OK;
   }
 
-  // -- Producers & transactions (slice G6) ------------------------------------
-  //
-  // abort_transaction / force_terminate_transaction have **no result handle** at
-  // the C boundary: `AbortTransactionResult` exposes only `all()` and
-  // `TerminateTransactionResult` only `result()`, so a handle whose sole method
-  // is `_destroy` would be ceremony plus a leak to get wrong. Success is a null
-  // return, which maps straight onto the shared StatusResponse.
-  //
-  // The other four are keyed handles. list_transactions is keyed by broker, from
-  // Java's byBrokerId(): the only view that keeps a per-broker error, so a
-  // partial listing survives. Only a failure of the broker-discovery step comes
-  // back as the entry point's non-null return.
-
   grpc::Status DescribeProducers(grpc::ServerContext*, const DescribeProducersRequest* req,
                                  DescribeProducersResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // Parallel (topic, partition) columns, as every partition-keyed request does.
-    std::vector<std::string> owned_topics;
-    std::vector<const char*> topics;
-    std::vector<int32_t> partitions;
-    owned_topics.reserve(req->partitions_size());
-    for (const auto& tp : req->partitions()) {
-      owned_topics.push_back(tp.topic());
-      partitions.push_back(tp.partition());
-    }
-    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
-
-    // `has_broker_id` is the dedicated discriminant for Java's OptionalInt: the
-    // setter range-checks nothing, so no sentinel is free.
-    kafka_admin_DescribeProducersResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_producers(
-        admin, topics.empty() ? nullptr : topics.data(),
-        partitions.empty() ? nullptr : partitions.data(),
-        static_cast<int32_t>(topics.size()), req->has_broker_id(),
-        req->has_broker_id() ? req->broker_id() : 0, timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeProducersResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    TpList partitions(req->partitions());
+    Owned<kafka_admin_DescribeProducersOptions_t, kafka_admin_DescribeProducersOptions_destroy> opts(
+        kafka_admin_DescribeProducersOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeProducersOptions_set_timeout_ms);
+    // An absent broker id is Java's empty Optional: ask each partition leader.
+    if (req->has_broker_id()) kafka_admin_DescribeProducersOptions_set_broker_id(opts.get(), req->broker_id());
+    Owned<kafka_admin_DescribeProducersResult_t, kafka_admin_DescribeProducersResult_destroy> result(
+        kafka_admin_Admin_describe_producers_with_options(admin, partitions.list, opts.get()));
+    for (kafka_common_TopicPartition_t* tp : partitions.handles) {
       DescribeProducersEntry* entry = resp->add_entries();
-      set_partition_key(entry->mutable_key(),
-                        kafka_admin_DescribeProducersResult_get_topic(result, i),
-                        kafka_admin_DescribeProducersResult_get_partition(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeProducersResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_partition_key(entry->mutable_key(), tp);
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      kafka_common_Error_t* err = kafka_admin_DescribeProducersResult_partition_result(result.get(), tp, &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      // Zero active producers is a *successful* description of a partition with
-      // no producer state, so the value is set (empty) rather than left absent.
-      PartitionProducerState* value = entry->mutable_value();
-      const int32_t producers = kafka_admin_DescribeProducersResult_get_producer_count(result, i);
-      for (int32_t j = 0; j < producers; j++) {
-        ProducerState* dst = value->add_active_producers();
-        dst->set_producer_id(kafka_admin_DescribeProducersResult_get_producer_id(result, i, j));
-        dst->set_producer_epoch(
-            kafka_admin_DescribeProducersResult_get_producer_epoch(result, i, j));
-        dst->set_last_sequence(kafka_admin_DescribeProducersResult_get_last_sequence(result, i, j));
-        dst->set_last_timestamp(
-            kafka_admin_DescribeProducersResult_get_last_timestamp(result, i, j));
-        // The two Optionals use the C boundary's present-flag accessors: every
-        // int, 0 and -1 included, is a legal value for both.
-        int32_t coordinator_epoch = 0;
-        if (kafka_admin_DescribeProducersResult_get_coordinator_epoch(result, i, j,
-                                                                     &coordinator_epoch)) {
-          dst->set_coordinator_epoch(coordinator_epoch);
-        }
-        int64_t start_offset = 0;
-        if (kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
-                result, i, j, &start_offset)) {
-          dst->set_current_transaction_start_offset(start_offset);
-        }
+      OwnedFuture f(raw);
+      const kafka_admin_DescribeProducersResult_PartitionProducerState_t* state = nullptr;
+      err = future_get(f.get(), &state);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
       }
+      PartitionProducerState* dst = entry->mutable_value();
+      OwnedList producers(kafka_admin_DescribeProducersResult_PartitionProducerState_active_producers(state));
+      for_each_in_list<kafka_admin_ProducerState_t>(producers.get(), [dst](const kafka_admin_ProducerState_t* p) {
+        ProducerState* ps = dst->add_active_producers();
+        ps->set_producer_id(kafka_admin_ProducerState_producer_id(p));
+        ps->set_producer_epoch(kafka_admin_ProducerState_producer_epoch(p));
+        ps->set_last_sequence(kafka_admin_ProducerState_last_sequence(p));
+        ps->set_last_timestamp(kafka_admin_ProducerState_last_timestamp(p));
+        // Java's OptionalInt / OptionalLong: -1 is empty.
+        const int32_t coordinator_epoch = kafka_admin_ProducerState_coordinator_epoch(p);
+        if (coordinator_epoch >= 0) ps->set_coordinator_epoch(coordinator_epoch);
+        const int64_t start = kafka_admin_ProducerState_current_transaction_start_offset(p);
+        if (start >= 0) ps->set_current_transaction_start_offset(start);
+      });
     }
-    kafka_admin_DescribeProducersResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status DescribeTransactions(grpc::ServerContext*, const DescribeTransactionsRequest* req,
                                     DescribeTransactionsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    StringArray ids(req->transactional_ids());
-
-    kafka_admin_DescribeTransactionsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_describe_transactions(
-        admin, ids.data(), ids.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_DescribeTransactionsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    BorrowedStringList ids(req->transactional_ids());
+    Owned<kafka_admin_DescribeTransactionsOptions_t, kafka_admin_DescribeTransactionsOptions_destroy>
+        opts(kafka_admin_DescribeTransactionsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_DescribeTransactionsOptions_set_timeout_ms);
+    Owned<kafka_admin_DescribeTransactionsResult_t, kafka_admin_DescribeTransactionsResult_destroy>
+        result(kafka_admin_Admin_describe_transactions_with_options(admin, ids.list, opts.get()));
+    for (const std::string& id : req->transactional_ids()) {
       DescribeTransactionsEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_DescribeTransactionsResult_get_transactional_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_DescribeTransactionsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_name_key(entry->mutable_key(), id.c_str());
+      kafka_common_KafkaFuture_t* raw = nullptr;
+      kafka_common_Error_t* err =
+          kafka_admin_DescribeTransactionsResult_description(result.get(), id.c_str(), &raw);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      TransactionDescription* value = entry->mutable_value();
-      value->set_coordinator_id(
-          kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, i));
-      // TransactionState crosses as its toString() name; the enum has no numeric
-      // id in Java, so the name is the contract.
-      value->set_state(cstr(kafka_admin_DescribeTransactionsResult_get_state(result, i)));
-      value->set_producer_id(kafka_admin_DescribeTransactionsResult_get_producer_id(result, i));
-      value->set_producer_epoch(
-          kafka_admin_DescribeTransactionsResult_get_producer_epoch(result, i));
-      value->set_transaction_timeout_ms(
-          kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(result, i));
-      // Java's OptionalLong: absent for a transaction that is not in progress,
-      // which is not a start time of 0.
-      int64_t start_time = 0;
-      if (kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(result, i,
-                                                                              &start_time)) {
-        value->set_transaction_start_time_ms(start_time);
+      OwnedFuture f(raw);
+      const kafka_admin_TransactionDescription_t* d = nullptr;
+      err = future_get(f.get(), &d);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
       }
-      const int32_t tps =
-          kafka_admin_DescribeTransactionsResult_get_topic_partition_count(result, i);
-      for (int32_t j = 0; j < tps; j++) {
-        TopicPartition* tp = value->add_topic_partitions();
-        tp->set_topic(cstr(
-            kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, i, j)));
-        tp->set_partition(
-            kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(result, i, j));
-      }
+      TransactionDescription* dst = entry->mutable_value();
+      dst->set_coordinator_id(kafka_admin_TransactionDescription_coordinator_id(d));
+      dst->set_state(transaction_state_name(kafka_admin_TransactionDescription_state(d)));
+      dst->set_producer_id(kafka_admin_TransactionDescription_producer_id(d));
+      dst->set_producer_epoch(kafka_admin_TransactionDescription_producer_epoch(d));
+      dst->set_transaction_timeout_ms(kafka_admin_TransactionDescription_transaction_timeout_ms(d));
+      // Java's OptionalLong transactionStartTimeMs: -1 is empty.
+      const int64_t start = kafka_admin_TransactionDescription_transaction_start_time_ms(d);
+      if (start >= 0) dst->set_transaction_start_time_ms(start);
+      OwnedList tps(kafka_admin_TransactionDescription_topic_partitions(d));
+      tp_list_to_proto(tps.get(), [dst] { return dst->add_topic_partitions(); });
     }
-    kafka_admin_DescribeTransactionsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status AbortTransaction(grpc::ServerContext*, const AbortTransactionRequest* req,
                                 StatusResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // Java's AbortTransactionSpec holds a TopicPartition, which has no
-    // null-topic form, so an absent one is a malformed *request* — the
-    // LOCAL_ILLEGAL_ARGUMENT class, matching grpc_translate's
-    // AdminRequestError.
-    if (!req->has_topic_partition()) {
-      *resp->mutable_error() = make_synthetic_error(
-          "abort_transaction requires a topic_partition",
-          kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
-      return grpc::Status::OK;
-    }
-    const std::string topic = req->topic_partition().topic();
-    kafka_common_Error_t* err = kafka_admin_AdminClient_abort_transaction(
-        admin, topic.c_str(), req->topic_partition().partition(), req->producer_id(),
-        req->producer_epoch(), req->coordinator_epoch(), timeout_ms(*req));
-    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    Owned<kafka_common_TopicPartition_t, kafka_common_TopicPartition_destroy> tp(
+        kafka_common_TopicPartition_new(req->topic_partition().topic().c_str(),
+                                        req->topic_partition().partition()));
+    Owned<kafka_admin_AbortTransactionSpec_t, kafka_admin_AbortTransactionSpec_destroy> spec(
+        kafka_admin_AbortTransactionSpec_new(tp.get(), req->producer_id(),
+                                             static_cast<int16_t>(req->producer_epoch()),
+                                             req->coordinator_epoch()));
+    Owned<kafka_admin_AbortTransactionOptions_t, kafka_admin_AbortTransactionOptions_destroy> opts(
+        kafka_admin_AbortTransactionOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_AbortTransactionOptions_set_timeout_ms);
+    Owned<kafka_admin_AbortTransactionResult_t, kafka_admin_AbortTransactionResult_destroy> result(
+        kafka_admin_Admin_abort_transaction_with_options(admin, spec.get(), opts.get()));
+    OwnedFuture f(kafka_admin_AbortTransactionResult_all(result.get()));
+    await_into(f.get(), resp);
     return grpc::Status::OK;
   }
 
   grpc::Status ForceTerminateTransaction(grpc::ServerContext*,
                                          const ForceTerminateTransactionRequest* req,
                                          StatusResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    const std::string id = req->transactional_id();
-    kafka_common_Error_t* err = kafka_admin_AdminClient_force_terminate_transaction(
-        admin, id.c_str(), timeout_ms(*req));
-    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    Owned<kafka_admin_TerminateTransactionOptions_t, kafka_admin_TerminateTransactionOptions_destroy>
+        opts(kafka_admin_TerminateTransactionOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_TerminateTransactionOptions_set_timeout_ms);
+    Owned<kafka_admin_TerminateTransactionResult_t, kafka_admin_TerminateTransactionResult_destroy>
+        result(kafka_admin_Admin_force_terminate_transaction_with_options(
+            admin, req->transactional_id().c_str(), opts.get()));
+    OwnedFuture f(kafka_admin_TerminateTransactionResult_result(result.get()));
+    await_into(f.get(), resp);
     return grpc::Status::OK;
   }
 
   grpc::Status ListTransactions(grpc::ServerContext*, const ListTransactionsRequest* req,
                                 ListTransactionsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    // States cross as TransactionState.toString() names, matched
-    // case-sensitively by TransactionState.parse. An empty array is Java's own
-    // default ("every state"), so there is no null form to preserve.
-    StringArray states(req->states());
-    std::vector<int64_t> producer_ids(req->producer_ids().begin(), req->producer_ids().end());
-    // A NULL pattern is Java's null (no pattern filter); "" is a distinct legal
-    // value, which is why has_transactional_id_pattern rather than emptiness
-    // decides. (Java's own ListTransactionsHandler then drops an empty pattern
-    // before it reaches the wire, so the two are not observably different — the
-    // discriminant is carried rather than re-derived so no server has to guess.)
-    const std::string pattern =
-        req->has_transactional_id_pattern() ? req->transactional_id_pattern() : std::string();
-
-    kafka_admin_ListTransactionsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_transactions(
-        admin, states.data(), states.count(),
-        producer_ids.empty() ? nullptr : producer_ids.data(),
-        static_cast<int32_t>(producer_ids.size()), req->duration_ms(),
-        req->has_transactional_id_pattern() ? pattern.c_str() : nullptr, timeout_ms(*req),
-        &result);
+    Owned<kafka_admin_ListTransactionsOptions_t, kafka_admin_ListTransactionsOptions_destroy> opts(
+        kafka_admin_ListTransactionsOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_ListTransactionsOptions_set_timeout_ms);
+    // The state filter crosses as TransactionState names; an empty list is
+    // Java's empty set, i.e. the filter left unset.
+    CList states;  // borrowed TransactionState singletons
+    for (const std::string& name : req->states()) states.add(kafka_admin_TransactionState_parse(name.c_str()));
+    if (req->states_size() > 0) kafka_admin_ListTransactionsOptions_filter_states(opts.get(), states.list);
+    ScalarArena scalars;
+    CList producer_ids;
+    for (int64_t id : req->producer_ids()) producer_ids.add(scalars.i64(id));
+    if (req->producer_ids_size() > 0) {
+      kafka_admin_ListTransactionsOptions_filter_producer_ids(opts.get(), producer_ids.list);
+    }
+    // Passed straight through, as Java does: a negative duration disables the filter.
+    kafka_admin_ListTransactionsOptions_filter_on_duration(opts.get(), req->duration_ms());
+    // Presence decides: an absent pattern is Java's null (no filter), a
+    // present one is passed as is, even when empty.
+    if (req->has_transactional_id_pattern()) {
+      kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern(
+          opts.get(), req->transactional_id_pattern().c_str());
+    }
+    Owned<kafka_admin_ListTransactionsResult_t, kafka_admin_ListTransactionsResult_destroy> result(
+        kafka_admin_Admin_list_transactions_with_options(admin, opts.get()));
+    OwnedFuture by_broker(kafka_admin_ListTransactionsResult_by_broker_id(result.get()));
+    const kafka_Map_t* brokers = nullptr;
+    kafka_common_Error_t* err = future_get(by_broker.get(), &brokers);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-
-    const int32_t count = kafka_admin_ListTransactionsResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    // The inner futures are owned by the map, which the outer future owns.
+    const int32_t n = brokers == nullptr ? 0 : kafka_Map_size(brokers);
+    for (int32_t i = 0; i < n; i++) {
       ListTransactionsEntry* entry = resp->add_entries();
-      entry->mutable_key()->set_broker_id(
-          kafka_admin_ListTransactionsResult_get_broker_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_ListTransactionsResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_broker_key(entry->mutable_key(), static_cast<const int32_t*>(kafka_Map_key(brokers, i)));
+      const kafka_List_t* listings = nullptr;
+      err = future_get(static_cast<const kafka_common_KafkaFuture_t*>(kafka_Map_value(brokers, i)), &listings);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
       // An empty listing list is a successful "this broker has no transactions",
       // so the wrapper value is set even when empty.
       TransactionListingList* value = entry->mutable_value();
-      const int32_t listings = kafka_admin_ListTransactionsResult_get_listing_count(result, i);
-      for (int32_t j = 0; j < listings; j++) {
+      for_each_in_list<kafka_admin_TransactionListing_t>(listings, [value](const kafka_admin_TransactionListing_t* l) {
         TransactionListing* dst = value->add_listings();
-        dst->set_transactional_id(
-            cstr(kafka_admin_ListTransactionsResult_get_transactional_id(result, i, j)));
-        dst->set_producer_id(kafka_admin_ListTransactionsResult_get_producer_id(result, i, j));
-        dst->set_state(cstr(kafka_admin_ListTransactionsResult_get_state(result, i, j)));
-      }
+        dst->set_transactional_id(cstr(kafka_admin_TransactionListing_transactional_id(l)));
+        dst->set_producer_id(kafka_admin_TransactionListing_producer_id(l));
+        dst->set_state(transaction_state_name(kafka_admin_TransactionListing_state(l)));
+      });
     }
-    kafka_admin_ListTransactionsResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status FenceProducers(grpc::ServerContext*, const FenceProducersRequest* req,
                               FenceProducersResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    const kafka_admin_Admin_t* admin = admin_for(req->admin_id());
     if (admin == nullptr) {
       *resp->mutable_error() = unknown_admin(req->admin_id());
       return grpc::Status::OK;
     }
-    StringArray ids(req->transactional_ids());
-
-    kafka_admin_FenceProducersResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_fence_producers(
-        admin, ids.data(), ids.count(), timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t count = kafka_admin_FenceProducersResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
+    BorrowedStringList ids(req->transactional_ids());
+    Owned<kafka_admin_FenceProducersOptions_t, kafka_admin_FenceProducersOptions_destroy> opts(
+        kafka_admin_FenceProducersOptions_new());
+    apply_timeout(*req, opts.get(), kafka_admin_FenceProducersOptions_set_timeout_ms);
+    Owned<kafka_admin_FenceProducersResult_t, kafka_admin_FenceProducersResult_destroy> result(
+        kafka_admin_Admin_fence_producers_with_options(admin, ids.list, opts.get()));
+    for (const std::string& id : req->transactional_ids()) {
       FenceProducersEntry* entry = resp->add_entries();
-      set_name_key(entry->mutable_key(),
-                   kafka_admin_FenceProducersResult_get_transactional_id(result, i));
-      const kafka_common_Error_t* key_err =
-          kafka_admin_FenceProducersResult_get_error(result, i);
-      if (key_err != nullptr) {
-        copy_proto_error(entry->mutable_error(), key_err);
+      set_name_key(entry->mutable_key(), id.c_str());
+      kafka_common_KafkaFuture_t* raw_pid = nullptr;
+      kafka_common_Error_t* err = kafka_admin_FenceProducersResult_producer_id(result.get(), id.c_str(), &raw_pid);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
         continue;
       }
-      // (-1, -1) is Java's ProducerIdAndEpoch.NONE, a legal value rather than an
-      // absence, so both fields are always set.
-      ProducerIdAndEpoch* value = entry->mutable_value();
-      value->set_producer_id(kafka_admin_FenceProducersResult_get_producer_id(result, i));
-      value->set_epoch(kafka_admin_FenceProducersResult_get_epoch_id(result, i));
+      OwnedFuture pid_future(raw_pid);
+      const int64_t* producer_id = nullptr;
+      err = future_get(pid_future.get(), &producer_id);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      kafka_common_KafkaFuture_t* raw_epoch = nullptr;
+      err = kafka_admin_FenceProducersResult_epoch_id(result.get(), id.c_str(), &raw_epoch);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      OwnedFuture epoch_future(raw_epoch);
+      const int16_t* epoch = nullptr;
+      err = future_get(epoch_future.get(), &epoch);
+      if (err != nullptr) {
+        fill_proto_error(entry->mutable_error(), err);
+        continue;
+      }
+      ProducerIdAndEpoch* dst = entry->mutable_value();
+      dst->set_producer_id(producer_id != nullptr ? *producer_id : -1);
+      dst->set_epoch(epoch != nullptr ? *epoch : -1);
     }
-    kafka_admin_FenceProducersResult_destroy(result);
     return grpc::Status::OK;
   }
 
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = nullptr;
+    AdminEntry entry;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = admins_.find(req->admin_id());
-      if (it != admins_.end()) {
-        admin = it->second;
-        admins_.erase(it);
+      if (it == admins_.end()) {
+        *resp->mutable_error() = unknown_admin(req->admin_id());
+        return grpc::Status::OK;
       }
+      entry = it->second;
+      admins_.erase(it);
     }
-    if (admin == nullptr) {
-      // Idempotent close — silent success on unknown id.
-      return grpc::Status::OK;
+    // Java's close(Duration) joins the background thread; the C call blocks
+    // the same way and has no error slot. An absent timeout is Java's
+    // close() (Long.MAX_VALUE ms).
+    if (req->has_timeout_ms()) {
+      kafka_admin_Admin_close_with_timeout(entry.view, req->timeout_ms());
+    } else {
+      kafka_admin_Admin_close(entry.view);
     }
-    // A negative timeout is the C layer's spelling of Java's no-argument
-    // close() (wait indefinitely), which is what an absent timeout_ms means.
-    const int64_t timeout_ms = req->has_timeout_ms() ? req->timeout_ms() : -1;
-    // Returns void: Java's Admin.close(Duration) is void, so a successful
-    // close leaves resp->error unset.
-    kafka_admin_AdminClient_close(admin, timeout_ms);
-    kafka_admin_AdminClient_destroy(admin);
-    (void)resp;
+    entry.destroy();
+    std::cerr << "c server: closed admin " << req->admin_id() << std::endl;
     return grpc::Status::OK;
   }
 
  private:
-  kafka_admin_AdminClient_t* admin_for(uint64_t id) {
+  const kafka_admin_Admin_t* admin_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = admins_.find(id);
-    return it == admins_.end() ? nullptr : it->second;
+    return it == admins_.end() ? nullptr : it->second.view;
   }
 
   static KafkaError unknown_admin(uint64_t id) {
     return make_synthetic_error("unknown admin_id " + std::to_string(id));
   }
 
-  static std::string cstr(const char* s) { return s ? std::string(s) : std::string(); }
-
-  // A negative timeout is the C layer's "unset", so default.api.timeout.ms
-  // applies — which is what an absent timeout_ms means.
-  template <typename Req>
-  static int32_t timeout_ms(const Req& req) {
-    return req.has_timeout_ms() ? req.timeout_ms() : -1;
+  static kafka_Bytes_t bytes_of(const std::string& s) {
+    kafka_Bytes_t bytes;
+    bytes.data = reinterpret_cast<const uint8_t*>(s.data());
+    bytes.len = static_cast<int32_t>(s.size());
+    return bytes;
   }
 
-  // Java's CreateTopicsOptions.retryOnQuotaViolation etc. default to true, so an
-  // absent field is true rather than proto3's implicit false.
-  template <typename Req>
-  static bool retry_on_quota(const Req& req) {
-    return req.has_retry_on_quota_violation() ? req.retry_on_quota_violation() : true;
-  }
-
-  // Per-key error pointers are *borrowed* from the result handle, so unlike
-  // fill_proto_error this must not destroy them.
-  static void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
-    const char* msg = kafka_common_Error_message(err);
-    dst->set_code(kafka_common_Error_code(err));
-    dst->set_message(msg ? std::string(msg) : std::string());
-  }
-
-  static void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
-
-  // electLeaders / alterPartitionReassignments / listOffsets key their results by
-  // TopicPartition, flattened at the C boundary into a name plus an index.
-  static void set_partition_key(ResultKey* key, const char* topic, int32_t partition) {
-    TopicPartition* tp = key->mutable_partition();
-    tp->set_topic(cstr(topic));
-    tp->set_partition(partition);
-  }
-
-  // -- Slice G5 helpers -------------------------------------------------------
-
-  // Java's `AclBinding` flattened into the seven parallel arrays the C entry
-  // point takes. Every string is required, so `StringArray`'s non-nullable form
-  // would do — but the columns have to be built together with the four int32
-  // ones, so they share a struct with [AclFilterColumns] for symmetry.
-  struct AclBindingColumns {
-    explicit AclBindingColumns(const ::google::protobuf::RepeatedPtrField<AclBinding>& acls) {
-      owned_names.reserve(acls.size());
-      owned_principals.reserve(acls.size());
-      owned_hosts.reserve(acls.size());
-      for (const AclBinding& a : acls) {
-        resource_types.push_back(a.resource_type());
-        owned_names.push_back(a.resource_name());
-        pattern_types.push_back(a.pattern_type());
-        owned_principals.push_back(a.principal());
-        owned_hosts.push_back(a.host());
-        operations.push_back(a.operation());
-        permission_types.push_back(a.permission_type());
+  // CreateTopicsResult's per-topic refinements (`topicId`, `numPartitions`,
+  // `replicationFactor`, `config`): each is a future that fails when the
+  // topic was created but the broker returned no metadata (Java's
+  // `ensureSuccess()` rethrow), which must cross as the error arm, not as a
+  // metadata of -1s.
+  static void metadata_to_proto(const kafka_admin_CreateTopicsResult_t* result, const char* topic,
+                                TopicMetadataAndConfig* dst) {
+    TopicMetadata* metadata = dst->mutable_metadata();
+    {
+      OwnedFuture f(kafka_admin_CreateTopicsResult_topic_id(result, topic));
+      const kafka_common_Uuid_t* id = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &id);
+      if (err != nullptr) {
+        dst->clear_metadata();
+        fill_proto_error(dst->mutable_error(), err);
+        return;
       }
-      // Pointers only after the vectors have stopped growing.
-      for (size_t i = 0; i < owned_names.size(); i++) {
-        resource_names.push_back(owned_names[i].c_str());
-        principals.push_back(owned_principals[i].c_str());
-        hosts.push_back(owned_hosts[i].c_str());
+      OwnedCString id_str(kafka_common_Uuid_to_string(id));
+      metadata->set_topic_id(cstr(id_str.get()));
+    }
+    {
+      OwnedFuture f(kafka_admin_CreateTopicsResult_num_partitions(result, topic));
+      const int32_t* n = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &n);
+      if (err != nullptr) {
+        dst->clear_metadata();
+        fill_proto_error(dst->mutable_error(), err);
+        return;
       }
+      metadata->set_num_partitions(n != nullptr ? *n : -1);
     }
-    int32_t count() const { return static_cast<int32_t>(resource_types.size()); }
-
-    std::vector<std::string> owned_names, owned_principals, owned_hosts;
-    std::vector<int32_t> resource_types, pattern_types, operations, permission_types;
-    std::vector<const char*> resource_names, principals, hosts;
-  };
-
-  // Java's `AclBindingFilter` flattened. Three of the seven columns are
-  // **nullable**: a NULL pointer is Java's match-any, and an empty std::string
-  // would match only the literally empty name — so an absent field must reach
-  // the entry point as nullptr, never as "". `StringArray` cannot express that,
-  // which is why this is a separate struct rather than a reuse.
-  struct AclFilterColumns {
-    explicit AclFilterColumns(
-        const ::google::protobuf::RepeatedPtrField<AclBindingFilter>& filters) {
-      const size_t n = static_cast<size_t>(filters.size());
-      owned_names.reserve(n);
-      owned_principals.reserve(n);
-      owned_hosts.reserve(n);
-      has_name.reserve(n);
-      has_principal.reserve(n);
-      has_host.reserve(n);
-      for (const AclBindingFilter& f : filters) {
-        resource_types.push_back(f.resource_type());
-        pattern_types.push_back(f.pattern_type());
-        operations.push_back(f.operation());
-        permission_types.push_back(f.permission_type());
-        owned_names.push_back(f.has_resource_name() ? f.resource_name() : std::string());
-        owned_principals.push_back(f.has_principal() ? f.principal() : std::string());
-        owned_hosts.push_back(f.has_host() ? f.host() : std::string());
-        has_name.push_back(f.has_resource_name());
-        has_principal.push_back(f.has_principal());
-        has_host.push_back(f.has_host());
+    {
+      OwnedFuture f(kafka_admin_CreateTopicsResult_replication_factor(result, topic));
+      const int32_t* rf = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &rf);
+      if (err != nullptr) {
+        dst->clear_metadata();
+        fill_proto_error(dst->mutable_error(), err);
+        return;
       }
-      for (size_t i = 0; i < n; i++) {
-        resource_names.push_back(has_name[i] ? owned_names[i].c_str() : nullptr);
-        principals.push_back(has_principal[i] ? owned_principals[i].c_str() : nullptr);
-        hosts.push_back(has_host[i] ? owned_hosts[i].c_str() : nullptr);
+      metadata->set_replication_factor(rf != nullptr ? *rf : -1);
+    }
+    {
+      OwnedFuture f(kafka_admin_CreateTopicsResult_config(result, topic));
+      const kafka_admin_Config_t* config = nullptr;
+      kafka_common_Error_t* err = future_get(f.get(), &config);
+      if (err != nullptr) {
+        dst->clear_metadata();
+        fill_proto_error(dst->mutable_error(), err);
+        return;
       }
+      if (config != nullptr) config_to_proto(config, [metadata] { return metadata->add_configs(); });
     }
-    int32_t count() const { return static_cast<int32_t>(resource_types.size()); }
-
-    std::vector<std::string> owned_names, owned_principals, owned_hosts;
-    std::vector<char> has_name, has_principal, has_host;
-    std::vector<int32_t> resource_types, pattern_types, operations, permission_types;
-    std::vector<const char*> resource_names, principals, hosts;
-  };
-
-  // A principal list as the two parallel arrays the delegation-token entry
-  // points take. `token_authenticated` is not sent: Java's requests carry only
-  // the type and the name.
-  struct PrincipalColumns {
-    explicit PrincipalColumns(
-        const ::google::protobuf::RepeatedPtrField<KafkaPrincipal>& principals) {
-      owned_types.reserve(principals.size());
-      owned_names.reserve(principals.size());
-      for (const KafkaPrincipal& p : principals) {
-        owned_types.push_back(p.principal_type());
-        owned_names.push_back(p.name());
-      }
-      for (size_t i = 0; i < owned_types.size(); i++) {
-        type_ptrs.push_back(owned_types[i].c_str());
-        name_ptrs.push_back(owned_names[i].c_str());
-      }
-      types = type_ptrs.empty() ? nullptr : type_ptrs.data();
-      names = name_ptrs.empty() ? nullptr : name_ptrs.data();
-    }
-    int32_t count() const { return static_cast<int32_t>(type_ptrs.size()); }
-
-    std::vector<std::string> owned_types, owned_names;
-    std::vector<const char*> type_ptrs, name_ptrs;
-    const char* const* types;
-    const char* const* names;
-  };
-
-  // The binding keeps Java's object graph: strings and enums sit on its
-  // `pattern()` and `entry()`, and each enum crosses the wire as its Java code.
-  static void acl_binding_to_proto(const kafka_common_acl_AclBinding_t* binding, AclBinding* dst) {
-    const kafka_common_resource_ResourcePattern_t* pattern = kafka_common_acl_AclBinding_pattern(binding);
-    const kafka_common_acl_AccessControlEntry_t* entry = kafka_common_acl_AclBinding_entry(binding);
-    dst->set_resource_type(
-        kafka_common_resource_ResourceType_code(kafka_common_resource_ResourcePattern_resource_type(pattern)));
-    dst->set_resource_name(cstr(kafka_common_resource_ResourcePattern_name(pattern)));
-    dst->set_pattern_type(
-        kafka_common_resource_PatternType_code(kafka_common_resource_ResourcePattern_pattern_type(pattern)));
-    dst->set_principal(cstr(kafka_common_acl_AccessControlEntry_principal(entry)));
-    dst->set_host(cstr(kafka_common_acl_AccessControlEntry_host(entry)));
-    dst->set_operation(kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntry_operation(entry)));
-    dst->set_permission_type(
-        kafka_common_acl_AclPermissionType_code(kafka_common_acl_AccessControlEntry_permission_type(entry)));
-  }
-
-  // The three nullable strings stay absent when the C accessor returns NULL:
-  // that is Java's match-any, and `cstr` would turn it into "".
-  static void acl_filter_to_proto(const kafka_common_acl_AclBindingFilter_t* filter,
-                                  AclBindingFilter* dst) {
-    const kafka_common_resource_ResourcePatternFilter_t* pattern =
-        kafka_common_acl_AclBindingFilter_pattern_filter(filter);
-    const kafka_common_acl_AccessControlEntryFilter_t* entry =
-        kafka_common_acl_AclBindingFilter_entry_filter(filter);
-    dst->set_resource_type(kafka_common_resource_ResourceType_code(
-        kafka_common_resource_ResourcePatternFilter_resource_type(pattern)));
-    dst->set_pattern_type(kafka_common_resource_PatternType_code(
-        kafka_common_resource_ResourcePatternFilter_pattern_type(pattern)));
-    dst->set_operation(
-        kafka_common_acl_AclOperation_code(kafka_common_acl_AccessControlEntryFilter_operation(entry)));
-    dst->set_permission_type(kafka_common_acl_AclPermissionType_code(
-        kafka_common_acl_AccessControlEntryFilter_permission_type(entry)));
-    const char* name = kafka_common_resource_ResourcePatternFilter_name(pattern);
-    if (name != nullptr) dst->set_resource_name(std::string(name));
-    const char* principal = kafka_common_acl_AccessControlEntryFilter_principal(entry);
-    if (principal != nullptr) dst->set_principal(std::string(principal));
-    const char* host = kafka_common_acl_AccessControlEntryFilter_host(entry);
-    if (host != nullptr) dst->set_host(std::string(host));
-  }
-
-  // An absent entity name stays absent: that is Java's built-in *default*
-  // entity for the type, not the entity named "".
-  static void quota_entity_to_proto(const kafka_common_quota_ClientQuotaEntity_t* entity,
-                                    ClientQuotaEntity* dst) {
-    // `entries()` is an owned map of entity type -> entity name (NULL for
-    // the default entity), sorted by type.
-    kafka_Map_t* entries = kafka_common_quota_ClientQuotaEntity_entries(entity);
-    const int32_t n = kafka_Map_size(entries);
-    for (int32_t i = 0; i < n; i++) {
-      auto* pair = dst->add_entries();
-      pair->set_entity_type(cstr(static_cast<const char*>(kafka_Map_key(entries, i))));
-      const char* name = static_cast<const char*>(kafka_Map_value(entries, i));
-      if (name != nullptr) pair->set_entity_name(std::string(name));
-    }
-    kafka_Map_destroy(entries);
-  }
-
-  static void principal_to_proto(const kafka_common_security_auth_KafkaPrincipal_t* principal,
-                                 KafkaPrincipal* dst) {
-    dst->set_principal_type(cstr(kafka_common_security_auth_KafkaPrincipal_principal_type(principal)));
-    dst->set_name(cstr(kafka_common_security_auth_KafkaPrincipal_name(principal)));
-    dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(principal) != 0);
-  }
-
-  // Returns false when the token has no `token_info`, which the caller turns
-  // into a synthetic ILLEGAL_STATE rather than emitting a half-built token.
-  //
-  // The three timestamps go into the fields Java's *constructor* names (issue,
-  // max, expiry) rather than the order the C accessors happen to be declared in;
-  // getting that pair wrong is a live defect class, which is why the Rust client
-  // asserts each one by its own getter (Java's `TokenInformation.equals` ignores
-  // the expiry, so an equality check could not see it).
-  static bool delegation_token_to_proto(const kafka_common_security_token_delegation_DelegationToken_t* token,
-                                        DelegationToken* dst) {
-    const kafka_common_security_token_delegation_TokenInformation_t* info =
-        kafka_common_security_token_delegation_DelegationToken_token_info(token);
-    if (info == nullptr) return false;
-    TokenInformation* out = dst->mutable_token_information();
-    out->set_token_id(cstr(kafka_common_security_token_delegation_TokenInformation_token_id(info)));
-    const kafka_common_security_auth_KafkaPrincipal_t* owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
-    if (owner != nullptr) principal_to_proto(owner, out->mutable_owner());
-    const kafka_common_security_auth_KafkaPrincipal_t* requester =
-        kafka_common_security_token_delegation_TokenInformation_token_requester(info);
-    if (requester != nullptr) principal_to_proto(requester, out->mutable_token_requester());
-    // `renewers()` is an owned list of owned principals.
-    kafka_List_t* renewers = kafka_common_security_token_delegation_TokenInformation_renewers(info);
-    const int32_t renewer_count = kafka_List_size(renewers);
-    for (int32_t i = 0; i < renewer_count; i++) {
-      const auto* renewer =
-          static_cast<const kafka_common_security_auth_KafkaPrincipal_t*>(kafka_List_get(renewers, i));
-      if (renewer != nullptr) principal_to_proto(renewer, out->add_renewers());
-    }
-    kafka_List_destroy(renewers);
-    out->set_issue_timestamp(kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info));
-    out->set_max_timestamp(kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
-    out->set_expiry_timestamp(kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info));
-    const kafka_Bytes_t hmac = kafka_common_security_token_delegation_DelegationToken_hmac(token);
-    if (hmac.data != nullptr && hmac.len > 0) {
-      dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac.data),
-                                static_cast<size_t>(hmac.len)));
-    }
-    // Owned, unlike the borrowed getters above.
-    char* hmac_base64 = kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token);
-    dst->set_hmac_as_base64(cstr(hmac_base64));
-    kafka_string_destroy(hmac_base64);
-    return true;
-  }
-
-  // Projects a wire [OffsetSpec] onto the two columns the C entry point takes,
-  // returning false for a kind it cannot represent (KIND_UNSPECIFIED, an unknown
-  // value, or FOR_TIMESTAMP with no timestamp).
-  //
-  // The negative numbers are the `ListOffsets` wire sentinels Java's
-  // `KafkaAdminClient.getOffsetFromSpec` (`KafkaAdminClient.java:5142-5156`)
-  // emits for the six no-argument factories. This table is deliberately written
-  // here rather than sent over the wire: `grpc_translate.py` reaches the same
-  // sentinels through `admin.py`'s named factories, so the two tables are
-  // independent and a disagreement between them is a finding rather than a shared
-  // mistake forwarded by both.
-  //
-  // `is_timestamp` stays separate from the value because the projection is not
-  // injective — `forTimestamp(-2)` and `earliest()` both yield -2.
-  static bool offset_spec_columns(const OffsetSpec& spec, bool* is_timestamp, int64_t* value) {
-    *is_timestamp = false;
-    switch (spec.kind()) {
-      case OffsetSpec::LATEST:
-        *value = -1;
-        return true;
-      case OffsetSpec::EARLIEST:
-        *value = -2;
-        return true;
-      case OffsetSpec::MAX_TIMESTAMP:
-        *value = -3;
-        return true;
-      case OffsetSpec::EARLIEST_LOCAL:
-        *value = -4;
-        return true;
-      case OffsetSpec::LATEST_TIERED:
-        *value = -5;
-        return true;
-      case OffsetSpec::EARLIEST_PENDING_UPLOAD:
-        *value = -6;
-        return true;
-      case OffsetSpec::FOR_TIMESTAMP:
-        if (!spec.has_timestamp()) return false;
-        *is_timestamp = true;
-        *value = spec.timestamp();
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  // describeConfigs / incrementalAlterConfigs key their results by
-  // ConfigResource, which the C surface reads as a `Type.id()` code plus a name.
-  static void set_config_resource_key(ResultKey* key, int32_t resource_type, const char* name) {
-    ConfigResource* resource = key->mutable_config_resource();
-    resource->set_resource_type(resource_type);
-    resource->set_name(cstr(name));
-  }
-
-  // describeReplicaLogDirs / alterReplicaLogDirs key their results by
-  // TopicPartitionReplica, likewise flattened at the C boundary.
-  static void set_replica_key(ResultKey* key, const char* topic, int32_t partition,
-                              int32_t broker_id) {
-    TopicPartitionReplica* replica = key->mutable_replica();
-    replica->set_topic(cstr(topic));
-    replica->set_partition(partition);
-    replica->set_broker_id(broker_id);
-  }
-
-  // All nine ConfigEntry fields, which is what describeConfigs reports. The
-  // five-field `metadata_to_proto` path above is createTopics', where the broker
-  // genuinely sends nothing more.
-  static void config_entry_to_proto(const kafka_admin_ConfigEntry_t* entry, ConfigEntry* dst) {
-    dst->set_name(cstr(kafka_admin_ConfigEntry_name(entry)));
-    // Java's nullable value(): null when unset or suppressed as sensitive, and
-    // it must stay absent rather than become "".
-    const char* value = kafka_admin_ConfigEntry_value(entry);
-    if (value != nullptr) dst->set_value(std::string(value));
-    dst->set_is_default(kafka_admin_ConfigEntry_is_default(entry));
-    dst->set_is_sensitive(kafka_admin_ConfigEntry_is_sensitive(entry));
-    dst->set_is_read_only(kafka_admin_ConfigEntry_is_read_only(entry));
-    // ConfigSource / ConfigType have no numeric id in Java, so the C surface
-    // hands out the enum constant name and that is what crosses.
-    const char* source = kafka_admin_ConfigEntry_source(entry);
-    if (source != nullptr) dst->set_source(std::string(source));
-    const char* config_type = kafka_admin_ConfigEntry_type(entry);
-    if (config_type != nullptr) dst->set_config_type(std::string(config_type));
-    const char* documentation = kafka_admin_ConfigEntry_documentation(entry);
-    if (documentation != nullptr) dst->set_documentation(std::string(documentation));
-    // Synonyms keep Java's precedence order; index order is that order.
-    const int32_t synonyms = kafka_admin_ConfigEntry_synonym_count(entry);
-    for (int32_t i = 0; i < synonyms; i++) {
-      ConfigSynonym* synonym = dst->add_synonyms();
-      synonym->set_name(cstr(kafka_admin_ConfigEntry_synonym_name(entry, i)));
-      const char* synonym_value = kafka_admin_ConfigEntry_synonym_value(entry, i);
-      if (synonym_value != nullptr) synonym->set_value(std::string(synonym_value));
-      synonym->set_source(cstr(kafka_admin_ConfigEntry_synonym_source(entry, i)));
-    }
-  }
-
-  // Returns false if any entry could not be read (unreachable for i < entries).
-  // A bool rather than a silent `continue`, so the caller can report an error
-  // instead of returning a successful config with silently reduced cardinality.
-  static bool config_to_proto(const kafka_admin_Config_t* config, AdminConfig* dst) {
-    const int32_t entries = kafka_admin_Config_entry_count(config);
-    for (int32_t i = 0; i < entries; i++) {
-      const kafka_admin_ConfigEntry_t* entry = kafka_admin_Config_get_entry(config, i);
-      if (entry == nullptr) return false;
-      config_entry_to_proto(entry, dst->add_entries());
-    }
-    return true;
   }
 
   static void log_dir_description_to_proto(const kafka_admin_LogDirDescription_t* description,
@@ -5092,236 +4821,121 @@ class AdminServiceImpl final : public AdminService::Service {
     const kafka_common_Error_t* err = kafka_admin_LogDirDescription_error(description);
     if (err != nullptr) copy_proto_error(dst->mutable_error(), err);
     // Java's totalBytes() / usableBytes() are OptionalLong; the C surface spells
-    // an empty one -1 (DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES), the same
-    // mapping admin.py applies, so a negative stays absent on the wire.
+    // an empty one -1 (DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES), so a
+    // negative stays absent on the wire.
     const int64_t total = kafka_admin_LogDirDescription_total_bytes(description);
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
     if (usable >= 0) dst->set_usable_bytes(usable);
-    const int32_t replicas = kafka_admin_LogDirDescription_replica_count(description);
-    for (int32_t i = 0; i < replicas; i++) {
-      ReplicaInfoEntry* replica = dst->add_replica_infos();
-      TopicPartition* tp = replica->mutable_partition();
-      tp->set_topic(cstr(kafka_admin_LogDirDescription_replica_topic(description, i)));
-      tp->set_partition(kafka_admin_LogDirDescription_replica_partition(description, i));
-      replica->set_size(kafka_admin_LogDirDescription_replica_size(description, i));
-      replica->set_offset_lag(
-          kafka_admin_LogDirDescription_replica_offset_lag(description, i));
-      replica->set_is_future(
-          kafka_admin_LogDirDescription_replica_is_future(description, i));
-    }
-  }
-
-  // deleteTopics / describeTopics render their key as a topic name or as the
-  // base64 topic id depending on which TopicCollection the request carried.
-  static void set_keyed(ResultKey* key, const char* text, bool by_ids) {
-    if (by_ids) {
-      key->set_topic_id(cstr(text));
-    } else {
-      key->set_name(cstr(text));
-    }
-  }
-
-  static void metadata_to_proto(const kafka_admin_TopicMetadataAndConfig_t* mc,
-                                TopicMetadataAndConfig* dst) {
-    // The value-level error of envelope exception 3: the topic was created but
-    // the broker did not return its metadata, so every Java accessor rethrows.
-    // It must cross as the error arm, not as a metadata of -1s.
-    const kafka_common_Error_t* err = kafka_admin_TopicMetadataAndConfig_error(mc);
-    if (err != nullptr) {
-      copy_proto_error(dst->mutable_error(), err);
-      return;
-    }
-    TopicMetadata* metadata = dst->mutable_metadata();
-    metadata->set_topic_id(cstr(kafka_admin_TopicMetadataAndConfig_topic_id(mc)));
-    metadata->set_num_partitions(kafka_admin_TopicMetadataAndConfig_num_partitions(mc));
-    metadata->set_replication_factor(
-        kafka_admin_TopicMetadataAndConfig_replication_factor(mc));
-    const int32_t configs = kafka_admin_TopicMetadataAndConfig_config_count(mc);
-    for (int32_t i = 0; i < configs; i++) {
-      ConfigEntry* entry = metadata->add_configs();
-      entry->set_name(cstr(kafka_admin_TopicMetadataAndConfig_config_name(mc, i)));
-      // Java's nullable value(): null when unset or suppressed as sensitive.
-      const char* value = kafka_admin_TopicMetadataAndConfig_config_value(mc, i);
-      if (value != nullptr) entry->set_value(std::string(value));
-      entry->set_is_default(kafka_admin_TopicMetadataAndConfig_config_is_default(mc, i));
-      entry->set_is_sensitive(kafka_admin_TopicMetadataAndConfig_config_is_sensitive(mc, i));
-      entry->set_is_read_only(kafka_admin_TopicMetadataAndConfig_config_is_read_only(mc, i));
-    }
-  }
-
-  // Named for its Java type rather than reusing `partition_info_to_proto`,
-  // which is the consumer service's free function for `PartitionInfo`; a member
-  // of the same name would hide it inside this class.
-  static void topic_partition_info_to_proto(const kafka_common_TopicPartitionInfo_t* info,
-                                            TopicPartitionInfo* dst) {
-    dst->set_partition(kafka_common_TopicPartitionInfo_partition(info));
-    const kafka_common_Node_t* leader = kafka_common_TopicPartitionInfo_leader(info);
-    if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-    node_list_to_proto(kafka_common_TopicPartitionInfo_replicas(info),
-                       [dst] { return dst->add_replicas(); });
-    node_list_to_proto(kafka_common_TopicPartitionInfo_isr(info),
-                       [dst] { return dst->add_isr(); });
-    // elr / last_known_elr are nullable in Java: the getters return nullptr for
-    // an absent set and an empty list for a reported-but-empty one, so only a
-    // non-null list creates the proto field.
-    if (kafka_List_t* elr = kafka_common_TopicPartitionInfo_elr(info)) {
-      NodeList* out = dst->mutable_elr();
-      node_list_to_proto(elr, [out] { return out->add_nodes(); });
-    }
-    if (kafka_List_t* last = kafka_common_TopicPartitionInfo_last_known_elr(info)) {
-      NodeList* out = dst->mutable_last_known_elr();
-      node_list_to_proto(last, [out] { return out->add_nodes(); });
-    }
-  }
-
-  static void description_to_proto(const kafka_admin_TopicDescription_t* description,
-                                   TopicDescription* dst) {
-    dst->set_name(cstr(kafka_admin_TopicDescription_name(description)));
-    dst->set_topic_id(cstr(kafka_admin_TopicDescription_topic_id(description)));
-    dst->set_is_internal(kafka_admin_TopicDescription_is_internal(description));
-    const int32_t partitions = kafka_admin_TopicDescription_partition_count(description);
-    for (int32_t i = 0; i < partitions; i++) {
-      topic_partition_info_to_proto(kafka_admin_TopicDescription_partition(description, i),
-                                    dst->add_partitions());
-    }
-    // Absent means the broker did not report the operations, which is not the
-    // same as reporting that none are authorized.
-    if (kafka_admin_TopicDescription_has_authorized_operations(description)) {
-      AclOperationList* ops = dst->mutable_authorized_operations();
-      const int32_t n = kafka_admin_TopicDescription_authorized_operation_count(description);
-      for (int32_t i = 0; i < n; i++) {
-        ops->add_operations(kafka_admin_TopicDescription_authorized_operation(description, i));
-      }
-    }
-  }
-
-  // -- Group value converters (slice G4) ------------------------------------
-
-  static void member_assignment_to_proto(const kafka_admin_MemberAssignment_t* assignment,
-                                         MemberAssignment* dst) {
-    const int32_t n = kafka_admin_MemberAssignment_count(assignment);
+    OwnedMap replicas(kafka_admin_LogDirDescription_replica_infos(description));
+    const int32_t n = replicas ? kafka_Map_size(replicas.get()) : 0;
     for (int32_t i = 0; i < n; i++) {
-      TopicPartition* tp = dst->add_topic_partitions();
-      tp->set_topic(cstr(kafka_admin_MemberAssignment_get_topic(assignment, i)));
-      tp->set_partition(kafka_admin_MemberAssignment_get_partition(assignment, i));
+      ReplicaInfoEntry* replica = dst->add_replica_infos();
+      tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(replicas.get(), i)),
+                  replica->mutable_partition());
+      const auto* info = static_cast<const kafka_admin_ReplicaInfo_t*>(kafka_Map_value(replicas.get(), i));
+      replica->set_size(kafka_admin_ReplicaInfo_size(info));
+      replica->set_offset_lag(kafka_admin_ReplicaInfo_offset_lag(info));
+      replica->set_is_future(kafka_admin_ReplicaInfo_is_future(info) != 0);
     }
   }
 
-  static void member_description_to_proto(const kafka_admin_MemberDescription_t* member,
-                                          MemberDescription* dst) {
-    dst->set_consumer_id(cstr(kafka_admin_MemberDescription_consumer_id(member)));
-    dst->set_client_id(cstr(kafka_admin_MemberDescription_client_id(member)));
-    dst->set_host(cstr(kafka_admin_MemberDescription_host(member)));
-    // group_instance_id / rack_id are Java Optionals: NULL is an empty one and
-    // must stay absent, since a static member with an empty instance id is not
-    // the same thing as a dynamic member.
-    const char* instance_id = kafka_admin_MemberDescription_group_instance_id(member);
-    if (instance_id != nullptr) dst->set_group_instance_id(std::string(instance_id));
-    const char* rack_id = kafka_admin_MemberDescription_rack_id(member);
-    if (rack_id != nullptr) dst->set_rack_id(std::string(rack_id));
-    // Java's assignment() is never null; targetAssignment() is nullable, and an
-    // absent one must not become an assignment holding no partitions.
-    const kafka_admin_MemberAssignment_t* assignment =
-        kafka_admin_MemberDescription_assignment(member);
-    if (assignment != nullptr) {
-      member_assignment_to_proto(assignment, dst->mutable_assignment());
-    }
-    const kafka_admin_MemberAssignment_t* target =
-        kafka_admin_MemberDescription_target_assignment(member);
-    if (target != nullptr) {
-      member_assignment_to_proto(target, dst->mutable_target_assignment());
-    }
-    int32_t member_epoch = 0;
-    if (kafka_admin_MemberDescription_member_epoch(member, &member_epoch)) {
-      dst->set_member_epoch(member_epoch);
-    }
-    bool upgraded = false;
-    if (kafka_admin_MemberDescription_upgraded(member, &upgraded)) {
-      dst->set_upgraded(upgraded);
+  // Copies an owned list of boxed `int32_t *` through `add`, then frees it.
+  template <typename Add>
+  static void int32_list_to_proto(kafka_List_t* ids, Add add) {
+    OwnedList owned(ids);
+    for_each_in_list<int32_t>(owned.get(), [&add](const int32_t* id) { add(*id); });
+  }
+
+  // Maps the proto OffsetSpec onto the Java OffsetSpec factories: the five
+  // constant kinds are singletons, FOR_TIMESTAMP is an owned handle kept in
+  // `owned`. Null for KIND_UNSPECIFIED, an unknown kind, or FOR_TIMESTAMP
+  // without a timestamp.
+  static const kafka_admin_OffsetSpec_t* offset_spec_for(
+      const OffsetSpec& spec, OwnedHandles<kafka_admin_OffsetSpec_t, kafka_admin_OffsetSpec_destroy>* owned) {
+    switch (spec.kind()) {
+      case OffsetSpec::EARLIEST:
+        return kafka_admin_OffsetSpec_earliest();
+      case OffsetSpec::LATEST:
+        return kafka_admin_OffsetSpec_latest();
+      case OffsetSpec::MAX_TIMESTAMP:
+        return kafka_admin_OffsetSpec_max_timestamp();
+      case OffsetSpec::EARLIEST_LOCAL:
+        return kafka_admin_OffsetSpec_earliest_local();
+      case OffsetSpec::LATEST_TIERED:
+        return kafka_admin_OffsetSpec_latest_tiered();
+      case OffsetSpec::EARLIEST_PENDING_UPLOAD:
+        return kafka_admin_OffsetSpec_earliest_pending_upload();
+      case OffsetSpec::FOR_TIMESTAMP:
+        if (!spec.has_timestamp()) return nullptr;
+        return owned->add(kafka_admin_OffsetSpec_for_timestamp(spec.timestamp()));
+      default:
+        return nullptr;
     }
   }
 
-  static void consumer_group_description_to_proto(
-      const kafka_admin_ConsumerGroupDescription_t* description,
-      ConsumerGroupDescription* dst) {
-    dst->set_group_id(cstr(kafka_admin_ConsumerGroupDescription_group_id(description)));
-    dst->set_is_simple_consumer_group(
-        kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(description));
-    dst->set_partition_assignor(
-        cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(description)));
-    dst->set_group_type(cstr(kafka_admin_ConsumerGroupDescription_group_type(description)));
-    dst->set_group_state(cstr(kafka_admin_ConsumerGroupDescription_group_state(description)));
-    const int32_t members = kafka_admin_ConsumerGroupDescription_member_count(description);
-    for (int32_t i = 0; i < members; i++) {
-      const kafka_admin_MemberDescription_t* member =
-          kafka_admin_ConsumerGroupDescription_get_member(description, i);
-      if (member != nullptr) member_description_to_proto(member, dst->add_members());
+  // Builds owned `kafka_common_acl_AclBinding_t` handles from proto bindings,
+  // keeping the pattern and entry handles they were built from alive.
+  struct AclBindingArgs {
+    kafka_common_Error_t* build(const AclBinding& b, kafka_common_acl_AclBinding_t** out) {
+      kafka_common_resource_ResourcePattern_t* pattern = nullptr;
+      kafka_common_Error_t* err = kafka_common_resource_ResourcePattern_new(
+          kafka_common_resource_ResourceType_from_code(static_cast<int8_t>(b.resource_type())),
+          b.resource_name().c_str(),
+          kafka_common_resource_PatternType_from_code(static_cast<int8_t>(b.pattern_type())), &pattern);
+      if (err != nullptr) return err;
+      patterns.add(pattern);
+      kafka_common_acl_AccessControlEntry_t* entry = nullptr;
+      err = kafka_common_acl_AccessControlEntry_new(
+          b.principal().c_str(), b.host().c_str(),
+          kafka_common_acl_AclOperation_from_code(static_cast<int8_t>(b.operation())),
+          kafka_common_acl_AclPermissionType_from_code(static_cast<int8_t>(b.permission_type())), &entry);
+      if (err != nullptr) return err;
+      entries.add(entry);
+      *out = bindings.add(kafka_common_acl_AclBinding_new(pattern, entry));
+      return nullptr;
     }
-    // The coordinator's full endpoint, which is the field this milestone exists
-    // for: it must carry the broker's real host and port, not id-only.
-    const kafka_common_Node_t* coordinator =
-        kafka_admin_ConsumerGroupDescription_coordinator(description);
-    if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
-    // Absent means the broker did not report the operations at all, which is not
-    // the same as reporting that none are authorized.
-    if (kafka_admin_ConsumerGroupDescription_has_authorized_operations(description)) {
-      AclOperationList* ops = dst->mutable_authorized_operations();
-      const int32_t n =
-          kafka_admin_ConsumerGroupDescription_authorized_operation_count(description);
-      for (int32_t i = 0; i < n; i++) {
-        ops->add_operations(
-            kafka_admin_ConsumerGroupDescription_authorized_operation(description, i));
-      }
-    }
-    // groupEpoch / targetAssignmentEpoch are Optionals, both empty for a classic
-    // group; an absent one must not become 0.
-    int32_t group_epoch = 0;
-    if (kafka_admin_ConsumerGroupDescription_group_epoch(description, &group_epoch)) {
-      dst->set_group_epoch(group_epoch);
-    }
-    int32_t target_epoch = 0;
-    if (kafka_admin_ConsumerGroupDescription_target_assignment_epoch(description,
-                                                                    &target_epoch)) {
-      dst->set_target_assignment_epoch(target_epoch);
-    }
-  }
+    OwnedHandles<kafka_common_resource_ResourcePattern_t, kafka_common_resource_ResourcePattern_destroy> patterns;
+    OwnedHandles<kafka_common_acl_AccessControlEntry_t, kafka_common_acl_AccessControlEntry_destroy> entries;
+    OwnedHandles<kafka_common_acl_AclBinding_t, kafka_common_acl_AclBinding_destroy> bindings;
+  };
 
-  static void classic_group_description_to_proto(
-      const kafka_admin_ClassicGroupDescription_t* description,
-      ClassicGroupDescription* dst) {
-    dst->set_group_id(cstr(kafka_admin_ClassicGroupDescription_group_id(description)));
-    // protocol is the protocol *type*, protocol_data the selected assignment
-    // strategy: two different response fields, so both cross and a transposition
-    // is detectable.
-    dst->set_protocol(cstr(kafka_admin_ClassicGroupDescription_protocol(description)));
-    dst->set_protocol_data(
-        cstr(kafka_admin_ClassicGroupDescription_protocol_data(description)));
-    dst->set_is_simple_consumer_group(
-        kafka_admin_ClassicGroupDescription_is_simple_consumer_group(description));
-    dst->set_state(cstr(kafka_admin_ClassicGroupDescription_state(description)));
-    const int32_t members = kafka_admin_ClassicGroupDescription_member_count(description);
-    for (int32_t i = 0; i < members; i++) {
-      const kafka_admin_MemberDescription_t* member =
-          kafka_admin_ClassicGroupDescription_get_member(description, i);
-      if (member != nullptr) member_description_to_proto(member, dst->add_members());
+  // Same for `kafka_common_acl_AclBindingFilter_t`: the optional proto
+  // fields are Java's nullable "match any" filter values.
+  struct AclFilterArgs {
+    const kafka_common_acl_AclBindingFilter_t* build(const AclBindingFilter& f) {
+      kafka_common_resource_ResourcePatternFilter_t* pattern = patterns.add(
+          kafka_common_resource_ResourcePatternFilter_new(
+              kafka_common_resource_ResourceType_from_code(static_cast<int8_t>(f.resource_type())),
+              f.has_resource_name() ? f.resource_name().c_str() : nullptr,
+              kafka_common_resource_PatternType_from_code(static_cast<int8_t>(f.pattern_type()))));
+      kafka_common_acl_AccessControlEntryFilter_t* entry = entries.add(
+          kafka_common_acl_AccessControlEntryFilter_new(
+              f.has_principal() ? f.principal().c_str() : nullptr,
+              f.has_host() ? f.host().c_str() : nullptr,
+              kafka_common_acl_AclOperation_from_code(static_cast<int8_t>(f.operation())),
+              kafka_common_acl_AclPermissionType_from_code(static_cast<int8_t>(f.permission_type()))));
+      return filters.add(kafka_common_acl_AclBindingFilter_new(pattern, entry));
     }
-    const kafka_common_Node_t* coordinator =
-        kafka_admin_ClassicGroupDescription_coordinator(description);
-    if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
-    if (kafka_admin_ClassicGroupDescription_has_authorized_operations(description)) {
-      AclOperationList* ops = dst->mutable_authorized_operations();
-      const int32_t n =
-          kafka_admin_ClassicGroupDescription_authorized_operation_count(description);
-      for (int32_t i = 0; i < n; i++) {
-        ops->add_operations(
-            kafka_admin_ClassicGroupDescription_authorized_operation(description, i));
-      }
+    OwnedHandles<kafka_common_resource_ResourcePatternFilter_t, kafka_common_resource_ResourcePatternFilter_destroy>
+        patterns;
+    OwnedHandles<kafka_common_acl_AccessControlEntryFilter_t, kafka_common_acl_AccessControlEntryFilter_destroy>
+        entries;
+    OwnedHandles<kafka_common_acl_AclBindingFilter_t, kafka_common_acl_AclBindingFilter_destroy> filters;
+  };
+
+  // `new ClientQuotaEntity(Map<String, String>)`: an absent entity_name is
+  // Java's null, naming the built-in default entity for its type.
+  static kafka_common_quota_ClientQuotaEntity_t* quota_entity_from_proto(const ClientQuotaEntity& e) {
+    CMap entries;
+    for (const auto& entry : e.entries()) {
+      entries.put(entry.entity_type().c_str(), entry.has_entity_name() ? entry.entity_name().c_str() : nullptr);
     }
+    return kafka_common_quota_ClientQuotaEntity_new(entries.map);
   }
 
   std::mutex mu_;
-  std::unordered_map<uint64_t, kafka_admin_AdminClient_t*> admins_;
+  std::unordered_map<uint64_t, AdminEntry> admins_;
   std::atomic<uint64_t> next_id_{1};
 };
 

@@ -37,6 +37,17 @@ unsafe fn inner_ref<'a>(replica: *const kafka_common_TopicPartitionReplica_t) ->
     unsafe { &*(replica as *const TopicPartitionReplicaInner) }
 }
 
+/// The replica behind a handle.
+///
+/// # Safety
+///
+/// `replica` must be a live handle.
+pub(crate) unsafe fn topic_partition_replica_ref<'a>(
+    replica: *const kafka_common_TopicPartitionReplica_t,
+) -> &'a TopicPartitionReplica {
+    &unsafe { inner_ref(replica) }.replica
+}
+
 /// `new TopicPartitionReplica(String topic, int partition, int brokerId)`,
 /// as an owned handle freed with
 /// [`kafka_common_TopicPartitionReplica_destroy`].

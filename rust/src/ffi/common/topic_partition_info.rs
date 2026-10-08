@@ -50,6 +50,8 @@ impl TopicPartitionInfoInner {
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
+    // handed out by the admin result handles once the admin slice lands
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn as_ptr(&self) -> *const kafka_common_TopicPartitionInfo_t {
         self as *const Self as *const kafka_common_TopicPartitionInfo_t
     }
@@ -61,6 +63,23 @@ unsafe fn inner_ref<'a>(info: *const kafka_common_TopicPartitionInfo_t) -> &'a T
 
 fn boxed(info: TopicPartitionInfo) -> *mut kafka_common_TopicPartitionInfo_t {
     Box::into_raw(Box::new(TopicPartitionInfoInner::new(info))) as *mut kafka_common_TopicPartitionInfo_t
+}
+
+/// The value behind a handle.
+///
+/// # Safety
+///
+/// `info` must be a live handle.
+pub(crate) unsafe fn topic_partition_info_ref<'a>(
+    info: *const kafka_common_TopicPartitionInfo_t,
+) -> &'a TopicPartitionInfo {
+    &unsafe { inner_ref(info) }.info
+}
+
+/// Hands `info` to C as an owned handle, freed with
+/// `kafka_common_TopicPartitionInfo_destroy`.
+pub(crate) fn box_topic_partition_info(info: TopicPartitionInfo) -> *mut kafka_common_TopicPartitionInfo_t {
+    boxed(info)
 }
 
 /// `new TopicPartitionInfo(int partition, Node leader, List<Node> replicas,

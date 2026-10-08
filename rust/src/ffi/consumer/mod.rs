@@ -100,7 +100,7 @@ use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, map_topic_partition_i64, sorted_topic_partition_list,
     topic_partition_i64_map, topic_partition_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, take_error};
 use crate::ffi::consumer::close_options::{close_options_ref, kafka_consumer_CloseOptions_t};
 use crate::ffi::consumer::consumer_group_metadata::box_group_metadata;
 pub(crate) use crate::ffi::consumer::consumer_group_metadata::{
@@ -318,6 +318,7 @@ impl ConsumerClassHandle {
     /// multi-thread runtime (an `AsyncKafkaConsumer` spawns its background
     /// task on construction).
     pub(crate) fn new(owns: Owns, make: impl FnOnce() -> Result<ConsumerKind, Error>) -> Result<Box<Self>, Error> {
+        init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("kafka-consumer-ffi")

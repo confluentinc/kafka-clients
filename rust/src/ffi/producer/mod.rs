@@ -106,7 +106,7 @@ use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_d
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_destroy};
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t};
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
     offset_and_metadata_ref,
@@ -337,6 +337,7 @@ where
     /// multi-thread runtime (a `KafkaProducer` spawns its Sender task on
     /// construction), and wraps it with the runtime and the submission task.
     pub(crate) fn new(make: impl FnOnce() -> Result<P, Error>) -> Result<Box<Self>, Error> {
+        init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("kafka-producer-ffi")

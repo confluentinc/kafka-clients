@@ -7,27 +7,37 @@ Mirrors the Java ``Admin`` interface with Python naming, in both a synchronous
 Design notes
 ------------
 * The C extension (``_confluentkafka``) is a marshaling layer only: it converts
-  Python objects to/from the C FFI and bridges the FFI's async callbacks back
-  into Python. All orchestration lives here in pure Python.
-* **Both APIs drive the async C bindings.** Even the synchronous methods submit
-  an async FFI op and then wait on an interruptible Python primitive, so a slow
-  admin RPC never parks the calling thread inside a native ``block_on`` where
-  Python signal handlers cannot run.
-* Unlike the consumer, the admin client has no ``wakeup()``: an in-flight RPC
-  cannot be aborted. On ``KeyboardInterrupt`` the sync waiter therefore keeps
-  waiting for the callback (so the result handles are freed rather than leaked)
-  and then re-raises. This matches Java, where interrupting
-  ``KafkaFuture.get()`` does not cancel the underlying admin request.
+  Python objects to/from the C FFI. All orchestration lives here in pure Python.
+* **Every RPC is a plain synchronous C call that returns a result object**, as
+  in Java: the network I/O happens later on the client's background task, and
+  the result holds one ``KafkaFuture`` per key (or per view) that the caller
+  resolves. The C layer hands the result back as an opaque *job* -- the result
+  plus the futures it exposes -- and this module resolves it:
+
+  - the synchronous client (:class:`AdminClient`, :class:`MockAdminClient`)
+    resolves with ``kafka_common_KafkaFuture_get`` on the calling thread, GIL
+    released, exactly like a Java caller blocking in ``KafkaFuture.get()``;
+  - the asyncio client (:class:`AsyncAdminClient`, :class:`AsyncMockAdminClient`)
+    resolves with ``kafka_common_KafkaFuture_get_cb``. The completion callbacks
+    queue up on the client and the ``set_callbacks_notify`` hook -- which only
+    *schedules*, via ``loop.call_soon_threadsafe`` -- has the event loop drain
+    them with ``execute_callbacks`` on its own thread. No extra thread exists.
+
+* There is no admin ``wakeup()``: an in-flight RPC cannot be aborted. The sync
+  client blocks inside ``KafkaFuture.get`` with the GIL released, so a
+  ``KeyboardInterrupt`` is raised once the call returns (the result is freed
+  rather than leaked, and the client stays usable). This matches Java, where
+  interrupting ``KafkaFuture.get()`` does not cancel the admin request.
 * The Rust admin client is thread-safe (Java's ``KafkaAdminClient`` is too), so
-  concurrent calls from several threads or tasks are allowed — there is no
+  concurrent calls from several threads or tasks are allowed -- there is no
   single-owner guard as on the consumer.
 
 Per-key results
 ---------------
 Java returns one ``KafkaFuture<T>`` per key (per topic for ``createTopics``).
-C has no ``KafkaFuture``, so each RPC delivers one flattened result handle
-carrying a value *and* an error per key, and this module drains it into a plain
-dict whose values are either the result object or a :class:`KafkaError`:
+Each per-key future is resolved individually and the outcomes are collected
+into a plain dict whose values are either the result object or a
+:class:`KafkaError`:
 
 * ``create_topics`` -> ``{topic_name: TopicMetadataAndConfig | KafkaError}``
 * ``delete_topics`` -> ``{topic_name: None | KafkaError}`` (Java's per-key
@@ -2254,9 +2264,28 @@ def _close_ms(timeout):
     return int(float(timeout) * 1000)
 
 
+def _whole(convert):
+    """Wrap a converter for a whole-call result: ``(error, value)`` raises the
+    error (Java's single ``KafkaFuture`` failing) or converts the value."""
+    def convert_whole(payload):
+        error, value = payload
+        if error is not None:
+            raise _to_error(error)
+        return convert(value)
+    return convert_whole
+
+
+def _void(payload):
+    """A whole-call ``KafkaFuture<Void>``: raise the error or return None."""
+    error, _ = payload
+    if error is not None:
+        raise _to_error(error)
+    return None
+
+
 # --------------------------------------------------------------------------
-# Shared base: handle ownership and the per-method (submit, resolve, free)
-# specs driven by _run_sync / _run_async.
+# Shared base: handle ownership and the per-method (submit, convert) specs
+# driven by _run_sync / _run_async.
 # --------------------------------------------------------------------------
 class _AdminBase:
     def __init__(self):
@@ -2278,72 +2307,42 @@ class _AdminBase:
             _lib.Admin_destroy(self._h)
             self._h = None
 
-    # ---- resolve / free pairs (by callback payload shape) ------------------
+    # ---- per-method specs: (submit, convert) --------------------------------
+    #
+    # `submit()` issues the C RPC and returns its `(job, error)` pair: a job to
+    # resolve, or an owned error handle when a typed constructor rejected an
+    # argument before anything was sent (the Python wrapper raises it).
+    # `convert(payload)` turns the resolved raw payload into the public shape.
+    # Keyed results keep their raw dict shape; whole-call results arrive as
+    # `(error, value)` and go through `_whole` / `_void`, which raise the
+    # call-level error as Java's single future would.
+
     @staticmethod
-    def _resolve_void(payload):
-        (error,) = payload
+    def _submit(ret):
+        job, error = ret
         if error:
             raise KafkaError._from_c(error)
-        return None
-
-    @staticmethod
-    def _free_void(payload):
-        if payload[0]:
-            _lib.KafkaError_destroy(payload[0])
-
-    @staticmethod
-    def _resolve_value(drain, convert):
-        def resolve(payload):
-            handle, error = payload
-            if error:
-                raise KafkaError._from_c(error)
-            return convert(drain(handle))
-        return resolve
-
-    @staticmethod
-    def _free_value(drain):
-        def free(payload):
-            handle, error = payload
-            if error:
-                _lib.KafkaError_destroy(error)
-            if handle:
-                drain(handle)  # drain destroys the handle
-        return free
-
-    # ---- per-method specs: (submit, resolve, free) -------------------------
-    def _close_spec(self, timeout):
-        ms = _close_ms(timeout)
-        return (lambda cb: _lib.Admin_close_async(self._h, ms, cb),
-                self._resolve_void, self._free_void)
+        return job
 
     def _create_topics_spec(self, new_topics, timeout, validate_only,
                             retry_on_quota_violation):
         spec = [t._to_spec() for t in new_topics]
         ms = _ms(timeout)
-        drain = _lib.CreateTopicsResult_drain
-        return (lambda cb: _lib.Admin_create_topics_async(
+        return (lambda: _lib.Admin_create_topics(
                     self._h, spec, ms, bool(validate_only),
-                    bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_create_topics),
-                self._free_value(drain))
+                    bool(retry_on_quota_violation)), _to_create_topics)
 
     def _delete_topics_spec(self, topics, timeout, retry_on_quota_violation, by_ids):
         names = [str(t) for t in topics]
         ms = _ms(timeout)
-        fn = (_lib.Admin_delete_topics_by_ids_async if by_ids
-              else _lib.Admin_delete_topics_async)
-        drain = _lib.DeleteTopicsResult_drain
-        return (lambda cb: fn(self._h, names, ms, bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_delete_topics),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_delete_topics(
+                    self._h, names, ms, bool(retry_on_quota_violation), bool(by_ids)),
+                _to_delete_topics)
 
     def _list_topics_spec(self, timeout, list_internal):
         ms = _ms(timeout)
-        drain = _lib.ListTopicsResult_drain
-        return (lambda cb: _lib.Admin_list_topics_async(
-                    self._h, ms, bool(list_internal), cb),
-                self._resolve_value(drain, _to_list_topics),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_topics(
+                    self._h, ms, bool(list_internal)), _whole(_to_list_topics))
 
     @staticmethod
     def _create_partitions_rows(new_partitions):
@@ -2365,12 +2364,9 @@ class _AdminBase:
                                 retry_on_quota_violation):
         spec = self._create_partitions_rows(new_partitions)
         ms = _ms(timeout)
-        drain = _lib.CreatePartitionsResult_drain
-        return (lambda cb: _lib.Admin_create_partitions_async(
+        return (lambda: _lib.Admin_create_partitions(
                     self._h, spec, ms, bool(validate_only),
-                    bool(retry_on_quota_violation), cb),
-                self._resolve_value(drain, _to_create_partitions),
-                self._free_value(drain))
+                    bool(retry_on_quota_violation)), _to_create_partitions)
 
     @staticmethod
     def _delete_records_rows(records_to_delete):
@@ -2387,31 +2383,22 @@ class _AdminBase:
     def _delete_records_spec(self, records_to_delete, timeout):
         spec = self._delete_records_rows(records_to_delete)
         ms = _ms(timeout)
-        drain = _lib.DeleteRecordsResult_drain
-        return (lambda cb: _lib.Admin_delete_records_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_delete_records),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_delete_records(self._h, spec, ms), _to_delete_records)
 
     def _describe_cluster_spec(self, timeout, include_authorized_operations,
                                include_fenced_brokers):
         ms = _ms(timeout)
-        drain = _lib.DescribeClusterResult_drain
-        return (lambda cb: _lib.Admin_describe_cluster_async(
+        return (lambda: _lib.Admin_describe_cluster(
                     self._h, ms, bool(include_authorized_operations),
-                    bool(include_fenced_brokers), cb),
-                self._resolve_value(drain, _to_cluster_description),
-                self._free_value(drain))
+                    bool(include_fenced_brokers)), _whole(_to_cluster_description))
 
     def _describe_configs_spec(self, resources, timeout, include_synonyms,
                                include_documentation):
         spec = [(int(r.resource_type), str(r.name)) for r in resources]
         ms = _ms(timeout)
-        drain = _lib.DescribeConfigsResult_drain
-        return (lambda cb: _lib.Admin_describe_configs_async(
+        return (lambda: _lib.Admin_describe_configs(
                     self._h, spec, ms, bool(include_synonyms),
-                    bool(include_documentation), cb),
-                self._resolve_value(drain, _to_describe_configs),
-                self._free_value(drain))
+                    bool(include_documentation)), _to_describe_configs)
 
     def _incremental_alter_configs_spec(self, configs, timeout, validate_only):
         # Java's Map<ConfigResource, Collection<AlterConfigOp>> flattens to one
@@ -2422,44 +2409,29 @@ class _AdminBase:
                  int(op.op_type))
                 for resource, ops in configs.items() for op in ops]
         ms = _ms(timeout)
-        drain = _lib.AlterConfigsResult_drain
-        return (lambda cb: _lib.Admin_incremental_alter_configs_async(
-                    self._h, spec, ms, bool(validate_only), cb),
-                self._resolve_value(drain, _to_alter_configs),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_incremental_alter_configs(
+                    self._h, spec, ms, bool(validate_only)), _to_alter_configs)
 
     def _list_config_resources_spec(self, resource_types, timeout):
         types = [] if resource_types is None else [int(t) for t in resource_types]
         ms = _ms(timeout)
-        drain = _lib.ListConfigResourcesResult_drain
-        return (lambda cb: _lib.Admin_list_config_resources_async(self._h, types, ms, cb),
-                self._resolve_value(drain, _to_config_resources),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_config_resources(self._h, types, ms), _whole(_to_config_resources))
 
     def _describe_log_dirs_spec(self, brokers, timeout):
         ids = [int(b) for b in brokers]
         ms = _ms(timeout)
-        drain = _lib.DescribeLogDirsResult_drain
-        return (lambda cb: _lib.Admin_describe_log_dirs_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_describe_log_dirs),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_log_dirs(self._h, ids, ms), _to_describe_log_dirs)
 
     def _alter_replica_log_dirs_spec(self, replica_assignment, timeout):
         spec = [(str(r.topic), int(r.partition), int(r.broker_id), str(log_dir))
                 for r, log_dir in replica_assignment.items()]
         ms = _ms(timeout)
-        drain = _lib.AlterReplicaLogDirsResult_drain
-        return (lambda cb: _lib.Admin_alter_replica_log_dirs_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_alter_replica_log_dirs),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_alter_replica_log_dirs(self._h, spec, ms), _to_alter_replica_log_dirs)
 
     def _describe_replica_log_dirs_spec(self, replicas, timeout):
         spec = [(str(r.topic), int(r.partition), int(r.broker_id)) for r in replicas]
         ms = _ms(timeout)
-        drain = _lib.DescribeReplicaLogDirsResult_drain
-        return (lambda cb: _lib.Admin_describe_replica_log_dirs_async(self._h, spec, ms, cb),
-                self._resolve_value(drain, _to_describe_replica_log_dirs),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_replica_log_dirs(self._h, spec, ms), _to_describe_replica_log_dirs)
 
     @staticmethod
     def _elect_leaders_rows(partitions):
@@ -2479,11 +2451,8 @@ class _AdminBase:
     def _elect_leaders_spec(self, election_type, partitions, timeout):
         all_partitions, spec = self._elect_leaders_rows(partitions)
         ms = _ms(timeout)
-        drain = _lib.ElectLeadersResult_drain
-        return (lambda cb: _lib.Admin_elect_leaders_async(
-                    self._h, int(election_type), all_partitions, spec, ms, cb),
-                self._resolve_value(drain, _to_elect_leaders),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_elect_leaders(
+                    self._h, int(election_type), all_partitions, spec, ms), _whole(_to_elect_leaders))
 
     def _alter_partition_reassignments_spec(self, reassignments, timeout,
                                             allow_replication_factor_change):
@@ -2494,45 +2463,33 @@ class _AdminBase:
                  [] if r is None else [int(x) for x in r.target_replicas])
                 for (topic, partition), r in reassignments.items()]
         ms = _ms(timeout)
-        drain = _lib.AlterPartitionReassignmentsResult_drain
-        return (lambda cb: _lib.Admin_alter_partition_reassignments_async(
-                    self._h, spec, ms, bool(allow_replication_factor_change), cb),
-                self._resolve_value(drain, _to_alter_partition_reassignments),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_alter_partition_reassignments(
+                    self._h, spec, ms, bool(allow_replication_factor_change)), _to_alter_partition_reassignments)
 
     def _list_partition_reassignments_spec(self, partitions, timeout):
         # `partitions is None` is Java's Optional.empty(): list everything.
         all_partitions = partitions is None
         spec = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
         ms = _ms(timeout)
-        drain = _lib.ListPartitionReassignmentsResult_drain
-        return (lambda cb: _lib.Admin_list_partition_reassignments_async(
-                    self._h, all_partitions, spec, ms, cb),
-                self._resolve_value(drain, _to_list_partition_reassignments),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_partition_reassignments(
+                    self._h, all_partitions, spec, ms), _whole(_to_list_partition_reassignments))
 
     def _list_offsets_spec(self, topic_partition_offsets, timeout, isolation_level):
         spec = [(str(topic), int(partition), spec_.is_timestamp, int(spec_.value))
                 for (topic, partition), spec_ in topic_partition_offsets.items()]
         ms = _ms(timeout)
-        drain = _lib.ListOffsetsResult_drain
-        return (lambda cb: _lib.Admin_list_offsets_async(
-                    self._h, spec, ms, int(isolation_level), cb),
-                self._resolve_value(drain, _to_list_offsets),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_offsets(
+                    self._h, spec, ms, int(isolation_level)), _to_list_offsets)
 
     def _describe_topics_spec(self, topics, timeout, include_authorized_operations,
                               partition_size_limit, by_ids):
         names = [str(t) for t in topics]
         ms = _ms(timeout)
         limit = -1 if partition_size_limit is None else int(partition_size_limit)
-        fn = (_lib.Admin_describe_topics_by_ids_async if by_ids
-              else _lib.Admin_describe_topics_async)
-        drain = _lib.DescribeTopicsResult_drain
-        return (lambda cb: fn(self._h, names, ms,
-                              bool(include_authorized_operations), limit, cb),
-                self._resolve_value(drain, _to_describe_topics),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_topics(
+                    self._h, names, ms, bool(include_authorized_operations), limit,
+                    bool(by_ids)),
+                _to_describe_topics)
 
     def _list_groups_spec(self, group_states, protocol_types, types, timeout):
         # Group states and types cross as the Java enums' toString() names:
@@ -2542,31 +2499,22 @@ class _AdminBase:
         protocols = [] if protocol_types is None else [str(p) for p in protocol_types]
         kinds = [] if types is None else [str(t) for t in types]
         ms = _ms(timeout)
-        drain = _lib.ListGroupsResult_drain
-        return (lambda cb: _lib.Admin_list_groups_async(
-                    self._h, states, protocols, kinds, ms, cb),
-                self._resolve_value(drain, _to_list_groups),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_groups(
+                    self._h, states, protocols, kinds, ms), _whole(_to_list_groups))
 
     def _describe_consumer_groups_spec(self, group_ids, timeout,
                                        include_authorized_operations):
         ids = [str(g) for g in group_ids]
         ms = _ms(timeout)
-        drain = _lib.DescribeConsumerGroupsResult_drain
-        return (lambda cb: _lib.Admin_describe_consumer_groups_async(
-                    self._h, ids, ms, bool(include_authorized_operations), cb),
-                self._resolve_value(drain, _to_describe_consumer_groups),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_consumer_groups(
+                    self._h, ids, ms, bool(include_authorized_operations)), _to_describe_consumer_groups)
 
     def _describe_classic_groups_spec(self, group_ids, timeout,
                                       include_authorized_operations):
         ids = [str(g) for g in group_ids]
         ms = _ms(timeout)
-        drain = _lib.DescribeClassicGroupsResult_drain
-        return (lambda cb: _lib.Admin_describe_classic_groups_async(
-                    self._h, ids, ms, bool(include_authorized_operations), cb),
-                self._resolve_value(drain, _to_describe_classic_groups),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_classic_groups(
+                    self._h, ids, ms, bool(include_authorized_operations)), _to_describe_classic_groups)
 
     def _list_consumer_group_offsets_spec(self, group_specs, timeout, require_stable):
         # One ragged partition list per group. A spec whose topic_partitions is
@@ -2580,11 +2528,8 @@ class _AdminBase:
             rows = [] if all_partitions else [(str(t), int(p)) for t, p in partitions]
             spec.append((str(group_id), all_partitions, rows))
         ms = _ms(timeout)
-        drain = _lib.ListConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_list_consumer_group_offsets_async(
-                    self._h, spec, ms, bool(require_stable), cb),
-                self._resolve_value(drain, _to_list_consumer_group_offsets),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_consumer_group_offsets(
+                    self._h, spec, ms, bool(require_stable)), _to_list_consumer_group_offsets)
 
     @staticmethod
     def _alter_consumer_group_offsets_rows(offsets):
@@ -2610,11 +2555,8 @@ class _AdminBase:
     def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
         spec = self._alter_consumer_group_offsets_rows(offsets)
         ms = _ms(timeout)
-        drain = _lib.AlterConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_alter_consumer_group_offsets_async(
-                    self._h, str(group_id), spec, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_alter_consumer_group_offsets(
+                    self._h, str(group_id), spec, ms), _to_keyed_errors)
 
     @staticmethod
     def _delete_consumer_group_offsets_rows(partitions):
@@ -2630,19 +2572,13 @@ class _AdminBase:
     def _delete_consumer_group_offsets_spec(self, group_id, partitions, timeout):
         spec = self._delete_consumer_group_offsets_rows(partitions)
         ms = _ms(timeout)
-        drain = _lib.DeleteConsumerGroupOffsetsResult_drain
-        return (lambda cb: _lib.Admin_delete_consumer_group_offsets_async(
-                    self._h, str(group_id), spec, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_delete_consumer_group_offsets(
+                    self._h, str(group_id), spec, ms), _to_keyed_errors)
 
     def _delete_consumer_groups_spec(self, group_ids, timeout):
         ids = [str(g) for g in group_ids]
         ms = _ms(timeout)
-        drain = _lib.DeleteConsumerGroupsResult_drain
-        return (lambda cb: _lib.Admin_delete_consumer_groups_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_delete_consumer_groups(self._h, ids, ms), _to_keyed_errors)
 
     @staticmethod
     def _remove_members_rows(members):
@@ -2664,12 +2600,13 @@ class _AdminBase:
     def _remove_members_from_consumer_group_spec(self, group_id, members, reason, timeout):
         remove_all, ids = self._remove_members_rows(members)
         ms = _ms(timeout)
-        drain = _lib.RemoveMembersFromConsumerGroupResult_drain
-        return (lambda cb: _lib.Admin_remove_members_from_consumer_group_async(
+        # Remove-all is Java's no-argument options constructor: memberResult()
+        # is not applicable there and all() is the only outcome, so a failure
+        # raises and success is an empty per-member dict.
+        convert = _whole(lambda _none: {}) if remove_all else _to_keyed_errors
+        return (lambda: _lib.Admin_remove_members_from_consumer_group(
                     self._h, str(group_id), remove_all, ids,
-                    None if reason is None else str(reason), ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+                    None if reason is None else str(reason), ms), convert)
 
 
     # ---- B5a: ACLs and client quotas ---------------------------------------
@@ -2703,27 +2640,18 @@ class _AdminBase:
     def _create_acls_spec(self, acls, timeout):
         rows = self._acl_binding_rows(acls)
         ms = _ms(timeout)
-        drain = _lib.CreateAclsResult_drain
-        return (lambda cb: _lib.Admin_create_acls_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_create_acls),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_create_acls(self._h, rows, ms), _to_create_acls)
 
     def _describe_acls_spec(self, acl_filter, timeout):
         row = self._acl_filter_rows([acl_filter])[0]
         ms = _ms(timeout)
-        drain = _lib.DescribeAclsResult_drain
-        return (lambda cb: _lib.Admin_describe_acls_async(
-                    self._h, row[0], row[1], row[2], row[3], row[4], row[5], row[6], ms, cb),
-                self._resolve_value(drain, _to_describe_acls),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_acls(self._h, row, ms),
+                _whole(_to_describe_acls))
 
     def _delete_acls_spec(self, filters, timeout):
         rows = self._acl_filter_rows(filters)
         ms = _ms(timeout)
-        drain = _lib.DeleteAclsResult_drain
-        return (lambda cb: _lib.Admin_delete_acls_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_delete_acls),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_delete_acls(self._h, rows, ms), _to_delete_acls)
 
     @staticmethod
     def _quota_filter_rows(quota_filter):
@@ -2747,11 +2675,8 @@ class _AdminBase:
         components = self._quota_filter_rows(quota_filter)
         strict = bool(quota_filter.strict)
         ms = _ms(timeout)
-        drain = _lib.DescribeClientQuotasResult_drain
-        return (lambda cb: _lib.Admin_describe_client_quotas_async(
-                    self._h, components, strict, ms, cb),
-                self._resolve_value(drain, _to_describe_client_quotas),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_client_quotas(
+                    self._h, components, strict, ms), _whole(_to_describe_client_quotas))
 
     @staticmethod
     def _quota_alteration_rows(entries):
@@ -2772,11 +2697,8 @@ class _AdminBase:
     def _alter_client_quotas_spec(self, entries, timeout, validate_only):
         rows = self._quota_alteration_rows(entries)
         ms = _ms(timeout)
-        drain = _lib.AlterClientQuotasResult_drain
-        return (lambda cb: _lib.Admin_alter_client_quotas_async(
-                    self._h, rows, ms, validate_only, cb),
-                self._resolve_value(drain, _to_alter_client_quotas),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_alter_client_quotas(
+                    self._h, rows, ms, validate_only), _to_alter_client_quotas)
 
 
     # ---- B5b: SCRAM, delegation tokens and features ------------------------
@@ -2837,18 +2759,12 @@ class _AdminBase:
     def _describe_user_scram_credentials_spec(self, users, timeout):
         names = [] if users is None else [str(u) for u in users]
         ms = _ms(timeout)
-        drain = _lib.DescribeUserScramCredentialsResult_drain
-        return (lambda cb: _lib.Admin_describe_user_scram_credentials_async(self._h, names, ms, cb),
-                self._resolve_value(drain, _to_describe_user_scram_credentials),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_user_scram_credentials(self._h, names, ms), _whole(_to_describe_user_scram_credentials))
 
     def _alter_user_scram_credentials_spec(self, alterations, timeout):
         rows = self._scram_alteration_rows(alterations)
         ms = _ms(timeout)
-        drain = _lib.AlterUserScramCredentialsResult_drain
-        return (lambda cb: _lib.Admin_alter_user_scram_credentials_async(self._h, rows, ms, cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_alter_user_scram_credentials(self._h, rows, ms), _to_keyed_errors)
 
     def _create_delegation_token_spec(self, renewers, owner, max_lifetime_ms, timeout):
         rows = self._principal_rows(renewers)
@@ -2857,27 +2773,18 @@ class _AdminBase:
         owner_type = None if owner is None else str(owner.principal_type)
         owner_name = None if owner is None else str(owner.name)
         ms = _ms(timeout)
-        drain = _lib.CreateDelegationTokenResult_drain
-        return (lambda cb: _lib.Admin_create_delegation_token_async(
-                    self._h, rows, owner_type, owner_name, int(max_lifetime_ms), ms, cb),
-                self._resolve_value(drain, _to_delegation_token),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_create_delegation_token(
+                    self._h, rows, owner_type, owner_name, int(max_lifetime_ms), ms), _whole(_to_delegation_token))
 
     def _renew_delegation_token_spec(self, hmac, renew_time_period_ms, timeout):
         ms = _ms(timeout)
-        drain = _lib.RenewDelegationTokenResult_drain
-        return (lambda cb: _lib.Admin_renew_delegation_token_async(
-                    self._h, bytes(hmac), int(renew_time_period_ms), ms, cb),
-                self._resolve_value(drain, int),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_renew_delegation_token(
+                    self._h, bytes(hmac), int(renew_time_period_ms), ms), _whole(int))
 
     def _expire_delegation_token_spec(self, hmac, expiry_time_period_ms, timeout):
         ms = _ms(timeout)
-        drain = _lib.ExpireDelegationTokenResult_drain
-        return (lambda cb: _lib.Admin_expire_delegation_token_async(
-                    self._h, bytes(hmac), int(expiry_time_period_ms), ms, cb),
-                self._resolve_value(drain, int),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_expire_delegation_token(
+                    self._h, bytes(hmac), int(expiry_time_period_ms), ms), _whole(int))
 
     def _describe_delegation_token_spec(self, owners, timeout):
         # `owners is None` is Java's unset filter: describe every token. It
@@ -2885,11 +2792,8 @@ class _AdminBase:
         has_owners = owners is not None
         rows = self._principal_rows(owners)
         ms = _ms(timeout)
-        drain = _lib.DescribeDelegationTokenResult_drain
-        return (lambda cb: _lib.Admin_describe_delegation_token_async(
-                    self._h, has_owners, rows, ms, cb),
-                self._resolve_value(drain, _to_describe_delegation_token),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_delegation_token(
+                    self._h, has_owners, rows, ms), _whole(_to_describe_delegation_token))
 
     def _describe_features_spec(self, node_id, timeout):
         # `node_id is None` is Java's empty OptionalInt: send to an arbitrary
@@ -2897,20 +2801,14 @@ class _AdminBase:
         # carries absence.
         has_node_id = node_id is not None
         ms = _ms(timeout)
-        drain = _lib.DescribeFeaturesResult_drain
-        return (lambda cb: _lib.Admin_describe_features_async(
-                    self._h, has_node_id, 0 if node_id is None else int(node_id), ms, cb),
-                self._resolve_value(drain, _to_feature_metadata),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_features(
+                    self._h, has_node_id, 0 if node_id is None else int(node_id), ms), _whole(_to_feature_metadata))
 
     def _update_features_spec(self, feature_updates, timeout, validate_only):
         rows = self._feature_update_rows(feature_updates)
         ms = _ms(timeout)
-        drain = _lib.UpdateFeaturesResult_drain
-        return (lambda cb: _lib.Admin_update_features_async(
-                    self._h, rows, ms, bool(validate_only), cb),
-                self._resolve_value(drain, _to_keyed_errors),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_update_features(
+                    self._h, rows, ms, bool(validate_only)), _to_keyed_errors)
 
     # ---- B6: producers and transactions ------------------------------------
     @staticmethod
@@ -2929,28 +2827,19 @@ class _AdminBase:
         # leader. Broker id 0 is legal, so the flag carries absence.
         rows = self._describe_producers_rows(partitions)
         ms = _ms(timeout)
-        drain = _lib.DescribeProducersResult_drain
-        return (lambda cb: _lib.Admin_describe_producers_async(
+        return (lambda: _lib.Admin_describe_producers(
                     self._h, rows, broker_id is not None,
-                    0 if broker_id is None else int(broker_id), ms, cb),
-                self._resolve_value(drain, _to_describe_producers),
-                self._free_value(drain))
+                    0 if broker_id is None else int(broker_id), ms), _to_describe_producers)
 
     def _describe_transactions_spec(self, transactional_ids, timeout):
         ids = [str(i) for i in transactional_ids]
         ms = _ms(timeout)
-        drain = _lib.DescribeTransactionsResult_drain
-        return (lambda cb: _lib.Admin_describe_transactions_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_describe_transactions),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_describe_transactions(self._h, ids, ms), _to_describe_transactions)
 
     def _fence_producers_spec(self, transactional_ids, timeout):
         ids = [str(i) for i in transactional_ids]
         ms = _ms(timeout)
-        drain = _lib.FenceProducersResult_drain
-        return (lambda cb: _lib.Admin_fence_producers_async(self._h, ids, ms, cb),
-                self._resolve_value(drain, _to_fence_producers),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_fence_producers(self._h, ids, ms), _to_fence_producers)
 
     @staticmethod
     def _list_transactions_filters(states, producer_ids, duration_ms, transactional_id_pattern):
@@ -2973,28 +2862,23 @@ class _AdminBase:
         names, ids, duration, pattern = self._list_transactions_filters(
             states, producer_ids, duration_ms, transactional_id_pattern)
         ms = _ms(timeout)
-        drain = _lib.ListTransactionsResult_drain
-        return (lambda cb: _lib.Admin_list_transactions_async(
-                    self._h, names, ids, duration, pattern, ms, cb),
-                self._resolve_value(drain, _to_list_transactions),
-                self._free_value(drain))
+        return (lambda: _lib.Admin_list_transactions(
+                    self._h, names, ids, duration, pattern, ms), _whole(_to_list_transactions))
 
     def _abort_transaction_spec(self, spec, timeout):
         # No result handle: Java's AbortTransactionResult exposes only
         # all() -> KafkaFuture<Void>, so success is a null error.
         ms = _ms(timeout)
-        return (lambda cb: _lib.Admin_abort_transaction_async(
+        return (lambda: _lib.Admin_abort_transaction(
                     self._h, str(spec.topic), int(spec.partition), int(spec.producer_id),
-                    int(spec.producer_epoch), int(spec.coordinator_epoch), ms, cb),
-                self._resolve_void, self._free_void)
+                    int(spec.producer_epoch), int(spec.coordinator_epoch), ms), _void)
 
     def _force_terminate_transaction_spec(self, transactional_id, timeout):
         # No result handle either: TerminateTransactionResult exposes only
         # result() -> KafkaFuture<Void>.
         ms = _ms(timeout)
-        return (lambda cb: _lib.Admin_force_terminate_transaction_async(
-                    self._h, str(transactional_id), ms, cb),
-                self._resolve_void, self._free_void)
+        return (lambda: _lib.Admin_force_terminate_transaction(
+                    self._h, str(transactional_id), ms), _void)
 
 
 class _MockAdminClientMixin:
@@ -3065,10 +2949,11 @@ class _MockAdminClientMixin:
 # Synchronous API.
 # --------------------------------------------------------------------------
 class Admin(_AdminBase):
-    """A synchronous Kafka admin client. Every RPC submits an async FFI op and
-    waits on an interruptible event, so ``KeyboardInterrupt`` is honored
-    promptly (though the request itself is not cancelled — see module
-    docstring)."""
+    """A synchronous Kafka admin client. Every RPC issues the C call and then
+    resolves its ``KafkaFuture`` handles on the calling thread with the GIL
+    released, as a Java caller blocking in ``KafkaFuture.get()`` does. The
+    request itself cannot be interrupted (there is no admin ``wakeup()``; see
+    the module docstring)."""
 
     def __enter__(self):
         return self
@@ -3076,33 +2961,13 @@ class Admin(_AdminBase):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def _run_sync(self, submit, resolve, free):
-        box = {}
-        done = threading.Event()
-
-        def cb(*payload):
-            box["payload"] = payload
-            done.set()
-
-        submit(cb)
-        interrupted = None
-        while True:
-            try:
-                # Short slices keep the main-thread eval loop reachable so a
-                # pending signal raises KeyboardInterrupt here rather than after
-                # the whole op completes.
-                while not done.wait(0.1):
-                    pass
-                break
-            except KeyboardInterrupt as exc:
-                interrupted = exc
-                # There is no admin wakeup(): keep waiting for the callback so
-                # the result handles are freed rather than leaked.
-        payload = box["payload"]
-        if interrupted is not None:
-            free(payload)
-            raise interrupted
-        return resolve(payload)
+    def _run_sync(self, submit, convert):
+        job = self._submit(submit())
+        # Blocks in `kafka_common_KafkaFuture_get` for every future of the job
+        # (GIL released), converts each value while the future is alive, and
+        # frees the result. A pending KeyboardInterrupt is raised on return.
+        payload = _lib.Admin_resolve(job)
+        return convert(payload)
 
     def create_topics(self, new_topics, timeout=None, validate_only=False,
                       retry_on_quota_violation=True):
@@ -3598,11 +3463,14 @@ class Admin(_AdminBase):
         return self._run_sync(*self._force_terminate_transaction_spec(transactional_id, timeout))
 
     def close(self, timeout=None):
+        """Java ``close()`` / ``close(Duration)``: blocks (GIL released) until
+        the background task has drained or ``timeout`` elapsed, then frees the
+        client."""
         if self.closed:
             return
         self.closed = True
         try:
-            self._run_sync(*self._close_spec(timeout))
+            _lib.Admin_close(self._h, _close_ms(timeout))
         finally:
             self._destroy()
 
@@ -3612,7 +3480,22 @@ class Admin(_AdminBase):
 # --------------------------------------------------------------------------
 class AsyncAdmin(_AdminBase):
     """An asyncio-native Kafka admin client. Every RPC is a coroutine that
-    submits an async FFI op and ``await``s its completion on the event loop."""
+    issues the C call and ``await``s its ``KafkaFuture`` handles on the event
+    loop: the completion callbacks are delivered through the client's callback
+    queue, which the loop drains on its own thread when the client's notify hook
+    schedules it (``loop.call_soon_threadsafe``)."""
+
+    def __init__(self):
+        super().__init__()
+        self._loop = None
+
+    def _init_mock(self, num_brokers=1):
+        super()._init_mock(num_brokers)
+        _lib.Admin_set_callbacks_notify(self._h, self._on_callbacks_notify)
+
+    def _init_kafka(self, config):
+        super()._init_kafka(config)
+        _lib.Admin_set_callbacks_notify(self._h, self._on_callbacks_notify)
 
     async def __aenter__(self):
         return self
@@ -3620,32 +3503,58 @@ class AsyncAdmin(_AdminBase):
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.close()
 
+    def _on_callbacks_notify(self):
+        """The ``set_callbacks_notify`` hook: fired from a Rust task each time
+        the client's callback queue goes from empty to non-empty. It only
+        schedules the drain -- it never runs callbacks itself."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._execute_callbacks)
+                return
+            except RuntimeError:
+                pass  # the loop closed between the check and the call
+        # No loop to hand the drain to (a callback completing after the loop
+        # closed): drain on a helper thread so every callback still fires once.
+        threading.Thread(target=self._execute_callbacks, daemon=True).start()
+
+    def _execute_callbacks(self):
+        h = self._h
+        if h is None:
+            return  # destroyed: `Admin_destroy` already ran what was pending
+        while _lib.Admin_execute_callbacks(h) > 0:
+            pass
+
     @staticmethod
-    def _deliver(fut, payload, free):
+    def _deliver(fut, payload, exc):
         # Runs on the event loop thread.
         if fut.cancelled() or fut.done():
-            free(payload)
             return
-        fut.set_result(payload)
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(payload)
 
-    async def _run_async(self, submit, resolve, free):
+    async def _run_async(self, submit, convert):
         loop = asyncio.get_running_loop()
+        self._loop = loop
+        job = self._submit(submit())
         fut = loop.create_future()
 
-        def cb(*payload):
-            # Runs on the Rust dispatcher thread with the GIL held. asyncio
-            # futures must be touched only on the loop thread.
+        def cb(payload, exc):
+            # Runs either inline (a future that already completed, or belongs
+            # to no client) or on the loop thread from `_execute_callbacks`;
+            # asyncio futures are touched only through the loop either way.
             if loop.is_closed():
-                free(payload)
                 return
-            loop.call_soon_threadsafe(self._deliver, fut, payload, free)
+            loop.call_soon_threadsafe(self._deliver, fut, payload, exc)
 
-        submit(cb)
-        # On cancellation the late callback frees the handles via _deliver (the
-        # future is cancelled by then). There is no admin wakeup(), so the
-        # request itself keeps running — as in Java.
+        _lib.Admin_resolve_cb(job, cb)
+        # On cancellation the late callback finds the future done and is
+        # dropped; the C side frees the job regardless. There is no admin
+        # wakeup(), so the request itself keeps running -- as in Java.
         payload = await fut
-        return resolve(payload)
+        return convert(payload)
 
     async def create_topics(self, new_topics, timeout=None, validate_only=False,
                             retry_on_quota_violation=True):
@@ -3894,11 +3803,15 @@ class AsyncAdmin(_AdminBase):
             *self._force_terminate_transaction_spec(transactional_id, timeout))
 
     async def close(self, timeout=None):
+        """Java ``close()`` / ``close(Duration)``: the blocking C close runs on
+        the default executor so the loop stays free, then the client is
+        freed."""
         if self.closed:
             return
         self.closed = True
         try:
-            await self._run_async(*self._close_spec(timeout))
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _lib.Admin_close, self._h, _close_ms(timeout))
         finally:
             self._destroy()
 

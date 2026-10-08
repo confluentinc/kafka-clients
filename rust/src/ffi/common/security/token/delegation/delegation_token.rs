@@ -48,6 +48,8 @@ impl DelegationTokenInner {
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
+    // handed out by the admin result handles once the admin slice lands
+    #[expect(dead_code)]
     pub(crate) fn as_ptr(&self) -> *const kafka_common_security_token_delegation_DelegationToken_t {
         self as *const Self as *const kafka_common_security_token_delegation_DelegationToken_t
     }

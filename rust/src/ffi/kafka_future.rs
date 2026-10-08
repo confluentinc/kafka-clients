@@ -120,8 +120,6 @@ impl Drop for FfiValue {
 pub(crate) type FfiFuture = KafkaFuture<Arc<FfiValue>>;
 
 /// Maps a typed future to its C value, boxing `T` when it resolves.
-// the clients deliver C handles through `map_future_handle`; this one backs the tests
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn map_future<T>(future: &KafkaFuture<T>) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,

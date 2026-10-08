@@ -52,6 +52,8 @@ impl AclBindingFilterInner {
 
     /// A borrowed handle on this filter, valid as long as `self` stays where
     /// it is: a result handle keeps its filters in place and hands this out.
+    // handed out by the admin result handles once the admin slice lands
+    #[expect(dead_code)]
     pub(crate) fn as_ptr(&self) -> *const kafka_common_acl_AclBindingFilter_t {
         self as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t
     }

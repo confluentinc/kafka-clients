@@ -33,12 +33,12 @@
 //! is [`kafka_future::kafka_common_KafkaFuture_t`]; the callbacks a client
 //! queues for its `_execute_callbacks` live in [`callback_queue`].
 //!
-//! A `*_count` accessor is never negative in any of these modules: a count feeds
-//! straight into `malloc(count * n)` and into `for (size_t i = 0; i < count; i++)`
-//! on the C side, so an in-band sentinel there would be a memory-safety hazard.
-//! Where a Java collection is nullable and null must stay distinct from empty,
-//! the count reports 0 and a separate `*_has_<field>` predicate carries the
-//! presence bit — see the "Counts are never negative" section of `admin`.
+//! A nullable Java collection crosses as a null `kafka_List_t *` /
+//! `kafka_Map_t *` (distinct from an empty one); `kafka_List_size` and
+//! `kafka_Map_size` are never negative, since a size feeds straight into
+//! `malloc(size * n)` and `for (int32_t i = 0; i < size; i++)` on the C side.
+//! The first client created from C initializes the default `RUST_LOG` logger
+//! ([`common::init_default_logger`]).
 //!
 //! # Feature Gate
 //!

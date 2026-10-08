@@ -17,9 +17,6 @@
 import asyncio
 import datetime as _dt
 import gc
-import signal
-import threading
-import time
 
 import pytest
 from admin import (
@@ -1054,51 +1051,60 @@ def test_handle_survives_gc_of_intermediate_objects():
         assert listings["gc-topic"].topic_id == described.topic_id
 
 
-def test_sigint_while_waiting_drains_callback_then_reraises():
-    """A SIGINT delivered while a sync call is waiting must raise
-    KeyboardInterrupt *after* the in-flight callback has been drained, so the
-    result handles are freed rather than leaked, and the client stays usable.
+def test_run_sync_raises_a_submit_error_before_resolving_anything():
+    """``_run_sync`` is the shared waiter behind every sync RPC: ``submit()``
+    issues the C call and returns ``(job, error)``. An owned error handle means a
+    typed constructor rejected an argument before anything was sent, so it is
+    raised as a :class:`KafkaError` and the converter never runs -- there is no
+    job to resolve.
 
-    ``_run_sync`` is the shared waiter behind every sync RPC. It is driven here
-    with a deliberately slow submit because the mock resolves every real RPC
-    instantly, leaving no window for the signal to land inside the wait.
+    (The former SIGINT test is not expressible any more: the sync client now
+    blocks inside ``kafka_common_KafkaFuture_get`` with the GIL released and has
+    no injectable waiter, so a ``KeyboardInterrupt`` is simply raised once the
+    call returns, with the result freed by the C side.)
     """
+    import _confluentkafka as _lib
+
     with MockAdminClient(1) as admin:
-        _created(admin, "before-sigint")
+        _created(admin, "before-submit-error")
 
-        freed = []
-        callback_fired = threading.Event()
+        def submit():
+            # An empty member list is rejected by
+            # RemoveMembersFromConsumerGroupOptions.with_members itself.
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
 
-        def submit(cb):
-            def fire():
-                time.sleep(0.5)
-                callback_fired.set()
-                cb(0)  # payload shape of a void op: (error_int,)
-            threading.Thread(target=fire, daemon=True).start()
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
 
-        def resolve(payload):
-            raise AssertionError("resolve must not run after an interrupt")
-
-        def free(payload):
-            freed.append(payload)
-
-        def raise_sigint():
-            time.sleep(0.15)
-            signal.raise_signal(signal.SIGINT)
-
-        th = threading.Thread(target=raise_sigint)
-        th.start()
-        with pytest.raises(KeyboardInterrupt):
-            admin._run_sync(submit, resolve, free)
-        th.join()
-
-        # The interrupt was deferred until the callback arrived, and its payload
-        # was freed rather than leaked.
-        assert callback_fired.is_set()
-        assert freed == [(0,)]
+        with pytest.raises(KafkaError) as excinfo:
+            admin._run_sync(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
 
         # The client is still usable afterwards.
-        assert "before-sigint" in admin.list_topics(list_internal=True)
+        assert "before-submit-error" in admin.list_topics(list_internal=True)
+
+
+async def test_run_async_raises_a_submit_error_before_resolving_anything():
+    """The asyncio mirror of the test above: a ``submit()`` error is raised
+    from the coroutine before any ``KafkaFuture`` callback is registered."""
+    import _confluentkafka as _lib
+
+    admin = AsyncMockAdminClient(1)
+    try:
+        def submit():
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
+
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
+
+        with pytest.raises(KafkaError) as excinfo:
+            await admin._run_async(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
+        assert (await admin.describe_cluster()).controller.id == 0
+    finally:
+        await admin.close()
 
 
 # -- B3: elections, reassignments, offsets -----------------------------------
