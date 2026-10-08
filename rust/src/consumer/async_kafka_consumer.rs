@@ -2519,7 +2519,7 @@ where
         // tests. The metrics manager registers against the consumer's shared
         // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
         // Java keeps the manager in a field since KAFKA-19542 so `close()` can
-        // close it (`AsyncKafkaConsumer.java:530`).
+        // close it (`AsyncKafkaConsumer.java:568`).
         let rebalance_callback_metrics_manager = Arc::new(RebalanceCallbackMetricsManager::new(&metrics));
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
         rebalance_listener_invoker.set_metrics(Arc::clone(&rebalance_callback_metrics_manager), Arc::clone(&time));

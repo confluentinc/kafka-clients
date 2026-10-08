@@ -209,8 +209,9 @@ impl KafkaConsumerMetrics {
 mod tests {
     //! `KafkaConsumerMetricsTest` (Java) is fully translated here. The
     //! `KafkaConsumerTest` metrics rows that read `consumer.metrics()` for the
-    //! `consumer-metrics` group — `testPollTimeMetrics`, `testPollIdleRatio` —
-    //! are translated below at this (the recording) layer (Phase M7).
+    //! `consumer-metrics` group — `testPollTimeMetrics`, `testPollIdleRatio`,
+    //! `testPollIdleRatioZero` (KAFKA-20750) — are translated below at this (the
+    //! recording) layer (Phase M7).
     //!
     //! The remaining `KafkaConsumerTest` metrics rows are OUT OF SCOPE per the
     //! Milestone-9 plan ("Out of scope") and are NOT translated:
@@ -219,7 +220,8 @@ mod tests {
     //!     testUnsubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics,
     //!     testShouldOnlyCallMetricReporterMetricChangeOnceWithExistingConsumerMetric,
     //!     testShouldNotCallMetricReporterMetricRemovalWithExistingConsumerMetric,
-    //!     testUnSubscribingNonExisingMetricsDoesntCauseError — all exercise
+    //!     testUnsubscribingNonExistingMetricsDoesntCauseError (named
+    //!     testUnSubscribingNonExisingMetricsDoesntCauseError before 1a46339e90) — all exercise
     //!     `registerMetricForSubscription` / `unregisterMetricFromSubscription`
     //!     (KIP-714 broker-push telemetry), which is a separate milestone and
     //!     is not present on the `Consumer` trait.
@@ -277,7 +279,7 @@ mod tests {
             .expect("double-valued metric")
     }
 
-    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3226), translated at
+    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3708), translated at
     /// the `KafkaConsumerMetrics` level (the recording site). The Java test
     /// drives the values through `consumer.poll(Duration.ZERO)` + a mock
     /// clock; the value math is identical when driven via
@@ -338,7 +340,7 @@ mod tests {
         assert_eq!(read_metric(&metrics, "time-between-poll-max"), 10.0 * 1000.0);
     }
 
-    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3272), translated at
+    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3754), translated at
     /// the `KafkaConsumerMetrics` level. Drives `record_poll_start` /
     /// `record_poll_end` with the same timing the Java test produces via the
     /// mock clock + `consumer.poll()`, then reads `poll-idle-ratio-avg`.

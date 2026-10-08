@@ -86,7 +86,7 @@ impl FetchMetricsManager {
     /// (CLAUDE.md §12.1 — do not panic where recovery is possible).
     ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
-    /// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
+    /// (`Metrics.java:520`) and lets it propagate out of the fetch path. We
     /// deliberately do NOT propagate: these `record_*` methods are a side channel,
     /// and failing a user's fetch is worse than the metric being absent. The
     /// failure is reported rather than hidden.
@@ -127,7 +127,7 @@ impl FetchMetricsManager {
     /// `-lag-avg`, `-lag-max`, `{tp}.records-lead`, `-lead-min`, `-lead-avg`)
     /// are ALSO registered at INFO — full Java parity. Java's `SensorBuilder`
     /// creates every sensor (including these per-partition detail sensors,
-    /// `FetchMetricsManager.java:133,148`) via `metrics.sensor(name)`, which
+    /// `FetchMetricsManager.java:144,159`) via `metrics.sensor(name)`, which
     /// defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
     /// fetch metrics, so we record the full per-partition metric set per
     /// partition per poll at the default INFO level — the accepted Java-parity
@@ -937,7 +937,7 @@ mod tests {
     /// `records-lag-max` / `records-lead-min` AND the DETAILED per-partition
     /// lag/lead sensors are recorded — there is NO DEBUG gating (Java's
     /// `SensorBuilder` defaults every fetch sensor to `RecordingLevel.INFO`,
-    /// including the per-partition detail at `FetchMetricsManager.java:133,148`).
+    /// including the per-partition detail at `FetchMetricsManager.java:144,159`).
     #[test]
     fn test_partition_metrics_recording_level() {
         let f = setup();

@@ -31,7 +31,7 @@ use crate::common::{Error, MetricName, MetricNameTemplate};
 /// Because `Metrics` is a `final` class, we cannot extend it in a delegation
 /// pattern. Instead, we mimic the subset of APIs that are needed by the callers.
 ///
-/// Rust differences from Java (`MetricsLedger.java:49-110`):
+/// Rust differences from Java (`MetricsLedger.java:43-111`):
 ///
 /// - The managers record through `&self` from several tasks (the fetch manager
 ///   is `Arc`-shared with the per-response aggregators), so both ledgers sit
