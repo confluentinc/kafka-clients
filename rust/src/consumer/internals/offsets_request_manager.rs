@@ -276,6 +276,13 @@ pub(crate) struct OffsetsManagerShared {
     /// Drained by [`OffsetsRequestManager::poll`] into
     /// [`PollResult::try_connect`].
     pub(crate) try_connect_queue: Mutex<Vec<Node>>,
+    /// Test seam: runs once between the per-partition leader lookup and the
+    /// regroup by node in `group_list_offset_requests`, so a test can update
+    /// the metadata in that window. It reproduces the race KAFKA-20312 guards
+    /// against with the real metadata, where Java's test stubs
+    /// `metadata.fetch()` with Mockito instead.
+    #[cfg(test)]
+    pub(crate) before_regroup_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl OffsetsManagerShared {
@@ -415,7 +422,36 @@ impl OffsetsManagerShared {
                 partition_data_map.insert(tp.clone(), part);
             }
         }
-        OffsetFetcherUtils::regroup_partition_map_by_node(&self_arc.metadata, &partition_data_map)
+        #[cfg(test)]
+        if let Some(hook) = self_arc
+            .before_regroup_for_test
+            .lock()
+            .expect("before_regroup_for_test mutex poisoned")
+            .take()
+        {
+            hook();
+        }
+        // Java (KAFKA-20312, `OffsetsRequestManager.java:914-923`): a partition
+        // whose leader vanished between the lookup above and the regroup is
+        // searched again after a metadata update.
+        let mut partitions_skipped_in_regroup: HashSet<TopicPartition> = HashSet::new();
+        let result = OffsetFetcherUtils::regroup_partition_map_by_node(
+            &self_arc.metadata,
+            &partition_data_map,
+            &mut partitions_skipped_in_regroup,
+        );
+        if !partitions_skipped_in_regroup.is_empty() {
+            self_arc.metadata.metadata_arc().request_update(false);
+            if let Some(state_arc) = state {
+                let mut guard = state_arc.lock().expect("ListOffsetsRequestState mutex poisoned");
+                for tp in partitions_skipped_in_regroup {
+                    if let Some(&timestamp) = timestamps_to_search.get(&tp) {
+                        guard.remaining_to_search.insert(tp, timestamp);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Mirrors the success branch of Java's per-`buildListOffsetsRequests`
@@ -752,6 +788,8 @@ impl OffsetsRequestManager {
             requests_to_retry: Mutex::new(Vec::new()),
             metadata_updated: std::sync::atomic::AtomicBool::new(false),
             try_connect_queue: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            before_regroup_for_test: Mutex::new(None),
         });
         let manager = Self {
             shared: shared.clone(),
@@ -1053,8 +1091,20 @@ impl OffsetsRequestManager {
         }
 
         // Group by current leader (the `leader.is_none()` entries were
-        // already dropped above with a metadata-update request).
-        let by_node = OffsetFetcherUtils::regroup_partition_map_by_node(&self.shared.metadata, &timestamps_to_search);
+        // already dropped above with a metadata-update request). Java calls
+        // `groupListOffsetRequests(timestampsToSearch, Optional.empty())`, so a
+        // partition whose leader vanished before the regroup (KAFKA-20312) only
+        // requests a metadata update: with no request state there is nothing to
+        // record it on, and the reset is retried once the backoff expires.
+        let mut partitions_skipped_in_regroup: HashSet<TopicPartition> = HashSet::new();
+        let by_node = OffsetFetcherUtils::regroup_partition_map_by_node(
+            &self.shared.metadata,
+            &timestamps_to_search,
+            &mut partitions_skipped_in_regroup,
+        );
+        if !partitions_skipped_in_regroup.is_empty() {
+            metadata_arc.request_update(false);
+        }
 
         for (node, reset_timestamps) in by_node {
             // Java: subscriptionState.setNextAllowedRetry(...) to back off
@@ -5816,6 +5866,65 @@ mod tests {
             subs.awaiting_validation(&tp).expect("assigned"),
             "stale OffsetsForLeaderEpoch response for a changed position must be ignored"
         );
+    }
+
+    /// Translated from `OffsetsRequestManagerTest.testFetchOffsetsRegroupSkipsNullLeaderPartitionNoNPE`
+    /// (KAFKA-20312). Both partitions have a leader when they are looked up,
+    /// but partition 2's is gone by the time they are regrouped by node: it is
+    /// skipped (Java used to NPE), searched again after the next metadata
+    /// update, and the result covers both.
+    ///
+    /// Java stubs `metadata.fetch()` to return a cluster without partition 2's
+    /// leader; here the real metadata is updated in that window through the
+    /// `before_regroup_for_test` seam.
+    #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest#testFetchOffsetsRegroupSkipsNullLeaderPartitionNoNPE"
+    )]
+    async fn test_fetch_offsets_regroup_skips_null_leader_partition() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        // Partition 1 → node 1, partition 2 → node 0.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        let tp1 = TopicPartition::new("t1", 1);
+        let tp2 = TopicPartition::new("t1", 2);
+        let timestamps = HashMap::from([
+            (tp1.clone(), ListOffsetsRequest::EARLIEST_TIMESTAMP),
+            (tp2.clone(), ListOffsetsRequest::EARLIEST_TIMESTAMP),
+        ]);
+
+        // Leader lost between the lookup and the regroup.
+        let metadata = Arc::clone(&mgr.shared.metadata);
+        *mgr.shared.before_regroup_for_test.lock().unwrap() = Some(Box::new(move || {
+            bootstrap_metadata_with_nodes(&metadata, "t1", 2, 2);
+        }));
+        let mut rx = mgr.fetch_offsets(timestamps, false);
+        // Only partition 1 has a leader in the regroup: one request.
+        assert_eq!(1, mgr.requests_to_send_count());
+        // Parked only once the in-flight request completes with partitions left.
+        assert_eq!(0, mgr.requests_to_retry_count());
+
+        // Complete the request for partition 1.
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::None, -1, 5, ListOffsetsResponse::UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _ = RequestManager::poll(&mut mgr, 0);
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "the result waits for partition 2"
+        );
+
+        // Metadata update: both partitions have leaders again, and the retry
+        // sends a request for partition 2 only.
+        bootstrap_metadata_with_nodes(&mgr.shared.metadata, "t1", 3, 2);
+        assert_eq!(1, mgr.requests_to_send_count());
+        let response =
+            build_list_offsets_response("t1", vec![(2, Errors::None, -1, 10, ListOffsetsResponse::UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert_eq!(2, result.len());
+        assert_eq!(5, result[&tp1].as_ref().expect("partition 1 offset").offset());
+        assert_eq!(10, result[&tp2].as_ref().expect("partition 2 offset").offset());
     }
 
     // ════════════════════════════════════════════════════════════════════

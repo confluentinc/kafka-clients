@@ -158,24 +158,35 @@ impl OffsetFetcherUtils {
     /// Aggregates a `(TopicPartition, T)` map by leader node.
     ///
     /// Returns a map from `Node` to the sub-map of entries whose current leader
-    /// is that node. Partitions for which the metadata does not yet have a
-    /// leader are dropped (matching Java's `groupingBy` over `leaderFor` which
-    /// would NPE on null).
+    /// is that node. A partition whose leader is unknown in the cluster snapshot
+    /// (the metadata changed since the caller looked the leader up) is skipped
+    /// and added to `partitions_to_retry`. No metadata refresh is requested
+    /// here: the callers own retry and metadata (KAFKA-20312).
     ///
     /// Translated from `OffsetFetcherUtils.regroupPartitionMapByNode`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#regroupPartitionMapByNode")]
     pub(crate) fn regroup_partition_map_by_node<T: Clone>(
         metadata: &ConsumerMetadata,
         partition_map: &HashMap<TopicPartition, T>,
+        partitions_to_retry: &mut HashSet<TopicPartition>,
     ) -> HashMap<Node, HashMap<TopicPartition, T>> {
         let cluster = metadata.metadata_arc().fetch();
-        let mut result: HashMap<Node, HashMap<TopicPartition, T>> = HashMap::new();
+        let mut partitions_by_node: HashMap<Node, HashMap<TopicPartition, T>> = HashMap::new();
         for (tp, value) in partition_map {
-            if let Some(node) = cluster.leader_for(tp) {
-                result.entry(node.clone()).or_default().insert(tp.clone(), value.clone());
+            match cluster.leader_for(tp) {
+                Some(leader) => {
+                    partitions_by_node
+                        .entry(leader.clone())
+                        .or_default()
+                        .insert(tp.clone(), value.clone());
+                },
+                None => {
+                    log::debug!("Leader for partition {tp} is unknown while regrouping partition map by node");
+                    partitions_to_retry.insert(tp.clone());
+                },
             }
         }
-        result
+        partitions_by_node
     }
 
     /// Builds an `OffsetAndTimestampInternal` result map from a
@@ -944,5 +955,38 @@ mod tests {
             subscriptions.lock().unwrap().awaiting_validation(&tp).expect("assigned"),
             "partition must STAY AWAITING_VALIDATION on LogTruncation"
         );
+    }
+
+    /// KAFKA-20312: a partition without a leader in the cluster snapshot is
+    /// skipped and reported for retry instead of being grouped (Java's
+    /// `groupingBy` threw a `NullPointerException` on the null key).
+    #[test]
+    fn regroup_partition_map_by_node_reports_partitions_without_leader() {
+        let subscriptions = std::sync::Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+        let config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..Default::default()
+        };
+        let metadata = ConsumerMetadata::with_config(
+            &config,
+            std::sync::Arc::clone(&subscriptions),
+            crate::common::internals::ClusterResourceListeners::new(),
+        );
+        metadata.add_transient_topics(HashSet::from(["t".to_string()]));
+        let response =
+            crate::common::requests::RequestTestUtils::metadata_update_with(1, &HashMap::from([("t".to_string(), 1)]));
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+
+        let with_leader = TopicPartition::new("t", 0);
+        let without_leader = TopicPartition::new("t", 5);
+        let partition_map = HashMap::from([(with_leader.clone(), 1_i64), (without_leader.clone(), 2_i64)]);
+        let mut partitions_to_retry = HashSet::new();
+        let by_node =
+            OffsetFetcherUtils::regroup_partition_map_by_node(&metadata, &partition_map, &mut partitions_to_retry);
+
+        assert_eq!(1, by_node.len());
+        let grouped = by_node.values().next().unwrap();
+        assert_eq!(HashMap::from([(with_leader, 1_i64)]), *grouped);
+        assert_eq!(HashSet::from([without_leader]), partitions_to_retry);
     }
 }
