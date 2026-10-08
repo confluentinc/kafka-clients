@@ -240,7 +240,9 @@ where
                     // polls (we discard); otherwise it leaves the entry
                     // behind. We mirror that by taking ownership and
                     // pushing back on the "leave" path.
-                    let completed_fetch = fetch_buffer.poll().expect("non-empty checked above");
+                    // `poll_checked_out` keeps the partition buffered while it
+                    // is initialized, as Java's peek-initialize-poll order does.
+                    let completed_fetch = fetch_buffer.poll_checked_out().expect("non-empty checked above");
                     // Snapshot records size BEFORE moving cf into initialize.
                     let records_size_bytes = FetchResponse::records_size(&completed_fetch.partition_data);
 
@@ -270,6 +272,9 @@ where
                                 ConsumerRecords::fetch_is_empty(&records_by_partition, position_advanced);
                             if !(fetch_is_empty && records_size_bytes == 0) {
                                 fetch_buffer.push_front(cf);
+                            } else {
+                                // Java's `fetchBuffer.poll()`: the fetch is gone.
+                                fetch_buffer.clear_checked_out_next_in_line();
                             }
                             // Defer the throw so the paused-fetches
                             // restore step still runs (matches Java's
@@ -283,7 +288,7 @@ where
                     // no additional action.
                 } else {
                     // Initialized — set as next-in-line and drop from queue.
-                    let cf = fetch_buffer.poll().expect("non-empty checked above");
+                    let cf = fetch_buffer.poll_checked_out().expect("non-empty checked above");
                     fetch_buffer.set_next_in_line_fetch(Some(cf));
                 }
                 // Loop back: read the new next-in-line.
@@ -1130,12 +1135,15 @@ mod tests {
         assign_and_seek(&h, &partition);
 
         let mut cf = build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None);
-        // Record the subscription position at the moment drain() is called.
-        let position_at_drain_time = Arc::new(std::sync::atomic::AtomicI64::new(-1));
-        let (subs, recorded, tp_in_hook) = (h.subs.clone(), position_at_drain_time.clone(), partition.clone());
+        // Record the subscription position at every drain() call. Java's spy
+        // keeps only the last one; keeping all of them also catches a second
+        // drain (for example the pre-fix drain inside the cursor followed by
+        // the collector's).
+        let positions_at_drain_time = Arc::new(Mutex::new(Vec::<i64>::new()));
+        let (subs, recorded, tp_in_hook) = (h.subs.clone(), positions_at_drain_time.clone(), partition.clone());
         cf.on_drain_for_test = Some(Box::new(move || {
             let offset = subs.lock().unwrap().position(&tp_in_hook).unwrap().map_or(-1, |p| p.offset);
-            recorded.store(offset, std::sync::atomic::Ordering::SeqCst);
+            recorded.lock().unwrap().push(offset);
         }));
         h.fetch_buffer.add(cf);
 
@@ -1144,17 +1152,40 @@ mod tests {
         // Java: `assertTrue(completedFetch.isConsumed())`. The consumed fetch is
         // discarded by the collector's next pass, so its drain is observed
         // through the hook instead.
-        assert_ne!(
-            -1,
-            position_at_drain_time.load(std::sync::atomic::Ordering::SeqCst),
-            "drain() was called"
-        );
         assert!(!h.fetch_buffer.has_next_in_line_fetch(), "the consumed fetch was discarded");
 
-        // When drain() was invoked, the position had already been advanced.
+        // drain() was invoked exactly once, after the position had been advanced.
+        assert_eq!(vec![DEFAULT_RECORD_COUNT as i64], *positions_at_drain_time.lock().unwrap());
+    }
+
+    /// Critic 100 L1 (KAFKA-15529, the Rust ownership model): Java initializes
+    /// the head fetch in place (`peek`, `initialize`, `setNextInLineFetch`,
+    /// `poll`, `FetchCollector.java:101-122`), so its partition stays buffered
+    /// throughout. The Rust collector takes the fetch out to initialize it;
+    /// `buffered_partitions()`, which the background task reads to decide what
+    /// to fetch, must still report the partition from inside `initialize`.
+    #[test]
+    fn test_head_fetch_stays_buffered_while_initialized() {
+        let mut h = build_harness(DEFAULT_RECORD_COUNT, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer
+            .add(build_completed_fetch(&h, partition.clone(), 0, DEFAULT_RECORD_COUNT, None));
+        assert_eq!(HashSet::from([partition.clone()]), h.fetch_buffer.buffered_partitions());
+
+        let seen_inside_initialize = Arc::new(Mutex::new(None::<HashSet<TopicPartition>>));
+        let (buffer, seen) = (h.fetch_buffer.clone(), seen_inside_initialize.clone());
+        h.collector.set_force_initialize_error(move || {
+            *seen.lock().unwrap() = Some(buffer.buffered_partitions());
+            None
+        });
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).unwrap();
+        assert_eq!(DEFAULT_RECORD_COUNT as usize, fetch.count());
         assert_eq!(
-            DEFAULT_RECORD_COUNT as i64,
-            position_at_drain_time.load(std::sync::atomic::Ordering::SeqCst)
+            Some(HashSet::from([partition])),
+            *seen_inside_initialize.lock().unwrap(),
+            "the partition must stay buffered while its fetch is initialized"
         );
     }
 
