@@ -5701,16 +5701,20 @@ static PyObject* acl_binding_filter_to_py(const kafka_common_acl_AclBindingFilte
 // the built-in default entity, which is not the empty name.
 static PyObject* client_quota_entity_to_py(const kafka_common_quota_ClientQuotaEntity_t* e) {
     if (e == NULL) Py_RETURN_NONE;
-    int32_t n = kafka_common_quota_ClientQuotaEntity_entry_count(e);
+    // `entries()` is an owned map of entity type -> entity name (NULL for the
+    // default entity), sorted by type; destroyed once copied out.
+    kafka_Map_t* entries = kafka_common_quota_ClientQuotaEntity_entries(e);
+    int32_t n = kafka_Map_size(entries);
     PyObject* pairs = PyTuple_New(n < 0 ? 0 : n);
-    if (pairs == NULL) return NULL;
+    if (pairs == NULL) { kafka_Map_destroy(entries); return NULL; }
     for (int32_t i = 0; i < n; i++) {
         PyObject* pair = Py_BuildValue("(sz)",
-                                       kafka_common_quota_ClientQuotaEntity_get_entry_type(e, i),
-                                       kafka_common_quota_ClientQuotaEntity_get_entry_name(e, i));
-        if (pair == NULL) { Py_DECREF(pairs); return NULL; }
+                                       (const char*)kafka_Map_key(entries, i),
+                                       (const char*)kafka_Map_value(entries, i));
+        if (pair == NULL) { Py_DECREF(pairs); kafka_Map_destroy(entries); return NULL; }
         PyTuple_SET_ITEM(pairs, i, pair);
     }
+    kafka_Map_destroy(entries);
     return pairs;
 }
 
@@ -6116,22 +6120,28 @@ static PyObject* kafka_principal_to_py(const kafka_common_security_auth_KafkaPri
 static PyObject* delegation_token_to_py(const kafka_common_security_token_delegation_DelegationToken_t* t) {
     if (t == NULL) Py_RETURN_NONE;
     const kafka_common_security_token_delegation_TokenInformation_t* info = kafka_common_security_token_delegation_DelegationToken_token_info(t);
-    int32_t renewer_count = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
+    // `renewers()` is an owned list of owned principals; destroyed once
+    // copied out.
+    kafka_List_t* renewer_list = kafka_common_security_token_delegation_TokenInformation_renewers(info);
+    int32_t renewer_count = kafka_List_size(renewer_list);
     PyObject* renewers = PyList_New(renewer_count < 0 ? 0 : renewer_count);
-    if (renewers == NULL) return NULL;
+    if (renewers == NULL) { kafka_List_destroy(renewer_list); return NULL; }
     for (int32_t i = 0; i < renewer_count; i++) {
-        PyObject* renewer = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, i));
-        if (renewer == NULL) { Py_DECREF(renewers); return NULL; }
+        PyObject* renewer = kafka_principal_to_py(
+            (const kafka_common_security_auth_KafkaPrincipal_t*)kafka_List_get(renewer_list, i));
+        if (renewer == NULL) { Py_DECREF(renewers); kafka_List_destroy(renewer_list); return NULL; }
         PyList_SET_ITEM(renewers, i, renewer);
     }
+    kafka_List_destroy(renewer_list);
     PyObject* owner = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_owner(info));
     PyObject* requester = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_token_requester(info));
     if (owner == NULL || requester == NULL) {
         Py_XDECREF(owner); Py_XDECREF(requester); Py_DECREF(renewers);
         return NULL;
     }
-    int32_t hmac_len = 0;
-    const uint8_t* hmac = kafka_common_security_token_delegation_DelegationToken_hmac(t, &hmac_len);
+    kafka_Bytes_t hmac = kafka_common_security_token_delegation_DelegationToken_hmac(t);
+    // Owned, unlike the borrowed getters: freed after Py_BuildValue copied it.
+    char* hmac_base64 = kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(t);
     // 'O' (not 'N') plus an explicit, unconditional Py_DECREF below: 'N'
     // steals its reference only when do_mkvalue actually runs for that item,
     // which do_mktuple skips entirely if its own PyTuple_New fails (OOM) —
@@ -6144,8 +6154,9 @@ static PyObject* delegation_token_to_py(const kafka_common_security_token_delega
                          (long long)kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info),
                          (long long)kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info),
                          (long long)kafka_common_security_token_delegation_TokenInformation_max_timestamp(info),
-                         (const char*)hmac, (Py_ssize_t)(hmac_len < 0 ? 0 : hmac_len),
-                         kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(t));
+                         (const char*)hmac.data, (Py_ssize_t)(hmac.len < 0 ? 0 : hmac.len),
+                         hmac_base64);
+    kafka_string_destroy(hmac_base64);
     Py_DECREF(owner); Py_DECREF(requester); Py_DECREF(renewers);
     return out;
 }

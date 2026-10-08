@@ -164,7 +164,7 @@ use crate::common::requests::ListOffsetsRequest;
 
 use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use crate::common::security::auth::KafkaPrincipal;
-use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
+use crate::common::security::token::delegation::DelegationToken;
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{
     ElectionType, Error, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection, TopicPartition,
@@ -173,6 +173,12 @@ use crate::common::{
 use crate::consumer::OffsetAndMetadata;
 
 use super::common::node::{NodeInner, kafka_common_Node_t, optional_node_ptr};
+use super::common::quota::client_quota_entity::{
+    client_quota_entity_ptr, kafka_common_quota_ClientQuotaEntity_t, sorted_entries as client_quota_entity_sort_key,
+};
+use super::common::security::token::delegation::delegation_token::{
+    DelegationTokenInner, kafka_common_security_token_delegation_DelegationToken_t,
+};
 use super::common::topic_partition_info::{TopicPartitionInfoInner, kafka_common_TopicPartitionInfo_t};
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
@@ -11957,131 +11963,6 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_permission_type(
     unsafe { acl_binding_filter_ref(filter) }.permission_type
 }
 
-/// Opaque handle to a `ClientQuotaEntity` (Java's
-/// `org.apache.kafka.common.quota.ClientQuotaEntity`).
-///
-/// Borrowed from the owning `describe_client_quotas` / `alter_client_quotas`
-/// result handle; valid until that handle is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_quota_ClientQuotaEntity_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_quota_ClientQuotaEntity_t`].
-///
-/// Java's entity is a `Map<String, String>` from entity type (`"user"`,
-/// `"client-id"`, `"ip"`) to entity name, with a **null value meaning the
-/// built-in default entity** for that type — the `--entity-default` of the
-/// command-line tools — which is not the same as the type being absent from the
-/// map, and not the same as the name `""`.
-///
-/// C gets the map as an indexed sequence sorted by entity type. Absence is
-/// expressed by the type simply not appearing; "default entity" is a null name
-/// pointer; the name `""` is a pointer to an empty string. All three stay
-/// distinct without an extra discriminant, because a null pointer cannot
-/// collide with a pointer to `""`.
-struct ClientQuotaEntityInner {
-    entry_types_c: Vec<CString>,
-    entry_names_c: Vec<Option<CString>>,
-}
-
-impl ClientQuotaEntityInner {
-    fn new(entity: &ClientQuotaEntity) -> Self {
-        // Sorted by entity type so C's index addressing is reproducible; Java's
-        // map is unordered.
-        let mut entries: Vec<(&String, &Option<String>)> = entity.entries().iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
-        Self {
-            entry_types_c: entries.iter().map(|(t, _)| to_cstring(t)).collect(),
-            entry_names_c: entries.iter().map(|(_, n)| n.as_deref().map(to_cstring)).collect(),
-        }
-    }
-
-    /// Deterministic ordering key across entities. `ClientQuotaEntity` is
-    /// `Hash + Eq` but not `Ord`, and its entries are already type-sorted, so
-    /// the pair sequence orders entities reproducibly.
-    fn sort_key(&self) -> Vec<(&str, Option<&str>)> {
-        self.entry_types_c
-            .iter()
-            .zip(&self.entry_names_c)
-            .map(|(t, n)| {
-                (
-                    t.to_str().unwrap_or_default(),
-                    n.as_ref().map(|n| n.to_str().unwrap_or_default()),
-                )
-            })
-            .collect()
-    }
-
-    fn as_ptr(&self) -> *const kafka_common_quota_ClientQuotaEntity_t {
-        self as *const ClientQuotaEntityInner as *const kafka_common_quota_ClientQuotaEntity_t
-    }
-}
-
-/// Casts a `*const kafka_common_quota_ClientQuotaEntity_t` to a reference.
-///
-/// # Safety
-///
-/// `entity` must be a non-null borrowed pointer from a client-quota result
-/// getter.
-unsafe fn client_quota_entity_ref(
-    entity: *const kafka_common_quota_ClientQuotaEntity_t,
-) -> &'static ClientQuotaEntityInner {
-    unsafe { &*(entity as *const ClientQuotaEntityInner) }
-}
-
-/// Returns the number of entity-type entries (the size of Java's
-/// `entries()` map).
-///
-/// # Safety
-///
-/// `entity` must be a valid borrowed client-quota-entity pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entry_count(
-    entity: *const kafka_common_quota_ClientQuotaEntity_t,
-) -> i32 {
-    unsafe { client_quota_entity_ref(entity) }.entry_types_c.len() as i32
-}
-
-/// Returns the entity type at `index` (borrowed) — `"user"`, `"client-id"` or
-/// `"ip"` — or null if out of range. Entries are sorted by entity type.
-///
-/// # Safety
-///
-/// `entity` must be a valid borrowed client-quota-entity pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_type(
-    entity: *const kafka_common_quota_ClientQuotaEntity_t,
-    index: i32,
-) -> *const c_char {
-    cstring_at(&unsafe { client_quota_entity_ref(entity) }.entry_types_c, index)
-}
-
-/// Returns the entity name at `index` (borrowed), or null if out of range **or
-/// if the entry names the built-in default entity** for its type.
-///
-/// The two nulls are told apart by [`kafka_common_quota_ClientQuotaEntity_entry_count`]:
-/// an `index` below the count always denotes a present entry, so a null there
-/// means "default entity", Java's null map value. A name of `""` is a real,
-/// distinct name and comes back as a pointer to an empty string.
-///
-/// # Safety
-///
-/// `entity` must be a valid borrowed client-quota-entity pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
-    entity: *const kafka_common_quota_ClientQuotaEntity_t,
-    index: i32,
-) -> *const c_char {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    match unsafe { client_quota_entity_ref(entity) }.entry_names_c.get(index as usize) {
-        Some(name) => optional_cstring_ptr(name),
-        None => std::ptr::null(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // B5a — ACL and client-quota input marshaling and submission helpers
 //
@@ -13040,7 +12921,7 @@ pub struct kafka_admin_DescribeClientQuotasResult_t {
 /// it is a plain `Map<String, Double>`, not a Java class, so it gets indexed
 /// accessors on the parent rather than a handle (the B2 `ReplicaInfo` rule).
 struct DescribeClientQuotasResultInner {
-    entities: Vec<ClientQuotaEntityInner>,
+    entities: Vec<ClientQuotaEntity>,
     quota_keys: Vec<Vec<CString>>,
     quota_values: Vec<Vec<f64>>,
 }
@@ -13049,11 +12930,10 @@ struct DescribeClientQuotasResultInner {
 fn box_describe_client_quotas_result(
     outcome: DescribeClientQuotasOutcome,
 ) -> *mut kafka_admin_DescribeClientQuotasResult_t {
-    let mut rows: Vec<(ClientQuotaEntityInner, HashMap<String, f64>)> = outcome
-        .into_iter()
-        .map(|(entity, quotas)| (ClientQuotaEntityInner::new(&entity), quotas))
-        .collect();
-    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    // Sorted by the entities' (type, name) pairs so index addressing is
+    // reproducible; `ClientQuotaEntity` is `Hash + Eq` but not `Ord`.
+    let mut rows: Vec<(ClientQuotaEntity, HashMap<String, f64>)> = outcome.into_iter().collect();
+    rows.sort_by(|a, b| client_quota_entity_sort_key(&a.0).cmp(&client_quota_entity_sort_key(&b.0)));
 
     let mut entities = Vec::with_capacity(rows.len());
     let mut quota_keys = Vec::with_capacity(rows.len());
@@ -13110,7 +12990,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
         .entities
         .get(index as usize)
     {
-        Some(entity) => entity.as_ptr(),
+        Some(entity) => client_quota_entity_ptr(entity),
         None => std::ptr::null(),
     }
 }
@@ -13224,17 +13104,17 @@ pub struct kafka_admin_AlterClientQuotasResult_t {
 /// one future for the whole map — so this handle exposes a per-entity error and
 /// no value.
 struct AlterClientQuotasResultInner {
-    entities: Vec<ClientQuotaEntityInner>,
+    entities: Vec<ClientQuotaEntity>,
     errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-entity `alterClientQuotas` outcomes into the C handle.
 fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut kafka_admin_AlterClientQuotasResult_t {
-    let mut rows: Vec<(ClientQuotaEntityInner, Option<ErrorInner>)> = outcomes
+    let mut rows: Vec<(ClientQuotaEntity, Option<ErrorInner>)> = outcomes
         .into_iter()
-        .map(|(entity, outcome)| (ClientQuotaEntityInner::new(&entity), outcome.err().map(error_inner)))
+        .map(|(entity, outcome)| (entity, outcome.err().map(error_inner)))
         .collect();
-    rows.sort_by(|a, b| a.0.sort_key().cmp(&b.0.sort_key()));
+    rows.sort_by(|a, b| client_quota_entity_sort_key(&a.0).cmp(&client_quota_entity_sort_key(&b.0)));
     let (entities, errors) = rows.into_iter().unzip();
     Box::into_raw(Box::new(AlterClientQuotasResultInner { entities, errors }))
         as *mut kafka_admin_AlterClientQuotasResult_t
@@ -13278,7 +13158,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
         return std::ptr::null();
     }
     match unsafe { alter_client_quotas_result_ref(result) }.entities.get(index as usize) {
-        Some(entity) => entity.as_ptr(),
+        Some(entity) => client_quota_entity_ptr(entity),
         None => std::ptr::null(),
     }
 }
@@ -14371,342 +14251,6 @@ unsafe fn read_partition_offsets(
 //     and cross as parallel arrays, never as handles.
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a `KafkaPrincipal` (Java's
-/// `org.apache.kafka.common.security.auth.KafkaPrincipal`).
-///
-/// Borrowed from the owning delegation-token result handle; valid until that
-/// handle is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_security_auth_KafkaPrincipal_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_security_auth_KafkaPrincipal_t`].
-struct KafkaPrincipalInner {
-    principal_type_c: CString,
-    name_c: CString,
-    token_authenticated: bool,
-}
-
-impl KafkaPrincipalInner {
-    fn new(principal: &KafkaPrincipal) -> Self {
-        Self {
-            principal_type_c: to_cstring(principal.principal_type()),
-            name_c: to_cstring(principal.name()),
-            token_authenticated: principal.token_authenticated(),
-        }
-    }
-
-    fn as_ptr(&self) -> *const kafka_common_security_auth_KafkaPrincipal_t {
-        self as *const KafkaPrincipalInner as *const kafka_common_security_auth_KafkaPrincipal_t
-    }
-}
-
-/// Casts a `*const kafka_common_security_auth_KafkaPrincipal_t` to a reference.
-///
-/// # Safety
-///
-/// `principal` must be a non-null borrowed pointer from a token getter.
-unsafe fn kafka_principal_ref(
-    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
-) -> &'static KafkaPrincipalInner {
-    unsafe { &*(principal as *const KafkaPrincipalInner) }
-}
-
-/// Returns `principalType()`, e.g. `"User"`. Borrowed; do not free.
-///
-/// # Safety
-///
-/// `principal` must be a valid borrowed principal pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
-    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
-) -> *const c_char {
-    unsafe { kafka_principal_ref(principal) }.principal_type_c.as_ptr()
-}
-
-/// Returns `getName()`, e.g. `"alice"`. Borrowed; do not free.
-///
-/// # Safety
-///
-/// `principal` must be a valid borrowed principal pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
-    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
-) -> *const c_char {
-    unsafe { kafka_principal_ref(principal) }.name_c.as_ptr()
-}
-
-/// Returns `tokenAuthenticated()`: whether this principal authenticated with a
-/// delegation token.
-///
-/// # Safety
-///
-/// `principal` must be a valid borrowed principal pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
-    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
-) -> bool {
-    unsafe { kafka_principal_ref(principal) }.token_authenticated
-}
-
-/// Opaque handle to a `TokenInformation` (Java's
-/// `org.apache.kafka.common.security.token.delegation.TokenInformation`).
-///
-/// Borrowed from the owning [`kafka_common_security_token_delegation_DelegationToken_t`]; valid until the
-/// result handle that owns the token is destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_security_token_delegation_TokenInformation_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_security_token_delegation_TokenInformation_t`].
-struct TokenInformationInner {
-    token_id_c: CString,
-    owner: KafkaPrincipalInner,
-    token_requester: KafkaPrincipalInner,
-    renewers: Vec<KafkaPrincipalInner>,
-    issue_timestamp: i64,
-    expiry_timestamp: i64,
-    max_timestamp: i64,
-}
-
-impl TokenInformationInner {
-    fn new(info: &TokenInformation) -> Self {
-        Self {
-            token_id_c: to_cstring(info.token_id()),
-            owner: KafkaPrincipalInner::new(info.owner()),
-            token_requester: KafkaPrincipalInner::new(info.token_requester()),
-            renewers: info.renewers().iter().map(KafkaPrincipalInner::new).collect(),
-            issue_timestamp: info.issue_timestamp(),
-            expiry_timestamp: info.expiry_timestamp(),
-            max_timestamp: info.max_timestamp(),
-        }
-    }
-
-    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_TokenInformation_t {
-        self as *const TokenInformationInner as *const kafka_common_security_token_delegation_TokenInformation_t
-    }
-}
-
-/// Casts a `*const kafka_common_security_token_delegation_TokenInformation_t` to a reference.
-///
-/// # Safety
-///
-/// `info` must be a non-null borrowed pointer from
-/// [`kafka_common_security_token_delegation_DelegationToken_token_info`].
-unsafe fn token_information_ref(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> &'static TokenInformationInner {
-    unsafe { &*(info as *const TokenInformationInner) }
-}
-
-/// Returns `tokenId()`. Borrowed; do not free.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> *const c_char {
-    unsafe { token_information_ref(info) }.token_id_c.as_ptr()
-}
-
-/// Returns `owner()` (borrowed). Do not free it; it dies with the result
-/// handle.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> *const kafka_common_security_auth_KafkaPrincipal_t {
-    unsafe { token_information_ref(info) }.owner.as_ptr()
-}
-
-/// Returns `tokenRequester()` (borrowed). This is the principal that *asked*
-/// for the token, which differs from `owner()` when a superuser creates a token
-/// on another principal's behalf (KIP-373). Do not free it.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> *const kafka_common_security_auth_KafkaPrincipal_t {
-    unsafe { token_information_ref(info) }.token_requester.as_ptr()
-}
-
-/// Returns the number of principals in `renewers()`.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewer_count(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> i32 {
-    unsafe { token_information_ref(info) }.renewers.len() as i32
-}
-
-/// Returns the renewer at `index` (borrowed), or null if out of range. Renewers
-/// keep the order the broker reported. Do not free it.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_get_renewer(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-    index: i32,
-) -> *const kafka_common_security_auth_KafkaPrincipal_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    match unsafe { token_information_ref(info) }.renewers.get(index as usize) {
-        Some(renewer) => renewer.as_ptr(),
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns `issueTimestamp()`, in milliseconds since the epoch.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_issue_timestamp(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> i64 {
-    unsafe { token_information_ref(info) }.issue_timestamp
-}
-
-/// Returns `expiryTimestamp()`, in milliseconds since the epoch.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> i64 {
-    unsafe { token_information_ref(info) }.expiry_timestamp
-}
-
-/// Returns `maxTimestamp()`, in milliseconds since the epoch: the latest the
-/// token can be renewed to, whatever the renewal period asks for.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed token-information pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_max_timestamp(
-    info: *const kafka_common_security_token_delegation_TokenInformation_t,
-) -> i64 {
-    unsafe { token_information_ref(info) }.max_timestamp
-}
-
-/// Opaque handle to a `DelegationToken` (Java's
-/// `org.apache.kafka.common.security.token.delegation.DelegationToken`).
-///
-/// Borrowed from the owning `create_delegation_token` /
-/// `describe_delegation_token` result handle; valid until that handle is
-/// destroyed. Do not free it.
-#[repr(C)]
-pub struct kafka_common_security_token_delegation_DelegationToken_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_security_token_delegation_DelegationToken_t`].
-///
-/// The HMAC is raw bytes, not a string: it is a SHA-512 MAC and can contain
-/// NULs, so it crosses as a pointer plus a length rather than as a `CString`.
-/// Java's `hmacAsBase64String()` is exposed alongside it, because that is the
-/// form a caller passes back to `renewDelegationToken` in most tooling.
-struct DelegationTokenInner {
-    token_info: TokenInformationInner,
-    hmac: Vec<u8>,
-    hmac_base64_c: CString,
-}
-
-impl DelegationTokenInner {
-    fn new(token: &DelegationToken) -> Self {
-        Self {
-            token_info: TokenInformationInner::new(token.token_info()),
-            hmac: token.hmac().to_vec(),
-            hmac_base64_c: to_cstring(&token.hmac_as_base64_string()),
-        }
-    }
-
-    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_DelegationToken_t {
-        self as *const DelegationTokenInner as *const kafka_common_security_token_delegation_DelegationToken_t
-    }
-}
-
-/// Casts a `*const kafka_common_security_token_delegation_DelegationToken_t` to a reference.
-///
-/// # Safety
-///
-/// `token` must be a non-null borrowed pointer from a delegation-token result
-/// getter.
-unsafe fn delegation_token_ref(
-    token: *const kafka_common_security_token_delegation_DelegationToken_t,
-) -> &'static DelegationTokenInner {
-    unsafe { &*(token as *const DelegationTokenInner) }
-}
-
-/// Returns `tokenInfo()` (borrowed). Do not free it; it dies with the result
-/// handle.
-///
-/// # Safety
-///
-/// `token` must be a valid borrowed delegation-token pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
-    token: *const kafka_common_security_token_delegation_DelegationToken_t,
-) -> *const kafka_common_security_token_delegation_TokenInformation_t {
-    unsafe { delegation_token_ref(token) }.token_info.as_ptr()
-}
-
-/// Returns `hmac()`: the raw MAC bytes, borrowed, with the length written to
-/// `out_len` when it is non-null.
-///
-/// The bytes are **not** NUL-terminated and may contain NUL, so `out_len` is
-/// the only way to know how many there are. Pass these bytes back verbatim to
-/// [`kafka_admin_AdminClient_renew_delegation_token`] /
-/// [`kafka_admin_AdminClient_expire_delegation_token`].
-///
-/// # Safety
-///
-/// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
-/// null or writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
-    token: *const kafka_common_security_token_delegation_DelegationToken_t,
-    out_len: *mut i32,
-) -> *const u8 {
-    let inner = unsafe { delegation_token_ref(token) };
-    if !out_len.is_null() {
-        unsafe { *out_len = inner.hmac.len() as i32 };
-    }
-    inner.hmac.as_ptr()
-}
-
-/// Returns `hmacAsBase64String()`. Borrowed; do not free.
-///
-/// # Safety
-///
-/// `token` must be a valid borrowed delegation-token pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
-    token: *const kafka_common_security_token_delegation_DelegationToken_t,
-) -> *const c_char {
-    unsafe { delegation_token_ref(token) }.hmac_base64_c.as_ptr()
-}
-
 // ---------------------------------------------------------------------------
 // B5b — SCRAM, delegation-token and feature input marshaling and submission
 //
@@ -15573,9 +15117,10 @@ pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
 ///
 /// # Parameters
 ///
-/// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
-///   required.
+/// - `hmac` / `hmac_len`: the token's raw HMAC, the `data` / `len` of the
+///   `kafka_Bytes_t` returned by
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not
+///   NUL-terminated; the length is required.
 /// - `renew_time_period_ms`: how much longer the token should live; negative
 ///   keeps Java's `-1`, meaning the broker's
 ///   `delegation.token.expiry.time.ms`.
@@ -15682,9 +15227,10 @@ pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
 ///
 /// # Parameters
 ///
-/// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
-///   required.
+/// - `hmac` / `hmac_len`: the token's raw HMAC, the `data` / `len` of the
+///   `kafka_Bytes_t` returned by
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not
+///   NUL-terminated; the length is required.
 /// - `expiry_time_period_ms`: `>= 0` moves the expiry to
 ///   `min(now + expiry_time_period_ms, maxTimestamp)`; **negative expires the
 ///   token immediately**, which is Java's documented meaning of the `-1`
@@ -16451,7 +15997,7 @@ struct CreateDelegationTokenResultInner {
 /// Boxes the created token into the C handle.
 fn box_create_delegation_token_result(token: DelegationToken) -> *mut kafka_admin_CreateDelegationTokenResult_t {
     Box::into_raw(Box::new(CreateDelegationTokenResultInner {
-        token: DelegationTokenInner::new(&token),
+        token: DelegationTokenInner::new(token),
     })) as *mut kafka_admin_CreateDelegationTokenResult_t
 }
 
@@ -16600,7 +16146,7 @@ struct DescribeDelegationTokenResultInner {
 fn box_describe_delegation_token_result(
     tokens: Vec<DelegationToken>,
 ) -> *mut kafka_admin_DescribeDelegationTokenResult_t {
-    let tokens = tokens.iter().map(DelegationTokenInner::new).collect();
+    let tokens = tokens.into_iter().map(DelegationTokenInner::new).collect();
     Box::into_raw(Box::new(DescribeDelegationTokenResultInner { tokens }))
         as *mut kafka_admin_DescribeDelegationTokenResult_t
 }
@@ -19015,6 +18561,27 @@ mod tests {
     use crate::admin::{FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange};
     use crate::common::ClassicGroupState;
     use crate::common::protocol::Errors;
+    use crate::common::security::token::delegation::TokenInformation;
+    use crate::ffi::common::quota::client_quota_entity::client_quota_entity_ref;
+    use crate::ffi::common::security::auth::kafka_principal::{
+        kafka_common_security_auth_KafkaPrincipal_name, kafka_common_security_auth_KafkaPrincipal_principal_type,
+        kafka_common_security_auth_KafkaPrincipal_t, kafka_common_security_auth_KafkaPrincipal_token_authenticated,
+    };
+    use crate::ffi::common::security::token::delegation::delegation_token::{
+        kafka_common_security_token_delegation_DelegationToken_hmac,
+        kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string,
+        kafka_common_security_token_delegation_DelegationToken_token_info,
+    };
+    use crate::ffi::common::security::token::delegation::token_information::{
+        kafka_common_security_token_delegation_TokenInformation_expiry_timestamp,
+        kafka_common_security_token_delegation_TokenInformation_issue_timestamp,
+        kafka_common_security_token_delegation_TokenInformation_max_timestamp,
+        kafka_common_security_token_delegation_TokenInformation_owner,
+        kafka_common_security_token_delegation_TokenInformation_renewers,
+        kafka_common_security_token_delegation_TokenInformation_token_id,
+        kafka_common_security_token_delegation_TokenInformation_token_requester,
+    };
+    use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
 
     fn text(value: &CString) -> &str {
         value.to_str().expect("CString holds UTF-8")
@@ -21500,48 +21067,6 @@ mod tests {
     // -- Client-quota result flattening --------------------------------------
 
     #[test]
-    fn client_quota_entity_distinguishes_the_default_entity_from_the_empty_name() {
-        let inner = ClientQuotaEntityInner::new(&quota_entity(&[
-            ("user", None),
-            ("client-id", Some("")),
-            ("ip", Some("10.0.0.1")),
-        ]));
-        let e = inner.as_ptr();
-        unsafe {
-            assert_eq!(kafka_common_quota_ClientQuotaEntity_entry_count(e), 3);
-            // Sorted by entity type: client-id, ip, user.
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
-                Ok("client-id")
-            );
-            // Present but empty: a pointer to "", not null.
-            let empty = kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 0);
-            assert!(!empty.is_null());
-            assert_eq!(CStr::from_ptr(empty).to_str(), Ok(""));
-
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
-                Ok("ip")
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
-                Ok("10.0.0.1")
-            );
-
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
-                Ok("user")
-            );
-            // The default entity: a null name at an in-range index.
-            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 2).is_null());
-
-            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 3).is_null());
-            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 3).is_null());
-            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, -1).is_null());
-        }
-    }
-
-    #[test]
     fn describe_client_quotas_result_flattens_the_nested_quota_map() {
         let outcome: DescribeClientQuotasOutcome = HashMap::from([
             (
@@ -21559,10 +21084,7 @@ mod tests {
 
             // Entities sorted by their (type, name) pairs: alice before bob.
             let alice = kafka_admin_DescribeClientQuotasResult_get_entity(result, 0);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
-                Ok("alice")
-            );
+            assert_eq!(*client_quota_entity_ref(alice), quota_entity(&[("user", Some("alice"))]));
             assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 0), 2);
             // Quota keys sorted: consumer_byte_rate before producer_byte_rate.
             assert_eq!(
@@ -21612,10 +21134,7 @@ mod tests {
         unsafe {
             assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
             let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
-            assert_eq!(
-                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
-                Ok("alice")
-            );
+            assert_eq!(*client_quota_entity_ref(alice), quota_entity(&[("user", Some("alice"))]));
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
             assert_eq!(
                 common::kafka_common_Error_code(kafka_admin_AlterClientQuotasResult_get_error(result, 1)) as i32,
@@ -22321,14 +21840,12 @@ mod tests {
 
             // The HMAC contains an interior NUL, so only the length says how
             // long it is -- a CString would have truncated it to one byte.
-            let mut len = 0i32;
-            let hmac = kafka_common_security_token_delegation_DelegationToken_hmac(handle, &mut len);
-            assert_eq!(len, 3);
-            assert_eq!(std::slice::from_raw_parts(hmac, len as usize), &[0x01, 0x00, 0x02]);
-            let encoded = CStr::from_ptr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
-                handle,
-            ));
-            assert_eq!(encoded.to_str().expect("utf8"), base64);
+            let hmac = kafka_common_security_token_delegation_DelegationToken_hmac(handle);
+            assert_eq!(hmac.len, 3);
+            assert_eq!(hmac.as_slice(), Some(&[0x01u8, 0x00, 0x02][..]));
+            let encoded = kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(handle);
+            assert_eq!(CStr::from_ptr(encoded).to_str().expect("utf8"), base64);
+            kafka_string_destroy(encoded);
 
             let info = kafka_common_security_token_delegation_DelegationToken_token_info(handle);
             let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(info));
@@ -22353,18 +21870,18 @@ mod tests {
             let requester_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(requester));
             assert_eq!(requester_name.to_str().expect("utf8"), "requester");
 
-            assert_eq!(kafka_common_security_token_delegation_TokenInformation_renewer_count(info), 2);
-            let renewer0 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 0);
+            let renewers = kafka_common_security_token_delegation_TokenInformation_renewers(info);
+            assert_eq!(kafka_List_size(renewers), 2);
+            let renewer0 = kafka_List_get(renewers, 0) as *const kafka_common_security_auth_KafkaPrincipal_t;
             let renewer0_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer0));
             let renewer0_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(renewer0));
             assert_eq!(renewer0_type.to_str().expect("utf8"), "User");
             assert_eq!(renewer0_name.to_str().expect("utf8"), "renewer-1");
-            let renewer1 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 1);
+            let renewer1 = kafka_List_get(renewers, 1) as *const kafka_common_security_auth_KafkaPrincipal_t;
             let renewer1_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer1));
             assert_eq!(renewer1_type.to_str().expect("utf8"), "Group");
-            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 2).is_null());
-            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, -1).is_null());
-            assert!(!kafka_common_security_auth_KafkaPrincipal_token_authenticated(owner));
+            kafka_List_destroy(renewers);
+            assert_eq!(kafka_common_security_auth_KafkaPrincipal_token_authenticated(owner), 0);
 
             kafka_admin_DescribeDelegationTokenResult_destroy(result);
         }
@@ -22434,12 +21951,11 @@ mod tests {
             ));
             assert_eq!(id.to_str().expect("utf8"), "token-id-2");
             // No renewers is a legal token: only the owner may renew it.
-            assert_eq!(
-                kafka_common_security_token_delegation_TokenInformation_renewer_count(
-                    kafka_common_security_token_delegation_DelegationToken_token_info(handle)
-                ),
-                0
+            let renewers = kafka_common_security_token_delegation_TokenInformation_renewers(
+                kafka_common_security_token_delegation_DelegationToken_token_info(handle),
             );
+            assert_eq!(kafka_List_size(renewers), 0);
+            kafka_List_destroy(renewers);
             kafka_admin_CreateDelegationTokenResult_destroy(result);
         }
     }

@@ -4708,21 +4708,26 @@ static void test_mock_admin_alter_client_quotas_reports_unsupported_per_entity(v
     const kafka_common_quota_ClientQuotaEntity_t *e0 =
         kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
     TEST_ASSERT_NOT_NULL(e0);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_quota_ClientQuotaEntity_entry_count(e0));
-    TEST_ASSERT_EQUAL_STRING("client-id", kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 0));
-    /* A null name at an in-range index is the built-in default entity, not an
-     * absent entry and not the empty name. */
-    TEST_ASSERT_NULL(kafka_common_quota_ClientQuotaEntity_get_entry_name(e0, 0));
-    TEST_ASSERT_EQUAL_STRING("user", kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 1));
-    TEST_ASSERT_EQUAL_STRING("alice", kafka_common_quota_ClientQuotaEntity_get_entry_name(e0, 1));
-    TEST_ASSERT_NULL(kafka_common_quota_ClientQuotaEntity_get_entry_type(e0, 2));
+    /* `entries()` is an owned map of entity type -> entity name, sorted by
+     * type. A NULL value is the built-in default entity, not an absent entry
+     * and not the empty name. */
+    kafka_Map_t *entries0 = kafka_common_quota_ClientQuotaEntity_entries(e0);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(entries0));
+    TEST_ASSERT_EQUAL_STRING("client-id", (const char *)kafka_Map_key(entries0, 0));
+    TEST_ASSERT_NULL(kafka_Map_value(entries0, 0));
+    TEST_ASSERT_EQUAL_STRING("user", (const char *)kafka_Map_key(entries0, 1));
+    TEST_ASSERT_EQUAL_STRING("alice", (const char *)kafka_Map_value(entries0, 1));
+    TEST_ASSERT_NULL(kafka_Map_key(entries0, 2));
+    kafka_Map_destroy(entries0);
 
     const kafka_common_quota_ClientQuotaEntity_t *e1 =
         kafka_admin_AlterClientQuotasResult_get_entity(result, 1);
     TEST_ASSERT_NOT_NULL(e1);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_quota_ClientQuotaEntity_entry_count(e1));
-    TEST_ASSERT_EQUAL_STRING("ip", kafka_common_quota_ClientQuotaEntity_get_entry_type(e1, 0));
-    TEST_ASSERT_EQUAL_STRING("10.0.0.1", kafka_common_quota_ClientQuotaEntity_get_entry_name(e1, 0));
+    kafka_Map_t *entries1 = kafka_common_quota_ClientQuotaEntity_entries(e1);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(entries1));
+    TEST_ASSERT_EQUAL_STRING("ip", (const char *)kafka_Map_key(entries1, 0));
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", (const char *)kafka_Map_value(entries1, 0));
+    kafka_Map_destroy(entries1);
 
     for (int32_t i = 0; i < 2; i++) {
         const kafka_common_Error_t *e =
@@ -5109,13 +5114,17 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     TEST_ASSERT_NOT_NULL(token);
     const kafka_common_security_token_delegation_TokenInformation_t *info = kafka_common_security_token_delegation_DelegationToken_token_info(token);
     TEST_ASSERT_NOT_NULL(info);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_security_token_delegation_TokenInformation_renewer_count(info));
     const kafka_common_security_auth_KafkaPrincipal_t *owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
     TEST_ASSERT_EQUAL_STRING("User", kafka_common_security_auth_KafkaPrincipal_principal_type(owner));
     TEST_ASSERT_EQUAL_STRING("owner-principal", kafka_common_security_auth_KafkaPrincipal_name(owner));
+    /* `renewers()` is an owned list of owned principals, in the order they
+     * were passed. */
+    kafka_List_t *renewers = kafka_common_security_token_delegation_TokenInformation_renewers(info);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(renewers));
     TEST_ASSERT_EQUAL_STRING("second-renewer",
                              kafka_common_security_auth_KafkaPrincipal_name(
-                                 kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 1)));
+                                 (const kafka_common_security_auth_KafkaPrincipal_t *)kafka_List_get(renewers, 1)));
+    kafka_List_destroy(renewers);
     TEST_ASSERT_EQUAL_INT64(86400000, kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
     /* Copy the token id out, not just the pointer: every getter on these
      * handles returns a borrow that dies with the result handle destroyed
@@ -5129,14 +5138,17 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
 
     /* The HMAC is borrowed from the same handle and needs the same treatment;
      * the mock uses the token id's bytes as the HMAC. */
-    int32_t hmac_len = 0;
-    const uint8_t *hmac_borrowed = kafka_common_security_token_delegation_DelegationToken_hmac(token, &hmac_len);
+    kafka_Bytes_t hmac_borrowed = kafka_common_security_token_delegation_DelegationToken_hmac(token);
+    int32_t hmac_len = hmac_borrowed.len;
     TEST_ASSERT_TRUE(hmac_len > 0);
     uint8_t hmac[128];
     TEST_ASSERT_TRUE((size_t)hmac_len <= sizeof(hmac));
-    memcpy(hmac, hmac_borrowed, (size_t)hmac_len);
-    /* The base64 form is the same bytes, so it must be non-empty too. */
-    TEST_ASSERT_TRUE(strlen(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token)) > 0);
+    memcpy(hmac, hmac_borrowed.data, (size_t)hmac_len);
+    /* The base64 form is the same bytes, so it must be non-empty too. It is
+     * an owned string, unlike the borrowed getters above. */
+    char *hmac_base64 = kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token);
+    TEST_ASSERT_TRUE(strlen(hmac_base64) > 0);
+    kafka_string_destroy(hmac_base64);
     kafka_admin_CreateDelegationTokenResult_destroy(created);
 
     /* describeDelegationToken with no filter sees it. */
@@ -5429,7 +5441,9 @@ static void on_create_delegation_token(kafka_admin_CreateDelegationTokenResult_t
     if (result != NULL) {
         const kafka_common_security_token_delegation_TokenInformation_t *info =
             kafka_common_security_token_delegation_DelegationToken_token_info(kafka_admin_CreateDelegationTokenResult_get_token(result));
-        r->count = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
+        kafka_List_t *renewers = kafka_common_security_token_delegation_TokenInformation_renewers(info);
+        r->count = kafka_List_size(renewers);
+        kafka_List_destroy(renewers);
         kafka_admin_CreateDelegationTokenResult_destroy(result);
     }
     record_async_error(r, error);

@@ -4457,20 +4457,24 @@ class AdminServiceImpl final : public AdminService::Service {
   // entity for the type, not the entity named "".
   static void quota_entity_to_proto(const kafka_common_quota_ClientQuotaEntity_t* entity,
                                     ClientQuotaEntity* dst) {
-    const int32_t n = kafka_common_quota_ClientQuotaEntity_entry_count(entity);
+    // `entries()` is an owned map of entity type -> entity name (NULL for
+    // the default entity), sorted by type.
+    kafka_Map_t* entries = kafka_common_quota_ClientQuotaEntity_entries(entity);
+    const int32_t n = kafka_Map_size(entries);
     for (int32_t i = 0; i < n; i++) {
       auto* pair = dst->add_entries();
-      pair->set_entity_type(cstr(kafka_common_quota_ClientQuotaEntity_get_entry_type(entity, i)));
-      const char* name = kafka_common_quota_ClientQuotaEntity_get_entry_name(entity, i);
+      pair->set_entity_type(cstr(static_cast<const char*>(kafka_Map_key(entries, i))));
+      const char* name = static_cast<const char*>(kafka_Map_value(entries, i));
       if (name != nullptr) pair->set_entity_name(std::string(name));
     }
+    kafka_Map_destroy(entries);
   }
 
   static void principal_to_proto(const kafka_common_security_auth_KafkaPrincipal_t* principal,
                                  KafkaPrincipal* dst) {
     dst->set_principal_type(cstr(kafka_common_security_auth_KafkaPrincipal_principal_type(principal)));
     dst->set_name(cstr(kafka_common_security_auth_KafkaPrincipal_name(principal)));
-    dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(principal));
+    dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(principal) != 0);
   }
 
   // Returns false when the token has no `token_info`, which the caller turns
@@ -4493,22 +4497,27 @@ class AdminServiceImpl final : public AdminService::Service {
     const kafka_common_security_auth_KafkaPrincipal_t* requester =
         kafka_common_security_token_delegation_TokenInformation_token_requester(info);
     if (requester != nullptr) principal_to_proto(requester, out->mutable_token_requester());
-    const int32_t renewers = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
-    for (int32_t i = 0; i < renewers; i++) {
-      const kafka_common_security_auth_KafkaPrincipal_t* renewer =
-          kafka_common_security_token_delegation_TokenInformation_get_renewer(info, i);
+    // `renewers()` is an owned list of owned principals.
+    kafka_List_t* renewers = kafka_common_security_token_delegation_TokenInformation_renewers(info);
+    const int32_t renewer_count = kafka_List_size(renewers);
+    for (int32_t i = 0; i < renewer_count; i++) {
+      const auto* renewer =
+          static_cast<const kafka_common_security_auth_KafkaPrincipal_t*>(kafka_List_get(renewers, i));
       if (renewer != nullptr) principal_to_proto(renewer, out->add_renewers());
     }
+    kafka_List_destroy(renewers);
     out->set_issue_timestamp(kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info));
     out->set_max_timestamp(kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
     out->set_expiry_timestamp(kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info));
-    int32_t hmac_len = 0;
-    const uint8_t* hmac = kafka_common_security_token_delegation_DelegationToken_hmac(token, &hmac_len);
-    if (hmac != nullptr && hmac_len > 0) {
-      dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac),
-                                static_cast<size_t>(hmac_len)));
+    const kafka_Bytes_t hmac = kafka_common_security_token_delegation_DelegationToken_hmac(token);
+    if (hmac.data != nullptr && hmac.len > 0) {
+      dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac.data),
+                                static_cast<size_t>(hmac.len)));
     }
-    dst->set_hmac_as_base64(cstr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token)));
+    // Owned, unlike the borrowed getters above.
+    char* hmac_base64 = kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token);
+    dst->set_hmac_as_base64(cstr(hmac_base64));
+    kafka_string_destroy(hmac_base64);
     return true;
   }
 
