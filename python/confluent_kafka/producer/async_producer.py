@@ -84,6 +84,16 @@ def _set_result(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
+def _drop_completion(topic: str, partition: int | None, result: int, error: int) -> None:
+    """A completion whose event loop has closed: no loop can run its callback
+    (it runs on the event loop) or complete its future any more, so its
+    handles are freed and one warning is logged."""
+    metadata, _ = completion_to_python(result, error, topic, partition)
+    _LOG.warning("The completion of a record sent to topic-partition '%s' was dropped: its "
+                 "event loop had closed, so its callback did not run and its future does not "
+                 "complete", f"{metadata.topic()}-{metadata.partition()}")
+
+
 class AsyncProducer(Generic[K, V], _ProducerState):
     """The asyncio peer of ``Producer``, the interface for the
     ``AsyncKafkaProducer``: an async context manager whose exit flushes, then
@@ -130,7 +140,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def commit_transaction(self) -> None:
         """See :meth:`Producer.commit_transaction`: when it returns, the
-        callbacks of the transaction's records have run."""
+        callbacks of the transaction's records have run, but for those of a
+        record whose event loop has closed, which are dropped (see
+        :meth:`send`)."""
         self._check_not_closed()
         sent = list(self._futures)
         # Sends from now on wait for their handover again (see _ProducerState).
@@ -138,6 +150,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         await self._drain_async()
         await self._run_async(
             lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
+        sent = self._completable(sent)
         if sent:
             await asyncio.wait(sent)
 
@@ -187,16 +200,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                         rethrown = completion_to_python(result, error, topic, partition)[1]
                         return
             if loop.is_closed():
-                # No loop can run the callback (it runs on the event loop) or
-                # complete the future any more: the completion is dropped, its
-                # handles freed, and the future untracked, so a later flush()
-                # does not wait for it.
-                metadata, _ = completion_to_python(result, error, topic, partition)
+                # The completion is dropped, then the future untracked, so a
+                # later flush() does not wait for it (see _completable).
+                _drop_completion(topic, partition, result, error)
                 self._futures.discard(future)
-                _LOG.warning("The completion of a record sent to topic-partition '%s' was "
-                             "dropped: its event loop had closed, so its callback did not "
-                             "run and its future does not complete",
-                             f"{metadata.topic()}-{metadata.partition()}")
                 return
             with self._pending_lock:
                 pending = self._pending.get(loop)
@@ -273,13 +280,35 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     async def flush(self) -> None:
         """See :meth:`Producer.flush`: when it returns, the callbacks of the
-        records sent before it have run."""
+        records sent before it have run, but for those of a record whose event
+        loop has closed, which are dropped (see :meth:`send`)."""
         self._check_not_closed()
         sent = list(self._futures)
         await self._drain_async()
         await self._run_async(lambda cb: self._call(_lib.Producer_flush_async, cb))
+        sent = self._completable(sent)
         if sent:
             await asyncio.wait(sent)
+
+    def _completable(self, sent: list[Any]) -> list[Any]:
+        """The futures of ``sent`` a wait can still see complete. One whose event
+        loop has closed never completes: it is untracked instead of waited for,
+        and its completion is dropped with :func:`_drop_completion`'s warning,
+        when it arrives (see ``send``) or, if it arrived while the loop was
+        open but was left for the loop to run, here."""
+        with self._pending_lock:
+            closed_loops = [loop for loop in self._pending if loop.is_closed()]
+            stranded = [item for loop in closed_loops for item in self._pending.pop(loop)]
+        for future, _callback, topic, partition, result, error in stranded:
+            _drop_completion(topic, partition, result, error)
+            self._futures.discard(future)
+        completable: list[Any] = []
+        for future in sent:
+            if future.get_loop().is_closed():
+                self._futures.discard(future)
+            else:
+                completable.append(future)
+        return completable
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
         """See :meth:`Producer.partitions_for`."""

@@ -1730,6 +1730,74 @@ def test_an_async_completion_after_its_loop_closed_is_dropped(
     assert p._closed  # noqa: SLF001
 
 
+DROPPED = (f"The completion of a record sent to topic-partition '{TOPIC}--1' was dropped: its "
+           "event loop had closed, so its callback did not run and its future does not complete")
+
+
+def _dropped(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == "confluent_kafka.producer" and r.getMessage().startswith("The completion")]
+
+
+def test_a_flush_that_starts_before_a_closed_loops_completion_returns(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # Loop A closes with a send in flight, and a flush() on loop B starts
+    # before the record completes: the flush's wait list holds a future no
+    # loop can complete any more, so the wait leaves it out, and the
+    # completion is dropped with one warning when it arrives.
+    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 1000})
+    ran: list[Exception | None] = []
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.run_until_complete(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+    finally:
+        loop.close()
+
+    async def flush_then_close() -> None:
+        assert future in p._futures  # noqa: SLF001 - the completion has not arrived
+        await asyncio.wait_for(p.flush(), 10)
+        await asyncio.wait_for(p.close(), 10)
+
+    asyncio.run(flush_then_close())
+    assert future not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.done()
+    assert _dropped(caplog) == [DROPPED]
+
+
+def test_a_completion_left_for_a_closed_loop_is_dropped_by_the_next_flush(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # The record completes while its loop is open but not running, so its
+    # completion waits for that loop, which then closes without running it: a
+    # flush() on another loop drops it, with one warning, and returns.
+    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    ran: list[Exception | None] = []
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.run_until_complete(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+        deadline = time.monotonic() + 30
+        while loop not in p._pending and time.monotonic() < deadline:  # noqa: SLF001
+            time.sleep(0.01)
+        assert loop in p._pending  # noqa: SLF001
+    finally:
+        loop.close()
+
+    async def flush_then_close() -> None:
+        await asyncio.wait_for(p.flush(), 10)
+        await asyncio.wait_for(p.close(), 10)
+
+    asyncio.run(flush_then_close())
+    assert loop not in p._pending  # noqa: SLF001
+    assert future not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.done()
+    assert _dropped(caplog) == [DROPPED]
+
+
 async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
     # Its entry point has an _async form, so begin_transaction() is a
     # coroutine (Class family). Critic 75 N1: a record still waiting for its
