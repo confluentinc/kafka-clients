@@ -1226,6 +1226,34 @@ Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `1
     - **Never** use `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a chunked
       batch: `take_buffer` returns an empty `Vec`, and `initial_capacity()` is the chunk size.
     - Unused chunks were already released at `close_for_record_appends`.
+  - **Critic 97 notes for Phase 8:**
+    - `take_buffer()` on a chunked builder returns an empty `Vec`. Today's
+      `RecordAccumulator::deallocate` (`record_accumulator.rs` ~1794-1800) would call
+      `deallocate_with_size(Vec::new(), chunk_size)`, crediting a chunk of non-pooled memory, while
+      the stream's `Drop` also returns the real chunks. The in-flight branch
+      (`vec![0u8; initial_capacity()]`) is wrong the same way. Both over-credit the pool, so
+      `buffer.memory` can be exceeded.
+      - Phase 8 must branch on `is_chunked()` (Java's `ChunkedProducerBatch.deallocateBuffer` /
+        `deallocateInflightBuffer`).
+      - A `debug_assert!` in `take_buffer`'s `Chunked` arm would make a missed branch loud.
+    - An overflowing chunked append panics: `append_default_record`'s `.expect("I/O error ...")`
+      is now reachable through the fallible stream. Java refuses an under-sized first append
+      *before* writing (`ChunkedProducerBatch.tryAppend`, `ChunkedProducerBatch.java:82-88`).
+      - Translate that refusal as a returned error ahead of the append, and keep the builder panic
+        as the last-resort bug guard.
+      - The chunked-plus-compression panic at close stays acceptable only while the `ConfigException`
+        (`KafkaProducer.java:475-480`) runs before any chunked builder is built, on every
+        construction path.
+- **Java line-cite convention (Manager decision, Critic 97 L2):** a phase that ports a file's Java
+  changes refreshes that file's Java line cites to the new reference in the same phase. Phase 7 did
+  this for `buffer_pool.rs` and `memory_records_builder.rs` (and the one `BufferPool.java` cite in
+  `ffi/producer.rs`). Its `ProducerBatch.java` cite belongs to Phase 8's file.
+- **Critic 97 round 1:** 0 blockers, 2 Low, both fixed.
+  - L1: two probe tests were added, for the free-list-before-raw swap and for `set_position` on a
+    chunk boundary. Each fails under its mutation. The `test_try_allocate_chunks` docstring
+    overclaim is gone. Fixups `b3db22aa` and `f5285aea`.
+  - L2: cites refreshed to rc4 in `1d297caa`.
+  - Throughput: the Critic's interleaved re-run confirms "no regression"; the +3.7 % above is noise.
 - **Timing log** (2026-10-07/08, IST):
 
   | Step | Start | End | Minutes |
