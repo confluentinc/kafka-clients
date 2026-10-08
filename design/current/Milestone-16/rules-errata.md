@@ -464,3 +464,7 @@ Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not ed
   and name callbacks per CLAUDE.md §4.
 - **Related, `admin-client.md` §2:** if restated, note that not every enqueue goes through `CallSender::call`:
   `HandleResult::NewCall` follow-ups are pushed by the I/O task directly (Critic 102 Issue 1).
+- **More suggested anti-patterns (Critic 98 P1):**
+  - a per-record `DashMap::entry` (a shard write lock) where a `get` would do;
+  - send-path performance judged from a `cfg(test)` build. Measure in a release example (fat LTO,
+    system allocator), not in the test binary, whose test allocator and seams change the inlining.

@@ -1607,28 +1607,50 @@ notes commit.
     `Option`s in `AppendGuard` were most of it; splitting out `ChunkedAppendGuard` (`d529098c`)
     brought it to 10.19-10.47 after vs 10.70-10.78 before (-2 to -5 %, about 3-4 ns per append).
     Allocation counts are unchanged.
-  - **Critic 98 F1 (fixup `77183531`).** That accumulator-only figure understated the cost, which
-    was +6 % at `do_send_bytes`. The largest single lever was the folded `ChunkedProducerBatch`
-    first-append check running inline in every plain `ProducerBatch::try_append`. Three changes
-    were needed together:
-    - the check moved into a `#[cold] #[inline(never)]` helper;
-    - `#[inline]` on five small helpers, and the two full-path `partition_changed` calls guarded
-      with `unknown_partition &&`;
-    - `RecordAppendResult` back to 40 B, with the extension size sharing `appended_bytes` and read
-      through `extension_bytes_needed()` (a test pins the size).
+  - **Critic 98 F1 (fixup `77183531`) and P1 (fixup `67e85c90`).** The F1 numbers, and every number
+    above, came from a `cfg(test)` binary (test allocator, test seams), whose inlining is not the
+    shipped build's. They are superseded by the production measurements below.
+    - F1 (cold first-append helper, `#[inline]` hints, `unknown_partition &&` guard, 40 B
+      `RecordAppendResult`) was tuned on that test harness.
+    - P1, measured in a production build: the default `full` strategy was +15-18 % per record against
+      `3957e76f`. The chunked accumulator gives hot code it shares with the full path a second call
+      site (DashMap `_entry` / `_get`, `has_room_for`, `topic_info_for`,
+      `update_partition_info_on_append`), so fat LTO stopped inlining it into the full path. The
+      per-append `batches.entry(p)` shard write lock was the largest single cost.
+    - The fix:
+      - the deque lookup takes `get(p)` first and falls back to `entry(p).or_insert_with(..)` only
+        on a miss. The full path writes this out in place (a shared helper was itself not inlined),
+        and the chunked path uses `RecordAccumulator::deque_for`;
+      - `#[inline(always)]` on those three helpers.
+    - Each F1 part was re-measured in production on top of the fix. Removing the cold helper, the
+      `#[inline]` hints or the 40 B layout made no part faster, and removing the 40 B layout cost
+      +3 % on the sticky accumulator path. All are kept, and the size-pinning test stays.
+    - **Production method** (the Critic's): a clean export per commit, with a `#[doc(hidden)]
+      critic98_prodbench` module and an `examples/critic98_prodbench.rs`.
+      - `cargo build --release --example`: fat LTO, one codegen unit, the system allocator.
+      - 500 000 appends of a 10 B key and a 100 B value into 16 KiB batches, best of 9 per run.
+      - 8 interleaved runs. Load was 3.5 at the start of the run and 9.8 at the end.
+      - Scripts: `actor98-pb/{add.py,variant.py,buildv.sh,runbench.sh,summ.py}` in scratch.
 
-    Behaviour is unchanged. Re-measured with the Critic's harness: clean `git archive` release
-    builds with fat LTO, a current-thread runtime, 500 000 appends of a 10 B key and a 100 B value,
-    best of 9 per run, 8 runs interleaved with 3957e76f, at load 4-5. Medians, ns per record:
-
-    | | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
+    | median ns / record, production build | accumulator, explicit | accumulator, sticky | `do_send_bytes`, explicit | `do_send_bytes`, keyed |
     |---|---|---|---|---|
-    | base `3957e76f` | 93.39 | 98.72 | 107.95 | 122.63 |
-    | after the fixup | 93.92 (+0.6 %) | 99.81 (+1.1 %) | 109.27 (+1.2 %) | 124.38 (+1.4 %) |
+    | `7ccc9ffb` (master before Milestone 16) | 91.90 | 97.26 | 103.84 | 112.66 |
+    | `3957e76f` (before Phase 8) | 92.06 | 97.12 | 103.50 | 111.69 |
+    | after P1 (`67e85c90`) | 89.24 (−3.1 % / −2.9 %) | 97.42 (+0.3 % / +0.2 %) | 102.27 (−1.2 % / −1.5 %) | 113.37 (+1.5 % / +0.6 %) |
 
-    Allocations per steady send are still 2 at the producer and 1 at the accumulator.
-    After the fix: `producer::` lib tests 793 passed; producer broker tests in both strategies 105 of
-    105 passed, including all 11 incremental ones; lint shows the 11 §5.1 rows; format-check is clean.
+    The percentages are against `3957e76f` / `7ccc9ffb`.
+    - `3957e76f` and `7ccc9ffb` are at parity with each other, so neither Phase 5 nor Phase 6
+      regressed this path.
+    - For information, the incremental strategy's accumulator costs 147.0 ns (explicit) and
+      151.9 ns (sticky) per record in the same run, about 1.6x the full strategy. The extra is the
+      per-record extension check, plus a chunk acquire and attach every 16 KiB.
+    - Allocations per steady send are unchanged: 2 at the producer, 1 at the accumulator.
+    - After P1:
+      - `producer::` lib tests: 793 passed;
+      - format-check is clean; lint shows the 11 §5.1 rows;
+      - producer broker tests in both strategies: 104 of 105 passed, including all 11 incremental
+        ones. The failure, `test_producer_rebootstrap_disabled`, was a container startup timeout,
+        and it passed when re-run alone.
 - **Cites.** `KafkaProducer.java`, `RecordAccumulator.java` and `ProducerBatch.java` cites across
   `rust/src` refreshed to rc4 by content (204 cites in 13 files, `1daace6b`), including the bare
   `:1056` / `:1072` in `buffer_pool.rs` (now `KafkaProducer.java:1130` / `:1147`). One historical
