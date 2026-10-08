@@ -33,6 +33,8 @@ import itertools
 import logging
 import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 from types import FrameType
@@ -1479,6 +1481,132 @@ async def test_cancelling_close_waits_for_its_teardown_before_closing_the_serial
     with pytest.raises(asyncio.CancelledError):
         await task
     assert order == ["teardown", "serializers"]
+
+
+# ===========================================================================
+# Byte lengths and allocation failures in the C extension's send path
+#
+# Master's tests of the CPython fixes of PR #207, on this package's send path:
+# ``MockProducer`` is a Python translation here and never reaches the C
+# extension, so a ``KafkaProducer`` with an unreachable broker stands for the
+# FFI-backed mock they used.
+# ===========================================================================
+
+def test_producer_record_rejects_a_2_gib_buffer(two_gib_bytes: bytes) -> None:
+    # The C API takes int32_t lengths. A plain cast turned 2**31 into a
+    # negative length, which the C API reads as a null value, so the bytes were
+    # silently dropped; the length is now checked before anything is stored.
+    # The check is in the native record a send builds (the default
+    # bytes_serializer passes the buffer through without a copy).
+    p = KafkaProducer(configs=UNREACHABLE)
+    try:
+        with pytest.raises(OverflowError, match=r"^value exceeds 2 GiB$"):
+            p.send(record=ProducerRecord(topic=TOPIC, value=two_gib_bytes))
+        with pytest.raises(OverflowError, match=r"^key exceeds 2 GiB$"):
+            p.send(record=ProducerRecord(topic=TOPIC, key=two_gib_bytes, value=b"v"))
+    finally:
+        p.close(timeout=0)
+
+
+# `_testcapi.set_nomemory` makes every CPython allocation fail, including the
+# PyMem_Raw* calls the extension makes with the GIL released. Each check runs
+# in a child interpreter, as CPython's own tests of it do, because an
+# allocation failure the extension does not handle crashes the process.
+_NO_MEMORY_PRELUDE = """
+import sys
+BACKPRESSURE_BOUND = int(sys.argv[1])
+FUTURE_TIMEOUT = float(sys.argv[2])
+sys.path[:0] = sys.argv[3:]
+import _testcapi
+import _confluentkafka as _lib
+from confluent_kafka.producer import KafkaProducer, ProducerRecord
+from confluent_kafka.producer._send import completion_to_python
+UNREACHABLE = {"bootstrap.servers": "127.0.0.1:59999", "max.block.ms": 100}
+
+
+def without_memory(call, *args):
+    # Return call(*args), or the MemoryError it raised, with every allocation
+    # failing for the duration of the call. `call(*args)` hands the `args`
+    # tuple to a METH_VARARGS function as it is, and the frame object is
+    # created up front, so only the call itself asks for memory meanwhile.
+    sys._getframe()
+    outcome = None
+    _testcapi.set_nomemory(0)
+    try:
+        outcome = call(*args)
+    except MemoryError as e:
+        outcome = e
+    finally:
+        _testcapi.remove_mem_hooks()
+    return outcome
+
+
+def on_complete(result, error, immediate):
+    completion_to_python(result, error, "t", None)  # frees the completion handles
+"""
+
+# How long the child waits for a future: a send to the unreachable broker
+# fails after max.block.ms (100 ms).
+_NO_MEMORY_FUTURE_TIMEOUT = 30.0
+
+
+def _run_without_memory(body: str) -> None:
+    pytest.importorskip("_testcapi")
+    import confluent_kafka
+
+    module_dirs = dict.fromkeys(
+        os.path.dirname(os.path.abspath(path))
+        for path in (_lib.__file__, os.path.dirname(os.path.abspath(confluent_kafka.__file__))))
+    proc = subprocess.run(
+        [sys.executable, "-c", _NO_MEMORY_PRELUDE + body,
+         str(BACKPRESSURE_BOUND), str(_NO_MEMORY_FUTURE_TIMEOUT), *module_dirs],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+    assert proc.stdout.splitlines()[-1:] == ["ok"], proc.stdout
+
+
+def test_send_without_memory_for_a_new_batch_raises_memory_error() -> None:
+    # The first record of a fresh producer needs a new batch node. Its
+    # allocation was unchecked, so a failure crashed on a NULL dereference.
+    _run_without_memory("""
+from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
+p = KafkaProducer(configs=UNREACHABLE)
+record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+refs = sys.getrefcount(record), sys.getrefcount(on_complete)
+outcome = without_memory(_lib.Producer_send, p._c_producer, record, on_complete)
+assert isinstance(outcome, MemoryError), outcome
+# Not queued: both references taken for the queue were given back...
+assert (sys.getrefcount(record), sys.getrefcount(on_complete)) == refs
+# ...and no half-built batch was left behind: the next record still goes
+# through the batch list to the producer, whose metadata wait it fails.
+error = p.send(record=ProducerRecord(topic="t", value=b"v")).exception(timeout=FUTURE_TIMEOUT)
+assert isinstance(error, KafkaTimeoutError), error
+p.close(timeout=0)
+print("ok")
+""")
+
+
+def test_waiting_for_space_without_memory_does_not_wait() -> None:
+    # The list of senders waiting for space grows on demand. A failed realloc
+    # was assigned over the list and then written through; now the sender is
+    # told not to wait, because its record is already queued.
+    _run_without_memory("""
+p = KafkaProducer(configs=UNREACHABLE)
+_lib.Producer_test_set_paused(p._c_producer, True)
+futures = [p.send(record=ProducerRecord(topic="t", value=b"v")) for _ in range(BACKPRESSURE_BOUND - 1)]
+record = p._native_record(ProducerRecord(topic="t", value=b"v"))
+assert _lib.Producer_send(p._c_producer, record, on_complete) is True
+space_cb = lambda: None
+refs = sys.getrefcount(space_cb)
+outcome = without_memory(_lib.Producer_on_space_available, p._c_producer, space_cb)
+assert outcome is True, outcome
+assert sys.getrefcount(space_cb) == refs  # not registered
+_lib.Producer_test_set_paused(p._c_producer, False)
+# The queued records are not lost: the close completes every one of them.
+p.close(timeout=0)
+assert all(future.done() for future in futures)
+print("ok")
+""")
 
 
 # ===========================================================================

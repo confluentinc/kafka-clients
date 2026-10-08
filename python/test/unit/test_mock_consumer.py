@@ -17,7 +17,13 @@ Java mock's other documented behaviours with Java's messages
 (``MockConsumer.java``), each also on ``AsyncMockConsumer`` where the method
 differs by async-ness, and the two ``consumer-threading.md`` §31 regression
 tests on the mocks (a ``commit()`` inside ``on_partitions_revoked``; the
-rebalance not advancing until the listener returns), sync and async."""
+rebalance not advancing until the listener returns), sync and async.
+
+Master's ``test_add_record_rejects_a_2_gib_buffer`` (PR #207: a 2 GiB key or
+value through the C extension's ``MockConsumer_add_record``) is not carried
+over: this ``MockConsumer`` is a Python translation of Java's mock whose
+``add_record`` takes a ``ConsumerRecord`` and never reaches the C extension, so
+there is no ``int32_t`` length to check."""
 
 from __future__ import annotations
 

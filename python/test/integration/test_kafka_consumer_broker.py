@@ -46,6 +46,7 @@ Skips without Docker (``kafka_broker``).
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 import uuid
@@ -902,6 +903,35 @@ def test_commits_fetched_during_assign(kafka_broker: Any) -> None:
         assert committed is not None and committed.offset() == 1
         committed = consumer.committed(partitions={tp1})[tp1]
         assert committed is not None and committed.offset() == 2
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_committed_does_not_leak_the_leader_epoch(kafka_broker: Any) -> None:
+    # The C drain created the epoch int and passed it to Py_BuildValue with
+    # "O", which takes a reference of its own, so the creating reference was
+    # never released and every committed() entry with an epoch leaked one int.
+    # 1000 is outside CPython's small-int cache (-5..256), so the epoch is a
+    # fresh object whose reference count means something. Master's test (PR
+    # #207) drove committed() through its FFI-backed MockConsumer; this
+    # package's MockConsumer is a Python translation that never reaches the
+    # drain, so the broker answers committed() here.
+    topic = _topic(kafka_broker, ["a"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    try:
+        consumer.assign(partitions=[tp])
+        consumer.commit(offsets={tp: OffsetAndMetadata(offset=1, metadata="meta", leader_epoch=1000)})
+        committed = consumer.committed(partitions=[tp])
+        oam = committed[tp]
+        assert oam is not None
+        epoch = oam.leader_epoch()
+        assert epoch == 1000
+        del committed, oam
+        # With the dict and its OffsetAndMetadata gone, `epoch` is the only
+        # owner left, exactly like `control`; a leak makes the count one higher.
+        control = int("1000")
+        assert sys.getrefcount(epoch) == sys.getrefcount(control)
     finally:
         consumer.close(option=CloseOptions.timeout(0))
 
