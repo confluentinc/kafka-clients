@@ -327,92 +327,39 @@ impl ApplicationEventProcessor {
 
     /// Java: `process(CurrentLagEvent)`.
     ///
-    /// Reports the partition lag for the given partition, or kicks off a
-    /// `ListOffsets(LATEST)` request when the log-end offset is unknown
-    /// so the lag will be available on the next call. Java uses
-    /// `OptionalLong`; the Rust translation uses `Option<i64>`.
+    /// Delegates to [`OffsetsRequestManager::current_lag`], which reports the
+    /// partition lag or kicks off a one-shot `ListOffsets(LATEST)` request when
+    /// the log-end offset is unknown, so the lag will be available on the next
+    /// call. KAFKA-20187 moved that logic out of this processor and into the
+    /// manager, which clears the 'end offset requested' flag however the request
+    /// completes. Java uses `OptionalLong`; the Rust translation uses
+    /// `Option<i64>`.
+    ///
+    /// [`OffsetsRequestManager::current_lag`]: crate::consumer::internals::OffsetsRequestManager::current_lag
     fn process_current_lag(
         &mut self,
         handle: super::CompletableEventHandle<Option<i64>>,
         partition: TopicPartition,
         isolation_level: IsolationLevel,
     ) {
-        // Step 1: snapshot the lag / end-offset state under the
-        // subscriptions lock. We collect everything we need so the lock
-        // is released before we touch the offsets manager (§16).
-        enum Decision {
-            HaveLag(i64),
-            RequestEndOffset,
-            EmptyOnly,
-            Error(Error),
-        }
-        let decision = {
-            let mut guard = self.lock_subscriptions();
-            match guard.partition_lag(&partition, isolation_level) {
-                Ok(Some(lag)) => Decision::HaveLag(lag),
-                Ok(None) => {
-                    // Java: only request the end offset if it's not
-                    // already known AND no in-flight request exists.
-                    let end_offset_known = match guard.partition_end_offset(&partition, isolation_level) {
-                        Ok(opt) => opt.is_some(),
-                        Err(e) => {
-                            return self.complete_lag_error(handle, e);
-                        },
-                    };
-                    let request_in_flight = match guard.partition_end_offset_requested(&partition) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return self.complete_lag_error(handle, e);
-                        },
-                    };
-                    if !end_offset_known && !request_in_flight {
-                        log::info!("Requesting the log end offset for {} in order to compute lag", partition);
-                        if let Err(e) = guard.request_partition_end_offset(&partition) {
-                            return self.complete_lag_error(handle, e);
-                        }
-                        Decision::RequestEndOffset
-                    } else {
-                        Decision::EmptyOnly
-                    }
-                },
-                Err(e) => Decision::Error(e),
+        // Java's `try { … } catch (Exception e) { completeExceptionally(e) }`.
+        let result = {
+            let mut rm_guard = self.lock_request_managers();
+            match rm_guard.offsets.as_mut() {
+                Some(offsets_mgr) => offsets_mgr.current_lag(&partition, isolation_level),
+                None => Err(Error::local_illegal_state(
+                    "OffsetsRequestManager not available when processing a CurrentLag event",
+                )),
             }
         };
-
-        match decision {
-            Decision::HaveLag(lag) => {
-                handle.complete(Some(lag));
+        match result {
+            Ok(lag) => {
+                handle.complete(lag);
             },
-            Decision::EmptyOnly => {
-                handle.complete(None);
-            },
-            Decision::RequestEndOffset => {
-                // Java: Emulates Consumer.endOffsets() — fire-and-forget
-                // `ListOffsets(LATEST)` so the lag is available next call.
-                let mut ts = std::collections::HashMap::new();
-                ts.insert(partition.clone(), crate::common::requests::ListOffsetsRequest::LATEST_TIMESTAMP);
-                {
-                    let mut rm_guard = self.lock_request_managers();
-                    if let Some(offsets_mgr) = rm_guard.offsets.as_mut() {
-                        // Drop the returned receiver — Java's
-                        // `fetchOffsets(ts, false)` is fire-and-forget here.
-                        // Explicit `drop` rather than `let _` to satisfy
-                        // `clippy::let_underscore_future` (the `Receiver`
-                        // IS a `Future` but the result is intentionally
-                        // discarded).
-                        std::mem::drop(offsets_mgr.fetch_offsets(ts, false));
-                    }
-                }
-                handle.complete(None);
-            },
-            Decision::Error(e) => {
+            Err(e) => {
                 handle.complete_with_error(e);
             },
         }
-    }
-
-    fn complete_lag_error(&self, handle: super::CompletableEventHandle<Option<i64>>, err: Error) {
-        handle.complete_with_error(err);
     }
 
     /// Java: `process(TopicSubscriptionChangeEvent)`.
@@ -2262,12 +2209,32 @@ mod tests {
         let lag = await_complete_value(rx).expect("lag computation must not error");
         // No position / no high-watermark → lag unknown.
         assert!(lag.is_none());
-        // Verify the manager flipped the end-offset-requested flag.
+        // The fixture's metadata knows no leader, so the one-shot LIST_OFFSETS
+        // (KAFKA-20187) cannot be built and completes at once instead of being
+        // parked; its completion clears the end-offset-requested flag again.
+        // The request/clear sequence itself is covered in
+        // `offsets_request_manager.rs` (`test_current_lag_*`).
         let guard = fx.subscriptions.lock().unwrap();
         let requested = guard
             .partition_end_offset_requested(&partition)
             .expect("partition end offset state available");
-        assert!(requested, "end-offset request should have been triggered");
+        assert!(!requested, "the one-shot request completed, so the flag is cleared");
+    }
+
+    /// `process(CurrentLagEvent)` completes the event's future exceptionally
+    /// with what `currentLag` throws (Java's `catch (Exception e)`): here the
+    /// partition is not assigned.
+    #[test]
+    fn current_lag_event_completes_with_error_for_unassigned_partition() {
+        let mut fx = setup_processor(false);
+        let (handle, rx) = CompletableEventHandle::<Option<i64>>::new(20_000);
+        fx.processor.process(ApplicationEvent::CurrentLag {
+            handle,
+            partition: tp("topic", 0),
+            isolation_level: IsolationLevel::ReadUncommitted,
+        });
+        let err = await_complete_value(rx).expect_err("unassigned partition");
+        assert_eq!("No current assignment for partition topic-0", err.message());
     }
 
     // -------------------------------------------------------------------

@@ -367,9 +367,10 @@ impl OffsetFetcherUtils {
                     subs.update_high_watermark(partition, offset)?;
                 }
             } else if isolation_level == IsolationLevel::ReadCommitted {
-                log::warn!("Not updating last stable offset for partition {partition} as it is no longer assigned");
+                // DEBUG, not WARN, since KAFKA-20449 (a39e714c6f).
+                log::debug!("Not updating last stable offset for partition {partition} as it is no longer assigned");
             } else {
-                log::warn!("Not updating high watermark for partition {partition} as it is no longer assigned");
+                log::debug!("Not updating high watermark for partition {partition} as it is no longer assigned");
             }
         }
         Ok(())
@@ -383,11 +384,11 @@ impl OffsetFetcherUtils {
     /// Returns `true` if the partition's end offset can be requested, `false`
     /// if there's already an in-flight request.
     ///
-    /// Mirrors Java's `OffsetFetcherUtils.maybeSetPartitionEndOffsetRequest`
-    /// (AK 4.3.1). The sole caller is the classic-consumer `OffsetFetcher`
-    /// (untranslated per consumer-threading.md §20); the async consumer
-    /// performs the equivalent inline in
-    /// `ApplicationEventProcessor::process_current_lag`.
+    /// Mirrors Java's `OffsetFetcherUtils.maybeSetPartitionEndOffsetRequest`.
+    /// Since KAFKA-20187 the async consumer calls it from
+    /// [`OffsetsRequestManager::current_lag`](super::OffsetsRequestManager::current_lag),
+    /// as the classic `OffsetFetcher` (untranslated per consumer-threading.md
+    /// §20) always did.
     ///
     /// # Errors
     ///
@@ -414,9 +415,11 @@ impl OffsetFetcherUtils {
     /// to be called when `LIST_OFFSETS` fails. Successful `LIST_OFFSETS` calls
     /// should use [`Self::update_subscription_state`].
     ///
-    /// Mirrors Java's `OffsetFetcherUtils.clearPartitionEndOffsetRequests`
-    /// (AK 4.3.1). The sole caller is the classic-consumer `OffsetFetcher`
-    /// (untranslated per consumer-threading.md §20).
+    /// Mirrors Java's `OffsetFetcherUtils.clearPartitionEndOffsetRequests`.
+    /// Since KAFKA-20187 the async consumer calls it when the one-shot
+    /// `LIST_OFFSETS` issued by
+    /// [`OffsetsRequestManager::current_lag`](super::OffsetsRequestManager::current_lag)
+    /// completes, however it completes.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#clearPartitionEndOffsetRequests")]
     pub(crate) fn clear_partition_end_offset_requests<'a, I>(&self, partitions: I)
     where
