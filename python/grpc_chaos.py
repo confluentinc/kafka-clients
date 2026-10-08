@@ -195,16 +195,40 @@ def _stats(sent, elapsed):
     return chpb.WorkloadEvent(producer_stats=chpb.ProducerStats(sent=sent, elapsed_seconds=elapsed))
 
 
-def _consumed_events(records):
-    """One ``Consumed`` per harness record (8-byte key) in a poll's batch."""
+def _check_record(key, value, msg_size):
+    """The record's index if it is what a producer wrote: an 8-byte big-endian
+    index key and that index's ``_value`` at ``msg_size``. Otherwise raises
+    ``ValueError`` saying what is wrong. Mirrors the Rust harness's
+    ``check_record`` (``rust/tests/chaos/workload.rs``), messages included."""
+    if key is None:
+        raise ValueError("key is missing (expected the 8-byte index)")
+    if len(key) != 8:
+        raise ValueError(f"key is {len(key)} byte(s), expected the 8-byte index")
+    index = int.from_bytes(bytes(key), "big")
+    if value is None:
+        if msg_size == 0:
+            return index
+        raise ValueError(f"value is missing (expected {msg_size} byte(s) encoding index {index})")
+    if bytes(value) != _value(index, msg_size):
+        raise ValueError(
+            f"value of {len(value)} byte(s) does not match the producer's encoding of index {index} "
+            f"({msg_size} byte(s))")
+    return index
+
+
+def _consumed_events(records, msg_size):
+    """One event per record in a poll's batch: ``Consumed`` when it is what a
+    producer wrote, ``Corrupted`` otherwise (see ``_check_record``)."""
     events = []
     for r in records:
-        key = r.key
-        if key is None or len(key) != 8:
+        try:
+            index = _check_record(r.key, r.value, msg_size)
+        except ValueError as e:
+            events.append(chpb.WorkloadEvent(corrupted=chpb.Corrupted(
+                topic=r.topic, partition=r.partition, offset=r.offset, detail=str(e))))
             continue
         events.append(chpb.WorkloadEvent(consumed=chpb.Consumed(
-            index=int.from_bytes(bytes(key), "big"),
-            topic=r.topic, partition=r.partition, offset=r.offset)))
+            index=index, topic=r.topic, partition=r.partition, offset=r.offset)))
     return events
 
 
@@ -420,7 +444,7 @@ def _run_consumer_sync(request, emit, stop):
             continue
         if records.is_empty():
             continue
-        for event in _consumed_events(records):
+        for event in _consumed_events(records, request.msg_size):
             emit(event)
         try:
             if sync_commit:
@@ -726,7 +750,7 @@ async def _run_consumer_async(request, emit, stop):
             continue
         if records.is_empty():
             continue
-        for event in _consumed_events(records):
+        for event in _consumed_events(records, request.msg_size):
             emit(event)
         try:
             if sync_commit:

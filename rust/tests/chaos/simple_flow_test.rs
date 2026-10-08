@@ -25,7 +25,7 @@ use std::time::Duration;
 use super::actions::ChaosAction;
 use super::common::broker_control::StopKind;
 use super::harness::{CONSUMER_STOP_DEADLINE, ChaosHarness, PRODUCER_STOP_DEADLINE};
-use super::isolation::signals;
+use super::isolation::{self, signals};
 use super::run_test::{ProtectedRun, drive_protected};
 use super::workload::{CommitMode, WorkloadSpec};
 
@@ -44,6 +44,7 @@ const DRAIN: Duration = Duration::from_secs(15);
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "chaos: slow, Docker-heavy, destructive; run with --ignored"]
 async fn simple_flow_clean_broker_roll() {
+    isolation::claim_process_for_scenario("simple_flow_test::simple_flow_clean_broker_roll");
     signals::install();
     let harness = ChaosHarness::start("chaos-simple-flow", 3, 6).await;
 
