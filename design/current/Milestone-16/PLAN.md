@@ -810,18 +810,19 @@ Phase 3 completion notes (agent 93):
       instead of busy-looping, and the loop no longer polls with timeout 0, whose `process_all` sweep used
       to read every channel anyway.
     - `test_fire_not_stranded_when_every_poll_starts_woken` fails at its 5 s timeout without the new drain.
-- **Remaining timing difference (for the Critic):** `test_async_close` now passes but takes ~50 s, against
-  ~20 s at baseline.
-  - Close timings are identical. The extra ~30 s is the group's first ConsumerGroupHeartbeat going
-    unanswered until the 30 s request timeout; the retry succeeds at once.
-  - Broker logs (4.2.0) show the coordinator receiving that heartbeat about 190 ms *before* its
-    `__consumer_offsets-0` followers make their first fetch. The member-join write therefore does not commit
-    in time, and no response comes.
-  - The baseline client reaches the coordinator slightly later and misses that window. The heartbeat bytes
-    are identical.
-  - So this is a broker-side race with the brand-new offsets partition, which the client's new timing hits;
-    it is not a client defect. Under full-suite load the extra 30 s can push `test_async_close`'s 60 s
-    receive bound over (seen once in verify run 2).
+- **`test_async_close` +30 s (corrected after review, COMMENTS.93 Issue 1):** the earlier "broker-side race"
+  diagnosis was wrong.
+  - Critic 93's evidence: the broker answered the first heartbeat in about 380 ms, the response sat unread
+    in the test's in-process `BrokerProxy`, and a sample showed a test-runtime worker busy in
+    `AsyncKafkaConsumer::poll` 99% of the time.
+  - Cause: while a JOINING member's first heartbeat is in flight with a zero interval,
+    `maximumTimeToWait` is 0, as in Java. `poll_inner` then looped without ever returning `Pending`,
+    monopolising its tokio worker and starving the proxy task on that runtime.
+  - Fixed in fixup 9a390dd3: `poll_inner` yields once per empty iteration.
+    `test_poll_yields_while_maximum_time_to_wait_is_zero` fails without the yield.
+  - Result: 9 of 9 logged `test_async_close` runs under the broker lock took about 24.6 s, with no request
+    timeouts. Three earlier unlogged runs took 44 s, 111 s and 111 s while the host load average was above
+    6 from parallel tracks; they did not recur at load ~3.
 - **How each busy loop is shown fixed, by value:**
   - Background task, while bootstrapping:
     - `run_once_does_not_spin_while_bootstrap_resolution_is_pending` runs 40 iterations (50 ms model steps)
@@ -863,7 +864,8 @@ Phase 3 completion notes (agent 93):
     `ShareHeartbeatRequestManagerTest` hunks of 21010/20253 (consumer-threading §20);
   - checkstyle suppressions;
   - the fixture-only `AsyncKafkaConsumerTest` hunks: the `retryBackoffMs` local in `newConsumer`, and the
-    Mockito stub reordering in `testProcessBackgroundEventsWithInitialDelay`, which has no Rust counterpart.
+    Mockito stub reordering in `testSubscribePatternAgainstBrokerNotSupportingRegex`
+    (`AsyncKafkaConsumerTest.java:2482`), which has no Rust counterpart.
 - **Deviations (DoD #7):**
   - `FetchRequestPreparationResult` is keyed by node id, with the `Node` alongside.
   - `poll_for_fetches_timeout_ms` is an extracted helper (Java computes it inline).
@@ -1035,8 +1037,9 @@ Phase 3 completion notes (agent 93):
 
 ### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
 
-- KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
-  `CommitRequestManager` and `CoordinatorRequestManager`.
+- ~~KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
+  `CommitRequestManager` and `CoordinatorRequestManager`.~~ **Covered by Phase 3** (02ac689c, 98e6c919),
+  including its consumer tests; do not port it again. See the Phase 3 completion notes.
 - KAFKA-20761 (56410c311b): log the group configs defined on the broker.
 - b8429b93a7: no-op call removed.
 - KAFKA-20681 (6a6b536fbc): heartbeat-success handling consolidated into `AbstractMembershipManager`
@@ -1215,6 +1218,7 @@ The summary by component:
 | Security | 2 | – | – | – | 1 | O 1 |
 | **Total** | **190** | **55** | **13** | **21** | **37** | **O 56, R 6, A 2** |
 
-Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
-P7+P8 1 (+1 trunk commit for D3), P9 7, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
-Phase 1 review.)
+Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 4, P4 4, P5 13, P6 3,
+P7+P8 1 (+1 trunk commit for D3), P9 6, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
+Phase 1 review; 28de22de34 moved from Phase 9 to Phase 3, which needed it for KAFKA-21010 and the
+bootstrap-window spin.)
