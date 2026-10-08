@@ -351,6 +351,41 @@ void test_send_batch_partial_failure(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
+/* A negative `count` violates `send_batch`'s precondition, which the library
+ * checks with a Rust panic. That panic used to unwind into this caller and
+ * abort the whole test process; the entry point now catches it and returns its
+ * failure value instead (APPSEC-7665 / NONJAVACLI-4521). Reaching the
+ * assertions below at all is half of what this test checks. */
+void test_send_batch_negative_count_returns_error(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    kafka_producer_ProducerRecord_t records[1] = {
+        { "topic1", -1, -1, NULL, -1, NULL, -1 },
+    };
+    kafka_common_KafkaFuture_RecordMetadata_t *futures[1] = { NULL };
+    kafka_common_Error_t *errors[1] = { NULL };
+
+    int32_t sent = kafka_producer_Producer_send_batch(
+        producer, records, -1, futures, errors);
+    TEST_ASSERT_EQUAL_INT32(-1, sent);
+
+    /* The precondition is checked before any slot is written, so there is
+     * nothing to free. */
+    TEST_ASSERT_NULL(futures[0]);
+    TEST_ASSERT_NULL(errors[0]);
+
+    /* The header's recovery after a caught panic: destroy the handle and make a
+     * new one, which works as usual. */
+    kafka_producer_Producer_destroy(producer);
+    producer = kafka_producer_MockProducer_new(true);
+    sent = kafka_producer_Producer_send_batch(producer, records, 1, futures, errors);
+    TEST_ASSERT_EQUAL_INT32(1, sent);
+    TEST_ASSERT_NULL(errors[0]);
+    TEST_ASSERT_NOT_NULL(futures[0]);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(futures[0]);
+    kafka_producer_Producer_destroy(producer);
+}
+
 // ---------------------------------------------------------------------------
 // Close then send
 // ---------------------------------------------------------------------------
@@ -2051,6 +2086,7 @@ int main(void) {
     /* Batch */
     RUN_TEST(test_send_batch);
     RUN_TEST(test_send_batch_partial_failure);
+    RUN_TEST(test_send_batch_negative_count_returns_error);
 
     /* Close */
     RUN_TEST(test_close_then_send);

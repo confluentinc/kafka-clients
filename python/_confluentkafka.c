@@ -26,6 +26,21 @@
 // here at batch granularity in front of the Rust accumulator.
 #define PRODUCER_MAX_ACCUMULATED_RECORDS PRODUCER_RECORD_SLOT_THRESHOLD
 
+// Converts the length of a byte buffer to the int32_t that every byte length in
+// the C API takes. Returns 0 with the length stored in *out, or -1 with
+// OverflowError("<what> exceeds 2 GiB") set when it does not fit: the largest
+// length that does is INT32_MAX, one byte short of 2 GiB. A plain (int32_t)
+// cast would instead wrap a 2 GiB buffer to a negative length, which the C API
+// reads as null or empty, and a buffer of 4 GiB + n bytes to n, truncating it.
+static int checked_len_to_int32(Py_ssize_t len, const char* what, int32_t* out) {
+    if (len > INT32_MAX) {
+        PyErr_Format(PyExc_OverflowError, "%s exceeds 2 GiB", what);
+        return -1;
+    }
+    *out = (int32_t)len;
+    return 0;
+}
+
 // ProducerRecord C extension type
 typedef struct {
     PyObject_HEAD
@@ -126,6 +141,17 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
         return -1;
     }
 
+    // Check the byte lengths before anything is stored, so a rejected record
+    // leaves this object as it was.
+    int32_t key_len = -1;
+    if (key != Py_None && checked_len_to_int32(PyBytes_Size(key), "key", &key_len) < 0) {
+        return -1;
+    }
+    int32_t value_len = 0;
+    if (checked_len_to_int32(PyBytes_Size(value), "value", &value_len) < 0) {
+        return -1;
+    }
+
     // Store key and value
     Py_INCREF(key);
     self->key = key;
@@ -150,14 +176,14 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
 
     if (key != Py_None) {
         self->record_struct.key = (const uint8_t*)PyBytes_AsString(key);
-        self->record_struct.key_len = (int32_t)PyBytes_Size(key);
+        self->record_struct.key_len = key_len;
     } else {
         self->record_struct.key = NULL;
         self->record_struct.key_len = -1;
     }
 
     self->record_struct.value = (const uint8_t*)PyBytes_AsString(value);
-    self->record_struct.value_len = (int32_t)PyBytes_Size(value);
+    self->record_struct.value_len = value_len;
 
     return 0;
 }
@@ -764,42 +790,59 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_INCREF(complete_cb);
 
     int full = 0;
+    // Set when the node for a new batch cannot be allocated. That is checked
+    // before the node is linked or the record stored, so on failure the batch
+    // list and the counters are untouched and the record is simply not queued.
+    int no_memory = 0;
     Py_BEGIN_ALLOW_THREADS
     mtx_lock(&producer->record_batches_mutex);
     if (!producer->last_accumulating_batch || producer->last_accumulating_batch->count == PRODUCER_RECORD_SLOT_CAPACITY) {
         BatchNode* new_batch = (BatchNode*)PyMem_RawMalloc(sizeof(BatchNode));
-        new_batch->count = 0;
-        new_batch->next_batch = NULL;
-        if (producer->last_accumulating_batch) {
-            producer->last_accumulating_batch->next_batch = new_batch;
-            producer->last_accumulating_batch = new_batch;
+        if (new_batch == NULL) {
+            no_memory = 1;
         } else {
-            producer->next_batches_to_send = new_batch;
-            producer->last_accumulating_batch = new_batch;
+            new_batch->count = 0;
+            new_batch->next_batch = NULL;
+            if (producer->last_accumulating_batch) {
+                producer->last_accumulating_batch->next_batch = new_batch;
+                producer->last_accumulating_batch = new_batch;
+            } else {
+                producer->next_batches_to_send = new_batch;
+                producer->last_accumulating_batch = new_batch;
+            }
         }
     }
 
-    producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
-    producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
-    producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
-    producer->last_accumulating_batch->count++;
-    producer->accumulated_records++;
+    if (!no_memory) {
+        producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
+        producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
+        producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
+        producer->last_accumulating_batch->count++;
+        producer->accumulated_records++;
 
-    if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
-        cnd_signal(&producer->record_batches_new_record_cnd);
+        if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
+            cnd_signal(&producer->record_batches_new_record_cnd);
+        }
+        // Report whether the producer is now over the backpressure bound, so the
+        // caller can wait for space (see py_Producer_on_space_available).
+        full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
     }
-    // Report whether the producer is now over the backpressure bound, so the
-    // caller can wait for space (see py_Producer_on_space_available).
-    full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
     mtx_unlock(&producer->record_batches_mutex);
     Py_END_ALLOW_THREADS
+    if (no_memory) {
+        // Not queued: give back the references taken for the queue.
+        Py_DECREF(record);
+        Py_DECREF(complete_cb);
+        return PyErr_NoMemory();
+    }
     return PyBool_FromLong(full ? 1 : 0);
 }
 
 // Register a "space available" callback to be invoked when the send task next
-// drains accumulated batches (freeing capacity). Returns True if space is
-// already available (the caller need not wait), False if `space_cb` was
-// registered and will be called later. The check-and-register is done under
+// drains accumulated batches (freeing capacity). Returns True if the caller
+// need not wait (space is already available, or there was no memory to
+// register the callback), False if `space_cb` was registered and will be
+// called later. The check-and-register is done under
 // record_batches_mutex — the same lock the send task holds when it takes
 // batches — so there is no lost-wakeup window. Called by the Python `send`
 // only after `Producer_send` reported the producer full.
@@ -825,11 +868,25 @@ static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) 
         if (producer->space_cbs_count == producer->space_cbs_capacity) {
             int new_capacity = producer->space_cbs_capacity
                 ? producer->space_cbs_capacity * 2 : 8;
-            producer->space_cbs = (PyObject**)PyMem_RawRealloc(
+            PyObject** grown = (PyObject**)PyMem_RawRealloc(
                 producer->space_cbs, new_capacity * sizeof(PyObject*));
-            producer->space_cbs_capacity = new_capacity;
+            if (grown != NULL) {
+                producer->space_cbs = grown;
+                producer->space_cbs_capacity = new_capacity;
+            }
         }
-        producer->space_cbs[producer->space_cbs_count++] = space_cb;
+        if (producer->space_cbs_count < producer->space_cbs_capacity) {
+            producer->space_cbs[producer->space_cbs_count++] = space_cb;
+        } else {
+            // The list could not grow; a failed realloc leaves it, and the
+            // callbacks already waiting in it, intact. Don't make the caller
+            // wait rather than fail: Producer_send has already queued the
+            // record, so an error here would report as failed a send that is
+            // still delivered. Skipping the wait only lets the queue pass its
+            // soft bound; the next batch node that cannot be allocated fails
+            // cleanly in py_Producer_send.
+            available = 1;
+        }
     }
     mtx_unlock(&producer->record_batches_mutex);
     Py_END_ALLOW_THREADS
@@ -2788,9 +2845,13 @@ static PyObject* py_OffsetMap_drain(PyObject* self, PyObject* args) {
         int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch);
         PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
                                       kafka_common_TopicPartition_partition(k));
-        PyObject* val = Py_BuildValue("(LsO)", kafka_consumer_OffsetAndMetadata_offset(v),
-                                      kafka_consumer_OffsetAndMetadata_metadata(v),
-                                      has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
+        // The epoch is a new reference, so "N" hands it to the tuple; "O" would
+        // take a second one and leak the int.
+        PyObject* py_epoch = has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
+        PyObject* val = py_epoch == NULL
+                            ? NULL
+                            : Py_BuildValue("(LsN)", (long long)kafka_consumer_OffsetAndMetadata_offset(v),
+                                            kafka_consumer_OffsetAndMetadata_metadata(v), py_epoch);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_consumer_OffsetMap_destroy(m); return NULL;
@@ -2815,9 +2876,13 @@ static PyObject* py_OffsetAndTimestampMap_drain(PyObject* self, PyObject* args) 
         int has_epoch = kafka_consumer_OffsetAndTimestamp_leader_epoch(v, &epoch);
         PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
                                       kafka_common_TopicPartition_partition(k));
-        PyObject* val = Py_BuildValue("(LLO)", kafka_consumer_OffsetAndTimestamp_offset(v),
-                                      kafka_consumer_OffsetAndTimestamp_timestamp(v),
-                                      has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
+        // As in py_OffsetMap_drain: "N" hands the new epoch reference over.
+        PyObject* py_epoch = has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None);
+        PyObject* val = py_epoch == NULL
+                            ? NULL
+                            : Py_BuildValue("(LLN)", (long long)kafka_consumer_OffsetAndTimestamp_offset(v),
+                                            (long long)kafka_consumer_OffsetAndTimestamp_timestamp(v),
+                                            py_epoch);
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
             kafka_consumer_OffsetAndTimestampMap_destroy(m); return NULL;
@@ -3260,14 +3325,23 @@ static PyObject* py_MockConsumer_add_record(PyObject* self, PyObject* args) {
     int have_key = 0, have_val = 0;
     if (key_obj != Py_None) {
         if (PyObject_GetBuffer(key_obj, &key, PyBUF_SIMPLE) < 0) return NULL;
-        have_key = 1; key_ptr = (const uint8_t*)key.buf; key_len = (int32_t)key.len;
+        have_key = 1; key_ptr = (const uint8_t*)key.buf;
+        if (checked_len_to_int32(key.len, "key", &key_len) < 0) {
+            PyBuffer_Release(&key);
+            return NULL;
+        }
     }
     if (value_obj != Py_None) {
         if (PyObject_GetBuffer(value_obj, &value, PyBUF_SIMPLE) < 0) {
             if (have_key) PyBuffer_Release(&key);
             return NULL;
         }
-        have_val = 1; val_ptr = (const uint8_t*)value.buf; val_len = (int32_t)value.len;
+        have_val = 1; val_ptr = (const uint8_t*)value.buf;
+        if (checked_len_to_int32(value.len, "value", &val_len) < 0) {
+            if (have_key) PyBuffer_Release(&key);
+            PyBuffer_Release(&value);
+            return NULL;
+        }
     }
     kafka_common_Error_t* e = kafka_consumer_MockConsumer_add_record(
         (kafka_consumer_Consumer_t*)(uintptr_t)h, topic, partition, offset,
@@ -6320,6 +6394,9 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         if (ok && salt_obj != Py_None) {
             ok = PyBytes_AsStringAndSize(salt_obj, &salt, &salt_len) == 0;
         }
+        int32_t password_len32 = 0, salt_len32 = 0;
+        if (ok) ok = checked_len_to_int32(password_len, "password", &password_len32) == 0;
+        if (ok) ok = checked_len_to_int32(salt_len, "salt", &salt_len32) == 0;
         Py_XDECREF(item);
         if (!ok) { failed = 1; break; }
         users[i] = user;
@@ -6327,9 +6404,9 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         mechanisms[i] = (int32_t)mechanism;
         iterations[i] = (int32_t)iteration;
         passwords[i] = (const uint8_t*)password;
-        password_lens[i] = (int32_t)password_len;
+        password_lens[i] = password_len32;
         salts[i] = (const uint8_t*)salt;
-        salt_lens[i] = (int32_t)salt_len;
+        salt_lens[i] = salt_len32;
         has_salts[i] = salt_obj != Py_None;
     }
     if (!failed) {
@@ -6369,9 +6446,11 @@ static PyObject* py_Admin_renew_delegation_token_async(PyObject* self, PyObject*
     long long renew_period_ms = -1; int timeout_ms; PyObject* cb;
     if (!PyArg_ParseTuple(args, "Ky#LiO", &h, &hmac, &hmac_len, &renew_period_ms, &timeout_ms, &cb))
         return NULL;
+    int32_t hmac_len32;
+    if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
     Py_INCREF(cb);
     kafka_admin_AdminClient_renew_delegation_token_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, (const uint8_t*)hmac, (int32_t)hmac_len,
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, (const uint8_t*)hmac, hmac_len32,
         (int64_t)renew_period_ms, timeout_ms, admin_renew_delegation_token_trampoline, cb);
     Py_RETURN_NONE;
 }
@@ -6381,9 +6460,11 @@ static PyObject* py_Admin_expire_delegation_token_async(PyObject* self, PyObject
     long long expiry_period_ms = -1; int timeout_ms; PyObject* cb;
     if (!PyArg_ParseTuple(args, "Ky#LiO", &h, &hmac, &hmac_len, &expiry_period_ms, &timeout_ms, &cb))
         return NULL;
+    int32_t hmac_len32;
+    if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
     Py_INCREF(cb);
     kafka_admin_AdminClient_expire_delegation_token_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, (const uint8_t*)hmac, (int32_t)hmac_len,
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, (const uint8_t*)hmac, hmac_len32,
         (int64_t)expiry_period_ms, timeout_ms, admin_expire_delegation_token_trampoline, cb);
     Py_RETURN_NONE;
 }

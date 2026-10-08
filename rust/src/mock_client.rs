@@ -737,7 +737,7 @@ impl KafkaClient for MockClient {
             //     test pay for a build it never reads. Nothing downstream of a matched
             //     future response reads the request body, so the narrower build is
             //     equivalent.
-            //   - Safety: `produce_request::Builder::build_version` *drains* its builder —
+            //   - Correctness: `produce_request::Builder::build_version` *drains* its builder —
             //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
             //     (`common/requests/produce_request.rs:307`) — so a second build of the
             //     same request yields empty `topic_data`. Java's
