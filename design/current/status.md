@@ -1,4 +1,38 @@
-# Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
+# Current Status: Milestone 16 complete — client tracks Apache Kafka 4.4.0 (4.4.0-rc4)
+
+> **Current state (2026-10-08, Milestone 16 close-out):** the Rust client is up
+> to **Apache Kafka 4.4.0**, built against `4.4.0-rc4` (`1156b2752a`) because
+> 4.4.0 final was not yet tagged (the bump steps for final are in
+> `Milestone-16/PLAN.md`, Phase 13 notes). The `kafka/` submodule is at
+> 4.4.0-rc4, `generator/messages/` holds **203 specs** and matches the 4.4.0-rc4
+> corpus byte for byte, and `generator/test-messages/` holds 5. `AUDIENCE_REF` /
+> `DEPRECATION_REFS` are `4.4.0-rc3` / `[4.3.1, 4.4.0-rc3]`, valid for rc4
+> (`rc3..rc4` has no `clients/src/main` change). Error codes run `-1..=136`.
+> - **What landed:** KIP-909 async bootstrap DNS resolution and its consumer
+>   busy-loop follow-ups; KIP-1242 misrouted-connection detection; KIP-1319
+>   TxnOffsetCommit v6; rack-aware producer partitioning; KIP-1332 incremental
+>   buffer allocation (plus the trunk-only KAFKA-20864); KAFKA-18157's
+>   `UnsupportedProtocolFieldError` and `is_unsupported_version_error()`;
+>   schema-derived throttling; generated-reader bounds; the
+>   `common::utils::internals` moves; consumer heartbeat / fetch / offsets /
+>   metrics fixes; `MockConsumer::lose_partitions`; `Admin::unregister_controller`.
+>   See `design/history/MILESTONES.md` → Milestone 16.
+> - **Audit:** `Milestone-16/PLAN.md` §7 maps all 191 `clients/src` commits of
+>   `4.3.1...4.4.0-rc4`, KAFKA-20864 and the two master merges to a phase or a
+>   reasoned skip, with no gaps.
+> - **Open:** `Milestone-16/PLAN.md` §8 lists the decisions left to the human
+>   (S1/S2 producer batch timing, admin close grace period, `unregisterBroker`,
+>   the consumer I/O-loop catch-all, two upstream JIRAs, the keyed-send cost) and the follow-ups;
+>   `Milestone-16/rules-errata.md` holds the drafted rules amendments.
+> - **Tests at the last merge (`5c207c9f`):** `cargo test` 4641 passed / 0
+>   failed / 10 ignored (lib 4585 / 3); `--features ffi --lib` 4835 / 0 / 3.
+>   The broker reruns owed on that merge passed on the same code (Critic 103:
+>   4.2.0 consumer 109/109, producer 100/100, lib 35/35; 4.4.0-rc4
+>   `cluster_check_test` 3/3, `producer_transactions_test` 40/40).
+>   `make verify` runs on the milestone branch after Phase 13 merges back.
+> - The Milestone-13 block below ("tracks Apache Kafka 4.3.1") is now
+>   historical, like the older blocks.
+
 
 > **Paths (2026-09-27):** the repository was split into `rust/`, `python/` and
 > `c/` (see [structure.md](structure.md#top-level)). Crate paths below — `src/…`,

@@ -616,9 +616,16 @@ impl Metadata {
         inner.update_version
     }
 
-    /// Updates the last seen epoch if the provided epoch is newer.
+    /// Request an update for the partition metadata if and only if we have seen
+    /// a newer leader epoch. This is called by the client any time it handles a
+    /// response from the broker that includes leader epoch, except for update
+    /// via Metadata RPC which follows a different code path ([`Self::update`]).
     ///
-    /// Returns `true` if we updated the last seen epoch.
+    /// * `topic_partition` - The partition for which to update the last seen
+    ///   leader epoch.
+    /// * `leader_epoch` - The leader epoch received from the broker.
+    ///
+    /// Returns `true` if we updated the last seen epoch, `false` otherwise.
     ///
     /// # Errors
     /// Returns an error if `leader_epoch` is negative.

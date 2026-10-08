@@ -209,12 +209,12 @@ pub struct ProducerConfig {
 
     /// `metadata.recovery.strategy` - How the client recovers when none of the
     /// brokers known to it is available. Default: `rebootstrap`
-    /// (`ProducerConfig.java:548-554`).
+    /// (`ProducerConfig.java:595-601`).
     pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
 
     /// `metadata.recovery.rebootstrap.trigger.ms` - How long a client configured
     /// to rebootstrap waits without obtaining metadata before it rebootstraps.
-    /// Default: 300000 ms (`ProducerConfig.java:555-560`).
+    /// Default: 300000 ms (`ProducerConfig.java:602-607`).
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
 
     /// `metadata.cluster.check.enable` (KIP-1242) - Whether the client sends the
@@ -550,9 +550,9 @@ impl ProducerConfig {
         // computed. Clone it up front, before `maybe_override_client_id` runs.
         let mut config = Self { originals: props.clone(), ..Default::default() };
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -564,18 +564,18 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`).
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_rack = value.trim().to_string();
                 },
                 Self::BATCH_SIZE_CONFIG => {
@@ -590,7 +590,7 @@ impl ProducerConfig {
                 Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
                     // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
-                    // `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `Type.STRING` value (`ConfigDef.java:731-733`).
                     let strategy = value.trim();
                     if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
                         && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
@@ -629,10 +629,10 @@ impl ProducerConfig {
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
                     // Java never reaches `CompressionType.forName` for a bad
-                    // property: `ProducerConfig.java:397` declares the key with
+                    // property: `ProducerConfig.java:436` declares the key with
                     // `in(Utils.enumOptions(CompressionType.class))`, so
                     // `ConfigDef.ValidString.ensureValid` rejects it first with a
-                    // `ConfigException` (`ConfigDef.java:1103`). Letting
+                    // `ConfigException` (`ConfigDef.java:1116`). Letting
                     // `for_name`'s `IllegalArgumentException` escape here would put
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
@@ -681,12 +681,12 @@ impl ProducerConfig {
                 },
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
-                    // (`ProducerConfig.java:551`).
+                    // (`ProducerConfig.java:598-599`).
                     config.metadata_recovery_strategy =
                         MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    // Java `ProducerConfig` (`:555-558`):
+                    // Java `ProducerConfig` (`:602-605`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = Self::parse_i64(key, value)?;
                     if v < 0 {
@@ -1056,7 +1056,7 @@ impl ProducerConfig {
     /// Parses the acks string, converting "all" to -1.
     ///
     /// Java's `parseAcks` catches `NumberFormatException` and throws
-    /// `ConfigException` (`ProducerConfig.java:653-659`). `ConfigException extends
+    /// `ConfigException` (`ProducerConfig.java:705-711`). `ConfigException extends
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
@@ -1128,8 +1128,8 @@ mod tests {
     }
 
     /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
-    /// string (`ProducerConfig.java:548-554`) and
-    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:555-560`). Before
+    /// string (`ProducerConfig.java:595-601`) and
+    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:602-607`). Before
     /// these keys were parsed the producer silently ignored them and never
     /// rebootstrapped (`ClientRebootstrapTest.testProducerRebootstrap`).
     #[test]
@@ -1179,7 +1179,7 @@ mod tests {
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
-    /// `ProducerConfig.java:555-558`): 0 is accepted, -1 is rejected with
+    /// `ProducerConfig.java:602-605`): 0 is accepted, -1 is rejected with
     /// Java's `ConfigDef.Range.atLeast` message.
     #[test]
     fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
@@ -1337,7 +1337,7 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1553,7 +1553,7 @@ mod tests {
         assert_eq!(ProducerConfig::parse_acks("1").unwrap(), 1);
 
         // Java's `parseAcks` catches `NumberFormatException` and throws
-        // `ConfigException` (`ProducerConfig.java:653-659`), so the class matters
+        // `ConfigException` (`ProducerConfig.java:705-711`), so the class matters
         // as much as the message: `ConfigException extends KafkaException`, and a
         // caller validating a config map with `is_kafka_error()` must see it.
         let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a config error");
@@ -1565,9 +1565,9 @@ mod tests {
     /// Every `ConfigException` this config raises must answer `true` to
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
-    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:657`) and the
-    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`,
-    /// `:621`, `:635`, `:645`). They all used to be `IllegalArgumentException`,
+    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:709`) and the
+    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:655`, `:664`,
+    /// `:673`, `:687`, `:697`). They all used to be `IllegalArgumentException`,
     /// which sits *beside* `KafkaException` rather than below it, so
     /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
     /// that a bad `linger.ms` did not.
@@ -1725,8 +1725,8 @@ mod tests {
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
-    /// (`ProducerConfig.java:397`), so `ConfigDef.ValidString.ensureValid`
-    /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
+    /// (`ProducerConfig.java:436`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.java:1116`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
         let mut props = base_props();
@@ -2100,7 +2100,7 @@ mod tests {
 
     /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
     /// on the key being present in the originals, not on emptiness
-    /// (`ProducerConfig.java:581-583`), so a blank explicit id stays empty,
+    /// (`ProducerConfig.java:633-635`), so a blank explicit id stays empty,
     /// as in Java. The consumer and admin client generate one instead.
     #[test]
     fn test_explicit_client_id_is_trimmed() {
@@ -2155,7 +2155,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]

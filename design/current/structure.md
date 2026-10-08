@@ -266,7 +266,7 @@ Sender-confined fields live on `sender.rs`, not in the manager.*
 ## consumer/ — org.apache.kafka.clients.consumer
 
 ```
-rust/src/consumer/               # 22 files + 51 internals + 9 events
+rust/src/consumer/               # 22 files + 45 internals + 10 metrics + 9 events (each incl. mod.rs)
 ├── mod.rs                  # Consumer<K, V> trait
 ├── kafka_consumer.rs       # KafkaConsumer::new -> Box<dyn Consumer<K, V>>
 ├── async_kafka_consumer.rs # AsyncKafkaConsumer<K, V> (pub(crate))

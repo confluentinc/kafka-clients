@@ -194,7 +194,12 @@ pub trait Producer<K, V>: Send + Sync {
     ///
     /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
     /// handles; mutating it does not affect the registry (Java's
-    /// `Collections.unmodifiableMap` analog).
+    /// `Collections.unmodifiableMap` analog). Metrics registered or removed
+    /// afterwards are not reflected in it, but each [`KafkaMetric`] is the
+    /// registry's own shared entry, so reading its value returns the current
+    /// value. (Java's javadoc, KAFKA-20341, documents its map as an
+    /// unmodifiable *live* view of the metrics; the snapshot of the key set is
+    /// the one difference.)
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#metrics")]
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 

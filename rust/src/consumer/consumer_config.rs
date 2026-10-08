@@ -319,6 +319,54 @@ impl ConsumerConfig {
     /// Config key: `partition.assignment.strategy`.
     pub const PARTITION_ASSIGNMENT_STRATEGY_CONFIG: &'static str = "partition.assignment.strategy";
     /// Config key: `auto.offset.reset`.
+    ///
+    /// What to do when there is no initial offset in Kafka or if the current
+    /// offset does not exist any more on the server (e.g. because that data has
+    /// been deleted):
+    ///
+    /// * `earliest`: automatically reset the offset to the earliest offset
+    /// * `latest`: automatically reset the offset to the latest offset
+    /// * `by_duration:<duration>`: automatically reset the offset to a
+    ///   configured `<duration>` from the current timestamp. `<duration>` must be
+    ///   specified in ISO8601 format (`PnDTnHnMn.nS`). Negative duration is not
+    ///   allowed.
+    /// * `none`: return an error to the consumer if no previous offset is found
+    ///   for the consumer's group
+    /// * anything else: return an error to the consumer.
+    ///
+    /// Note that increasing a topic's partition count while this config is set
+    /// to `latest` may cause silent message loss: producers may begin appending
+    /// records to a newly created partition before the consumer discovers it,
+    /// and `latest` resets the position to the log end offset, skipping any
+    /// records produced during that discovery gap.
+    ///
+    /// To avoid this, prefer `by_duration:<duration>`. When a partition has no
+    /// committed offset, `by_duration` determines the starting position by
+    /// issuing a `ListOffsets` lookup for `now() - duration`. If the target
+    /// timestamp is earlier than the partition's creation time, the lookup
+    /// returns the partition's start offset, ensuring that records produced
+    /// during the discovery window are still consumed. Size the duration to
+    /// cover the worst-case partition-discovery latency for the group protocol
+    /// in use:
+    ///
+    /// * With the `consumer` group protocol (KIP-848), newly assigned
+    ///   partitions are pushed on the next group heartbeat, so a value at least
+    ///   as large as `group.consumer.heartbeat.interval.ms` (server default
+    ///   5000 ms) is sufficient, for example `by_duration:PT5S`.
+    /// * With the `classic` group protocol, new partitions are discovered
+    ///   through periodic metadata refresh and a subsequent rebalance, so the
+    ///   duration must exceed `metadata.max.age.ms` (client default 300000 ms)
+    ///   plus the rebalance time, for example `by_duration:PT6M`.
+    ///
+    /// Consumers with a valid committed offset are unaffected. The reset
+    /// applies only to partitions whose offset is missing or out of range, so
+    /// `by_duration` does not force existing consumers to replay historical
+    /// data on restart.
+    ///
+    /// (Text of Java's `ConsumerConfig.AUTO_OFFSET_RESET_DOC`,
+    /// `ConsumerConfig.java:183-206`, as rewritten by KAFKA-20539. This client
+    /// implements only the `consumer` group protocol; the `classic` item is kept
+    /// because the setting itself is protocol-independent.)
     pub const AUTO_OFFSET_RESET_CONFIG: &'static str = "auto.offset.reset";
 
     /// Config key: `fetch.min.bytes`.
@@ -623,7 +671,7 @@ impl ConsumerConfig {
 
         // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -659,7 +707,7 @@ impl ConsumerConfig {
                     // `AsyncKafkaConsumer.initializeGroupMetadata` is what
                     // rejects it — `throw new InvalidGroupIdException("The
                     // configured group.id should not be an empty string or
-                    // whitespace.")` (`AsyncKafkaConsumer.java:747-757`).
+                    // whitespace.")` (`AsyncKafkaConsumer.java:839-844`).
                     // Coercing to `None` here silently turned that hard
                     // configuration error into "no group", so a consumer
                     // configured with an empty `group.id` became a groupless
@@ -1340,7 +1388,7 @@ mod tests {
 
     /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
     /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
-    /// (`AsyncKafkaConsumer.java:747-757`). Coercing it to `None` here would
+    /// (`AsyncKafkaConsumer.java:839-844`). Coercing it to `None` here would
     /// turn a hard configuration error into a groupless consumer, which then
     /// fails much later and much less legibly.
     #[test]

@@ -392,6 +392,16 @@ impl ConsumerHeartbeatRequestManager {
                 GroupMembershipOperation::RemainInGroup
             )
         {
+            // Debug log added by 45c4bdc48a
+            // (`ConsumerHeartbeatRequestManager.java:222-224`). Guarded so the
+            // `member_id()` copy is only made when the line is emitted.
+            if log::log_enabled!(log::Level::Debug) {
+                log::debug!(
+                    "Dynamic member {} closed with REMAIN_IN_GROUP. No leave heartbeat will be sent, the member will \
+                     be removed by the coordinator after session timeout.",
+                    self.membership_manager.member_id()
+                );
+            }
             return false;
         }
         self.membership_manager.state() == MemberState::Leaving

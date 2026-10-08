@@ -79,10 +79,10 @@ impl ConsumerOffsetOutOfRangeError {
     /// The partitions this error covers.
     ///
     /// Mirrors Java's `OffsetOutOfRangeException.partitions()`
-    /// (`OffsetOutOfRangeException.java:51-54`), which is
+    /// (`OffsetOutOfRangeException.java:64-67`), which is
     /// `return offsetOutOfRangePartitions.keySet();` — the override of the
     /// single abstract member `InvalidOffsetException` declares
-    /// (`InvalidOffsetException.java:36`), so it is available uniformly across
+    /// (`InvalidOffsetException.java:49`), so it is available uniformly across
     /// the family that
     /// `is_consumer_invalid_offset_error`
     /// recognises.
@@ -158,7 +158,7 @@ mod tests {
     ///
     /// Java: `OffsetOutOfRangeException(Map<TopicPartition, Long>)` composes
     /// `"Offsets out of range with no configured reset policy for partitions: "
-    /// + offsetOutOfRangePartitions` (`OffsetOutOfRangeException.java:36-40`),
+    /// + offsetOutOfRangePartitions` (`OffsetOutOfRangeException.java:41-44`),
     /// and Java's `Map.toString()` braces the entries — hence `{t-0=5}`.
     ///
     /// The exact encoding is asserted because the split changed it and no test
@@ -176,9 +176,9 @@ mod tests {
 
     /// Java: `OffsetOutOfRangeException.partitions()` is
     /// `offsetOutOfRangePartitions.keySet()`
-    /// (`OffsetOutOfRangeException.java:51-54`) — the override of
+    /// (`OffsetOutOfRangeException.java:64-67`) — the override of
     /// `InvalidOffsetException`'s single abstract member
-    /// (`InvalidOffsetException.java:36`), which Kafka's own javadoc tells
+    /// (`InvalidOffsetException.java:49`), which Kafka's own javadoc tells
     /// callers to use.
     #[test]
     fn test_offset_out_of_range_partitions_accessor() {
@@ -190,7 +190,7 @@ mod tests {
     }
 
     /// `OffsetOutOfRangeException extends InvalidOffsetException extends
-    /// KafkaException` (`OffsetOutOfRangeException.java:29`) — the CONSUMER
+    /// KafkaException` (`OffsetOutOfRangeException.java:31`) — the CONSUMER
     /// package's `InvalidOffsetException`, so it is not an `ApiException`,
     /// unlike the identically-named `common.errors` class.
     #[test]

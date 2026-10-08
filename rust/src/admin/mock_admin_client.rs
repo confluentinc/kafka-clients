@@ -1595,7 +1595,7 @@ impl Admin for MockAdminClient {
         // inline in the collect (MockAdminClient.java:756), and that constructor
         // rejects a negative offset with
         // `IllegalArgumentException("Invalid negative offset")`
-        // (OffsetAndMetadata.java:49-50). A negative offset *is* seedable and
+        // (OffsetAndMetadata.java:51-52). A negative offset *is* seedable and
         // nothing upstream establishes otherwise: `updateConsumerGroupOffsets` is
         // an unvalidated `putAll` (MockAdminClient.java:1493-1495), which the
         // Rust mock mirrors. Java's throw is a catchable `RuntimeException`;
@@ -3182,7 +3182,7 @@ mod tests {
         // sentinel -- is seedable. Java then throws
         // `IllegalArgumentException("Invalid negative offset")` from
         // `new OffsetAndMetadata(...)` while building the row
-        // (MockAdminClient.java:756, OffsetAndMetadata.java:49-50). The Rust mock
+        // (MockAdminClient.java:756, OffsetAndMetadata.java:51-52). The Rust mock
         // must surface a `Error`, not panic: the FFI runs this inline on the
         // caller's thread, so a panic would unwind out of `extern "C"`.
         let mock = admin();

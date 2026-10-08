@@ -385,7 +385,10 @@ Named Java classes, packages and version stamps in the rules, checked against 4.
 
 ## Draft rules notes for later phases
 
-Reserved for the PLAN §2.3 KIP-1332 note (the `ChunkedProducerBatch` fold into `ProducerBatch`, so Critics do not flag the missing type) and any other rule amendments later Milestone-16 phases draft. Phase 0 adds none.
+Rule amendments drafted by the later phases, one section per rules file and phase. Phase 0 drafted
+none here: its suggestions are the citation tables and the content items above. Phase 13 (agent 103)
+moved the Critic 98 P1 anti-patterns, which a merge had left under the Phase 12 section, back to the
+Phase 8 section they belong to, and added the process section at the end.
 
 ### Phase 5 (agent 95): `producer-transactions.md` §2/§3 — the manager → `Metadata` lock edge (KIP-1319)
 
@@ -397,9 +400,10 @@ Drafted amendment, from Critic 95's review (COMMENTS.95 Q3). For a human to appl
   (`:430`) reaches `metadata.topicIds()` (`:1253`).
 - **Why the rules should say it.** §2 lists what lives behind the manager's lock and §3 fixes the
   deque → manager order, but neither mentions a lock taken *while* the manager's is held. `Metadata`
-  is not a leaf: `Metadata::update` runs `ProducerMetadata`'s retain and request-builder closures and
-  the `ClusterResourceListeners` under its own lock. The order is safe only because none of those
-  callbacks takes the manager's lock.
+  is not a leaf. Under its own lock it runs `ProducerMetadata`'s retain closure (in `update`), its
+  request-builder closures (in `new_metadata_request_and_version`) and the `ClusterResourceListeners`
+  (in `update` and `update_partition_leadership`). The order is safe only because none of those
+  callbacks takes the manager's lock. (Wording corrected in Phase 13 per Critic 95's round-2 nit.)
 - **Suggested text** (append to §2's "How to apply"):
   "`TransactionManager` holds `Arc<Metadata>` (KIP-1319) and reads `topic_ids()` under the manager's
   lock, so the order is manager → `Metadata`. `Metadata` runs `ProducerMetadata`'s closures and
@@ -446,6 +450,10 @@ Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not ed
   Put chunk-only checks behind a `#[cold]` out-of-line helper, or at the one call site that needs
   them. Here the inline first-append check alone cost a few ns per record on the default strategy
   until it moved out of line.
+- **More suggested anti-patterns (Critic 98 P1):**
+  - a per-record `DashMap::entry` (a shard write lock) where a `get` would do;
+  - send-path performance judged from a `cfg(test)` build. Measure in a release example (fat LTO,
+    system allocator), not in the test binary, whose test allocator and seams change the inlining.
 
 ### Drafted amendment (Phase 12, Critic 102): `admin-client.md` §11 is stale
 
@@ -464,7 +472,53 @@ Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not ed
   and name callbacks per CLAUDE.md §4.
 - **Related, `admin-client.md` §2:** if restated, note that not every enqueue goes through `CallSender::call`:
   `HandleResult::NewCall` follow-ups are pushed by the I/O task directly (Critic 102 Issue 1).
-- **More suggested anti-patterns (Critic 98 P1):**
-  - a per-record `DashMap::entry` (a shard write lock) where a `get` would do;
-  - send-path performance judged from a `cfg(test)` build. Measure in a release example (fat LTO,
-    system allocator), not in the test binary, whose test allocator and seams change the inlining.
+
+### Process and tooling conventions adopted during Milestone 16 (Phase 13, agent 103)
+
+These were decided by the Manager or proposed by a Critic during the milestone, and applied by every
+later phase. None is in a rules file yet. For a human to decide whether they belong in
+`definition-of-done.md`, `agent-roles.md` or the xtask docs.
+
+- **Java line cites follow the port** (Manager decision on Critic 97 L2, PLAN Phase 7 notes). A phase
+  that ports a Java file's changes refreshes that file's Java `file:line` cites in the Rust tree to the
+  new reference, by content, in the same phase. Phases 4, 7, 8, 9, 10 and 11 did so. Suggested DoD
+  text: "When a phase ports a Java file, re-point every `File.java:NNN` cite to that file in the Rust
+  tree at the new reference, by content, not by arithmetic."
+- **Gate on `cargo xtask lint --keep-going`** (Manager (b), PLAN Phase 1 review notes). It runs every
+  lint step after a failure and fails at the end. Suggested DoD text under item 9: "Run `cargo xtask
+  lint --keep-going` so a custom-lint failure does not hide clippy or doc-hygiene findings."
+- **A partial test translation carries no `#[doc(alias)]`** (PLAN Phase 5 notes). `check-java-name`
+  rejects a test whose alias names a Java test it is not named after. Suggested DoD #3 addition: "A
+  Rust test that translates only part of a Java test, or is Rust-only, carries no Java test marker."
+- **Perf deltas inside the layout noise** (Critic 103, merge review of the pre-close-out merges). In the
+  production bench, forcing function alignment alone moved one path by up to 4.4 %, and two
+  single-layout readings in this milestone pointed in opposite directions (the merge "~1 % slower"
+  and Phase 8's keyed "+0.6 %"). Suggested DoD #10 text: "A production perf comparison whose delta
+  is within ±5 % reports either the geometric mean over at least three
+  `-C llvm-args=-align-all-functions=N` layouts (N ∈ {5, 6, 7}) plus the default, or shows that the
+  timed loop is instruction-identical; a single-layout delta in that band is not evidence either way."
+- **Tooling, not a rule (Critic 101):** `check-java-name` accepts a constructor marker on any `with_*`
+  function (`rust/xtask/src/java.rs:197-198`), so a method marked with its class's constructor skips
+  the CLAUDE.md §2 overload check. Tracked as a follow-up in PLAN §8; no rules text needed.
+
+### Hand-off index
+
+Every suggestion in this file, in one list (14 rows after the fix round). "Done in code" means the Rust tree already follows it, so
+only the rules text is outstanding.
+
+| # | Rules file | Section | Suggestion | Where above | Code status |
+|---|---|---|---|---|---|
+| 1 | `producer-transactions.md` | all | Re-point the 35 drifted cites (TransactionManager, Sender, RecordAccumulator, TransactionalRequestResult, MessageDataGenerator, one request builder) | Per-file tables | n/a (rules text only) |
+| 2 | `consumer-threading.md` | §1 | `AsyncKafkaConsumer.java:2107,2131` → `:2238,2261` (the two method declarations) | `AsyncKafkaConsumer.java` table | Rust copy at `rust/src/consumer/mod.rs` fixed in Phase 13 as `:2246,2268`, the event-creating lines of the same two methods |
+| 3 | `producer-transactions.md` | §10 | The TxnOffsetCommit grouping site is now `TransactionManager.txnOffsetCommitHandler` | Content item 1 | Done in code (Phase 5) |
+| 4 | `producer-transactions.md` | §12 | Add `TxnOffsetCommitRequest.java:94` (deliberate `latestVersion()`) and `:82` (constant) | Content item 2 | Done in code (Phase 5) |
+| 5 | `producer-transactions.md` | §11 | Known cases: `Topics[].Name` / `Topics[].TopicId`, enforced at `Builder.build` | Content item 3 | Done in code (Phase 5) |
+| 6 | `admin-client.md` | §9 | `MockAdminClient` is in the test-fixtures source set; `describeStreamsGroups` / `unregisterController` now in memory | Content item 4 | `unregister_controller` done (Phase 12); Rust has no `describe_streams_groups`, so that half is moot |
+| 7 | `admin-client.md` | §3 | Add the KIP-909 `AdminMetadataManager` members | Content item 5 | Done in code (Phase 2) |
+| 8 | `producer-transactions.md`, `consumer-threading.md` | headers, §2, §12, §20 | Restate the stale "4.2" stamps and the spec-corpus paragraph against 4.4 | Not line citations | n/a |
+| 9 | `consumer-threading.md` | §28, §31 | Event names (`RebalanceListenerCallbackNeeded` split), still pending from Milestone 13 | Not line citations | n/a |
+| 10 | `producer-transactions.md` | §2, §3 | Manager → `Metadata` lock edge, plus its anti-pattern | Phase 5 section | Done in code (Phase 5) |
+| 11 | `producer-transactions.md` | §7 | `ChunkedProducerBatch` folded into `ProducerBatch`; `ChunkedRecordAccumulator` by composition; five anti-patterns | Phase 8 section | Done in code (Phases 7-8) |
+| 12 | `admin-client.md` | §11 (and §2) | Replace the stale branch-state caveat with the in-tree sync/async admin FFI helpers; name both enqueue paths | Phase 12 section | Done in code (Phase 12) |
+| 13 | `definition-of-done.md` | 3, 9 | Cite refresh with the port; `lint --keep-going`; no marker on a partial test | Process section | Applied by convention in Phases 4-12 |
+| 14 | `definition-of-done.md` | 10 | Production perf deltas under ±5 % need several code layouts or an instruction-identity check | Process section | Applied in Critic 103's merge review |

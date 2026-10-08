@@ -367,6 +367,10 @@ impl ConsumerMembershipManager {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
     pub(crate) fn leave_group_epoch(&self) -> i32 {
         let is_static_member = self.group_instance_id.is_some();
+        // The mechanism to make static members permanently leave the group is to
+        // send an HB to leave with the -1 epoch (used by dynamic members).
+        // This will make the group coordinator fence this member, effectively
+        // removing it from the group.
         if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
             return ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
         }
