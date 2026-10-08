@@ -3338,7 +3338,7 @@ mod tests {
                 )
                 .await
                 .expect("append should succeed");
-            result.future
+            result.future.unwrap()
         }
 
         /// Build a simple produce response for a single partition.
@@ -8977,6 +8977,7 @@ mod tests {
             .await
             .expect("append should succeed")
             .future
+            .unwrap()
     }
 
     /// The `destination()` → `Node` → `isReady` triple `SenderTest.testSplitBatchAndSend`

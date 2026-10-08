@@ -17,6 +17,8 @@
 pub(crate) mod buffer_pool;
 pub(crate) mod built_in_partitioner;
 mod chunked_byte_buffer_output_stream;
+pub(crate) mod chunked_producer_batch;
+pub(crate) mod chunked_record_accumulator;
 mod future_record_metadata;
 mod incomplete_batches;
 mod kafka_producer_metrics;
@@ -39,6 +41,7 @@ mod txn_partition_map;
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::{BuiltInPartitioner, KeyHasher};
 pub(crate) use chunked_byte_buffer_output_stream::ChunkedByteBufferOutputStream;
+pub(crate) use chunked_record_accumulator::ChunkedRecordAccumulator;
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use kafka_producer_metrics::KafkaProducerMetrics;

@@ -66,6 +66,7 @@ use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::Caller;
+use crate::producer::internals::ChunkedRecordAccumulator;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::PendingRequests;
@@ -75,6 +76,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::SenderStatics;
 use crate::producer::internals::TransactionManager;
+use crate::producer::internals::buffer_pool::AllocationMode;
 use crate::producer::internals::{BuiltInPartitioner, KeyHasher, PartitionerConfig, RecordAccumulator};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -119,6 +121,14 @@ pub struct KafkaProducer<K, V> {
     total_memory_size: i64,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
+    /// The incremental-strategy accumulator (KIP-1332), when `buffer.memory.allocation.strategy`
+    /// is `incremental` and `batch.size` admits it; its base is [`Self::accumulator`].
+    ///
+    /// Java holds one `accumulator` field typed `RecordAccumulator` and lets virtual dispatch pick
+    /// `ChunkedRecordAccumulator.append`. Rust composes the chunked accumulator over the base
+    /// (PLAN §2.3), so the one call site that differs — `append` on the send path — dispatches on
+    /// this field, and every other use keeps the shared base.
+    chunked_accumulator: Option<ChunkedRecordAccumulator>,
     /// The producer metadata.
     metadata: Arc<ProducerMetadata>,
     /// All the state related to transactions, in particular the producer id,
@@ -234,7 +244,9 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     pub value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     /// The producer metadata. Java's `metadata`.
     pub metadata: Arc<ProducerMetadata>,
-    /// The record accumulator. Java's `accumulator`.
+    /// The record accumulator. Java's `accumulator`. A producer built through these options
+    /// uses the full strategy: no caller (all of them tests) hands it a
+    /// `ChunkedRecordAccumulator`.
     pub accumulator: Arc<RecordAccumulator>,
     /// Whether the sender task is running. Part of Rust's decomposition of
     /// Java's `Sender sender` / `Sender.SenderThread ioThread` pair; defaults to
@@ -470,6 +482,9 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     /// The record accumulator. Java has no `accumulator` parameter on `:345`;
     /// Rust builds it in [`KafkaProducer::new_inner`] and injects it here.
     pub accumulator: Arc<RecordAccumulator>,
+    /// The incremental-strategy accumulator over `accumulator`, or `None` for the full strategy
+    /// (see `KafkaProducer::chunked_accumulator`).
+    pub chunked_accumulator: Option<ChunkedRecordAccumulator>,
     /// The network client the sender task drives. Java's `kafkaClient`.
     pub client: C,
     /// The clock. Java's `time`.
@@ -502,6 +517,7 @@ pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
+    chunked_accumulator: Option<ChunkedRecordAccumulator>,
     client: Option<C>,
     time: Option<Arc<dyn Time>>,
     metrics: Option<Arc<Metrics>>,
@@ -528,6 +544,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             value_serializer: None,
             metadata: None,
             accumulator: None,
+            chunked_accumulator: None,
             client: None,
             time: None,
             metrics: None,
@@ -562,6 +579,12 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     /// Sets [`KafkaProducerClientOptions::accumulator`], a mandatory parameter.
     pub(crate) fn set_accumulator(mut self, accumulator: Arc<RecordAccumulator>) -> Self {
         self.accumulator = Some(accumulator);
+        self
+    }
+    /// Sets [`KafkaProducerClientOptions::chunked_accumulator`]; `None` (the full strategy) if
+    /// unset.
+    pub(crate) fn set_chunked_accumulator(mut self, chunked_accumulator: Option<ChunkedRecordAccumulator>) -> Self {
+        self.chunked_accumulator = chunked_accumulator;
         self
     }
     /// Sets [`KafkaProducerClientOptions::client`], a mandatory parameter.
@@ -628,6 +651,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             value_serializer: self.value_serializer.ok_or_else(|| Self::missing("value_serializer"))?,
             metadata: self.metadata.ok_or_else(|| Self::missing("metadata"))?,
             accumulator: self.accumulator.ok_or_else(|| Self::missing("accumulator"))?,
+            chunked_accumulator: self.chunked_accumulator,
             client: self.client.ok_or_else(|| Self::missing("client"))?,
             time: self.time.ok_or_else(|| Self::missing("time"))?,
             metrics: self.metrics.ok_or_else(|| Self::missing("metrics"))?,
@@ -724,6 +748,7 @@ impl<K, V> KafkaProducer<K, V> {
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
+            chunked_accumulator: None,
             metadata,
             transaction_manager,
             pending_requests,
@@ -1025,7 +1050,7 @@ impl<K, V> KafkaProducer<K, V> {
             partitioner.configure(&configs);
         }
 
-        let accumulator = match Self::build_accumulator(
+        let (accumulator, chunked_accumulator) = match Self::build_accumulator(
             &config,
             compression,
             delivery_timeout_ms,
@@ -1066,6 +1091,7 @@ impl<K, V> KafkaProducer<K, V> {
                 .set_value_serializer(value_serializer)
                 .set_metadata(metadata)
                 .set_accumulator(accumulator)
+                .set_chunked_accumulator(chunked_accumulator)
                 .set_client(client)
                 .set_time(time)
                 .set_metrics(metrics)
@@ -1080,10 +1106,18 @@ impl<K, V> KafkaProducer<K, V> {
     }
 
     /// Step 10 of [`new_inner`](Self::new_inner): the `BufferPool` and the
-    /// `RecordAccumulator`, i.e. every fallible constructor step that follows the
-    /// custom partitioner's `configure`. `new_inner` closes the partitioner when this
-    /// returns an error, as Java's constructor `catch` does (KAFKA-2121), so a
-    /// fallible step added after the partitioner belongs here.
+    /// `RecordAccumulator` — a `ChunkedRecordAccumulator` for the incremental
+    /// `buffer.memory.allocation.strategy` (KIP-1332) — i.e. every fallible constructor step that
+    /// follows the custom partitioner's `configure`. `new_inner` closes the partitioner when this
+    /// returns an error, as Java's constructor `catch` does (KAFKA-2121), so a fallible step added
+    /// after the partitioner belongs here: the incremental strategy's compression
+    /// `ConfigException` is one.
+    ///
+    /// Returns the base accumulator, which the `Sender` and the producer's flush / close paths
+    /// share, and, for the incremental strategy, the chunked accumulator whose `append` the send
+    /// path calls instead of the base one (PLAN §2.3).
+    ///
+    /// Translated from `KafkaProducer.java:447-509`.
     #[expect(clippy::too_many_arguments)]
     fn build_accumulator(
         config: &ProducerConfig,
@@ -1094,47 +1128,111 @@ impl<K, V> KafkaProducer<K, V> {
         time: &Arc<dyn Time>,
         transaction_manager: &Option<Arc<Mutex<TransactionManager>>>,
         log_context: &LogContext,
-    ) -> Result<Arc<RecordAccumulator>, Error> {
+    ) -> Result<(Arc<RecordAccumulator>, Option<ChunkedRecordAccumulator>), Error> {
         // 10. Create BufferPool and RecordAccumulator, threading the shared
-        //    `Arc<Metrics>` and `time` into both (KafkaProducer.java:438
+        //    `Arc<Metrics>` and `time` into both (`KafkaProducer.java:497-509`
         //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
-        //    As per Kafka configuration documentation, batch.size may be set to 0
-        //    to explicitly disable batching, which in practice uses a batch size of 1.
+        let partitioner_config = PartitionerConfig::new(
+            // Java `KafkaProducer.java:447-449`: "There is no need to do work
+            // required for adaptive partitioning, if we use a custom
+            // partitioner." So adaptive partitioning is enabled only when no
+            // custom partitioner is present AND the config opts in.
+            no_custom_partitioner && config.partitioner_adaptive_partitioning_enable,
+            config.partitioner_availability_timeout_ms,
+            // KIP-1123 (`KafkaProducer.java:450-455`): passed through whether or
+            // not a custom partitioner is set, as Java does, so a blank
+            // `client.rack` with `partitioner.rack.aware=true` fails construction
+            // either way.
+            config.partitioner_rack_aware,
+            &config.client_rack,
+        )?;
+        // As per Kafka producer configuration documentation batch.size may be set to 0
+        // to explicitly disable batching which in practice actually means using a batch size of 1.
         let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(
+        let allocation_strategy = config.buffer_memory_allocation_strategy.to_lowercase();
+        let incremental = allocation_strategy == ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL;
+        // Use the chunked path only when a batch is at least one full chunk
+        // (batch.size >= CHUNK_SIZE). Below that, a batch can't fill even one chunk, so chunking
+        // would over-reserve and the producer falls back to the full strategy instead.
+        let use_incremental = incremental && batch_size >= ChunkedRecordAccumulator::CHUNK_SIZE;
+        if incremental && !use_incremental {
+            kafka_warn!(
+                log_context,
+                "Ignoring {}={} and falling back to {}: {} is {} bytes, below the {} byte chunk size, so a batch \
+                 cannot fill a single chunk.",
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+                ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+                ProducerConfig::BATCH_SIZE_CONFIG,
+                batch_size,
+                ChunkedRecordAccumulator::CHUNK_SIZE
+            );
+        }
+        // The chunked path does not support compression yet (KAFKA-20579).
+        if use_incremental && compression.compression_type() != CompressionType::None {
+            return Err(Error::config_message(Self::incremental_compression_error_message()));
+        }
+        if use_incremental {
+            let buffer_pool = Arc::new(BufferPool::with_allocation_mode(
+                config.buffer_memory,
+                ChunkedRecordAccumulator::CHUNK_SIZE as usize,
+                Arc::clone(metrics),
+                Arc::clone(time),
+                Self::PRODUCER_METRIC_GROUP_NAME,
+                AllocationMode::Incremental,
+            ));
+            let accumulator = ChunkedRecordAccumulator::new(
+                batch_size,
+                compression,
+                config.linger_ms as i32,
+                config.retry_backoff_ms,
+                config.retry_backoff_max_ms,
+                delivery_timeout_ms,
+                partitioner_config,
+                Arc::clone(metrics),
+                Self::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(time),
+                buffer_pool,
+                transaction_manager.clone(),
+                log_context.clone(),
+            )?;
+            return Ok((Arc::clone(accumulator.base()), Some(accumulator)));
+        }
+        let buffer_pool = Arc::new(BufferPool::with_allocation_mode(
             config.buffer_memory,
             batch_size as usize,
             Arc::clone(metrics),
             Arc::clone(time),
             Self::PRODUCER_METRIC_GROUP_NAME,
+            AllocationMode::Full,
         ));
-        Ok(Arc::new(RecordAccumulator::with_log_context(
+        let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
             config.linger_ms as i32,
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
-            PartitionerConfig::new(
-                // Java `KafkaProducer.java:428-433`: "There is no need to do work
-                // required for adaptive partitioning, if we use a custom
-                // partitioner." So adaptive partitioning is enabled only when no
-                // custom partitioner is present AND the config opts in.
-                no_custom_partitioner && config.partitioner_adaptive_partitioning_enable,
-                config.partitioner_availability_timeout_ms,
-                // KIP-1123 (`KafkaProducer.java:450-455`): passed through whether or
-                // not a custom partitioner is set, as Java does, so a blank
-                // `client.rack` with `partitioner.rack.aware=true` fails construction
-                // either way.
-                config.partitioner_rack_aware,
-                &config.client_rack,
-            )?,
+            partitioner_config,
             Arc::clone(metrics),
             Self::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(time),
             buffer_pool,
             transaction_manager.clone(),
             log_context.clone(),
-        )))
+        ));
+        Ok((accumulator, None))
+    }
+
+    /// The `ConfigException` message for the incremental strategy combined with compression
+    /// (`KafkaProducer.java:475-480`).
+    fn incremental_compression_error_message() -> String {
+        format!(
+            "The {} {} does not support compression yet. {} must be set to none.",
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+            ProducerConfig::COMPRESSION_TYPE_CONFIG
+        )
     }
 
     /// Builds the [`TransactionManager`] when idempotence is enabled.
@@ -1225,6 +1323,7 @@ impl<K, V> KafkaProducer<K, V> {
             value_serializer,
             metadata,
             accumulator,
+            chunked_accumulator,
             client,
             time,
             metrics,
@@ -1279,6 +1378,7 @@ impl<K, V> KafkaProducer<K, V> {
             max_request_size: config.max_request_size,
             total_memory_size: config.buffer_memory,
             accumulator,
+            chunked_accumulator,
             metadata,
             transaction_manager,
             pending_requests,
@@ -1967,30 +2067,59 @@ impl<K, V> KafkaProducer<K, V> {
 
         let timestamp = timestamp.unwrap_or(now_ms);
 
-        match self
-            .accumulator
-            .append(
-                topic,
-                partition,
-                timestamp,
-                key,
-                value,
-                headers,
-                callback,
-                remaining_wait_ms,
-                now_ms,
-                cluster,
-            )
-            .await
-        {
+        // Java's `accumulator.append(..)` dispatches virtually to `ChunkedRecordAccumulator.append`
+        // for the incremental strategy (`KafkaProducer.java:1110`); here the strategy picks the
+        // accumulator explicitly (see `chunked_accumulator`). Each arm awaits its own concrete
+        // future, so the dispatch costs a branch, not a boxed future (CLAUDE.md §13).
+        let appended = match &self.chunked_accumulator {
+            Some(chunked_accumulator) => {
+                chunked_accumulator
+                    .append(
+                        topic,
+                        partition,
+                        timestamp,
+                        key,
+                        value,
+                        headers,
+                        callback,
+                        remaining_wait_ms,
+                        now_ms,
+                        cluster,
+                    )
+                    .await
+            },
+            None => {
+                self.accumulator
+                    .append(
+                        topic,
+                        partition,
+                        timestamp,
+                        key,
+                        value,
+                        headers,
+                        callback,
+                        remaining_wait_ms,
+                        now_ms,
+                        cluster,
+                    )
+                    .await
+            },
+        };
+        match appended {
             Ok(result) => {
+                // `append` only ever returns an appended result, whose future and partition are
+                // set (`RecordAppendResult::appended`); the other outcomes are signals between
+                // the accumulator's own steps.
+                let (Some(future), Some(topic_partition)) = (result.future, result.topic_partition) else {
+                    return Err(Error::local_illegal_state("append returned a result that was not appended"));
+                };
                 // Add the partition to the transaction (if in progress) after it has
                 // been successfully appended to the accumulator. We cannot do it
                 // before because the partition may be unknown. Note that the `Sender`
                 // will refuse to dequeue batches from the accumulator until they have
                 // been added to the transaction (`KafkaProducer.java:1040-1046`).
                 //
-                // `result.topic_partition` is what Java reads back as
+                // `topic_partition` is what Java reads back as
                 // `appendCallbacks.topicPartition()`. It is borrowed, not rebuilt:
                 // constructing it here from `topic: &str` would allocate a `String` and
                 // an `Arc<str>` and copy the topic name twice on **every** record, which
@@ -2007,8 +2136,7 @@ impl<K, V> KafkaProducer<K, V> {
                     // `if let` scrutinee's temporaries live for the whole success arm —
                     // edition 2024 only shortens them across the `else`. Written inline,
                     // this self-deadlocks the application task.
-                    let add_partition =
-                        transaction_manager.lock().unwrap().maybe_add_partition(&result.topic_partition);
+                    let add_partition = transaction_manager.lock().unwrap().maybe_add_partition(&topic_partition);
                     if let Err(error) = add_partition {
                         // `maybeAddPartition` throws across two of `doSend`'s catch
                         // blocks, so the error class decides how the failure surfaces:
@@ -2038,7 +2166,7 @@ impl<K, V> KafkaProducer<K, V> {
                         // (the `Error::KafkaError` variant), for which `is_api_error()`
                         // answers `false` directly, so the code-based workaround is gone.
                         if error.is_api_error() {
-                            let partition = result.topic_partition.partition();
+                            let partition = topic_partition.partition();
                             // `None`, not a callback: unlike the pre-append failure paths
                             // (`ensure_valid_record_size`, `wait_on_metadata`), the record
                             // has ALREADY been appended here, and `append` above took
@@ -2066,7 +2194,7 @@ impl<K, V> KafkaProducer<K, V> {
                     );
                     self.wakeup.notify_one();
                 }
-                Ok(KafkaFuture::new(result.future))
+                Ok(KafkaFuture::new(future))
             },
             // Java's `catch (ApiException e)` (`KafkaProducer.java:1056-1068`) fires the
             // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
@@ -3309,6 +3437,7 @@ mod tests {
             PartitionerConfig::new(true, 0, false, "").unwrap(),
             Arc::new(Metrics::new()),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::new(crate::common::utils::SystemTime),
             // Room for exactly one batch.
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
             None,
@@ -5196,6 +5325,7 @@ mod tests {
                 .unwrap(),
                 Arc::clone(&metrics),
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(&time) as Arc<dyn Time>,
                 buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
@@ -6967,6 +7097,7 @@ mod tests {
             .unwrap(),
             Arc::clone(&metrics),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time) as Arc<dyn Time>,
             buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,
@@ -7494,6 +7625,132 @@ mod tests {
                 KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
                     .err()
                     .expect("rack-aware without client.rack must fail construction");
+            assert_eq!(error.message(), "Failed to construct kafka producer");
+
+            assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));
+            assert_eq!(1, MockPartitioner::close_count().load(Ordering::SeqCst));
+        });
+
+        MockPartitioner::reset_counters();
+    }
+
+    /// KIP-1332 (`KafkaProducer.java:457-509`): `buffer.memory.allocation.strategy=incremental`
+    /// (any case) builds a `ChunkedRecordAccumulator` over a pool serving 16 KiB chunks when
+    /// `batch.size` is at least one chunk, and falls back to the full strategy, with a pool of
+    /// `batch.size` buffers, when it is not. The default is the full strategy.
+    #[tokio::test]
+    async fn test_buffer_memory_allocation_strategy_wiring() {
+        use crate::producer::internals::buffer_pool::AllocationMode;
+        type Case<'a> = (&'a [(&'a str, &'a str)], bool, usize);
+        let cases: [Case; 5] = [
+            (&[], false, 16384),
+            (&[("buffer.memory.allocation.strategy", "incremental")], true, 16384),
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "Incremental"),
+                    ("batch.size", "1048576"),
+                ],
+                true,
+                16384,
+            ),
+            // Below one chunk: the warning, then the full strategy.
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "incremental"),
+                    ("batch.size", "16383"),
+                ],
+                false,
+                16383,
+            ),
+            (
+                &[
+                    ("buffer.memory.allocation.strategy", "incremental"),
+                    ("batch.size", "0"),
+                ],
+                false,
+                1,
+            ),
+        ];
+        for (extra, incremental, poolable_size) in cases {
+            let config = ProducerConfig::new(&guard_props(extra)).expect("valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("the producer constructs");
+            assert_eq!(incremental, producer.chunked_accumulator.is_some(), "{extra:?}");
+            let pool = producer.accumulator.buffer_pool_for_test();
+            let mode = if incremental {
+                AllocationMode::Incremental
+            } else {
+                AllocationMode::Full
+            };
+            assert_eq!(mode, pool.allocation_mode(), "{extra:?}");
+            assert_eq!(poolable_size, pool.poolable_size(), "{extra:?}");
+            if let Some(chunked) = &producer.chunked_accumulator {
+                // The chunked accumulator extends the very accumulator the Sender drains.
+                assert!(Arc::ptr_eq(chunked.base(), &producer.accumulator), "{extra:?}");
+            }
+        }
+    }
+
+    /// KIP-1332: the incremental strategy does not support compression yet, so the combination
+    /// fails construction with Java's `ConfigException` (`KafkaProducer.java:475-480`), wrapped
+    /// like every other construction failure. Below one chunk the strategy falls back to the full
+    /// one first, so compression is allowed there, as in Java.
+    #[tokio::test]
+    async fn test_incremental_allocation_strategy_rejects_compression() {
+        let config = ProducerConfig::new(&guard_props(&[
+            ("buffer.memory.allocation.strategy", "incremental"),
+            ("compression.type", "gzip"),
+        ]))
+        .expect("valid config");
+        let error =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .err()
+                .expect("incremental with compression must fail construction");
+        assert_eq!(error.message(), "Failed to construct kafka producer");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(
+            cause.message(),
+            "The incremental buffer.memory.allocation.strategy does not support compression yet. \
+             compression.type must be set to none."
+        );
+
+        let config = ProducerConfig::new(&guard_props(&[
+            ("buffer.memory.allocation.strategy", "incremental"),
+            ("compression.type", "gzip"),
+            ("batch.size", "1024"),
+        ]))
+        .expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("the full-strategy fallback supports compression");
+        assert!(producer.chunked_accumulator.is_none());
+    }
+
+    /// KAFKA-2121 for the KIP-1332 check: the compression `ConfigException` is raised inside
+    /// `build_accumulator`, after a custom partitioner is configured, so the failed construction
+    /// closes it (`KafkaProducer.java:519-523` -> `:1533`).
+    #[test]
+    fn test_partitioner_closed_when_incremental_compression_is_rejected() {
+        let _guard = MockPartitioner::lock_counters();
+        MockPartitioner::reset_counters();
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let partitioner: Box<dyn Partitioner<String, String>> = Box::new(MockPartitioner::new());
+            let config = ProducerConfig::new(&guard_props(&[
+                ("buffer.memory.allocation.strategy", "incremental"),
+                ("compression.type", "lz4"),
+            ]))
+            .expect("valid config")
+            .set_partitioner(partitioner);
+            let error =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .err()
+                    .expect("incremental with compression must fail construction");
             assert_eq!(error.message(), "Failed to construct kafka producer");
 
             assert_eq!(1, MockPartitioner::init_count().load(Ordering::SeqCst));

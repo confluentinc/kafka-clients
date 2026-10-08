@@ -101,6 +101,21 @@ pub struct ProducerConfig {
     /// waiting to be sent. Default: 32 MiB.
     pub(crate) buffer_memory: i64,
 
+    /// `buffer.memory.allocation.strategy` - Controls how the producer allocates memory from
+    /// `buffer.memory` for record batches. The following values are supported:
+    ///
+    /// - `full`: reserves a full `batch.size` up front when a batch is created, regardless of how
+    ///   much data it ends up holding. Pool memory therefore scales with the number of active
+    ///   partitions.
+    /// - `incremental`: allocates memory on demand as records are appended, growing a batch up to
+    ///   `batch.size`. Pool memory therefore scales with the data actually buffered rather than
+    ///   the number of active partitions, allowing larger `batch.size` values (e.g. for
+    ///   high-latency clusters) without reserving `batch.size` for every active partition.
+    ///
+    /// Default: `full`. Internal (Java's `defineInternal`) until the incremental strategy is fully
+    /// implemented. Validated case-insensitively and kept as given; `KafkaProducer` lower-cases it.
+    pub(crate) buffer_memory_allocation_strategy: String,
+
     /// `max.block.ms` - Maximum time `send()` and `partitionsFor()` will block.
     /// Default: 60000 ms.
     pub(crate) max_block_ms: i64,
@@ -341,6 +356,7 @@ impl Default for ProducerConfig {
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
+            buffer_memory_allocation_strategy: Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL.to_string(),
             max_block_ms: 60 * 1000,
             acks: -1, // "all"
             retries: i32::MAX,
@@ -404,6 +420,15 @@ impl ProducerConfig {
     pub const LINGER_MS_CONFIG: &'static str = "linger.ms";
     /// Config key: `buffer.memory`
     pub const BUFFER_MEMORY_CONFIG: &'static str = "buffer.memory";
+    /// Config key: `buffer.memory.allocation.strategy` (KIP-1332). Internal until the incremental
+    /// strategy is fully implemented.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG: &'static str = "buffer.memory.allocation.strategy";
+    /// `buffer.memory.allocation.strategy` value: reserve a full `batch.size` per batch up front
+    /// (the default).
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL: &'static str = "full";
+    /// `buffer.memory.allocation.strategy` value: allocate memory on demand as records are
+    /// appended.
+    pub const BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL: &'static str = "incremental";
     /// Config key: `max.block.ms`
     pub const MAX_BLOCK_MS_CONFIG: &'static str = "max.block.ms";
     /// Config key: `acks`
@@ -554,6 +579,22 @@ impl ProducerConfig {
                 },
                 Self::BUFFER_MEMORY_CONFIG => {
                     config.buffer_memory = Self::parse_i64(key, value)?;
+                },
+                Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
+                    // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
+                    // `Type.STRING` value (`ConfigDef.java:729-731`).
+                    let strategy = value.trim();
+                    if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
+                        && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
+                    {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            strategy,
+                            "String must be one of (case insensitive): FULL, INCREMENTAL",
+                        ));
+                    }
+                    config.buffer_memory_allocation_strategy = strategy.to_string();
                 },
                 Self::MAX_BLOCK_MS_CONFIG => {
                     config.max_block_ms = Self::parse_i64(key, value)?;
@@ -1586,6 +1627,63 @@ mod tests {
             msg.contains("security.protocol"),
             "Error message should contain config key, got: {}",
             msg
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testDefaultBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testDefaultBufferMemoryAllocationStrategy")]
+    fn test_default_buffer_memory_allocation_strategy() {
+        let producer_config = ProducerConfig::new(&base_props()).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testValidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testValidBufferMemoryAllocationStrategy")]
+    fn test_valid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL.to_string(),
+        );
+        let producer_config = ProducerConfig::new(&props).unwrap();
+        assert_eq!(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL,
+            producer_config.buffer_memory_allocation_strategy
+        );
+
+        // Rust-only: `CaseInsensitiveValidString` accepts any case, and the value is kept as given.
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "INCREMENTAL".to_string(),
+        );
+        assert_eq!(
+            "INCREMENTAL",
+            ProducerConfig::new(&props).unwrap().buffer_memory_allocation_strategy
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidBufferMemoryAllocationStrategy`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidBufferMemoryAllocationStrategy")]
+    fn test_invalid_buffer_memory_allocation_strategy() {
+        let mut props = base_props();
+        props.insert(
+            ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG.to_string(),
+            "abc".to_string(),
+        );
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "expected Error::Config, got {err:?}");
+        assert!(err.message().contains(ProducerConfig::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG));
+        // Rust-only: the whole `CaseInsensitiveValidString` message.
+        assert_eq!(
+            err.message(),
+            "Invalid value abc for configuration buffer.memory.allocation.strategy: \
+             String must be one of (case insensitive): FULL, INCREMENTAL"
         );
     }
 

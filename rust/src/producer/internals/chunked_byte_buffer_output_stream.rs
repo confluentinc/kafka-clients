@@ -84,10 +84,6 @@ pub(crate) struct ChunkedByteBufferOutputStream {
     flattened_buffer: Option<Bytes>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into the producer by Milestone 16 Phase 8")
-)]
 impl ChunkedByteBufferOutputStream {
     /// Constructs a chunked output stream backed by the given pre-allocated chunks. Ownership of
     /// `initial_chunks` transfers to this stream (they will be returned to the pool via
@@ -170,6 +166,10 @@ impl ChunkedByteBufferOutputStream {
     ///
     /// `IllegalState` after [`deallocate`](Self::deallocate) or [`close`](Self::close), or when
     /// every attached chunk is full.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "translated Java method (DoD #2); no Rust caller outside tests")
+    )]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#write")]
     pub(crate) fn write_with_b(&mut self, b: u8) -> Result<(), Error> {
         self.ensure_not_deallocated()?;
@@ -436,6 +436,10 @@ impl ChunkedByteBufferOutputStream {
     }
 
     /// Java's `limit()`: the stream has no limit of its own, so `Integer.MAX_VALUE`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "translated Java method (DoD #2); no Rust caller outside tests")
+    )]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#limit")]
     pub(crate) fn limit(&self) -> Result<usize, Error> {
         self.ensure_not_deallocated()?;
@@ -459,6 +463,10 @@ impl ChunkedByteBufferOutputStream {
     /// # Errors
     ///
     /// `IllegalState` after [`deallocate`](Self::deallocate), or if the bytes do not fit.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "translated Java method (DoD #2); no Rust caller outside tests")
+    )]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#ensureRemaining")]
     pub(crate) fn ensure_remaining(&self, remaining_bytes_required: usize) -> Result<(), Error> {
         let remaining = self.remaining()?;

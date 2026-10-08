@@ -141,7 +141,16 @@ pub struct BufferPool {
     /// unwinding (`finally`) refund paths.
     #[cfg(test)]
     fail_allocate_byte_buffer: AtomicBool,
+    /// Test-only observer mirroring Java tests overriding `deallocate(ByteBuffer, int)` to record
+    /// each buffer handed back: called with the buffer's address (its identity, which a move of
+    /// the `Vec` does not change) on every [`deallocate_with_size`](Self::deallocate_with_size).
+    #[cfg(test)]
+    pub(crate) deallocate_observer: Mutex<Option<DeallocateObserver>>,
 }
+
+/// The type of [`BufferPool::deallocate_observer`] (test-only).
+#[cfg(test)]
+pub(crate) type DeallocateObserver = Arc<dyn Fn(usize) + Send + Sync>;
 
 impl BufferPool {
     /// Sensor name for tracking buffer pool wait time.
@@ -255,6 +264,8 @@ impl BufferPool {
             fail_record_wait_time: AtomicBool::new(false),
             #[cfg(test)]
             fail_allocate_byte_buffer: AtomicBool::new(false),
+            #[cfg(test)]
+            deallocate_observer: Mutex::new(None),
         }
     }
 
@@ -979,6 +990,10 @@ impl BufferPool {
     ///   compression
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#deallocate")]
     pub fn deallocate_with_size(&self, buffer: Vec<u8>, size: usize) {
+        #[cfg(test)]
+        if let Some(observer) = self.deallocate_observer.lock().unwrap().clone() {
+            observer(buffer.as_ptr() as usize);
+        }
         let mut inner = self.inner.lock().unwrap();
         if size == self.poolable_size && size == buffer.capacity() {
             inner.free.push_back(buffer);
