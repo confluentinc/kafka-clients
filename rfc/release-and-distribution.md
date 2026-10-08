@@ -29,7 +29,7 @@ Each client is published to its language's standard registry under its existing 
 
 | Language | Registry | Install | Native artifact |
 | --- | --- | --- | --- |
-| Rust | crates.io | `cargo add <crate>` | pure-Rust crate, built by cargo |
+| Rust | crates.io | `cargo add confluent-kafka` | pure-Rust crate, built by cargo |
 | Python | PyPI | `pip install confluent-kafka` | prebuilt wheels per platform |
 | .NET | NuGet | `dotnet add package Confluent.Kafka` | native runtime assets in the package |
 | JavaScript | npm | `npm install @confluentinc/kafka-javascript` | prebuilt platform packages (`optionalDependencies`) |
