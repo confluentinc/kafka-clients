@@ -107,12 +107,21 @@ impl std::hash::Hash for MetricName {
 }
 
 impl std::fmt::Display for MetricName {
+    /// Java's `MetricName.toString()`. The tags render as Java's `Map.toString()`
+    /// does, `{k1=v1, k2=v2}` (in key order here: the tags are a `BTreeMap`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MetricName [name={}, group={}, description={}, tags={:?}]",
-            self.name, self.group, self.description, self.tags
-        )
+            "MetricName [name={}, group={}, description={}, tags={{",
+            self.name, self.group, self.description
+        )?;
+        for (i, (key, value)) in self.tags.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{key}={value}")?;
+        }
+        f.write_str("}]")
     }
 }
 

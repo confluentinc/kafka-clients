@@ -85,7 +85,7 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Java's `ConsumerRecords` is **structurally immutable** — its
     /// fields are `private final` and the maps/lists exposed by its
     /// getters are unmodifiable views (see
-    /// `ConsumerRecords.java:37-50`). An interceptor that throws
+    /// `ConsumerRecords.java:41-50, 78`). An interceptor that throws
     /// **cannot** corrupt the input batch in Java; the "next interceptor
     /// receives the previous-good batch" guarantee
     /// (`ConsumerInterceptor.java:63-65`) is a structural property of

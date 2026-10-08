@@ -527,6 +527,12 @@ impl Measurable for MeasurableArc {
     fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
         self.0.measure(config, now)
     }
+
+    /// The shared stat's own type: Java registers the stat itself as the
+    /// metric's provider, so its class is what `KafkaMetric.toString` names.
+    fn type_name(&self) -> Option<&'static str> {
+        self.0.type_name()
+    }
 }
 
 /// A `Stat` view over a `Box<dyn CompoundStat>` so the compound stat can sit in

@@ -15,7 +15,6 @@
 //! Coordinator heartbeat latency/rate metrics
 //! (`org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -24,6 +23,7 @@ use crate::common::MetricName;
 use crate::common::metrics::stats::{Max, Meter, WindowedCount};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records coordinator-heartbeat latency, rate, and last-heartbeat age.
 /// Mirrors Java's `HeartbeatMetricsManager`.
@@ -34,7 +34,13 @@ use crate::consumer::internals::ConsumerUtils;
 /// an `Arc<AtomicI64>` (init -1) so the `last-heartbeat-seconds-ago` closure
 /// measurable can read it while `record_heartbeat_sent_ms` writes it — an
 /// idiomatic-Rust, value-neutral swap for Java's plain `long lastHeartbeatMs`.
+///
+/// Extends `AbstractConsumerMetricsManager` (KAFKA-19542): everything it
+/// registers goes through the `inner` ledger and is removed by
+/// [`close`](Self::close).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager")]
 pub(crate) struct HeartbeatMetricsManager {
+    inner: AbstractConsumerMetricsManager,
     // MetricName fields visible for testing (Java: package-private `final`).
     #[cfg(test)]
     heartbeat_response_time_max: MetricName,
@@ -61,32 +67,26 @@ impl HeartbeatMetricsManager {
     /// `last-heartbeat-seconds-ago` gauge. All INFO (Java's `metrics.sensor`
     /// default) — full Java parity.
     pub(crate) fn with_prefix(metrics: &Arc<Metrics>, metric_group_prefix: &str) -> Self {
+        // Java: `this(new MetricsLedger(metrics), metricGroupPrefix)` → `super(metrics)`.
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(Arc::clone(metrics)));
+        let metrics = inner.metrics();
         let metric_group_name = format!("{metric_group_prefix}{}", ConsumerUtils::COORDINATOR_METRICS_SUFFIX);
         let heartbeat_sensor = metrics.sensor("heartbeat-latency").expect("creating heartbeat-latency sensor");
 
-        let heartbeat_response_time_max = metrics.metric_name_description_tags(
+        let heartbeat_response_time_max = metrics.metric_name(
             "heartbeat-response-time-max",
             &metric_group_name,
             "The max time taken to receive a response to a heartbeat request",
-            BTreeMap::new(),
         );
         heartbeat_sensor
             .add_metric_name(heartbeat_response_time_max.clone(), Box::new(Max::new()))
             .expect("adding heartbeat-response-time-max");
 
         // windowed meters
-        let heartbeat_rate = metrics.metric_name_description_tags(
-            "heartbeat-rate",
-            &metric_group_name,
-            "The number of heartbeats per second",
-            BTreeMap::new(),
-        );
-        let heartbeat_total = metrics.metric_name_description_tags(
-            "heartbeat-total",
-            &metric_group_name,
-            "The total number of heartbeats",
-            BTreeMap::new(),
-        );
+        let heartbeat_rate =
+            metrics.metric_name("heartbeat-rate", &metric_group_name, "The number of heartbeats per second");
+        let heartbeat_total =
+            metrics.metric_name("heartbeat-total", &metric_group_name, "The total number of heartbeats");
         // Java: `new Meter(new WindowedCount(), heartbeatRate, heartbeatTotal)`.
         heartbeat_sensor
             .add(Box::new(Meter::with_rate_stat(
@@ -109,17 +109,17 @@ impl HeartbeatMetricsManager {
                 ((now - last_heartbeat_send) / 1000) as f64
             }
         });
-        let last_heartbeat_seconds_ago = metrics.metric_name_description_tags(
+        let last_heartbeat_seconds_ago = metrics.metric_name(
             "last-heartbeat-seconds-ago",
             &metric_group_name,
             "The number of seconds since the last coordinator heartbeat was sent",
-            BTreeMap::new(),
         );
         metrics
-            .add_metric_measurable(last_heartbeat_seconds_ago.clone(), Box::new(last_heartbeat))
+            .add_metric(last_heartbeat_seconds_ago.clone(), Box::new(last_heartbeat))
             .expect("registering last-heartbeat-seconds-ago metric");
 
         Self {
+            inner,
             #[cfg(test)]
             heartbeat_response_time_max,
             #[cfg(test)]
@@ -141,6 +141,24 @@ impl HeartbeatMetricsManager {
     /// Java: `recordRequestLatency(long requestLatencyMs)`.
     pub(crate) fn record_request_latency(&self, request_latency_ms: i64) {
         self.heartbeat_sensor.record_value(request_latency_ms as f64);
+    }
+
+    /// Removes every sensor and metric this manager registered. Java inherits
+    /// `AbstractConsumerMetricsManager.close()`.
+    ///
+    /// No production caller, as in Java: `AsyncKafkaConsumer.close()` closes
+    /// neither this manager nor the request manager that owns it, so these
+    /// metrics outlive `close()` when a `group.id` is set (Java's own
+    /// `testMetricsRemovedOnClose` builds its consumer without one).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Java never closes this manager: AsyncKafkaConsumer closes only the kafka-consumer, async-consumer, fetch and rebalance-callback managers"
+        )
+    )]
+    pub(crate) fn close(&self) {
+        self.inner.close();
     }
 
     /// Test-only: read back the raw `last-heartbeat-sent` timestamp the
@@ -219,5 +237,19 @@ mod tests {
                 Some(random_sleep_s as f64)
             );
         }
+    }
+
+    /// `HeartbeatMetricsManagerTest.testCleanup`, inherited from
+    /// `AbstractConsumerMetricsManagerTest` (KAFKA-19542): the override builds
+    /// `new HeartbeatMetricsManager(metrics, groupDescription)`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AbstractConsumerMetricsManagerTest#testCleanup")]
+    fn test_cleanup() {
+        crate::consumer::internals::metrics::abstract_consumer_metrics_manager::tests::test_cleanup(
+            |metrics, group_description| {
+                let manager = HeartbeatMetricsManager::with_prefix(metrics, group_description);
+                Box::new(move || manager.close())
+            },
+        );
     }
 }

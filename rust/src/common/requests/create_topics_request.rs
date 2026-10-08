@@ -18,6 +18,8 @@
 
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::CreateTopicsRequestData;
 use crate::CreateTopicsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
@@ -152,10 +154,12 @@ impl RequestBuilder for Builder {
 
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if self.data.validate_only && version == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "validateOnly is not supported in version 0 of CreateTopicsRequest",
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("validateOnly")
+                .set_api_key_name(&ApiKeys::CREATE_TOPICS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(1)
+                .into_io_error());
         }
         // Topics created with default partitions/replication factor need v4+.
         let topics_with_defaults: Vec<&str> = self
@@ -170,14 +174,15 @@ impl RequestBuilder for Builder {
             .map(|t| t.name.as_str())
             .collect();
         if !topics_with_defaults.is_empty() && version < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "Creating topics with default partitions/replication factor are only supported in \
-                     CreateTopicRequest version 4+. The following topics need values for partitions and \
-                     replicas: {topics_with_defaults:?}"
-                ),
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value(&format!(
+                    "default partitions/replication for topics [{}]",
+                    topics_with_defaults.join(",")
+                ))
+                .set_api_key_name(&ApiKeys::CREATE_TOPICS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(4)
+                .into_io_error());
         }
         Ok(AbstractRequest::CreateTopics(CreateTopicsRequest::new(
             self.data.clone(),
@@ -189,6 +194,9 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Error;
+    use crate::common::errors::UnsupportedVersionError;
+    use crate::common::internals::UnsupportedProtocolFieldError;
     use crate::create_topics_request_data::CreatableTopic;
 
     fn topic(name: &str, num_partitions: i32, replication_factor: i16) -> CreatableTopic {
@@ -200,11 +208,36 @@ mod tests {
     }
 
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.RequestResponseTest#testCreateTopicRequestV3FailsIfNoPartitionsOrReplicas"
+    )]
+    fn test_create_topic_request_v3_fails_if_no_partitions_or_replicas() {
+        let mut data = CreateTopicsRequestData::new();
+        data.set_timeout_ms(123).set_validate_only(false);
+        data.set_topics(vec![
+            topic("foo", CreateTopicsRequest::NO_NUM_PARTITIONS, 1),
+            topic("bar", 1, CreateTopicsRequest::NO_REPLICATION_FACTOR),
+        ]);
+        let err = Builder::new(data).build_version(3).unwrap_err();
+        let error = Error::UnsupportedVersion(UnsupportedVersionError::from_io_error(&err));
+        assert!(UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&error));
+        assert!(
+            error.message().contains(
+                "does not support [default partitions/replication for topics [foo,bar]] in CREATE_TOPICS API version 3"
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
     fn build_rejects_validate_only_v0() {
         let mut data = CreateTopicsRequestData::new();
         data.set_validate_only(true);
         let mut builder = Builder::new(data);
-        assert!(builder.build_version(0).is_err());
+        crate::common::internals::assert_unsupported_protocol_field(
+            &builder.build_version(0).unwrap_err(),
+            "The cluster does not support [validateOnly] in CREATE_TOPICS API version 0. Upgrade the cluster to CREATE_TOPICS API version >= 1 to enable [validateOnly].",
+        );
     }
 
     #[test]
@@ -217,7 +250,10 @@ mod tests {
         )]);
         let mut builder = Builder::new(data);
         let err = builder.build_version(3).unwrap_err();
-        assert!(err.to_string().contains("version 4+"), "{err}");
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [default partitions/replication for topics [t]] in CREATE_TOPICS API version 3. Upgrade the cluster to CREATE_TOPICS API version >= 4 to enable [default partitions/replication for topics [t]].",
+        );
         // v4 accepts defaults.
         assert!(builder.build_version(4).is_ok());
     }

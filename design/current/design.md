@@ -805,9 +805,9 @@ variant per Java exception. Java's intermediate classes survive as `is_*_error`
 predicates, and `KafkaException` is the `KafkaError` struct that every variant
 embeds.*
 
-- `Error` (`common/error.rs:863`) is the single error type that every fallible
+- `Error` (`common/error.rs:864`) is the single error type that every fallible
   API returns.
-  - It is a `#[non_exhaustive]` flat enum with **162 variants**, one per Java
+  - It is a `#[non_exhaustive]` flat enum with **166 variants**, one per Java
     exception class. Examples: `TopicAuthorization`,
     `ProducerBufferExhausted`, `ConsumerOffsetOutOfRange`,
     `CorrelationIdMismatch`.
@@ -824,30 +824,34 @@ embeds.*
   `{ error: Errors, custom_message: Option<String>, source: Option<Box<Error>> }`.
   Every payload embeds one.
 - The ambassador-delegated traits forward to that embedded base: `ErrorCode`
-  (`error.rs:318`), `ErrorName` (`:344`), `ErrorMessage` (`:509`) and
-  `ErrorSource` (`:531`).
-- The crate-private `ErrorHierarchy` trait (`error.rs:160`) encodes Java's
+  (`error.rs:319`), `ErrorName` (`:345`), `ErrorMessage` (`:510`) and
+  `ErrorSource` (`:532`).
+- The crate-private `ErrorHierarchy` trait (`error.rs:161`) encodes Java's
   `extends` chain. Each intermediate Java class is a predicate on `Error`,
-  with public forms from `error.rs:1702`:
+  with public forms from `error.rs:1711`:
   - `is_kafka_error`, `is_api_error`, `is_retriable_error`,
     `is_refresh_retriable_error`, `is_timeout_error`
   - `is_invalid_metadata_error`, `is_invalid_configuration_error`,
-    `is_application_recoverable_error`
+    `is_unsupported_version_error`, `is_application_recoverable_error`
   - `is_invalid_offset_error`, `is_consumer_invalid_offset_error`,
     `is_consumer_offset_out_of_range_error`
   - `is_out_of_order_sequence_error`, `is_serialization_error`
   - `is_authentication_error`, `is_authorization_error`
 
   They are not complements of each other. For example, `Serialization` is a
-  `KafkaException` but not an `ApiException`. `is_transaction_abortable_error`
+  `KafkaException` but not an `ApiException`. A crate-private Java subclass with no
+  public variant is a crate-private kind on its parent's payload: Kafka 4.4's
+  `UnsupportedProtocolFieldException` is `UnsupportedVersionError` with
+  `UnsupportedVersionKind::UnsupportedProtocolField`
+  (`common/internals/unsupported_protocol_field_error.rs`). `is_transaction_abortable_error`
   (`:1650`) tests a single leaf class.
 - Fatality is **not** a predicate on `Error`, because the same class is fatal
   in one context and recoverable in another. It is
   `RequestUtils::is_fatal_error(&Error)` (`common/requests/request_utils.rs:63`),
   crate-private like its Java home.
 - `Errors` (`common/protocol/errors.rs:37`) is the crate-private wire-code
-  enum. It has **135 variants** covering codes `-1..=133`. `Errors::error()`
-  (`errors.rs:583`) builds the `Error` variant for a code.
+  enum. It has **138 variants** covering codes `-1..=136`. `Errors::error()`
+  (`errors.rs:613`) builds the `Error` variant for a code.
 
 ---
 

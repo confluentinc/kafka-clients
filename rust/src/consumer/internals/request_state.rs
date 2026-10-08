@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::internals::ExponentialBackoff;
 
 /// Per-manager exponential-backoff bookkeeping shared across all
 /// `RequestManager` implementations.
@@ -142,6 +142,14 @@ impl RequestState {
             log::trace!("{remaining} ms remain before another request should be sent for {self}");
             false
         }
+    }
+
+    /// The backoff policy. Java's subclasses read the `protected final
+    /// ExponentialBackoff exponentialBackoff` field directly
+    /// (`HeartbeatRequestState.retryBackoffMs()`, KAFKA-21010); the composed
+    /// Rust subclasses read it through this accessor.
+    pub(crate) fn exponential_backoff(&self) -> &ExponentialBackoff {
+        &self.exponential_backoff
     }
 
     /// Returns `true` if a request has been sent but its response has not

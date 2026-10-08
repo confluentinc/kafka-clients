@@ -27,8 +27,8 @@ use super::ClientUtils;
 use super::ConnectionState;
 use super::HostResolver;
 use crate::common::Error;
-use crate::common::utils::ExponentialBackoff;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::ExponentialBackoff;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_info;
 
 /// The state of our connection to each node in the cluster.

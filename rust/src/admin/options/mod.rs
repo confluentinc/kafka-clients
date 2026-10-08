@@ -62,6 +62,7 @@ mod list_transactions_options;
 mod remove_members_from_consumer_group_options;
 mod renew_delegation_token_options;
 mod terminate_transaction_options;
+mod unregister_controller_options;
 mod update_features_options;
 
 pub use abort_transaction_options::AbortTransactionOptions;
@@ -107,4 +108,5 @@ pub use list_transactions_options::ListTransactionsOptions;
 pub use remove_members_from_consumer_group_options::RemoveMembersFromConsumerGroupOptions;
 pub use renew_delegation_token_options::RenewDelegationTokenOptions;
 pub use terminate_transaction_options::TerminateTransactionOptions;
+pub use unregister_controller_options::UnregisterControllerOptions;
 pub use update_features_options::UpdateFeaturesOptions;

@@ -35,6 +35,20 @@ impl AbstractRecords {
     /// (base_offset: 8 bytes + length: 4 bytes = 12 bytes).
     pub const LOG_OVERHEAD: usize = RecordBatch::BASE_OFFSET_LENGTH + RecordBatch::LENGTH_LENGTH;
 
+    /// The largest byte array the JVM reliably allocates, mirroring the JDK's
+    /// internal `ArraysSupport.SOFT_MAX_ARRAY_LENGTH`: some VMs reserve header
+    /// words inside the array object, so allocations at `Integer.MAX_VALUE` may
+    /// fail with `OutOfMemoryError` regardless of available heap. Used as the
+    /// ceiling (and default) for the declared size of a record body read from a
+    /// decompressed stream, where the size must be checked before it is
+    /// allocated.
+    ///
+    /// Java's `Records.SOFT_MAX_ARRAY_LENGTH` (`Records.java:62`, b69c07c816).
+    /// Like [`Self::LOG_OVERHEAD`], a `Records` interface constant hosted here.
+    /// The Rust stream reader does not size its buffer from the declared size,
+    /// so the bound is kept for Java's error, not to avoid the allocation.
+    pub const SOFT_MAX_ARRAY_LENGTH: i32 = i32::MAX - 8;
+
     /// The number of bytes in the header up to and including the magic byte.
     /// Used to validate that a buffer contains at least the minimum header.
     pub const HEADER_SIZE_UP_TO_MAGIC: usize = RecordBatch::BASE_OFFSET_LENGTH

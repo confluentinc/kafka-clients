@@ -18,13 +18,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+#[cfg(test)]
 use crate::common::MetricName;
 use crate::common::metrics::stats::{Avg, CumulativeSum, Max};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records consumer poll/commit timing metrics. Mirrors Java's
-/// `KafkaConsumerMetrics implements AutoCloseable`.
+/// `KafkaConsumerMetrics extends AbstractConsumerMetricsManager` (an
+/// `AutoCloseable`; KAFKA-19542).
 ///
 /// Owned by the consumer (app task); `record_poll_*` / `record_commit_*` run
 /// per-poll / per-commit (low frequency, never per-record). The shared scalar
@@ -33,9 +36,9 @@ use crate::consumer::internals::ConsumerUtils;
 /// `last_poll_ms` while `record_poll_start` writes it — an idiomatic-Rust,
 /// value-neutral swap for Java's plain `long` fields read inside the
 /// `synchronized`-free measurable lambda.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics")]
 pub(crate) struct KafkaConsumerMetrics {
-    metrics: Arc<Metrics>,
-    last_poll_metric_name: MetricName,
+    inner: AbstractConsumerMetricsManager,
     time_between_poll_sensor: Arc<Sensor>,
     poll_idle_sensor: Arc<Sensor>,
     committed_sensor: Arc<Sensor>,
@@ -50,6 +53,9 @@ impl KafkaConsumerMetrics {
     /// created via `metrics.sensor(name)` (INFO default) and the last-poll
     /// gauge via `metrics.addMetric` — full Java parity, no DEBUG gating.
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
+        // Java: `this(new MetricsLedger(metrics))` → `super(metrics)` (KAFKA-19542).
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(metrics));
+        let metrics = inner.metrics();
         let metric_group_name = ConsumerUtils::CONSUMER_METRIC_GROUP;
 
         let last_poll_ms = Arc::new(AtomicI64::new(0));
@@ -67,35 +73,32 @@ impl KafkaConsumerMetrics {
                 ((now - last_poll_ms) / 1000) as f64
             }
         });
-        let last_poll_metric_name = metrics.metric_name_description_tags(
+        let last_poll_metric_name = metrics.metric_name(
             "last-poll-seconds-ago",
             metric_group_name,
             "The number of seconds since the last poll() invocation.",
-            std::collections::BTreeMap::new(),
         );
         metrics
-            .add_metric_measurable(last_poll_metric_name.clone(), Box::new(last_poll))
+            .add_metric(last_poll_metric_name, Box::new(last_poll))
             .expect("registering last-poll-seconds-ago metric");
 
         let time_between_poll_sensor = metrics.sensor("time-between-poll").expect("creating time-between-poll sensor");
         time_between_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-poll-avg",
                     metric_group_name,
                     "The average delay between invocations of poll() in milliseconds.",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding time-between-poll-avg");
         time_between_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-poll-max",
                     metric_group_name,
                     "The max delay between invocations of poll() in milliseconds.",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -106,11 +109,10 @@ impl KafkaConsumerMetrics {
             .expect("creating poll-idle-ratio-avg sensor");
         poll_idle_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "poll-idle-ratio-avg",
                     metric_group_name,
-                    "The average fraction of time the consumer's poll() is idle as opposed to waiting for the user code to process records.",
-                    std::collections::BTreeMap::new(),
+                    "The average fraction of time the consumer's poll() is idle as opposed to waiting for the user code to process records."
                 ),
                 Box::new(Avg::new()),
             )
@@ -121,11 +123,10 @@ impl KafkaConsumerMetrics {
             .expect("creating commit-sync-time-ns-total sensor");
         commit_sync_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "commit-sync-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in commitSync in nanoseconds",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(CumulativeSum::new()),
             )
@@ -136,19 +137,17 @@ impl KafkaConsumerMetrics {
             .expect("creating committed-time-ns-total sensor");
         committed_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "committed-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in committed in nanoseconds",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(CumulativeSum::new()),
             )
             .expect("adding committed-time-ns-total");
 
         Self {
-            metrics,
-            last_poll_metric_name,
+            inner,
             time_between_poll_sensor,
             poll_idle_sensor,
             committed_sensor,
@@ -177,7 +176,15 @@ impl KafkaConsumerMetrics {
     pub(crate) fn record_poll_end(&self, poll_end_ms: i64) {
         let poll_time_ms = poll_end_ms - self.poll_start_ms.load(Ordering::SeqCst);
         let time_since_last_poll_ms = self.time_since_last_poll_ms.load(Ordering::SeqCst);
-        let poll_idle_ratio = poll_time_ms as f64 * 1.0 / (poll_time_ms + time_since_last_poll_ms) as f64;
+        let poll_cycle_time_ms = poll_time_ms + time_since_last_poll_ms;
+        // KAFKA-20750: a poll that starts and ends within the same millisecond,
+        // right after the previous one, has a zero cycle; record 0 rather than
+        // the NaN of 0/0.
+        let poll_idle_ratio = if poll_cycle_time_ms == 0 {
+            0.0
+        } else {
+            poll_time_ms as f64 * 1.0 / poll_cycle_time_ms as f64
+        };
         self.poll_idle_sensor.record_value(poll_idle_ratio);
     }
 
@@ -191,14 +198,11 @@ impl KafkaConsumerMetrics {
         self.committed_sensor.record_value(duration as f64);
     }
 
-    /// Java: `close()` (`AutoCloseable`). Removes the registered metric and the
-    /// four sensors.
+    /// Removes every sensor and metric this manager registered. Since
+    /// KAFKA-19542 Java inherits `AbstractConsumerMetricsManager.close()`
+    /// instead of removing the last-poll metric and the four sensors by name.
     pub(crate) fn close(&self) {
-        self.metrics.remove_metric(&self.last_poll_metric_name);
-        self.metrics.remove_sensor(self.time_between_poll_sensor.name());
-        self.metrics.remove_sensor(self.poll_idle_sensor.name());
-        self.metrics.remove_sensor(self.commit_sync_sensor.name());
-        self.metrics.remove_sensor(self.committed_sensor.name());
+        self.inner.close();
     }
 }
 
@@ -206,8 +210,9 @@ impl KafkaConsumerMetrics {
 mod tests {
     //! `KafkaConsumerMetricsTest` (Java) is fully translated here. The
     //! `KafkaConsumerTest` metrics rows that read `consumer.metrics()` for the
-    //! `consumer-metrics` group — `testPollTimeMetrics`, `testPollIdleRatio` —
-    //! are translated below at this (the recording) layer (Phase M7).
+    //! `consumer-metrics` group — `testPollTimeMetrics`, `testPollIdleRatio`,
+    //! `testPollIdleRatioZero` (KAFKA-20750) — are translated below at this (the
+    //! recording) layer (Phase M7).
     //!
     //! The remaining `KafkaConsumerTest` metrics rows are OUT OF SCOPE per the
     //! Milestone-9 plan ("Out of scope") and are NOT translated:
@@ -216,7 +221,8 @@ mod tests {
     //!     testUnsubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics,
     //!     testShouldOnlyCallMetricReporterMetricChangeOnceWithExistingConsumerMetric,
     //!     testShouldNotCallMetricReporterMetricRemovalWithExistingConsumerMetric,
-    //!     testUnSubscribingNonExisingMetricsDoesntCauseError — all exercise
+    //!     testUnsubscribingNonExistingMetricsDoesntCauseError (named
+    //!     testUnSubscribingNonExisingMetricsDoesntCauseError before 1a46339e90) — all exercise
     //!     `registerMetricForSubscription` / `unregisterMetricFromSubscription`
     //!     (KIP-714 broker-push telemetry), which is a separate milestone and
     //!     is not present on the `Consumer` trait.
@@ -274,7 +280,7 @@ mod tests {
             .expect("double-valued metric")
     }
 
-    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3226), translated at
+    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3708), translated at
     /// the `KafkaConsumerMetrics` level (the recording site). The Java test
     /// drives the values through `consumer.poll(Duration.ZERO)` + a mock
     /// clock; the value math is identical when driven via
@@ -335,7 +341,7 @@ mod tests {
         assert_eq!(read_metric(&metrics, "time-between-poll-max"), 10.0 * 1000.0);
     }
 
-    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3272), translated at
+    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3754), translated at
     /// the `KafkaConsumerMetrics` level. Drives `record_poll_start` /
     /// `record_poll_end` with the same timing the Java test produces via the
     /// mock clock + `consumer.poll()`, then reads `poll-idle-ratio-avg`.
@@ -371,6 +377,29 @@ mod tests {
         time.sleep(25);
         consumer_metrics.record_poll_end(time.milliseconds());
         assert_eq!(read_metric(&metrics, "poll-idle-ratio-avg"), (1.0 + 0.0 + 0.5) / 3.0);
+    }
+
+    /// Java `KafkaConsumerTest.testPollIdleRatioZero` (KAFKA-20750, 02c0ce9707),
+    /// translated at the `KafkaConsumerMetrics` level like
+    /// [`test_poll_idle_ratio`]: Java also drives `kafkaConsumerMetrics()`
+    /// directly, through a consumer it builds only to reach the registry.
+    #[test]
+    fn test_poll_idle_ratio_zero() {
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
+
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let consumer_metrics = KafkaConsumerMetrics::new(Arc::clone(&metrics));
+
+        // Test default value
+        assert!(read_metric(&metrics, "poll-idle-ratio-avg").is_nan());
+
+        // Poll starts and ends within the same millisecond, so the metric should be 0.
+        consumer_metrics.record_poll_start(time.milliseconds());
+        consumer_metrics.record_poll_end(time.milliseconds());
+        assert_eq!(0.0, read_metric(&metrics, "poll-idle-ratio-avg"));
     }
 
     /// Java: `shouldRecordCommitSyncTime`.

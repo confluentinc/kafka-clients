@@ -23,6 +23,8 @@
 
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::ListGroupsRequestData;
 use crate::ListGroupsResponseData;
 use crate::common::GroupType;
@@ -146,13 +148,12 @@ impl RequestBuilder for Builder {
     fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `ListGroupsRequest.Builder.build(short version)`.
         if !self.data.states_filter.is_empty() && version < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "The broker only supports ListGroups v{version}, but we need v4 or newer to \
-                     request groups by states."
-                ),
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("StatesFilter")
+                .set_api_key_name(&ApiKeys::LIST_GROUPS.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(4)
+                .into_io_error());
         }
 
         if !self.data.types_filter.is_empty() && version < 5 {
@@ -165,14 +166,12 @@ impl RequestBuilder for Builder {
             let contained_classic = types_copy.remove(&GroupType::Classic.to_string());
             let contained_consumer = types_copy.remove(&GroupType::Consumer.to_string());
             if !types_copy.is_empty() || (!contained_classic && contained_consumer) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "The broker only supports ListGroups v{version}, but we need v5 or newer to \
-                         request groups by type. Requested group types: [{}].",
-                        self.data.types_filter.join(", ")
-                    ),
-                ));
+                return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                    .set_field_or_value(&self.data.types_filter.join(","))
+                    .set_api_key_name(&ApiKeys::LIST_GROUPS.to_string())
+                    .set_api_version(version)
+                    .set_lowest_supported_version(5)
+                    .into_io_error());
             }
             let mut data = self.data.clone();
             data.set_types_filter(Vec::new());
@@ -215,9 +214,9 @@ mod tests {
         data.set_states_filter(vec!["Stable".to_string()]);
         let mut builder = Builder::new(data);
         let err = builder.build_version(3).expect_err("states filter must require v4");
-        assert!(
-            err.to_string().contains("v4 or newer to request groups by states"),
-            "got: {err}"
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [StatesFilter] in LIST_GROUPS API version 3. Upgrade the cluster to LIST_GROUPS API version >= 4 to enable [StatesFilter].",
         );
     }
 
@@ -256,7 +255,10 @@ mod tests {
         let err = builder
             .build_version(4)
             .expect_err("consumer-only filter must be rejected pre-v5");
-        assert!(err.to_string().contains("v5 or newer to request groups by type"), "got: {err}");
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [Consumer] in LIST_GROUPS API version 4. Upgrade the cluster to LIST_GROUPS API version >= 5 to enable [Consumer].",
+        );
     }
 
     /// A non-consumer/classic types filter is rejected on pre-v5.
@@ -266,7 +268,10 @@ mod tests {
         data.set_types_filter(vec![GroupType::Share.to_string()]);
         let mut builder = Builder::new(data);
         let err = builder.build_version(4).expect_err("share filter must be rejected pre-v5");
-        assert!(err.to_string().contains("v5 or newer"), "got: {err}");
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [Share] in LIST_GROUPS API version 4. Upgrade the cluster to LIST_GROUPS API version >= 5 to enable [Share].",
+        );
     }
 
     /// The error response carries the exception's error code and no groups.

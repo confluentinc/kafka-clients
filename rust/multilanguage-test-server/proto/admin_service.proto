@@ -309,6 +309,17 @@ service AdminService {
   rpc ForceTerminateTransaction(ForceTerminateTransactionRequest) returns (StatusResponse);
   rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
   rpc FenceProducers(FenceProducersRequest) returns (FenceProducersResponse);
+
+  // -------------------------------------------------------------------------
+  // Controller registration (Milestone 16, KAFKA-20395 / Kafka 4.4)
+  //
+  // `unregisterController` is **whole-value degenerated to void**, the shared
+  // [StatusResponse]: `UnregisterControllerResult` exposes only
+  // `all() -> KafkaFuture<()>`, so, as for `abortTransaction`, the C entry
+  // points return no result handle and `admin.py` resolves to `None`.
+  // -------------------------------------------------------------------------
+
+  rpc UnregisterController(UnregisterControllerRequest) returns (StatusResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,7 +2599,7 @@ message TransactionListingList {
   repeated TransactionListing listings = 1;
 }
 
-// Java `org.apache.kafka.common.utils.ProducerIdAndEpoch`, the value of one
+// Java `org.apache.kafka.common.utils.internals.ProducerIdAndEpoch`, the value of one
 // `fenceProducers` row.
 //
 // A record of two scalars, so it is not the collection case at all — both
@@ -2693,6 +2704,16 @@ message AbortTransactionRequest {
 message ForceTerminateTransactionRequest {
   uint64 admin_id = 1;
   string transactional_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// unregisterController
+// ---------------------------------------------------------------------------
+
+message UnregisterControllerRequest {
+  uint64 admin_id = 1;
+  int32 controller_id = 2;
   optional int32 timeout_ms = 3;
 }
 

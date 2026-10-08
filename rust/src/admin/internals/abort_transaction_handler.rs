@@ -25,7 +25,7 @@ use crate::WriteTxnMarkersRequestData;
 use crate::admin::AbortTransactionSpec;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, write_txn_markers_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
 use crate::write_txn_markers_request_data::{WritableTxnMarker, WritableTxnMarkerTopic};

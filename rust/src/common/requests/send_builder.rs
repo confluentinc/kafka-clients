@@ -29,7 +29,7 @@ use crate::common::protocol::Message;
 use crate::common::protocol::MessageSizeAccumulator;
 use crate::common::protocol::ObjectSerializationCache;
 use crate::common::protocol::Writable;
-use crate::common::utils::ByteUtils;
+use crate::common::utils::internals::ByteUtils;
 
 use super::RequestHeader;
 use super::ResponseHeader;

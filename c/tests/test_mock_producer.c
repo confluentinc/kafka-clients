@@ -596,6 +596,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_unsupported_version_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(err));
@@ -622,6 +623,7 @@ void test_error_null_safety(void) {
     TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_configuration_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_unsupported_version_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_application_recoverable_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_offset_error(NULL));
     TEST_ASSERT_FALSE(kafka_common_Error_is_out_of_order_sequence_error(NULL));

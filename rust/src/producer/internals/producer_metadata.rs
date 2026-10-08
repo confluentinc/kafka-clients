@@ -29,7 +29,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::metadata_request;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
 /// Producer-specific inner state, protected by its own mutex.
@@ -218,6 +218,32 @@ impl ProducerMetadata {
             drop(state);
             self.metadata.request_update_for_new_topics();
         }
+    }
+
+    /// Atomically add a batch of topics to the working set, refreshing the
+    /// expiry for those already present. If any of the topics was newly added,
+    /// a partial metadata refresh is requested and the current update version is
+    /// returned so the caller can pass it to [`Metadata::await_update`] to wait
+    /// for the next response. Returns `None` when no topic was newly added (no
+    /// refresh requested, nothing to wait for).
+    ///
+    /// Java's `add(Collection<String>, long)` (6208dfc014), the batch overload of
+    /// [`Self::add`]. Java holds the producer lock across the refresh request;
+    /// here, as in [`Self::add`], the producer state's lock is released before
+    /// `Metadata`'s own is taken, so the two are never nested in that order.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#add")]
+    pub fn add_with_topics<'a>(&self, topics: impl IntoIterator<Item = &'a str>, now_ms: i64) -> Option<i32> {
+        let mut state = self.inner.lock().unwrap();
+        let expiry = now_ms + state.metadata_idle_ms;
+        let mut any_new = false;
+        for topic in topics {
+            if state.topics.insert(topic.to_string(), expiry).is_none() {
+                state.new_topics.insert(topic.to_string());
+                any_new = true;
+            }
+        }
+        drop(state);
+        any_new.then(|| self.metadata.request_update_for_new_topics())
     }
 
     /// Request a metadata update for a specific topic.

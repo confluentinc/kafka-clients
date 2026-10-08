@@ -85,13 +85,6 @@ impl SaslHandshakeResponse {
         // Not supported by the response schema
     }
 
-    /// Returns whether the client should throttle upon receiving this response.
-    ///
-    /// Always returns `false` for SASL handshake responses.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Returns the list of mechanisms enabled in the server.
     #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#enabledMechanisms")]
     pub fn enabled_mechanisms(&self) -> &[String] {
@@ -152,17 +145,6 @@ mod tests {
         response.maybe_set_throttle_time_ms(100);
         // Should still be 0 since it's a no-op
         assert_eq!(response.throttle_time_ms(), AbstractResponse::DEFAULT_THROTTLE_TIME);
-    }
-
-    #[test]
-    fn test_should_client_throttle() {
-        let data = SaslHandshakeResponseData::new();
-        let response = SaslHandshakeResponse::new(data);
-        for version in
-            SaslHandshakeResponseData::LOWEST_SUPPORTED_VERSION..=SaslHandshakeResponseData::HIGHEST_SUPPORTED_VERSION
-        {
-            assert!(!response.should_client_throttle(version));
-        }
     }
 
     #[test]

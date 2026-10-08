@@ -72,14 +72,6 @@ impl WriteTxnMarkersResponse {
     #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {}
 
-    /// Whether the client should throttle on this response.
-    ///
-    /// `WriteTxnMarkersResponse` does not override `shouldClientThrottle` in
-    /// Java, so it inherits `AbstractResponse`'s default of `false`.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Returns the error counts aggregated across all partition results.
     ///
     /// Mirrors `WriteTxnMarkersResponse.errorCounts`.

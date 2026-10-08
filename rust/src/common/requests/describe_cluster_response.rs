@@ -103,11 +103,6 @@ impl DescribeClusterResponse {
         let data = DescribeClusterResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
-
-    /// Whether the client should throttle on this response (always, v0+).
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
-    }
 }
 
 impl std::fmt::Display for DescribeClusterResponse {

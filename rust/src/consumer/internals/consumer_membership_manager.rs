@@ -28,7 +28,6 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::utils::Time;
 
@@ -41,11 +40,11 @@ use crate::consumer::internals::events::BackgroundEventHandler;
 
 use super::CommitRequestManager;
 use super::ConsumerMetadata;
-use super::ConsumerRebalanceMetricsManager;
 use super::MemberState;
 use super::PollResult;
 use super::RequestManager;
 use super::SubscriptionState;
+use super::metrics::ConsumerRebalanceMetricsManager;
 use super::{AbstractMembershipManager, LocalAssignment};
 
 /// KIP-848 consumer-group membership manager.
@@ -148,12 +147,12 @@ enum PendingReconcile {
     /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
     /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
     /// mirroring Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:889-909`).
+    /// (`AbstractMembershipManager.java:953-973`).
     ///
     /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
     /// continuation when the commit resolves while the `ConsumerNetworkThread`
     /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
-    /// fired (`ApplicationEventProcessor.java:761-765`). The pre-fix Rust
+    /// fired (`ApplicationEventProcessor.java:732-736`). The pre-fix Rust
     /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
     /// only marked `reconciliation_check_complete` after the commit resolved,
     /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
@@ -368,6 +367,10 @@ impl ConsumerMembershipManager {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
     pub(crate) fn leave_group_epoch(&self) -> i32 {
         let is_static_member = self.group_instance_id.is_some();
+        // The mechanism to make static members permanently leave the group is to
+        // send an HB to leave with the -1 epoch (used by dynamic members).
+        // This will make the group coordinator fence this member, effectively
+        // removing it from the group.
         if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
             return ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
         }
@@ -389,90 +392,53 @@ impl ConsumerMembershipManager {
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
     }
 
-    /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)`.
-    /// Updates member info and state from a successful response.
+    /// The heartbeat response's error code, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
     ///
-    /// Returns `Err(Error)` for unexpected errors in the response
-    /// body — Java throws `IllegalArgumentException`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#onHeartbeatSuccess")]
-    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
-        let data = response.data();
-        if data.error_code != Errors::None.code() {
-            return Err(Error::local_illegal_argument(format!(
-                "Unexpected error in Heartbeat response. Expected no error, but received: {:?}",
-                Errors::for_code(data.error_code)
-            )));
-        }
-        // Short-circuit decisions based on current state.
-        let mut guard = match self.abstract_mm.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let state = guard.state;
-        if state == MemberState::Leaving {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} with epoch {} is already leaving the group.",
-                guard.member_id,
-                guard.member_epoch
-            );
-            return Ok(());
-        }
-        if state == MemberState::Unsubscribed && data.member_epoch < 0 {
-            // Java: maybeCompleteLeaveInProgress (we don't track the
-            // leave future here — Phase 10 wires the close handshake).
-            log::debug!(
-                "Member {} with epoch {} received a successful response to the heartbeat to leave the group.",
-                guard.member_id,
-                guard.member_epoch
-            );
-            return Ok(());
-        }
-        if guard.is_not_in_group() {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} is in {} state so it's not a member of the group.",
-                guard.member_id,
-                state
-            );
-            return Ok(());
-        }
-        if data.member_epoch < 0 {
-            log::debug!(
-                "Ignoring heartbeat response received from broker. Member {} with epoch {} is in {} state and the member epoch is invalid: {}.",
-                guard.member_id,
-                guard.member_epoch,
-                state,
-                data.member_epoch
-            );
-            return Ok(());
-        }
+    /// Java: `protected short errorCode(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:211-214`), the override of the
+    /// abstract hook.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#errorCode")]
+    pub(crate) fn error_code(response: &ConsumerGroupHeartbeatResponse) -> i16 {
+        response.data().error_code
+    }
 
-        guard.update_member_epoch(data.member_epoch);
+    /// The member epoch the heartbeat response carries, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
+    /// Named after CLAUDE.md §2's overload rule: Java's `memberEpoch(R)` sits
+    /// beside the `memberEpoch()` getter ([`Self::member_epoch`]).
+    ///
+    /// Java: `protected int memberEpoch(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:216-219`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#memberEpoch")]
+    pub(crate) fn member_epoch_with_response(response: &ConsumerGroupHeartbeatResponse) -> i32 {
+        response.data().member_epoch
+    }
 
-        // Assignment field is only populated when there's a new target
-        // assignment for the member.
-        if data.assignment.is_some() && !state.can_handle_new_assignment() {
-            log::debug!(
-                "Ignoring new assignment received from server because member is in {} state.",
-                state
-            );
-            return Ok(());
+    /// The new target assignment the heartbeat response carries, if any, for
+    /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681). The
+    /// field is only populated when there is a new target assignment for the
+    /// member.
+    ///
+    /// Java builds each topic's partitions as a `TreeSet`, so they come out
+    /// sorted and without duplicates whatever order the broker sent; the
+    /// `Vec` here is sorted and deduplicated to match. That matters because
+    /// [`LocalAssignment::update_with`] compares the `Vec`s by value.
+    ///
+    /// Java: `protected Optional<Map<Uuid, SortedSet<Integer>>>
+    /// extractAssignment(ConsumerGroupHeartbeatResponse response)`
+    /// (`ConsumerMembershipManager.java:221-231`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#extractAssignment")]
+    pub(crate) fn extract_assignment(response: &ConsumerGroupHeartbeatResponse) -> Option<HashMap<Uuid, Vec<i32>>> {
+        let assignment = response.data().assignment.as_ref()?;
+        let mut new_assignment = HashMap::with_capacity(assignment.topic_partitions.len());
+        for topic_partition in &assignment.topic_partitions {
+            let mut partitions = topic_partition.partitions.clone();
+            partitions.sort_unstable();
+            partitions.dedup();
+            new_assignment.insert(topic_partition.topic_id, partitions);
         }
-
-        // Build the new assignment from the response (release the
-        // lock first; we'll re-acquire inside process_assignment_received).
-        let new_assignment = data.assignment.as_ref().map(|assignment| {
-            let mut map: HashMap<Uuid, Vec<i32>> = HashMap::new();
-            for tp in &assignment.topic_partitions {
-                map.insert(tp.topic_id, tp.partitions.clone());
-            }
-            map
-        });
-        drop(guard);
-
-        if let Some(assignment) = new_assignment {
-            self.abstract_mm.process_assignment_received(assignment)?;
-        }
-        Ok(())
+        Some(new_assignment)
     }
 
     /// Java: `transitionToFatal()` (override that wires Consumer-specific
@@ -639,7 +605,7 @@ impl ConsumerMembershipManager {
     /// already requested it) rejoin.
     ///
     /// Java: the async tail of `AbstractMembershipManager.transitionToStale()`
-    /// (`AbstractMembershipManager.java:791-806`):
+    /// (`AbstractMembershipManager.java:839-854`):
     ///
     /// ```java
     /// CompletableFuture<Void> callbackResult = signalPartitionsLost(subscriptions.assignedPartitions());
@@ -716,15 +682,18 @@ impl ConsumerMembershipManager {
     /// `revokeAndAssign(...)` chain, but linearised because we have
     /// `async/await` instead of `CompletableFuture::whenComplete`.
     ///
-    /// `can_commit` mirrors Java's parameter: when auto-commit is
-    /// enabled and `can_commit` is `false`, the reconciliation must be
-    /// skipped because there is no safe opportunity to flush in-progress
-    /// offsets before the assignment changes. Java passes `false` from
+    /// `can_commit` mirrors Java's parameter: it controls whether
+    /// reconciliation can proceed when auto-commit is enabled or there are
+    /// partitions to revoke. Auto-commit and partition revocation can only be
+    /// triggered on reconciliations initiated within a call to
+    /// `consumer.poll()`; if `can_commit` is `false` and either condition
+    /// applies, the reconciliation is skipped (KAFKA-20106 / KAFKA-20145
+    /// javadoc, `AbstractMembershipManager.java:868-874`). Java passes `false` from
     /// `AbstractMembershipManager.poll(now)` (the per-iteration
     /// `entries()` walk) and `true` from
     /// `ApplicationEventProcessor.process(AsyncPollEvent)` (the
     /// poll-time entry point, before any new fetching starts — see
-    /// Java line 715-718). The poll-time path passes `true` because
+    /// Java line 729-732). The poll-time path passes `true` because
     /// any pending offsets can be safely flushed via the commit
     /// manager's auto-commit-before-rebalance path inside this method.
     /// The Rust translation mirrors this through the bg-task call site
@@ -732,7 +701,7 @@ impl ConsumerMembershipManager {
     /// `true`).
     ///
     /// Java: `maybeReconcile(boolean canCommit)`
-    /// (`AbstractMembershipManager.java:824`).
+    /// (`AbstractMembershipManager.java:875`).
     pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
         // Phase 41b: if a reconcile rebalance callback is already in
         // flight, drive it non-blockingly instead of starting a new
@@ -782,22 +751,35 @@ impl ConsumerMembershipManager {
         let resolved_assignment = LocalAssignment::new(target_epoch, resolved_partitions.clone())?;
 
         // 4. Short-circuit: if the resolved subset equals the current
-        // assignment's partitions, just bump epoch and ACK.
-        let short_circuit = {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            !guard.current_assignment.is_none() && resolved_assignment.partitions == guard.current_assignment.partitions
-        };
-        if short_circuit {
+        // assignment's partitions, just bump epoch and ACK — once per target
+        // epoch. KAFKA-20145 (`AbstractMembershipManager.java:896-905`): when
+        // the current assignment already carries the target's local epoch,
+        // this partial assignment was acknowledged before, so return without
+        // acknowledging it again. Without the check every reconcile attempt
+        // (the bg loop's `reconcile(now, false)` runs on every iteration)
+        // flipped the member back to ACKNOWLEDGING and sent a redundant
+        // heartbeat while a topic id stayed unresolved.
+        {
             let mut guard = match self.abstract_mm.inner.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.current_assignment = resolved_assignment;
-            guard.transition_to(MemberState::Acknowledging)?;
-            return Ok(());
+            if !guard.current_assignment.is_none()
+                && resolved_assignment.partitions == guard.current_assignment.partitions
+            {
+                if guard.current_assignment.local_epoch == resolved_assignment.local_epoch {
+                    return Ok(());
+                }
+                log::debug!(
+                    "There are unresolved partitions, and the resolvable fragment of the target assignment {:?} is \
+                     equal to the current assignment. Bumping the local epoch of the assignment and acknowledging \
+                     the partially resolved assignment",
+                    resolved_assignment.partitions
+                );
+                guard.current_assignment = resolved_assignment;
+                guard.transition_to(MemberState::Acknowledging)?;
+                return Ok(());
+            }
         }
 
         // 5. Compute `auto_commit_enabled` for the reconciliation gate
@@ -882,8 +864,8 @@ impl ConsumerMembershipManager {
 
         // 8a. Java `signalReconciliationStarted()` →
         // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
-        // (`ConsumerMembershipManager.java:272-279`,
-        //  `AbstractMembershipManager.java:889-909`).
+        // (`ConsumerMembershipManager.java:236-244`,
+        //  `AbstractMembershipManager.java:953-973`).
         //
         // Commit `subscriptions.allConsumed()` synchronously if auto-commit is
         // enabled. The deadline mirrors Java: the rebalance timeout (configured
@@ -892,7 +874,7 @@ impl ConsumerMembershipManager {
         // runs the continuation (step 8b onward) WHEN the commit resolves, while
         // the `ConsumerNetworkThread` keeps spinning and
         // `markReconciliationCheckCompleted()` has already fired
-        // (`ApplicationEventProcessor.java:761-765`). Awaiting inline here froze
+        // (`ApplicationEventProcessor.java:732-736`). Awaiting inline here froze
         // the AsyncPoll task's reconciliation-check mark behind a slow commit, so
         // `poll()` returned empty even for RETAINED partitions until the commit
         // resolved. Instead we store an `AwaitingCommit` leg (member stays
@@ -904,7 +886,7 @@ impl ConsumerMembershipManager {
         // synchronously (auto-commit disabled or no consumed offsets →
         // `maybeAutoCommitSyncBeforeRebalance` returns a completed future; and
         // the base `signalReconciliationStarted()` at
-        // `AbstractMembershipManager.java:1000` returns a completed future when
+        // `AbstractMembershipManager.java:1064` returns a completed future when
         // there is no commit manager). We reproduce that by `try_recv`ing once:
         // if the result is already available, fall straight through to
         // `continue_after_commit` inline (behavior unchanged from before the
@@ -962,7 +944,7 @@ impl ConsumerMembershipManager {
 
     /// Log the auto-commit-before-rebalance result. Mirrors Java's
     /// `commitResult.whenComplete` success / failure logging
-    /// (`AbstractMembershipManager.java:894-901`). The abort check + revoke
+    /// (`AbstractMembershipManager.java:958-965`). The abort check + revoke
     /// enqueue in [`Self::continue_after_commit`] run on BOTH the success and
     /// failure branches, which is why the logging is separated from them —
     /// exactly as Java's `whenComplete` logs, then unconditionally runs
@@ -986,7 +968,7 @@ impl ConsumerMembershipManager {
     /// Steps 8b-9 of `reconcile`, run after the auto-commit-before-rebalance
     /// has resolved (or was a no-op / had no commit manager). Mirrors the body
     /// of Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:906-909`):
+    /// (`AbstractMembershipManager.java:967-969`):
     ///
     /// ```java
     /// if (!maybeAbortReconciliation()) {
@@ -1009,7 +991,7 @@ impl ConsumerMembershipManager {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-        // (`AbstractMembershipManager.java:906`) — the guard runs on BOTH the
+        // (`AbstractMembershipManager.java:967`) — the guard runs on BOTH the
         // success and failure paths of the commit.
         //
         // Since the divergence fix (PR #176) the commit receiver IS stored as
@@ -1077,7 +1059,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java's `reconciliationResult.whenComplete` error arm
-    /// (`AbstractMembershipManager.java:958-965`):
+    /// (`AbstractMembershipManager.java:1015-1022`):
     ///
     /// ```java
     /// reconciliationResult.whenComplete((__, error) -> {
@@ -2076,6 +2058,7 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::Errors;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
     use crate::consumer::internals::AutoOffsetResetStrategy;
@@ -2523,9 +2506,10 @@ mod tests {
 
     /// Regression for COMMENTS R2-2: `reconcile(now, can_commit=false)`
     /// is a no-op when auto-commit is enabled AND a commit manager is
-    /// present, mirroring Java's
-    /// `if (autoCommitEnabled && !canCommit) return;` at
-    /// `AbstractMembershipManager.java:854`.
+    /// present, mirroring the auto-commit half of Java's gate
+    /// `if (!canCommit && (autoCommitEnabled || !revokedPartitions.isEmpty())) return;`
+    /// (`AbstractMembershipManager.java:929`; KAFKA-20106 added the
+    /// revocation half).
     ///
     /// Path: state is `Reconciling` with a real target assignment that
     /// would otherwise emit an `OnPartitionsAssigned` background event;
@@ -2892,7 +2876,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
         // Member stays in PREPARE_LEAVING; the new assignment is
         // ignored because the state can't accept new assignments.
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
@@ -3183,7 +3167,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive a heartbeat with a full multi-topic target assignment.
@@ -3207,7 +3191,7 @@ mod tests {
             unknown_tagged_fields: vec![],
         });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Receive an empty target assignment (revoke everything).
@@ -3221,7 +3205,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
     }
 
     /// Drive `reconcile(0, can_commit)` on a bg task, expecting exactly
@@ -3590,7 +3574,7 @@ mod tests {
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`
-    /// (`ConsumerMembershipManagerTest.java:1579`).
+    /// (`ConsumerMembershipManagerTest.java:1727`).
     /// Even if the auto-commit before rebalance fails EXCEPTIONALLY, the
     /// revocation still completes (Java's "proceed with reconciliation
     /// anyway"). Java arranges a commit future and
@@ -3676,7 +3660,7 @@ mod tests {
     // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and the
     // AsyncPoll task marks reconciliation-check-complete, letting `poll()`
     // return RETAINED-partition records) WHILE the commit is still in flight,
-    // matching Java `ApplicationEventProcessor.java:761-765`. ───────────────
+    // matching Java `ApplicationEventProcessor.java:732-736`. ───────────────
 
     /// (a) With auto-commit enabled and the commit response withheld, a single
     /// `reconcile()` call parks on the `AwaitingCommit` leg: it returns without
@@ -3947,8 +3931,9 @@ mod tests {
     /// `ConsumerMembershipManagerTest#testSameAssignmentReconciledAgainWithMissingTopic`.
     /// One topic resolvable, one permanently missing. The resolvable one
     /// is reconciled+acked; the missing one stays awaiting reconciliation.
-    /// A re-sent assignment with the same resolvable partitions is acked
-    /// again without re-running a full reconcile.
+    /// An extended assignment is received but not reconciled; the original
+    /// assignment re-sent after it is acked again without re-running a full
+    /// reconcile.
     #[tokio::test]
     async fn same_assignment_reconciled_again_with_missing_topic() {
         let (mgr, mut rx) = make(None, None, None);
@@ -3980,12 +3965,24 @@ mod tests {
         // topic2 is awaiting reconciliation.
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
 
+        // Receive extended assignment (assignment2: topic1-0,1 + topic2-0) -
+        // assignment received but no reconciliation triggered. Java's step
+        // between the two assignment1s: it bumps the target's local epoch, so
+        // the re-received assignment1 below is a NEW target epoch. Without it
+        // the re-received assignment1 would be the target already acked, which
+        // KAFKA-20145 deliberately does not ack again
+        // (`partial_ack_not_repeated_on_background_reconcile_when_metadata_missing`).
+        receive_assignment_map(&mgr, &[(topic1, vec![0, 1]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+
         // Receive original assignment again -> not a full reconcile, but
         // ack again. topic1 stays assigned, topic2 still awaiting.
         receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
         // No callback emitted on the re-ack (same resolvable partitions).
-        mgr.reconcile(0, true).await.unwrap();
+        // Java reconciles from the background path here (`maybeReconcile(false)`).
+        mgr.reconcile(0, false).await.unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "no callback should fire for the same resolvable assignment",
@@ -4326,6 +4323,63 @@ mod tests {
         assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0), tp("topic2", 0)]));
     }
 
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testPartialAckNotRepeatedOnBackgroundReconcileWhenMetadataMissing`
+    /// (KAFKA-20145). When the resolvable subset of the target equals the
+    /// current assignment but some topic ids remain unresolved, the partial
+    /// acknowledgement fires exactly once per target epoch, whichever path
+    /// reconciles (`can_commit` false = bg loop, true = `AsyncPollEvent`).
+    #[tokio::test]
+    async fn partial_ack_not_repeated_on_background_reconcile_when_metadata_missing() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // `mockMemberSuccessfullyReceivesAndAcksAssignment(topicId1, topic1, [0])`.
+        receive_assignment(&mgr, topic1, vec![0]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(MemberState::Stable, mgr.state());
+
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+
+        // First reconcile from the background task acks the resolvable fragment, no need to wait for
+        // consumer.poll.
+        mgr.reconcile(0, false).await.unwrap();
+        assert_eq!(MemberState::Acknowledging, mgr.state());
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(MemberState::Reconciling, mgr.state());
+        assert_eq!(HashSet::from([topic2]), topics_awaiting_reconciliation(&mgr));
+        let acked_local_epoch = mgr.abstract_mm.inner.lock().unwrap().current_assignment.local_epoch;
+
+        // Until a new target arrives or new metadata resolves topicId2, further reconciles from either
+        // path must stay in RECONCILING - no redundant acks.
+        for _ in 0..5 {
+            mgr.reconcile(0, false).await.unwrap();
+            assert_eq!(MemberState::Reconciling, mgr.state());
+            mgr.reconcile(0, true).await.unwrap();
+            assert_eq!(MemberState::Reconciling, mgr.state());
+        }
+        // The value the redundant acks used to change: the local epoch is the
+        // one acknowledged once, and no rebalance callback was enqueued.
+        assert_eq!(
+            acked_local_epoch,
+            mgr.abstract_mm.inner.lock().unwrap().current_assignment.local_epoch
+        );
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    }
+
     // ---------------------------------------------------------------
     // Commit 3: new-assignment-replaces-waiting-on-metadata.
     // ---------------------------------------------------------------
@@ -4451,7 +4505,7 @@ mod tests {
     ///
     /// Java funnels every failure in the revocation+assignment chain through
     /// one arm that logs and calls `markReconciliationCompleted()`
-    /// (`AbstractMembershipManager.java:958-965`). Rust replaced the
+    /// (`AbstractMembershipManager.java:1015-1022`). Rust replaced the
     /// `CompletableFuture` chain with explicit steps and `?`, which returns
     /// *past* the clearing — so the flag stayed set and every later
     /// `reconcile()` short-circuited on "Another reconciliation is already in
@@ -4548,7 +4602,7 @@ mod tests {
     ///
     /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
     /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-    /// (`AbstractMembershipManager.java:906`).
+    /// (`AbstractMembershipManager.java:967`).
     ///
     /// Failure without the guard: the listener is told its partition was LOST
     /// (by the fence) and then REVOKED (by the stale reconcile), and the
@@ -4818,7 +4872,7 @@ mod tests {
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`
-    /// (`ConsumerMembershipManagerTest.java:566`).
+    /// (`ConsumerMembershipManagerTest.java:632`).
     /// A member is stuck reconciling assignment A, parked on the REVOCATION
     /// COMMIT future (Java's `mockNewAssignmentAndRevocationStuckOnCommit`,
     /// test:576). While parked on the commit it gets fenced and rejoins;
@@ -5188,7 +5242,7 @@ mod tests {
     /// kinds, mirroring Java's three error types.
     #[tokio::test]
     async fn listener_callbacks_throws_error_on_partitions_revoked() {
-        // Java's three, class for class (`ConsumerMembershipManagerTest.java:1957-1959`):
+        // Java's three, class for class (`ConsumerMembershipManagerTest.java:2000-2002`):
         // `WakeupException`, `InterruptException`, `IllegalArgumentException`.
         // `Interrupt` is not interchangeable with any other class here: together
         // with `Wakeup` it is one of the two that
@@ -5720,7 +5774,7 @@ mod tests {
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         // Leave response received -> remains UNSUBSCRIBED.
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
     }
 
@@ -5936,11 +5990,13 @@ mod tests {
 
         // A non-leave success response is ignored (member already
         // UNSUBSCRIBED with a positive epoch in the response).
-        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        mgr.abstract_mm
+            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
+            .unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // The leave response completes the leave.
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
         assert_eq!(mgr.member_epoch(), ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH);
         assert!(mgr.current_assignment().is_none());
@@ -5994,7 +6050,9 @@ mod tests {
             }
             // A response with a positive epoch + an assignment should be
             // ignored; the state must be unchanged.
-            mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5)).unwrap();
+            mgr.abstract_mm
+                .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 5))
+                .unwrap();
             assert_eq!(mgr.state(), state, "response must be ignored in {state:?}");
         }
     }
@@ -6013,11 +6071,13 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // A previous (non-leave) heartbeat response is ignored.
-        mgr.on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1)).unwrap();
+        mgr.abstract_mm
+            .on_heartbeat_success(&heartbeat_response(mgr.member_id(), 1))
+            .unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // The leave response is processed (still UNSUBSCRIBED).
-        mgr.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&leave_response(mgr.member_id())).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // Subscription updated + poll -> rejoin.
@@ -6074,12 +6134,46 @@ mod tests {
         data.member_id = Some(mgr.member_id());
         data.member_epoch = 5;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        let err = mgr.on_heartbeat_success(&resp).unwrap_err();
-        // Error message content is part of the contract (DoD §3).
+        let err = mgr.abstract_mm.on_heartbeat_success(&resp).unwrap_err();
+        // Error message content is part of the contract (DoD §3). Java formats
+        // the `Errors` constant with `%s`, i.e. its enum name
+        // (`AbstractMembershipManager.java:342-349`).
         assert!(
-            err.to_string().contains("Unexpected error in Heartbeat response"),
-            "unexpected error message: {err}",
+            matches!(err, Error::LocalIllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
         );
+        assert_eq!(
+            "Unexpected error in Heartbeat response. Expected no error, but received: UNKNOWN_MEMBER_ID",
+            err.message()
+        );
+        assert_eq!(
+            MemberState::Joining,
+            mgr.state(),
+            "a rejected response leaves the state unchanged"
+        );
+    }
+
+    /// `ConsumerMembershipManager.extractAssignment` (KAFKA-20681) builds each
+    /// topic's partitions as a `TreeSet`: sorted and deduplicated whatever
+    /// order the broker sent. An absent assignment is `Optional.empty()`.
+    #[test]
+    fn extract_assignment_sorts_and_deduplicates_partitions_like_java_tree_set() {
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions};
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        assert_eq!(
+            None,
+            ConsumerMembershipManager::extract_assignment(&ConsumerGroupHeartbeatResponse::new(data.clone()))
+        );
+
+        let topic_id = Uuid::random_uuid();
+        let mut topic_partitions = TopicPartitions::new();
+        topic_partitions.topic_id = topic_id;
+        topic_partitions.partitions = vec![2, 0, 1, 1];
+        data.assignment = Some(Assignment { topic_partitions: vec![topic_partitions], unknown_tagged_fields: vec![] });
+        let assignment = ConsumerMembershipManager::extract_assignment(&ConsumerGroupHeartbeatResponse::new(data));
+        assert_eq!(Some(HashMap::from([(topic_id, vec![0, 1, 2])])), assignment);
     }
 
     /// Translated from
@@ -6119,7 +6213,7 @@ mod tests {
         data.heartbeat_interval_ms = 5000;
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
-        mgr.on_heartbeat_success(&resp).unwrap();
+        mgr.abstract_mm.on_heartbeat_success(&resp).unwrap();
         // Empty assignment for a JOINING member: target changes (epoch
         // bumps via update_with), so we transition to RECONCILING.
         assert_eq!(mgr.state(), MemberState::Reconciling);

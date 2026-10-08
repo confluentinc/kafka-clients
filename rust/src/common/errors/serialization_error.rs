@@ -17,8 +17,7 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// Any exception during serialization in the producer, or deserialization
-    /// in the consumer.
+    /// Any exception during serialization or deserialization.
     ///
     /// Corresponds to Java's `SerializationException`. It has no entry in
     /// `Errors`, so it carries no protocol code.

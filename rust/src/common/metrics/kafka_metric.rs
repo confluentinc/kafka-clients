@@ -129,11 +129,39 @@ impl Metric for KafkaMetric {
     }
 }
 
+impl std::fmt::Display for KafkaMetric {
+    /// Returns a human-readable representation of this metric.
+    ///
+    /// The metric value provider is represented by its type name rather than its
+    /// own state, to avoid dumping internal stat state (e.g. `SampledStat`'s
+    /// samples) into logs, which could be verbose and is rarely useful for
+    /// identifying which metric changed. A closure provider (Java's lambda or
+    /// anonymous class) is omitted.
+    ///
+    /// Java's `toString()` names the provider's Java class
+    /// (`org.apache.kafka.common.metrics.stats.Avg`); the Rust type name is the
+    /// Rust type path [`std::any::type_name`] reports for the provider.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#toString")]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.metric_value_provider.type_name() {
+            None => write!(f, "KafkaMetric [metricName={}]", self.metric_name),
+            Some(type_name) => {
+                write!(
+                    f,
+                    "KafkaMetric [metricName={}, metricValueProvider={}]",
+                    self.metric_name, type_name
+                )
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::stats::Avg;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::{ClosureGauge, Stat};
+    use crate::common::metrics::{ClosureGauge, ClosureMeasurable, Stat};
     use crate::common::utils::MockTime;
     use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
@@ -179,7 +207,7 @@ mod tests {
     // "description", emptyMap())` and a `MockTime`; `name()` above plus
     // `MockTime` are the equivalents.
     //
-    // 4 of Java's 5 methods are translated below. `testConstructorWithNullProvider`
+    // 7 of Java's 8 methods are translated below. `testConstructorWithNullProvider`
     // is NOT translatable and is intentionally omitted: it asserts
     // `NullPointerException` when the value provider is `null`, but
     // `KafkaMetric::new` takes `MetricValueProvider` by value (not
@@ -277,5 +305,90 @@ mod tests {
             Arc::new(MockTime::new()),
         );
         assert_eq!(metric.metric_value(), MetricValue::String("metric value provider".to_string()));
+    }
+
+    /// Java's `METRIC_NAME_2`.
+    fn metric_name_2() -> MetricName {
+        MetricName::new(
+            "request-latency-avg",
+            "consumer-fetch-manager-metrics",
+            "The average request latency in ms",
+            BTreeMap::from([("client-id".to_string(), "consumer-1".to_string())]),
+        )
+    }
+
+    /// Java's `testToStringOnLambdaOrAnonymousClass`.
+    fn assert_to_string_on_lambda_or_anonymous_class(metric_value_provider: MetricValueProvider) {
+        let metric = KafkaMetric::new(
+            metric_name_2(),
+            metric_value_provider,
+            Arc::new(MetricConfig::new()),
+            Arc::new(MockTime::new()),
+        );
+        assert_eq!(
+            "KafkaMetric [metricName=MetricName [name=request-latency-avg, \
+             group=consumer-fetch-manager-metrics, \
+             description=The average request latency in ms, \
+             tags={client-id=consumer-1}]]",
+            metric.to_string()
+        );
+    }
+
+    /// Verifies that `Display` produces a human-readable representation suitable for
+    /// logging. Note that we skip the metric provider in this case.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testToStringWithLambdaProvider")]
+    fn test_to_string_with_lambda_provider() {
+        let metric_value_provider = ClosureMeasurable::new(|_, _| 0.0);
+        assert_to_string_on_lambda_or_anonymous_class(MetricValueProvider::Measurable(Box::new(metric_value_provider)));
+    }
+
+    /// Java's anonymous `Measurable` subclass. Rust has no anonymous classes: an
+    /// inline provider is a closure behind one of the adapters, so this exercises
+    /// the other adapter, `ClosureGauge`, which Java's `toString` likewise omits.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testToStringWithAnonymousClassProvider")]
+    fn test_to_string_with_anonymous_class_provider() {
+        let metric_value_provider = ClosureGauge::new(|_, _| MetricValue::Double(0.0));
+        assert_to_string_on_lambda_or_anonymous_class(MetricValueProvider::Gauge(Box::new(metric_value_provider)));
+    }
+
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testToStringWithStatProvider")]
+    fn test_to_string_with_stat_provider() {
+        let avg = Avg::new();
+        let metric = KafkaMetric::new(
+            metric_name_2(),
+            MetricValueProvider::Measurable(Box::new(avg)),
+            Arc::new(MetricConfig::new()),
+            Arc::new(MockTime::new()),
+        );
+        // Java names the Java class; Rust names the type path `type_name` reports.
+        let avg_type = std::any::type_name::<Avg>();
+        assert!(avg_type.starts_with("confluent_kafka::common::metrics::stats::") && avg_type.ends_with("::Avg"));
+        assert_eq!(
+            format!(
+                "KafkaMetric [metricName=MetricName [name=request-latency-avg, \
+                 group=consumer-fetch-manager-metrics, \
+                 description=The average request latency in ms, \
+                 tags={{client-id=consumer-1}}], \
+                 metricValueProvider={avg_type}]"
+            ),
+            metric.to_string()
+        );
+    }
+
+    /// A stat a `Sensor` registers is reported by its own type, not the sensor's
+    /// internal sharing wrapper: Java registers the stat itself as the provider.
+    #[test]
+    fn test_to_string_names_a_sensor_stat_by_its_own_type() {
+        let metrics = crate::common::metrics::Metrics::new();
+        let sensor = metrics.sensor("s").unwrap();
+        sensor
+            .add_metric_name(metrics.metric_name("m", "g"), Box::new(Avg::new()))
+            .unwrap();
+        let metric = metrics.metric(&metrics.metric_name("m", "g")).unwrap();
+        let expected_suffix = format!("metricValueProvider={}]", std::any::type_name::<Avg>());
+        assert!(metric.to_string().ends_with(&expected_suffix), "{metric}");
     }
 }

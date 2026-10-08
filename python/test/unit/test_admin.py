@@ -52,7 +52,7 @@ from admin import (
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_describe_topics,
     _to_partition_info,
-    _close_ms, _ms,
+    _close_ms, _ms, _MockAdminClientMixin,
 )
 from producer import KafkaError
 
@@ -2896,6 +2896,47 @@ async def test_async_b6_rpcs():
 
         with pytest.raises(KafkaError):
             await admin.force_terminate_transaction("txn-a")
+
+# --- unregisterController (KAFKA-20395) -------------------------------------
+
+def test_unregister_controller_follows_the_mock_raft_controller_setting():
+    """Java's MockAdminClient.unregisterController succeeds with a Raft
+    controller and otherwise fails with UnsupportedVersionException("")."""
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == ""
+
+        admin.set_using_raft_controller(True)
+        assert admin.unregister_controller(1) is None
+        assert admin.unregister_controller(1, timeout=5.0) is None
+
+        admin.set_using_raft_controller(False)
+        with pytest.raises(KafkaError):
+            admin.unregister_controller(1)
+
+
+def test_set_using_raft_controller_rejects_a_real_client():
+    admin = AdminClient({"bootstrap.servers": "localhost:9092"})
+    try:
+        with pytest.raises(KafkaError) as exc:
+            _MockAdminClientMixin.set_using_raft_controller(admin, True)
+        assert str(exc.value) == "this operation is only supported on a MockAdminClient"
+    finally:
+        admin.close(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_async_unregister_controller():
+    async with AsyncMockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            await admin.unregister_controller(1)
+        assert exc.value.code == UNSUPPORTED_VERSION
+
+        admin.set_using_raft_controller(True)
+        assert await admin.unregister_controller(1) is None
+
 
 def test_authorized_operations_none_stays_distinct_from_empty():
     """Java's authorizedOperations() is null when the broker did not report the

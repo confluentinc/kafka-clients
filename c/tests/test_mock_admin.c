@@ -6067,6 +6067,85 @@ static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+/* ---------------------------------------------------------------------------
+ * unregisterController (KAFKA-20395, Kafka 4.4)
+ *
+ * Java's MockAdminClient.unregisterController succeeds when the mock uses a
+ * Raft controller and otherwise fails with UnsupportedVersionException(""). Like
+ * abortTransaction there is no result handle: success is a null return.
+ * ------------------------------------------------------------------------- */
+
+static void test_mock_admin_unregister_controller_follows_raft_controller(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    kafka_common_Error_t *error = kafka_admin_AdminClient_unregister_controller(admin, 1, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, kafka_common_Error_code(error));
+    TEST_ASSERT_EQUAL_STRING("", kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_set_using_raft_controller(admin, true));
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_unregister_controller(admin, 1, 5000));
+
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_set_using_raft_controller(admin, false));
+    error = kafka_admin_AdminClient_unregister_controller(admin, 1, -1);
+    TEST_ASSERT_NOT_NULL(error);
+    kafka_common_Error_destroy(error);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+static void test_mock_admin_unregister_controller_async(void) {
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+
+    acl_async_result_t rejected = {0};
+    atomic_init(&rejected.fired, 0);
+    kafka_admin_AdminClient_unregister_controller_async(admin, 1, -1, on_void_transaction_op,
+                                                       &rejected);
+    TEST_ASSERT_TRUE(wait_for(&rejected.fired, 1));
+    TEST_ASSERT_EQUAL_INT(0, rejected.had_result);
+    TEST_ASSERT_EQUAL_INT(1, rejected.had_error);
+    TEST_ASSERT_EQUAL_STRING("", rejected.message);
+
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_set_using_raft_controller(admin, true));
+    acl_async_result_t accepted = {0};
+    atomic_init(&accepted.fired, 0);
+    kafka_admin_AdminClient_unregister_controller_async(admin, 1, -1, on_void_transaction_op,
+                                                       &accepted);
+    TEST_ASSERT_TRUE(wait_for(&accepted.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, accepted.had_result);
+    TEST_ASSERT_EQUAL_INT(0, accepted.had_error);
+
+    kafka_admin_AdminClient_destroy(admin);
+
+    /* A NULL handle still honours the callback obligation, inline. */
+    acl_async_result_t null_handle = {0};
+    atomic_init(&null_handle.fired, 0);
+    kafka_admin_AdminClient_unregister_controller_async(NULL, 1, -1, on_void_transaction_op,
+                                                       &null_handle);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&null_handle.fired));
+    TEST_ASSERT_EQUAL_INT(1, null_handle.had_error);
+}
+
+static void test_mock_admin_set_using_raft_controller_rejects_non_mock(void) {
+    kafka_admin_AdminClientProperties_t *props = kafka_admin_AdminClientProperties_new();
+    kafka_admin_AdminClientProperties_put(props, "bootstrap.servers", "localhost:9092");
+    kafka_common_Error_t *error = NULL;
+    kafka_admin_AdminClient_t *admin = kafka_admin_AdminClient_new(props, &error);
+    kafka_admin_AdminClientProperties_destroy(props);
+    TEST_ASSERT_NULL(error);
+    TEST_ASSERT_NOT_NULL(admin);
+
+    error = kafka_admin_MockAdminClient_set_using_raft_controller(admin, true);
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("this operation is only supported on a MockAdminClient",
+                             kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+
+    kafka_admin_AdminClient_close(admin, 1000);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_b6_null_out_result(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const char *topics[1] = {"alpha"};
@@ -6248,5 +6327,8 @@ int main(void) {
     RUN_TEST(test_mock_admin_b6_async_fires_once);
     RUN_TEST(test_mock_admin_b6_async_null_handle_and_marshaling_failure);
     RUN_TEST(test_mock_admin_b6_null_out_result);
+    RUN_TEST(test_mock_admin_unregister_controller_follows_raft_controller);
+    RUN_TEST(test_mock_admin_unregister_controller_async);
+    RUN_TEST(test_mock_admin_set_using_raft_controller_rejects_non_mock);
     return UNITY_END();
 }

@@ -97,15 +97,6 @@ impl AlterUserScramCredentialsResponse {
         let data = AlterUserScramCredentialsResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
-
-    /// Whether the client should throttle on this response.
-    ///
-    /// Mirrors `AlterUserScramCredentialsResponse.shouldClientThrottle`
-    /// (always `true`).
-    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsResponse#shouldClientThrottle")]
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
-    }
 }
 
 impl std::fmt::Display for AlterUserScramCredentialsResponse {
@@ -157,11 +148,5 @@ mod tests {
         assert_eq!(parsed.data().results.len(), 1);
         assert_eq!(parsed.data().results[0].user, "u0");
         assert_eq!(parsed.data().results[0].error_code, 0);
-    }
-
-    #[test]
-    fn always_throttles() {
-        let response = AlterUserScramCredentialsResponse::new(AlterUserScramCredentialsResponseData::new(), 0);
-        assert!(response.should_client_throttle(0));
     }
 }

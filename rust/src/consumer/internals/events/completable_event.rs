@@ -101,7 +101,7 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
     /// Java: `future.complete(value)`. Returns `true` if THIS call performed
     /// the completion (i.e. the slot was not yet consumed). Idempotent —
     /// safe to call concurrently with `complete_with_error` and with the
-    /// reaper's `fail_with_timeout`.
+    /// reaper's `complete_with_error`.
     pub(crate) fn complete(&self, value: T) -> bool {
         let sender_opt = {
             // Mutex critical section — never awaits.
@@ -169,10 +169,12 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
 pub(crate) trait CompletableEventErasedHandle: Send + Sync + 'static {
     fn deadline_ms(&self) -> i64;
     fn is_done(&self) -> bool;
-    /// Java: `future.completeExceptionally(timeoutException)`. Returns
-    /// `true` if this call performed the completion. Used by the reaper
-    /// to expire deadline-exceeded events.
-    fn fail_with_timeout(&self, error: Error) -> bool;
+    /// Java: `future.completeExceptionally(error)`. Returns `true` if this
+    /// call performed the completion. Used by the reaper to expire
+    /// deadline-exceeded events (with a timeout error), and by the
+    /// background task's event loop to fail an event whose processing
+    /// panicked (KAFKA-18812).
+    fn complete_with_error(&self, error: Error) -> bool;
     /// Diagnostic name for the wrapped `T` — used in log/trace messages
     /// equivalent to Java's `event.getClass().getSimpleName()`.
     fn type_name(&self) -> &'static str;
@@ -208,7 +210,7 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
         guard.is_none()
     }
 
-    fn fail_with_timeout(&self, error: Error) -> bool {
+    fn complete_with_error(&self, error: Error) -> bool {
         let sender_opt = {
             let mut guard = match self.inner.sender.lock() {
                 Ok(g) => g,
@@ -277,7 +279,7 @@ mod tests {
     #[test]
     fn second_completion_is_noop_after_failed_with_timeout() {
         let (handle, _rx, erased) = CompletableEvent::make_completable_event::<()>(1_000);
-        assert!(erased.fail_with_timeout(Error::timeout("deadline")));
+        assert!(erased.complete_with_error(Error::timeout("deadline")));
         assert!(handle.is_done());
         // The handle's own complete() must observe is_done and return false.
         assert!(!handle.complete(()));

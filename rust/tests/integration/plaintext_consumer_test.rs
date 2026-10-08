@@ -67,6 +67,8 @@
 //! - `testAsyncConsumerCloseOnBrokerShutdown` (line 214)
 //!   → `test_async_consumer_close_on_broker_shutdown` (Phase 16; dedicated
 //!   single-broker `Type::Kraft` cluster, stops the broker)
+//! - `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance` (4.4,
+//!   45c4bdc48a) → `test_async_static_member_close_with_leave_group_triggers_rebalance`
 //!
 //! ## SKIPped (documented gaps — see PLAN.md)
 //!
@@ -119,9 +121,11 @@ use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
+use confluent_kafka::consumer::CloseOptions;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
+use confluent_kafka::consumer::GroupMembershipOperation;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
@@ -1556,4 +1560,101 @@ async fn poll_count(consumer: &mut BytesConsumer, at_least: usize, budget: Durat
         }
     }
     count
+}
+
+/// Translates Java's `testAsyncConsumerUnsubscribeDoesNotCommitOffsetsWithAutoCommitEnabled`
+/// (KAFKA-20119, 40e9fcd742). The `testClassicConsumer...` twin is out of scope
+/// (classic protocol, consumer-threading.md §20).
+///
+/// `unsubscribe()` does not commit offsets even with `enable.auto.commit`
+/// enabled: a second consumer in the same group sees no committed offset after
+/// the first one consumed records and unsubscribed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commit_enabled() {
+    let num_records = 10;
+    let mut ctx = TestContext::new(cluster_config_kip848()).await;
+    let topic = ctx.topic("topic");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let group_id = ctx.group_id("unsubscribe-no-commit-test");
+    let overrides = [("enable.auto.commit", "true")];
+
+    let producer = build_producer(&ctx);
+    // Consumer 1: subscribe, consume records, then unsubscribe (without an
+    // explicit commit).
+    let mut consumer1 = make_consumer(&ctx, &group_id, &overrides);
+    create_topic(consumer1.as_mut(), &topic, 1).await;
+    send_records(&producer, &tp, num_records, current_time_ms()).await;
+    producer.close().await.expect("producer close");
+
+    consumer1.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+    consume_records(consumer1.as_mut(), num_records).await;
+    // Unsubscribe - this should NOT commit offsets even though auto-commit is
+    // enabled.
+    consumer1.unsubscribe().await.expect("unsubscribe");
+    consumer1.close().await.expect("consumer1 close");
+
+    // Consumer 2: use the same group id to check the committed offsets.
+    let mut consumer2 = make_consumer(&ctx, &group_id, &overrides);
+    consumer2.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
+    let committed = consumer2.committed(std::slice::from_ref(&tp)).await.expect("committed");
+    assert_eq!(
+        None,
+        committed.get(&tp),
+        "unsubscribe() should not commit offsets even when auto-commit is enabled"
+    );
+    consumer2.close().await.expect("consumer2 close");
+}
+
+/// Translates Java's `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance`
+/// (`PlaintextConsumerTest.java:1816`, added by 45c4bdc48a).
+///
+/// Tests that when a static member closes with
+/// [`GroupMembershipOperation::LeaveGroup`], the other members in the group
+/// receive a rebalance callback. This is in contrast to the default behavior
+/// where static members remain in the group on close (no rebalance triggered).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_static_member_close_with_leave_group_triggers_rebalance() {
+    let mut ctx = TestContext::new(cluster_config_kip848()).await;
+    let topic_name = ctx.topic("test-static-member-leave-group");
+    let group_id = ctx.group_id("test-group");
+    create_test_topic(&ctx, &topic_name, 2, 1).await;
+
+    let mut consumer1 = make_consumer(&ctx, &group_id, &[("group.instance.id", "instance-1")]);
+    let mut consumer2 = make_consumer(&ctx, &group_id, &[("group.instance.id", "instance-2")]);
+
+    let listener1 = TestConsumerReassignmentListener::default();
+    let listener2 = TestConsumerReassignmentListener::default();
+
+    consumer1
+        .subscribe_with_topics_listener(vec![topic_name.clone()], Arc::new(listener1.clone()))
+        .await
+        .expect("consumer1 subscribe");
+    consumer2
+        .subscribe_with_topics_listener(vec![topic_name.clone()], Arc::new(listener2.clone()))
+        .await
+        .expect("consumer2 subscribe");
+
+    await_rebalance(consumer1.as_mut(), &listener1).await;
+    await_rebalance(consumer2.as_mut(), &listener2).await;
+
+    let initial_assigned_calls = listener2.calls_to_assigned();
+
+    // Consumer 1 closes with LEAVE_GROUP - this should trigger a rebalance
+    consumer1
+        .close_with_options(CloseOptions::new_group_membership_operation(
+            GroupMembershipOperation::LeaveGroup,
+        ))
+        .await
+        .expect("consumer1 close with LEAVE_GROUP");
+    await_rebalance(consumer2.as_mut(), &listener2).await;
+
+    // Consumer 2 should have received another assignment callback due to the rebalance
+    let current = listener2.calls_to_assigned();
+    assert!(
+        current > initial_assigned_calls,
+        "Consumer 2 should have received a rebalance after static consumer 1 left the group permanently. \
+         Initial assigned calls: {initial_assigned_calls}, current: {current}"
+    );
+
+    consumer2.close().await.expect("consumer2 close");
 }

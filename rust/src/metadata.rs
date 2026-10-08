@@ -44,8 +44,8 @@ use crate::common::protocol::Errors;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::metadata_request;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
-use crate::common::utils::ExponentialBackoff;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::ExponentialBackoff;
+use crate::common::utils::internals::LogContext;
 
 use super::CommonClientConfigs;
 use super::MetadataSnapshot;
@@ -189,6 +189,9 @@ struct MetadataInner {
     last_successful_refresh_ms: i64,
     attempts: i64,
     fatal_err: Option<Error>,
+    /// A permanent bootstrap DNS resolution failure (KIP-909). Unlike
+    /// `fatal_err`, it is never cleared once set. Java's `bootstrapFatalException`.
+    bootstrap_fatal_err: Option<Error>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
     metadata_snapshot: Arc<MetadataSnapshot>,
@@ -418,6 +421,7 @@ impl Metadata {
                 unauthorized_topics: HashSet::new(),
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
+                bootstrap_fatal_err: None,
                 bootstrap_addresses: Vec::new(),
                 #[cfg(test)]
                 request_update_call_count: 0,
@@ -482,6 +486,7 @@ impl Metadata {
                 unauthorized_topics: HashSet::new(),
                 metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
+                bootstrap_fatal_err: None,
                 bootstrap_addresses: Vec::new(),
                 #[cfg(test)]
                 request_update_call_count: 0,
@@ -611,9 +616,16 @@ impl Metadata {
         inner.update_version
     }
 
-    /// Updates the last seen epoch if the provided epoch is newer.
+    /// Request an update for the partition metadata if and only if we have seen
+    /// a newer leader epoch. This is called by the client any time it handles a
+    /// response from the broker that includes leader epoch, except for update
+    /// via Metadata RPC which follows a different code path ([`Self::update`]).
     ///
-    /// Returns `true` if we updated the last seen epoch.
+    /// * `topic_partition` - The partition for which to update the last seen
+    ///   leader epoch.
+    /// * `leader_epoch` - The leader epoch received from the broker.
+    ///
+    /// Returns `true` if we updated the last seen epoch, `false` otherwise.
     ///
     /// # Errors
     /// Returns an error if `leader_epoch` is negative.
@@ -1357,6 +1369,7 @@ impl Metadata {
     #[doc(alias = "org.apache.kafka.clients.Metadata#maybeThrowFatalException")]
     pub fn maybe_return_fatal_error(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
+        Self::maybe_return_bootstrap_fatal_error_inner(&inner)?;
         if let Some(err) = inner.fatal_err.take() {
             return Err(err);
         }
@@ -1368,6 +1381,7 @@ impl Metadata {
     where
         F: FnOnce(&MetadataInner) -> Option<Error>,
     {
+        Self::maybe_return_bootstrap_fatal_error_inner(inner)?;
         let metadata_error = inner.fatal_err.take().or_else(|| recoverable_supplier(inner));
         Self::clear_recoverable_errors(inner);
         match metadata_error {
@@ -1424,6 +1438,45 @@ impl Metadata {
         // which calls `maybeThrowFatalException()` — on every `notify`, so a fatal
         // error surfaces immediately rather than after the full timeout.
         self.update_notify.notify_waiters();
+    }
+
+    /// Record a permanent bootstrap DNS resolution failure. Unlike
+    /// [`Self::fatal_error`], this error is never cleared after being returned,
+    /// so all subsequent API calls see it (bootstrap failure is not recoverable
+    /// without recreating the client).
+    ///
+    /// Java's `notifyAll()` becomes a wake of the [`Self::await_update`]
+    /// waiters, whose wait re-checks [`Self::maybe_return_fatal_error`] and so
+    /// fails at once.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#bootstrapFatalError")]
+    pub fn bootstrap_fatal_error(&self, error: Error) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.bootstrap_fatal_err = Some(error);
+        }
+        self.update_notify.notify_waiters();
+    }
+
+    /// Return the permanent bootstrap fatal error if one was recorded. The
+    /// error is intentionally not cleared so every API call after bootstrap
+    /// failure sees it.
+    ///
+    /// # Errors
+    ///
+    /// The error recorded by [`Self::bootstrap_fatal_error`].
+    #[doc(alias = "org.apache.kafka.clients.Metadata#maybeThrowBootstrapFatalException")]
+    pub fn maybe_return_bootstrap_fatal_error(&self) -> Result<(), Error> {
+        let inner = self.inner.lock().unwrap();
+        Self::maybe_return_bootstrap_fatal_error_inner(&inner)
+    }
+
+    /// [`Self::maybe_return_bootstrap_fatal_error`] under a held lock: Java's
+    /// `synchronized` methods re-enter the monitor, a std `Mutex` does not.
+    fn maybe_return_bootstrap_fatal_error_inner(inner: &MetadataInner) -> Result<(), Error> {
+        match &inner.bootstrap_fatal_err {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     /// Wait for metadata update until the given version is exceeded or the timeout expires.
@@ -1490,7 +1543,7 @@ impl Metadata {
     ///
     /// A bare `KafkaException`, so `is_kafka_error()` is `true` while
     /// `is_api_error()` is `false` — which is what makes `KafkaProducer.doSend`'s
-    /// `catch (KafkaException e)` (`KafkaProducer.java:995`) pick it up and
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1070`) pick it up and
     /// relabel it as `"Producer closed while send in progress"`.
     fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
         if inner.is_closed {
@@ -1646,6 +1699,51 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "it must fail fast, not wait out the timeout"
         );
+    }
+
+    /// KIP-909: `bootstrapFatalError` records a failure that every metadata
+    /// check returns and none clears — `maybeThrowBootstrapFatalException`,
+    /// `maybeThrowFatalException` and `clearErrorsAndMaybeThrowException` (the
+    /// `maybeThrowAnyException` / `maybeThrowExceptionForTopic` path) all check
+    /// it first — and its `notifyAll()` wakes a waiter blocked in
+    /// `awaitUpdate`, which then fails at once.
+    #[tokio::test]
+    async fn bootstrap_fatal_error_is_permanent_and_wakes_the_waiters() {
+        let metadata = Arc::new(new_metadata());
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+        let version = metadata.update_version();
+
+        let waiter = {
+            let metadata = Arc::clone(&metadata);
+            tokio::spawn(async move { metadata.await_update(version, 30_000).await })
+        };
+        tokio::task::yield_now().await;
+        let started = std::time::Instant::now();
+        metadata.bootstrap_fatal_error(Error::BootstrapResolution(
+            crate::common::errors::BootstrapResolutionError::new("dns"),
+        ));
+        let err = waiter.await.unwrap().expect_err("the bootstrap failure must fail the wait");
+        assert!(
+            matches!(&err, Error::BootstrapResolution(e) if e.message() == "dns"),
+            "got {err:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "it must fail fast");
+
+        // A recoverable and a fatal error behind it stay where they are.
+        metadata.fatal_error(Error::new(Errors::SaslAuthenticationFailed));
+        for _ in 0..2 {
+            for result in [
+                metadata.maybe_return_bootstrap_fatal_error(),
+                metadata.maybe_return_fatal_error(),
+                metadata.maybe_return_any_error(),
+                metadata.maybe_return_error_for_topic("topic"),
+            ] {
+                assert!(
+                    matches!(&result, Err(Error::BootstrapResolution(e)) if e.message() == "dns"),
+                    "got {result:?}"
+                );
+            }
+        }
     }
 
     /// `ProducerMetadata.awaitUpdate`'s close exit

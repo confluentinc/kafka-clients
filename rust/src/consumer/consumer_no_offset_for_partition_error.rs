@@ -133,7 +133,7 @@ mod tests {
     /// that file was split into one file per error class.
     ///
     /// Java: `NoOffsetForPartitionException(TopicPartition)` renders the
-    /// SINGULAR "partition:" (`NoOffsetForPartitionException.java:33-36`).
+    /// SINGULAR "partition:" (`NoOffsetForPartitionException.java:43-46`).
     #[test]
     fn test_no_offset_for_partition_singular_message() {
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -146,7 +146,7 @@ mod tests {
     ///
     /// Java: `NoOffsetForPartitionException(Collection<TopicPartition>)` renders
     /// the PLURAL "partitions:" followed by the collection
-    /// (`NoOffsetForPartitionException.java:38-41`), and Java's
+    /// (`NoOffsetForPartitionException.java:53-56`), and Java's
     /// `Collection.toString()` brackets the items — hence `[t-0, t-1]`. The
     /// exact encoding is asserted here because the split changed it (the old
     /// Rust form emitted the items bare) and no test noticed.
@@ -163,7 +163,7 @@ mod tests {
     /// (`test_no_offset_for_partition_partitions_accessor`).
     ///
     /// Java: `partitions()` — the one member `InvalidOffsetException` declares
-    /// abstract (`InvalidOffsetException.java:36`).
+    /// abstract (`InvalidOffsetException.java:49`).
     #[test]
     fn test_no_offset_for_partition_partitions_accessor() {
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -174,7 +174,7 @@ mod tests {
     }
 
     /// `NoOffsetForPartitionException extends InvalidOffsetException extends
-    /// KafkaException` (`NoOffsetForPartitionException.java:26`), where
+    /// KafkaException` (`NoOffsetForPartitionException.java:32`), where
     /// `InvalidOffsetException` is the CONSUMER package's abstract class — not
     /// the `common.errors` class of the same name, which extends
     /// `ApiException`.

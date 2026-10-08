@@ -97,15 +97,6 @@ impl DescribeUserScramCredentialsResponse {
         let data = DescribeUserScramCredentialsResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
-
-    /// Whether the client should throttle on this response.
-    ///
-    /// Mirrors `DescribeUserScramCredentialsResponse.shouldClientThrottle`
-    /// (throttled for versions `>= 0`).
-    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#shouldClientThrottle")]
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
-    }
 }
 
 impl std::fmt::Display for DescribeUserScramCredentialsResponse {
@@ -191,11 +182,5 @@ mod tests {
         data.set_throttle_time_ms(0).set_error_code(0).set_results(vec![result]);
         let response = DescribeUserScramCredentialsResponse::new(data, 0);
         assert_eq!(response.data().results[0].credential_infos[0].iterations, 4096);
-    }
-
-    #[test]
-    fn always_throttles() {
-        let response = DescribeUserScramCredentialsResponse::new(DescribeUserScramCredentialsResponseData::new(), 0);
-        assert!(response.should_client_throttle(0));
     }
 }

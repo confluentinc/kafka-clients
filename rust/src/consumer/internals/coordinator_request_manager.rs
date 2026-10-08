@@ -31,6 +31,7 @@ use crate::common::requests::{
 };
 use crate::common::{Error, Node};
 
+use super::GroupCoordinatorNode;
 use super::RequestManager;
 use super::RequestState;
 use super::{PollResult, UnsentRequest};
@@ -61,6 +62,19 @@ pub(crate) struct CoordinatorRequestManagerInner {
     closing: Mutex<bool>,
     /// Most recent fatal error (e.g. `GROUP_AUTHORIZATION_FAILED`).
     fatal_error: Mutex<Option<Error>>,
+    /// The bg task's wakeup `Notify` (a clone of `event_notify`), poked by the
+    /// spawned FindCoordinator forwarder once it has applied the response or
+    /// failure, so the next `run_once` acts on it at once. Java needs no
+    /// equivalent: its `whenComplete` callback runs inside the network poll,
+    /// so the coordinator is updated before the next `runOnce`. Here the
+    /// forwarder runs after the poll has returned; without the poke the bg
+    /// loop sleeps out its poll timeout with the coordinator already known.
+    /// That timeout is long (`PollResult::empty()` → `MAX_POLL_TIMEOUT_MS`)
+    /// since KAFKA-20253 stopped returning the in-flight request's elapsed
+    /// backoff (`0`), which used to spin the loop until the forwarder ran.
+    /// Wired once via [`CoordinatorRequestManager::set_completion_notify`];
+    /// unset in tests that drive no bg task.
+    completion_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 /// `CoordinatorRequestManager` — sends a single in-flight
@@ -108,6 +122,7 @@ impl CoordinatorRequestManager {
             total_disconnected_min: Mutex::new(0),
             closing: Mutex::new(false),
             fatal_error: Mutex::new(None),
+            completion_notify: std::sync::OnceLock::new(),
         });
         Self { inner }
     }
@@ -224,7 +239,7 @@ impl CoordinatorRequestManager {
     /// one-minute boundary since the last warning).
     ///
     /// Java: the inline `log.warn(...)` inside
-    /// `markCoordinatorUnknown(String, long)` (CoordinatorRequestManager.java:177-179).
+    /// `markCoordinatorUnknown(String, long)` (CoordinatorRequestManager.java:184-186).
     /// Factored out so the exact formatted message (including the
     /// `durationOfOngoingDisconnectMs` value) can be asserted directly —
     /// the Rust equivalent of Java's `LogCaptureAppender` regex on
@@ -287,11 +302,25 @@ impl CoordinatorRequestManager {
         current_time_ms: i64,
         coordinator: &crate::find_coordinator_response_data::Coordinator,
     ) {
-        // Java: use MAX_VALUE - node.id to allow separate connections for
-        // the coordinator at the network layer.
-        let coordinator_connection_id = i32::MAX - coordinator.node_id;
-        *inner.coordinator.lock().expect("coordinator poisoned") =
-            Some(Node::new(coordinator_connection_id, coordinator.host.clone(), coordinator.port));
+        // `CoordinatorRequestManager.java:191-201` (KAFKA-20246 3/N): the
+        // coordinator keeps the broker's real node id, so the ApiVersions
+        // cluster check (KIP-1242) names the right broker, and gets a `+<id>`
+        // connection id, so the network layer still keeps a connection to it
+        // separate from the regular broker connection.
+        let node = match GroupCoordinatorNode::new(coordinator.node_id, coordinator.host.clone(), coordinator.port) {
+            Ok(node) => node,
+            Err(error) => {
+                // A broker never answers `NONE` with a negative coordinator id.
+                // If one did, Java's constructor would throw inside the
+                // `whenComplete` callback, where the exception is lost: the
+                // request would stay in flight and the coordinator unknown for
+                // good. Failing the attempt with the error instead surfaces it
+                // (CLAUDE.md §7) through the fatal-error path below.
+                Self::on_failed_response_inner(inner, current_time_ms, error);
+                return;
+            },
+        };
+        *inner.coordinator.lock().expect("coordinator poisoned") = Some(node);
         log::info!("Discovered group coordinator (nodeId={})", coordinator.node_id);
         inner
             .request_state
@@ -344,7 +373,7 @@ impl CoordinatorRequestManager {
     /// [`Self::on_failed_response`] — translating Java's
     /// `unsent.whenComplete((clientResponse, throwable) -> { ... })`
     /// callback (Java: `makeFindCoordinatorRequest(long)`, lines
-    /// 113-132).
+    /// 120-139).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#makeFindCoordinatorRequest")]
     fn make_find_coordinator_request(
         inner: &Arc<CoordinatorRequestManagerInner>,
@@ -368,7 +397,7 @@ impl CoordinatorRequestManager {
         // task would never exit.
         let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
-            // Java: `CoordinatorRequestManager.java:124` —
+            // Java: `CoordinatorRequestManager.java:131` —
             // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
             // of the `whenComplete` lambda, before branching on success
             // vs. failure. Mirror that here: clear the fatal error
@@ -411,6 +440,10 @@ impl CoordinatorRequestManager {
                     );
                 },
             }
+            // Every lock above is released; the poke is lock-free.
+            if let Some(notify) = inner_for_handler.completion_notify.get() {
+                notify.notify_one();
+            }
         });
         unsent
     }
@@ -444,6 +477,21 @@ impl CoordinatorRequestManager {
             let request = Self::make_find_coordinator_request(&self.inner, current_time_ms);
             return PollResult::single(request);
         }
+
+        // KAFKA-20253: when a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the
+        // network thread to poll again immediately which causes a busy spin. Wait instead by returning a
+        // PollResult with a Long.MAX_VALUE backoff. (During KIP-909 bootstrap resolution the FindCoordinator
+        // request stays unsent, hence in flight, for the whole resolution window.)
+        if self
+            .inner
+            .request_state
+            .lock()
+            .expect("request_state poisoned")
+            .request_in_flight()
+        {
+            return PollResult::empty();
+        }
+
         let remaining = self
             .inner
             .request_state
@@ -487,6 +535,15 @@ impl CoordinatorRequestManager {
     /// `StopFindCoordinatorOnClose` arm signalled correctly.
     pub(crate) fn is_closing(&self) -> bool {
         *self.inner.closing.lock().expect("closing poisoned")
+    }
+
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
+    /// the spawned FindCoordinator forwarder can wake the network poll once
+    /// the response is applied. See `CoordinatorRequestManagerInner::completion_notify`.
+    /// Mirrors `CommitRequestManager::set_completion_notify`; the first
+    /// installed handle wins (it is wired exactly once, at construction).
+    pub(crate) fn set_completion_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.inner.completion_notify.set(notify);
     }
 
     /// `&self`-callable signal-close. Mirrors
@@ -582,6 +639,29 @@ mod tests {
         assert_eq!(expect_coordinator_found, manager.coordinator().is_some());
     }
 
+    /// A `NONE` answer naming a negative coordinator id cannot become a
+    /// `GroupCoordinatorNode`. Rust fails the attempt with the constructor's
+    /// error, which reaches the fatal-error path; Java's constructor throws
+    /// inside the response callback and the exception is lost (see
+    /// `on_successful_response_inner`). Rust-only.
+    #[tokio::test]
+    async fn test_negative_coordinator_id_fails_the_attempt() {
+        let mut manager = setup_manager();
+        let _ = manager.poll(0);
+        let response = FindCoordinatorResponse::prepare_response(
+            Errors::None,
+            GROUP_ID,
+            &Node::new(-5, "localhost".to_string(), 9092),
+        );
+        manager.on_response(0, &response);
+        assert!(manager.coordinator().is_none());
+        let err = manager.get_and_clear_fatal_error().expect("fatal error recorded");
+        let Error::LocalIllegalArgument(e) = &err else {
+            panic!("expected an illegal-argument error, got {err:?}");
+        };
+        assert_eq!(e.message(), "Node id for group coordinator node cannot be negative");
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testSuccessfulResponse`.
     /// `#[tokio::test]` because `poll()` now spawns a response forwarder
     /// via `tokio::spawn` (Phase 12.5 wiring) — the spawn requires a
@@ -594,7 +674,16 @@ mod tests {
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
 
         let n = manager.coordinator().expect("coordinator present");
-        assert_eq!(i32::MAX - node().id(), n.id());
+        assert_eq!(node().id(), n.id());
+        // Java's `assertInstanceOf(GroupCoordinatorNode.class, ..)`: the node
+        // equals only a `GroupCoordinatorNode` (`Node`'s class-aware equality),
+        // whose connection id is `+<id>`.
+        assert_eq!(
+            GroupCoordinatorNode::new(node().id(), node().host().to_string(), node().port()).unwrap(),
+            n
+        );
+        assert_eq!("+1", n.id_string());
+        assert_eq!(node().id(), n.id_string().parse::<i32>().unwrap());
         assert_eq!(node().host(), n.host());
         assert_eq!(node().port(), n.port());
 
@@ -809,6 +898,39 @@ mod tests {
         assert!(manager.coordinator().is_none());
     }
 
+    /// Translated from `CoordinatorRequestManagerTest.testNoBusyPollWhileFindCoordinatorRequestInFlight`
+    /// (KAFKA-20253): while a FindCoordinator request is in flight and its
+    /// backoff has already elapsed, poll() must not return
+    /// `time_until_next_poll_ms == 0`, which drives the background task into a
+    /// `NetworkClient::poll(0)` busy-spin. Java asserts `> 0`; the value is
+    /// `PollResult.EMPTY`'s `Long.MAX_VALUE`, asserted exactly here.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testNoBusyPollWhileFindCoordinatorRequestInFlight"
+    )]
+    async fn test_no_busy_poll_while_find_coordinator_request_in_flight() {
+        let mut manager = setup_manager();
+
+        // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        // Advance well past the retry backoff while the request is still in flight.
+        let res2 = manager.poll(60_000);
+        assert_eq!(
+            0,
+            res2.unsent_requests.len(),
+            "no new request should be sent while one is in flight"
+        );
+        assert!(
+            res2.time_until_next_poll_ms > 0,
+            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got {}",
+            res2.time_until_next_poll_ms
+        );
+        assert_eq!(PollResult::WAIT_FOREVER, res2.time_until_next_poll_ms);
+        drop(res);
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testNullGroupIdShouldThrow`.
     /// Rust's empty-string analog: an empty group id panics in the
     /// constructor.
@@ -978,9 +1100,42 @@ mod tests {
         wait_until(|| manager.coordinator().is_some()).await;
 
         let n = manager.coordinator().expect("coordinator present");
-        assert_eq!(i32::MAX - node().id(), n.id());
+        assert_eq!(node().id(), n.id());
+        // Java's `assertInstanceOf(GroupCoordinatorNode.class, ..)`: the node
+        // equals only a `GroupCoordinatorNode` (`Node`'s class-aware equality),
+        // whose connection id is `+<id>`.
+        assert_eq!(
+            GroupCoordinatorNode::new(node().id(), node().host().to_string(), node().port()).unwrap(),
+            n
+        );
+        assert_eq!("+1", n.id_string());
+        assert_eq!(node().id(), n.id_string().parse::<i32>().unwrap());
         assert_eq!(node().host(), n.host());
         assert_eq!(node().port(), n.port());
+    }
+
+    /// The forwarder wakes the bg task once it has applied the
+    /// FindCoordinator response: the network poll has already returned by
+    /// then (Java applies it inside the poll), and since KAFKA-20253 the
+    /// in-flight poll reported `i64::MAX`, so without the poke the discovered
+    /// coordinator would wait out the poll timeout (seen as a 3 s+ close in
+    /// `consumer_bounce_test::test_async_close`). The wake is ordered after
+    /// the update: once the permit is stored, the coordinator is visible.
+    #[tokio::test]
+    async fn test_forwarder_wakes_bg_task_after_applying_the_response() {
+        let mut manager = setup_manager();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let result = manager.poll(0);
+        let mut unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        let response = build_client_response(&mut unsent, Errors::None, 0);
+        unsent.handler().on_complete(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the forwarder must wake the bg task after applying the response");
+        assert!(manager.coordinator().is_some(), "the coordinator is applied before the wake");
     }
 
     /// Phase 12.5 regression — failure path: when the response receiver
@@ -1034,7 +1189,7 @@ mod tests {
     }
 
     /// Phase 12.5 regression — fatal-error clearing on the failure
-    /// path. Java's `CoordinatorRequestManager.java:124`
+    /// path. Java's `CoordinatorRequestManager.java:131`
     /// (`getAndClearFatalError()`) runs UNCONDITIONALLY at the top of
     /// the `whenComplete` lambda, before branching on success vs.
     /// failure. A stale `GroupAuthorizationFailed` from a prior

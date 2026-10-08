@@ -19,8 +19,13 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// An offset commit failed with a retriable error; committing the latest
-/// consumed offsets again may succeed.
+/// An offset commit failed with a retriable error. This error is generated
+/// on the client side upon receiving retriable error codes from the Group
+/// Coordinator in a commit response.
+///
+/// Unlike [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError), this
+/// error indicates that the commit can be retried. The consumer should attempt
+/// to commit the offsets again.
 ///
 /// Corresponds to Java's `RetriableCommitFailedException`. It has no entry in
 /// `Errors`, so it carries no protocol code.
@@ -50,7 +55,7 @@ impl ConsumerRetriableCommitFailedError {
     ///
     /// Java's text is "Offset commit failed with a retriable **exception**. You
     /// should retry committing the latest consumed offsets."
-    /// (`RetriableCommitFailedException.java:26`). CLAUDE.md §2 bars the word
+    /// (`RetriableCommitFailedException.java:42-43`). CLAUDE.md §2 bars the word
     /// "exception" from Rust code including message text, so this says "error"
     /// instead. The two strings differ by that one word and nothing else.
     pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
@@ -139,7 +144,7 @@ mod tests {
     ///
     /// Java: `RetriableCommitFailedException(Throwable t)` uses the default
     /// message and keeps the cause
-    /// (`RetriableCommitFailedException.java:29-31`).
+    /// (`RetriableCommitFailedException.java:41-44`).
     #[test]
     fn test_retriable_commit_failed_default_message() {
         let cause = Error::local_illegal_state("inner");
@@ -165,7 +170,7 @@ mod tests {
     /// the [`Error`] variant that replaced it.
     ///
     /// `RetriableCommitFailedException extends RetriableException`
-    /// (`RetriableCommitFailedException.java:26`), so unlike
+    /// (`RetriableCommitFailedException.java:32`), so unlike
     /// [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError) it is
     /// both an `ApiException` and retriable.
     #[test]

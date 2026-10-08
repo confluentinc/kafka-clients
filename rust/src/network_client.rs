@@ -36,6 +36,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+use crate::common::errors::{BootstrapResolutionError, UnsupportedVersionError};
 use crate::common::network::NetworkSend;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
@@ -48,8 +49,10 @@ use crate::common::requests::api_versions_request;
 use crate::common::requests::metadata_request;
 use crate::common::requests::{AbstractRequest, RequestBuilder, RequestHeader};
 
+use super::BootstrapConfiguration;
 use super::ClientRequest;
 use super::ClientResponse;
+use super::ClientUtils;
 use super::ClusterConnectionStates;
 use super::HostResolver;
 use super::KafkaClient;
@@ -61,13 +64,36 @@ use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use super::{InFlightRequest, InFlightRequests};
 use crate::common::Error;
 use crate::common::errors::AuthenticationError;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 
 /// Internal state enum for the client lifecycle.
 const STATE_ACTIVE: u8 = 0;
 const STATE_CLOSING: u8 = 1;
 const STATE_CLOSED: u8 = 2;
+
+/// An asynchronous bootstrap DNS resolution in progress (KIP-909).
+///
+/// Java's `CompletableFuture<List<InetSocketAddress>> pendingBootstrapResolution`,
+/// run on the `kafka-bootstrap-dns-resolver` daemon thread of a single-thread
+/// executor. Rust runs [`ClientUtils::parse_addresses`] — a blocking
+/// `getaddrinfo` loop — on a detached OS thread of the same name, one per
+/// attempt (attempts never overlap, so this is the executor's one thread at a
+/// time). No tokio runtime owns that thread, so it can never hold up a runtime's
+/// shutdown (a `spawn_blocking` task would: dropping a runtime waits for its
+/// running blocking tasks without bound), and, as a Java daemon thread, it does
+/// not keep the process alive (DoD #7).
+///
+/// The event loop never awaits the result: `poll()` only `try_recv`s it, so the
+/// resolution can never sit in a `select!` arm or hold up the network poll
+/// (CLAUDE.md §11.6, consumer-threading.md §10).
+struct PendingBootstrapResolution {
+    /// Java's `isDone()` / `getNow()`. Closed without a value when the thread
+    /// failed, Java's `CompletionException`. Dropping it is Java's
+    /// `cancel(true)` plus the `shutdownNow()` interrupt: the thread's
+    /// `is_interrupted` check sees the closed channel and stops at the next URL.
+    result: tokio::sync::oneshot::Receiver<Vec<(String, SocketAddr)>>,
+}
 
 /// Data for an in-progress metadata request.
 #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater$InProgressData")]
@@ -108,6 +134,11 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     rebootstrap_trigger_ms: i64,
     /// Metadata recovery strategy.
     metadata_recovery_strategy: MetadataRecoveryStrategy,
+    /// Whether to send the cluster ID and node ID on ApiVersions RPC for
+    /// checking by the broker (KIP-1242). Java's `metadataClusterCheckEnable`;
+    /// `false` unless a client wires the config in via
+    /// [`set_metadata_cluster_check_enable`](Self::set_metadata_cluster_check_enable).
+    metadata_cluster_check_enable: bool,
     /// True if we should send an ApiVersionRequest when first connecting to a broker.
     discover_broker_versions: bool,
     /// API versions for each node.
@@ -155,6 +186,29 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// sensor). `None` unless a caller wires one in via
     /// [`set_throttle_time_sensor`](Self::set_throttle_time_sensor).
     throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
+
+    // --- KIP-909 asynchronous bootstrap resolution ---
+    /// Java's `bootstrapConfiguration`. [`BootstrapConfiguration::DISABLED`]
+    /// unless a client wires one in via
+    /// [`set_bootstrap_configuration`](Self::set_bootstrap_configuration).
+    bootstrap_configuration: BootstrapConfiguration,
+    /// Java's `Timer bootstrapTimer`, as its deadline: `None` until the first
+    /// poll starts it. `org.apache.kafka.common.utils.Timer` has no translation
+    /// (see [`Time`]); `deadline - now` is its `remainingMs()` and
+    /// `now >= deadline` its `isExpired()`.
+    bootstrap_deadline_ms: Option<i64>,
+    /// Java's `pendingBootstrapResolution`.
+    pending_bootstrap_resolution: Option<PendingBootstrapResolution>,
+    /// Java's `bootstrapResolutionRetryMs`: when the next attempt may start,
+    /// `-1` for "no backoff pending".
+    bootstrap_resolution_retry_ms: i64,
+    /// Java's `bootstrapException`: set once the timeout expired; never
+    /// cleared.
+    bootstrap_error: Option<BootstrapResolutionError>,
+    /// Closed when the latest resolver thread exits: what `close()` waits on
+    /// in place of Java's `bootstrapExecutor.awaitTermination`. Kept after the
+    /// attempt is cancelled, as Java's executor still runs a cancelled task.
+    bootstrap_resolver_exit: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Names one concrete instantiation of [`NetworkClient`] so its
@@ -164,7 +218,7 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
 /// `S` and `H` are Rust-side injection parameters with no counterpart in
 /// Java — `NetworkClient.java` is not generic — and
 /// [`NetworkClient::parse_response`] (Java's `public static
-/// NetworkClient.parseResponse`, `NetworkClient.java:824`) reads neither, but
+/// NetworkClient.parseResponse`, `NetworkClient.java:917`) reads neither, but
 /// Rust still cannot infer them at a call site (E0283).
 pub(crate) type NetworkClientStatics = NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>;
 
@@ -173,7 +227,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// into the classes the rest of the client dispatches on.
     ///
     /// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
-    /// RequestHeader)` (`NetworkClient.java:824-840`), whose whole body is two
+    /// RequestHeader)` (`NetworkClient.java:917-933`), whose whole body is two
     /// `catch` clauses around `AbstractResponse.parseResponse`:
     ///
     ///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
@@ -309,6 +363,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             reconnect_backoff_ms,
             rebootstrap_trigger_ms,
             metadata_recovery_strategy,
+            metadata_cluster_check_enable: false,
             discover_broker_versions,
             api_versions,
             nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
@@ -325,6 +380,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             in_progress: None,
             metadata_attempt_start_ms: None,
             throttle_time_sensor: None,
+            bootstrap_configuration: BootstrapConfiguration::DISABLED,
+            bootstrap_deadline_ms: None,
+            pending_bootstrap_resolution: None,
+            bootstrap_resolution_retry_ms: -1,
+            bootstrap_error: None,
+            bootstrap_resolver_exit: None,
         }
     }
 
@@ -387,6 +448,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             reconnect_backoff_ms,
             rebootstrap_trigger_ms: i64::MAX,
             metadata_recovery_strategy,
+            metadata_cluster_check_enable: false,
             discover_broker_versions,
             api_versions,
             nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
@@ -403,7 +465,53 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             in_progress: None,
             metadata_attempt_start_ms: None,
             throttle_time_sensor: None,
+            bootstrap_configuration: BootstrapConfiguration::DISABLED,
+            bootstrap_deadline_ms: None,
+            pending_bootstrap_resolution: None,
+            bootstrap_resolution_retry_ms: -1,
+            bootstrap_error: None,
+            bootstrap_resolver_exit: None,
         }
+    }
+
+    /// Wires in the bootstrap resolution settings (KIP-909), which default to
+    /// [`BootstrapConfiguration::DISABLED`]. Java passes the configuration to
+    /// the `NetworkClient` constructor; it is set after construction here, like
+    /// the clock and the throttle-time sensor below, so the many constructor
+    /// call sites that pass `DISABLED` in Java need no change.
+    ///
+    /// As Java's constructor does, an enabled configuration kicks off the
+    /// first DNS resolution at once, so it overlaps with the caller finishing
+    /// construction. The timer is deliberately not started here: `poll()`
+    /// remains the driver — it starts the timer, observes the result, records
+    /// the failure and drives retries.
+    pub fn set_bootstrap_configuration(&mut self, bootstrap_configuration: BootstrapConfiguration) {
+        self.cancel_bootstrap_resolution();
+        self.bootstrap_configuration = bootstrap_configuration;
+        // Bootstrap timer is lazily initialized on the first poll so its budget represents
+        // "time we spend on bootstrap once polling begins" — an idle gap between construction
+        // and the first poll should not eat into that budget.
+        self.bootstrap_deadline_ms = None;
+        if !self.bootstrap_configuration.is_disabled() {
+            self.start_bootstrap_resolution();
+        }
+    }
+
+    /// Wires in `metadata.cluster.check.enable` (KIP-1242), which defaults to
+    /// `false`. Java passes it to the `NetworkClient` constructor
+    /// (`NetworkClient.java:358,391`, from `ClientUtils.createNetworkClient`,
+    /// `ClientUtils.java:309`); it is set after construction here, following
+    /// the [`set_bootstrap_configuration`](Self::set_bootstrap_configuration)
+    /// precedent, so the many constructor call sites that pass `false` in Java
+    /// need no change.
+    ///
+    /// When enabled and the metadata recovery strategy is not
+    /// [`MetadataRecoveryStrategy::None`], the ApiVersions request to a node
+    /// carries the cluster id and node id the client expects, once the cluster
+    /// id is known, so a 4.4+ broker can detect a misrouted connection and
+    /// answer `REBOOTSTRAP_REQUIRED`.
+    pub fn set_metadata_cluster_check_enable(&mut self, metadata_cluster_check_enable: bool) {
+        self.metadata_cluster_check_enable = metadata_cluster_check_enable;
     }
 
     /// Replaces the clock, which defaults to [`SystemTime`]. Java passes the
@@ -427,7 +535,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// `selector.poll()` using `self.time.milliseconds()`. For tests with mock
     /// selectors (instant poll), the fresh timestamp should equal `now`.
     #[cfg(test)]
-    fn set_mock_time(&mut self) {
+    pub(crate) fn set_mock_time(&mut self) {
         self.time = Arc::new(PollTime(Arc::clone(&self.poll_time_store)));
     }
 
@@ -566,12 +674,15 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 Err(e) => {
                     // Java propagates the `UnsupportedVersionException` object into
                     // both the `ClientResponse` and `handleFailedRequest`
-                    // (`NetworkClient.java:588-595`), so the caller sees
+                    // (`NetworkClient.java:653-660`), so the caller sees
                     // `NodeApiVersions.latestUsableVersion`'s diagnostic — which API,
                     // which range was asked for, what the broker supports. The bare
                     // `message()` is carried (not `Display`, which prefixes the class
                     // name and would double up when the consumer rebuilds the error).
-                    let version_mismatch = e.message().to_string();
+                    let version_mismatch = match &e {
+                        Error::UnsupportedVersion(e) => e.clone(),
+                        other => UnsupportedVersionError::new(other.message()),
+                    };
                     kafka_debug!(
                         self.log_context,
                         "Version mismatch when attempting to send {} with correlation id {} to {}",
@@ -620,8 +731,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         //
         // Java wraps **both** steps in one `try`: `NetworkClient.send` catches
         // `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-        // (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
-        // at `:608` — inside that same `try`. Serialization is a second place the
+        // (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
+        // at `:673` — inside that same `try`. Serialization is a second place the
         // exception is raised, because the generated `write` refuses to encode a
         // non-default field the chosen version cannot carry
         // (`FieldSpec.generateNonIgnorableFieldCheck`). Both failures must therefore
@@ -662,7 +773,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// aborted send, instead of putting it on the wire.
     ///
     /// This is the body of Java's `catch (UnsupportedVersionException)` in
-    /// `NetworkClient.send` (`NetworkClient.java:583-597`), shared by the two failures
+    /// `NetworkClient.send` (`NetworkClient.java:648-663`), shared by the two failures
     /// that `try` covers: `builder.build(version)` and `request.toSend(header)`.
     fn abort_send_with_unsupported_version(
         &mut self,
@@ -672,15 +783,17 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         error: &std::io::Error,
     ) {
         // Java propagates the `UnsupportedVersionException` the builder
-        // threw (`NetworkClient.java:588-595`), so the builder's own
-        // diagnostic is what the caller reads. `RequestBuilder::build`
-        // reports through `io::Error`, whose `Display` is that bare text;
-        // prefixing it with the class name here rendered
+        // threw (`NetworkClient.java:653-660`), so the builder's own
+        // diagnostic, and its class, is what the caller reads. A builder
+        // carries the error object inside the `io::Error`
+        // (`UnsupportedVersionError::into_io_error`); a serialize failure is a
+        // plain `io::Error` whose text is the message. Either way the message
+        // is not prefixed with the class name here: that rendered
         // "UnsupportedVersionError: UnsupportedVersionError: .." once
         // `Error`'s `Display` added its own (finding 232).
-        let error_msg = error.to_string();
+        let version_mismatch = UnsupportedVersionError::from_io_error(error);
         // Java builds the response header at `builder.latestAllowedVersion()`, not at
-        // the version that failed (`NetworkClient.java:589`).
+        // the version that failed (`NetworkClient.java:653`).
         let header = client_request
             .make_header(client_request.request_builder().latest_allowed_version())
             .expect("Failed to create header");
@@ -691,14 +804,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             now,
             now,
             false,
-            Some(error_msg.clone()),
+            Some(version_mismatch.clone()),
             None,
             None,
         );
         if !is_internal_request {
             self.aborted_sends.push(client_response);
         } else if *client_request.api_key() == ApiKeys::METADATA {
-            self.handle_failed_request(now, Some(Error::unsupported_version(error_msg)));
+            self.handle_failed_request(now, Some(Error::UnsupportedVersion(version_mismatch)));
         }
     }
 
@@ -796,6 +909,24 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let receives: Vec<(String, Option<Vec<u8>>)> = self.selector.drain_completed_receives();
 
         for (source, payload) in receives {
+            // A receive whose connection an earlier receive of this same loop
+            // closed: the KIP-1242 `REBOOTSTRAP_REQUIRED` branch of
+            // `handle_api_versions_response` disconnects every known node, and
+            // `process_disconnection` has already failed this node's in-flight
+            // requests as disconnected. Java's `completeNext` would throw
+            // `IllegalStateException` here and the exception would escape
+            // `poll()`, dropping the rest of the poll's responses, which Java's
+            // I/O threads then catch. Rust skips the stale receive instead
+            // (deviation, Milestone 16 Phase 4 / Critic 94 Issue 1): a panic here
+            // would end the consumer's background task, which has no catch.
+            if self.in_flight_requests.is_empty_for_node(&source) && self.connection_states.is_disconnected(&source) {
+                kafka_debug!(
+                    self.log_context,
+                    "Ignoring a response from node {} received before its connection was closed by a rebootstrap.",
+                    source
+                );
+                continue;
+            }
             let mut req = self.in_flight_requests.complete_next(&source);
 
             if let Some(payload_bytes) = payload {
@@ -806,7 +937,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
                 // Java calls the static `parseResponse` here, not
                 // `AbstractResponse.parseResponse` directly
-                // (`NetworkClient.java:999`), so the two `catch` clauses apply.
+                // (`NetworkClient.java:1092`), so the two `catch` clauses apply.
                 match Self::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
                         // Record the throttle time of EVERY response (Java
@@ -873,7 +1004,24 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let node = req.destination.clone();
         if api_versions_response.data().error_code != Errors::None.code() {
             let request_version = req.request.as_ref().map(|r| r.version()).unwrap_or(0);
-            if request_version == 0 || api_versions_response.data().error_code != Errors::UnsupportedVersion.code() {
+            if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+                && api_versions_response.data().error_code == Errors::RebootstrapRequired.code()
+            {
+                // KIP-1242 (`NetworkClient.java:1120-1130`): the broker found the
+                // cluster id / node id this client sent do not match its own, so
+                // the connection is misrouted and the cached metadata is stale.
+                // Disconnect from every known node, as `handleRebootstrap` does,
+                // and rebootstrap.
+                kafka_info!(
+                    self.log_context,
+                    "Rebootstrap requested by server due to cluster metadata mismatch for cluster {:?} and node {}.",
+                    self.cluster_id(),
+                    node
+                );
+                self.disconnect_all_and_rebootstrap(responses, now).await;
+            } else if request_version == 0
+                || api_versions_response.data().error_code != Errors::UnsupportedVersion.code()
+            {
                 kafka_warn!(
                     self.log_context,
                     "Received error {:?} from node {} when making an ApiVersionsRequest with correlation id {}. Disconnecting.",
@@ -975,9 +1123,26 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        for (node, builder) in ready_nodes {
+        for (node, mut builder) in ready_nodes {
             kafka_debug!(self.log_context, "Initiating API versions fetch from node {}.", node);
             self.connection_states.checking_api_versions(&node);
+            // If we know the cluster ID and node ID we are connecting to, we can include
+            // those details in the ApiVersions request for checking in the broker,
+            // provided that the metadata recovery strategy is not NONE. (KIP-1242,
+            // `NetworkClient.java:1214-1224`)
+            if self.metadata_recovery_strategy != MetadataRecoveryStrategy::None && self.metadata_cluster_check_enable {
+                let cluster_id = self.cluster_id();
+                // Java's `Integer.parseInt(node)`. A connection id is always a
+                // node's `idString`, which parses as its integer id, including a
+                // group coordinator's `+<id>` (`GroupCoordinatorNode`). An id that
+                // does not parse cannot name a broker to check, so it sends none.
+                if let (Some(cluster_id), Ok(node_id)) = (cluster_id, node.parse::<i32>())
+                    && node_id >= 0
+                {
+                    builder.set_cluster_id(Some(&cluster_id));
+                    builder.set_node_id(node_id);
+                }
+            }
             let client_request = self.new_client_request(&node, Box::new(builder), now, true);
             self.do_send(client_request, true, now);
             self.nodes_needing_api_versions_fetch.remove(&node);
@@ -1021,27 +1186,35 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleRebootstrap")]
     async fn handle_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap && self.needs_rebootstrap(now) {
-            let nodes = self.fetch_nodes();
-            let node_ids: Vec<String> = nodes.iter().map(|n| n.id_string().to_string()).collect();
-            for node_id in node_ids {
-                self.selector.close_channel(&node_id).await;
-                if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
-                    kafka_info!(
-                        self.log_context,
-                        "Disconnecting from node {} due to client rebootstrap.",
-                        node_id
-                    );
-                    self.process_disconnection(
-                        responses,
-                        &node_id,
-                        now,
-                        ChannelState::new(channel_state::State::LocalClose),
-                        false,
-                    );
-                }
-            }
-            self.rebootstrap(now);
+            self.disconnect_all_and_rebootstrap(responses, now).await;
         }
+    }
+
+    /// Closes and disconnects every node the metadata knows, then rebootstraps.
+    ///
+    /// The shared body of `handleRebootstrap` (`NetworkClient.java:1232-1243`)
+    /// and the `REBOOTSTRAP_REQUIRED` branch of `handleApiVersionsResponse`
+    /// (`NetworkClient.java:1120-1130`), which Java writes out twice.
+    async fn disconnect_all_and_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+        let node_ids: Vec<String> = self.fetch_nodes().iter().map(|n| n.id_string().to_string()).collect();
+        for node_id in node_ids {
+            self.selector.close_channel(&node_id).await;
+            if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
+                kafka_info!(
+                    self.log_context,
+                    "Disconnecting from node {} due to client rebootstrap.",
+                    node_id
+                );
+                self.process_disconnection(
+                    responses,
+                    &node_id,
+                    now,
+                    ChannelState::new(channel_state::State::LocalClose),
+                    false,
+                );
+            }
+        }
+        self.rebootstrap(now);
     }
 
     /// Complete all responses by invoking their callbacks.
@@ -1065,7 +1238,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_flight_requests
                 .increment_throttle_time(node_id, throttle_time_ms as i64);
             self.connection_states.throttle(node_id, now + throttle_time_ms as i64);
-            kafka_trace!(
+            // `log.warn` since KAFKA-19117 (525b278288, `NetworkClient.java:1076`).
+            kafka_warn!(
                 self.log_context,
                 "Connection to node {} is throttled for {} ms until timestamp {}",
                 node_id,
@@ -1093,7 +1267,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             channel_state::State::AuthenticationFailed => {
                 // Java: `AuthenticationException exception = disconnectState.exception();
                 // connectionStates.authenticationFailed(nodeId, now, exception)`
-                // (`NetworkClient.java:887-888`) — the object, so the subclass the
+                // (`NetworkClient.java:980-981`) — the object, so the subclass the
                 // channel raised (`SaslAuthenticationException` vs
                 // `SslAuthenticationException`) survives all the way to
                 // `client.authenticationException(node)`. `ChannelState` only
@@ -1143,7 +1317,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             node_id,
             // Java passes `disconnectState.exception()` — the object itself, typed
             // `AuthenticationException` and non-null only in the
-            // AUTHENTICATION_FAILED state (`NetworkClient.java:906`,
+            // AUTHENTICATION_FAILED state (`NetworkClient.java:999`,
             // `ChannelState.java:76`), which `DefaultMetadataUpdater` plants with
             // `metadata.fatalError(e)` and `maybeThrowAnyException()` rethrows.
             // `ChannelState` carries that typed error, so it is forwarded
@@ -1236,7 +1410,299 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         false
     }
 
+    /// Attempts to resolve bootstrap server addresses via DNS and create an
+    /// initial bootstrap cluster. Called from [`poll`](KafkaClient::poll); it
+    /// never blocks on DNS resolution.
+    ///
+    /// DNS resolution runs off the event loop (see
+    /// [`PendingBootstrapResolution`]), so the event loop remains responsive
+    /// even if DNS lookups block or take a long time, and the bootstrap timeout
+    /// can expire while a resolution is still pending.
+    ///
+    /// When the timeout expires, a [`BootstrapResolutionError`] is recorded on
+    /// the metadata updater; it is not returned from here.
+    ///
+    /// Java first checks `Thread.interrupted()` and throws `InterruptException`;
+    /// a tokio task has no interrupt flag, so that branch has no counterpart.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#ensureBootstrapped")]
+    pub(crate) fn ensure_bootstrapped(&mut self, current_time_ms: i64) {
+        if self.bootstrap_configuration.is_disabled() || self.is_bootstrapped() {
+            return;
+        }
+
+        if self.bootstrap_error.is_some() {
+            return;
+        }
+
+        // Start the timer on the first poll so its budget represents "time we spend on
+        // bootstrap since polling began" — the caller may have created the client well before
+        // its first API call, and we don't want that idle gap to eat into the budget.
+        self.maybe_start_bootstrap_timer();
+
+        // Check if a pending resolution completed before checking the timeout, so that a
+        // result arriving at the same time as the deadline is not incorrectly rejected.
+        if self.maybe_process_bootstrap_resolution_result(current_time_ms) {
+            return;
+        }
+
+        // Record a timeout failure before possibly triggering a new resolution.
+        // maybe_start_bootstrap_resolution skips if bootstrap_error is set, so we
+        // don't kick off a fresh resolution after the failure has been recorded.
+        self.check_bootstrap_timeout(current_time_ms);
+        self.maybe_start_bootstrap_resolution(current_time_ms);
+    }
+
+    /// Java's `bootstrapTimer = time.timer(bootstrapResolveTimeoutMs)` when the
+    /// timer is still `null`.
+    fn maybe_start_bootstrap_timer(&mut self) {
+        if self.bootstrap_deadline_ms.is_none() {
+            self.bootstrap_deadline_ms = Some(
+                self.time
+                    .milliseconds()
+                    .saturating_add(self.bootstrap_configuration.bootstrap_resolve_timeout_ms),
+            );
+        }
+    }
+
+    /// Record a permanent bootstrap failure on the metadata if the timeout has
+    /// expired. The error is not returned here; callers observe it through
+    /// their metadata layer ([`Metadata::maybe_return_fatal_error`] for the
+    /// producer and consumer, `AdminMetadataManager::bootstrap_fatal_error` for
+    /// the admin client).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#checkBootstrapTimeout")]
+    fn check_bootstrap_timeout(&mut self, current_time_ms: i64) {
+        let expired = self.bootstrap_deadline_ms.is_some_and(|deadline| current_time_ms >= deadline);
+        if expired && self.bootstrap_error.is_none() {
+            self.cancel_bootstrap_resolution();
+            let error = BootstrapResolutionError::new(format!(
+                "Failed to resolve bootstrap servers after {}ms. Please check your bootstrap.servers configuration and DNS settings.",
+                self.bootstrap_configuration.bootstrap_resolve_timeout_ms
+            ));
+            self.bootstrap_error = Some(error.clone());
+            self.bootstrap_failed(Error::BootstrapResolution(error));
+        }
+    }
+
+    /// Trigger a new async DNS resolution if none is in progress and the retry
+    /// backoff has elapsed.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#maybeStartBootstrapResolution")]
+    fn maybe_start_bootstrap_resolution(&mut self, current_time_ms: i64) {
+        if self.bootstrap_error.is_some() {
+            return;
+        }
+
+        if self.pending_bootstrap_resolution.is_some() {
+            return;
+        }
+
+        if self.bootstrap_resolution_retry_ms >= 0 && current_time_ms < self.bootstrap_resolution_retry_ms {
+            return;
+        }
+
+        self.bootstrap_resolution_retry_ms = -1;
+        self.maybe_start_bootstrap_timer();
+
+        self.start_bootstrap_resolution();
+    }
+
+    /// Java's `CompletableFuture.supplyAsync(() -> ClientUtils.parseAddresses(..),
+    /// bootstrapExecutor)`, on a detached `kafka-bootstrap-dns-resolver` thread
+    /// (see [`PendingBootstrapResolution`]). If the thread cannot be spawned
+    /// the attempt counts as failed and is retried after the backoff, as a
+    /// failed `supplyAsync` task would be.
+    ///
+    /// The thread pokes the selector's wakeup primitive once the result is in,
+    /// so a poll blocked on its timeout picks it up at once rather than after
+    /// the timeout. Java has no such wake; it is a latency improvement only, and
+    /// a woken poll returning early is always allowed.
+    fn start_bootstrap_resolution(&mut self) {
+        // `enabled` always sets it; `DISABLED` never starts a resolution.
+        let Some(client_dns_lookup) = self.bootstrap_configuration.client_dns_lookup else {
+            return;
+        };
+        let urls = self.bootstrap_configuration.bootstrap_servers.clone();
+        let wakeup = self.selector.wakeup_handle();
+        let (sender, result) = tokio::sync::oneshot::channel();
+        let (exit_sender, exit) = tokio::sync::oneshot::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("kafka-bootstrap-dns-resolver".to_string())
+            .spawn(move || {
+                // Dropped when the thread ends, however it ends.
+                let _exit = exit_sender;
+                // `Thread.currentThread().isInterrupted()`: the attempt was
+                // cancelled once its result receiver is gone.
+                let servers = ClientUtils::parse_addresses(&urls, client_dns_lookup, || sender.is_closed());
+                let _ = sender.send(servers);
+                wakeup.notify_one();
+            });
+        match spawned {
+            // Detached: the `JoinHandle` is dropped, as Java never joins the
+            // executor's thread.
+            Ok(_) => self.bootstrap_resolver_exit = Some(exit),
+            Err(error) => {
+                kafka_warn!(self.log_context, "Could not start bootstrap DNS resolution: {}", error);
+            },
+        }
+        // Without a thread the sender is already gone, so the next poll sees a
+        // failed attempt and schedules the retry.
+        self.pending_bootstrap_resolution = Some(PendingBootstrapResolution { result });
+    }
+
+    /// How long `close()` waits for the resolver thread per phase: Java's
+    /// `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1,
+    /// TimeUnit.SECONDS)` (`NetworkClient.java:806`).
+    const BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Java's `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1, SECONDS)`
+    /// (`ThreadUtils.java:95-117`): wait up to 1 s for the resolver to finish,
+    /// then interrupt it (`shutdownNow()`) and wait up to 1 s more, then give up
+    /// with Java's error log. The Rust interrupt — the closed result channel —
+    /// was already delivered by `cancel_bootstrap_resolution`, which `close()`
+    /// runs first, so the two waits differ only in what is logged. The thread is
+    /// detached: giving up leaves it to finish its current lookup and exit on
+    /// its own, without blocking anything.
+    async fn shutdown_bootstrap_resolver_quietly(&mut self) {
+        let Some(mut exit) = self.bootstrap_resolver_exit.take() else {
+            return;
+        };
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if tokio::time::timeout(Self::BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT, &mut exit)
+            .await
+            .is_err()
+        {
+            kafka_error!(
+                self.log_context,
+                "Executor kafka-bootstrap-dns-resolver did not terminate in time"
+            );
+        }
+    }
+
+    /// Check if a pending bootstrap DNS resolution has completed and process
+    /// its result.
+    ///
+    /// Returns `true` if the client is now bootstrapped and the caller should
+    /// return early.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#maybeProcessBootstrapResolutionResult")]
+    fn maybe_process_bootstrap_resolution_result(&mut self, current_time_ms: i64) -> bool {
+        let servers = match self.pending_bootstrap_resolution.as_mut() {
+            None => return false,
+            Some(pending) => match pending.result.try_recv() {
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
+                Ok(servers) => servers,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    kafka_debug!(self.log_context, "DNS resolution failed");
+                    Vec::new()
+                },
+            },
+        };
+
+        self.pending_bootstrap_resolution = None;
+
+        if !servers.is_empty() {
+            kafka_debug!(
+                self.log_context,
+                "Bootstrap DNS resolution succeeded, {} servers resolved",
+                servers.len()
+            );
+            self.bootstrap(servers);
+            return true;
+        }
+
+        let remaining_ms = self
+            .bootstrap_deadline_ms
+            .map_or(0, |deadline| (deadline - current_time_ms).max(0));
+        kafka_debug!(
+            self.log_context,
+            "Failed to resolve bootstrap servers, will retry after {}ms. Remaining time: {}ms",
+            self.bootstrap_configuration.retry_backoff_ms,
+            remaining_ms
+        );
+        self.bootstrap_resolution_retry_ms =
+            current_time_ms.saturating_add(self.bootstrap_configuration.retry_backoff_ms);
+        false
+    }
+
+    /// Java's `cancelBootstrapResolution`.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#cancelBootstrapResolution")]
+    fn cancel_bootstrap_resolution(&mut self) {
+        // Dropping the receiver interrupts the resolver thread at its next URL.
+        self.pending_bootstrap_resolution = None;
+        self.bootstrap_resolution_retry_ms = -1;
+    }
+
+    /// Handle the case when there are no nodes available.
+    ///
+    /// If bootstrap is disabled or already complete, this is Java's
+    /// `IllegalStateException("There are no nodes in the Kafka cluster")`, kept
+    /// as the panic the existing translation of `leastLoadedNode` raises for it.
+    /// If bootstrap is enabled but not yet complete, return an empty
+    /// [`LeastLoadedNode`] so that the caller can continue polling while DNS
+    /// resolution finishes.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleEmptyNodeList")]
+    fn handle_empty_node_list(&self) -> LeastLoadedNode {
+        if self.bootstrap_configuration.is_disabled() || self.is_bootstrapped() {
+            panic!("There are no nodes in the Kafka cluster");
+        }
+
+        kafka_debug!(self.log_context, "No nodes available yet, still in bootstrap phase");
+        LeastLoadedNode::new(None, false)
+    }
+
     // --- DefaultMetadataUpdater delegation ---
+
+    /// Whether the metadata has been bootstrapped. DefaultMetadataUpdater: we
+    /// are bootstrapped if we have any nodes available (either from DNS
+    /// resolution or metadata response).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#isBootstrapped")]
+    fn is_bootstrapped(&self) -> bool {
+        if let Some(ref metadata) = self.metadata {
+            !metadata.fetch().nodes().is_empty()
+        } else if let Some(ref updater) = self.external_metadata_updater {
+            updater.is_bootstrapped()
+        } else {
+            false
+        }
+    }
+
+    /// Bootstrap the metadata cache with the given addresses.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#bootstrap")]
+    fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
+        if let Some(ref metadata) = self.metadata {
+            metadata.bootstrap(addresses);
+        } else if let Some(ref mut updater) = self.external_metadata_updater {
+            updater.bootstrap(addresses);
+        }
+    }
+
+    /// Record a permanent bootstrap DNS resolution failure.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater#bootstrapFailed")]
+    fn bootstrap_failed(&mut self, error: Error) {
+        if let Some(ref metadata) = self.metadata {
+            metadata.bootstrap_fatal_error(error);
+        } else if let Some(ref mut updater) = self.external_metadata_updater {
+            updater.bootstrap_failed(error);
+        }
+    }
+
+    /// Gets the current cluster id without blocking, `None` if unknown.
+    ///
+    /// Java's `MetadataUpdater.clusterId()`: `DefaultMetadataUpdater` reads the
+    /// metadata's `ClusterResource` (`NetworkClient.java:1426-1433`); an
+    /// external updater answers for itself, `None` by default.
+    fn cluster_id(&self) -> Option<String> {
+        if let Some(ref metadata) = self.metadata {
+            metadata.fetch().cluster_resource().cluster_id().map(str::to_string)
+        } else if let Some(ref updater) = self.external_metadata_updater {
+            updater.cluster_id()
+        } else {
+            None
+        }
+    }
 
     /// Gets the current cluster nodes from metadata.
     fn fetch_nodes(&self) -> Vec<crate::common::Node> {
@@ -1297,7 +1763,10 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let least_loaded = self.least_loaded_node(now);
 
         // Rebootstrap if needed and configured.
+        // Only rebootstrap if we've already completed initial bootstrap - otherwise we're still
+        // in the initial DNS resolution phase and should let ensure_bootstrapped() handle it.
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+            && self.is_bootstrapped()
             && !least_loaded.has_node_available_or_connection_ready()
         {
             self.rebootstrap(now);
@@ -1494,7 +1963,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn authentication_error(&self, node: &crate::common::Node) -> Option<Error> {
         // Java: `return connectionStates.authenticationException(node.idString())`
-        // (`NetworkClient.java:506-507`) — the object, so the subclass reaches the
+        // (`NetworkClient.java:571-572`) — the object, so the subclass reaches the
         // caller.
         self.connection_states.authentication_error(node.id_string()).cloned()
     }
@@ -1508,6 +1977,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.last_poll_time_ms = now;
         #[cfg(test)]
         self.poll_time_store.store(now, Ordering::Relaxed);
+        self.ensure_bootstrapped(now);
 
         if !self.aborted_sends.is_empty() {
             let mut responses = Vec::new();
@@ -1573,7 +2043,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode {
         let nodes = self.fetch_nodes();
         if nodes.is_empty() {
-            panic!("There are no nodes in the Kafka cluster");
+            return self.handle_empty_node_list();
         }
 
         let mut inflight = usize::MAX;
@@ -1746,6 +2216,8 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             .compare_exchange(STATE_CLOSING, STATE_CLOSED, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            self.cancel_bootstrap_resolution();
+            self.shutdown_bootstrap_resolver_quietly().await;
             self.selector.close().await;
             if let Some(ref metadata) = self.metadata {
                 metadata.close();
@@ -1780,9 +2252,11 @@ impl Time for PollTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::internals::UnsupportedProtocolFieldError;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     use crate::ApiVersionsResponseData;
+    use crate::ClientDnsLookup;
     use crate::HostResolver;
     use crate::KafkaClient;
     use crate::MetadataRequestData;
@@ -1869,6 +2343,17 @@ mod tests {
         ) {
         }
 
+        /// `ManualMetadataUpdater` is designed for cases where nodes are
+        /// manually set, so we consider it bootstrapped if nodes have been
+        /// provided.
+        fn is_bootstrapped(&self) -> bool {
+            !self.nodes.is_empty()
+        }
+
+        /// `ManualMetadataUpdater` doesn't use `NetworkClient`'s bootstrap
+        /// mechanism; nodes should be set manually via the constructor.
+        fn bootstrap(&mut self, _addresses: Vec<(String, SocketAddr)>) {}
+
         fn close(&mut self) {}
     }
 
@@ -1879,19 +2364,38 @@ mod tests {
 
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
-        failure: Option<Error>,
+        /// Shared with the test, which cannot reach the updater once it is boxed
+        /// into the client (Java's test keeps a direct reference instead).
+        failure: Arc<std::sync::Mutex<Option<Error>>>,
+        /// Java's `rebootstrapCount` (0ef4a4c80e), shared for the same reason.
+        rebootstrap_count: Arc<std::sync::atomic::AtomicI32>,
     }
 
     impl TestMetadataUpdater {
         fn new(nodes: Vec<Node>) -> Self {
-            Self { nodes, failure: None }
+            Self {
+                nodes,
+                failure: Arc::new(std::sync::Mutex::new(None)),
+                rebootstrap_count: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            }
         }
 
-        /// Returns and clears the last failure.
-        #[expect(dead_code)]
-        fn get_and_clear_failure(&mut self) -> Option<Error> {
-            self.failure.take()
+        /// A handle on the recorded failure that outlives boxing the updater.
+        fn failure_handle(&self) -> Arc<std::sync::Mutex<Option<Error>>> {
+            Arc::clone(&self.failure)
         }
+
+        /// A handle on the rebootstrap count that outlives boxing the updater;
+        /// reading it is Java's `getRebootstrapCount()`.
+        fn rebootstrap_count_handle(&self) -> Arc<std::sync::atomic::AtomicI32> {
+            Arc::clone(&self.rebootstrap_count)
+        }
+    }
+
+    /// Java's `TestMetadataUpdater.getAndClearFailure`, through a
+    /// [`TestMetadataUpdater::failure_handle`].
+    fn get_and_clear_failure(handle: &std::sync::Mutex<Option<Error>>) -> Option<Error> {
+        handle.lock().unwrap().take()
     }
 
     impl MetadataUpdater for TestMetadataUpdater {
@@ -1909,14 +2413,21 @@ mod tests {
 
         fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
             if let Some(err) = maybe_auth_error {
-                self.failure = Some(err);
+                *self.failure.lock().unwrap() = Some(err);
             }
         }
 
         fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<Error>) {
             if let Some(err) = maybe_fatal_error {
-                self.failure = Some(err);
+                *self.failure.lock().unwrap() = Some(err);
             }
+        }
+
+        /// Java's `TestMetadataUpdater.rebootstrap` override: count, then
+        /// delegate to `ManualMetadataUpdater.rebootstrap`, which is the
+        /// interface's no-op default.
+        fn rebootstrap(&mut self, _now: i64) {
+            self.rebootstrap_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn handle_successful_response(
@@ -1927,6 +2438,17 @@ mod tests {
         ) {
         }
 
+        /// `ManualMetadataUpdater` is designed for cases where nodes are
+        /// manually set, so we consider it bootstrapped if nodes have been
+        /// provided.
+        fn is_bootstrapped(&self) -> bool {
+            !self.nodes.is_empty()
+        }
+
+        /// `ManualMetadataUpdater` doesn't use `NetworkClient`'s bootstrap
+        /// mechanism; nodes should be set manually via the constructor.
+        fn bootstrap(&mut self, _addresses: Vec<(String, SocketAddr)>) {}
+
         fn close(&mut self) {}
     }
 
@@ -1935,8 +2457,20 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
+        create_network_client_with_failure_handle(reconnect_backoff_max_ms).0
+    }
+
+    /// [`create_network_client`], also returning the metadata updater's
+    /// [`TestMetadataUpdater::failure_handle`].
+    fn create_network_client_with_failure_handle(
+        reconnect_backoff_max_ms: i64,
+    ) -> (
+        NetworkClient<MockSelector, TestHostResolver>,
+        Arc<std::sync::Mutex<Option<Error>>>,
+    ) {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
+        let failure = updater.failure_handle();
         let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
@@ -1956,7 +2490,7 @@ mod tests {
             LogContext::empty(),
         );
         client.set_mock_time();
-        client
+        (client, failure)
     }
 
     /// Creates a `NetworkClient` with static nodes (0 backoff).
@@ -2556,21 +3090,23 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testUnsupportedVersionDuringInternalMetadataRequest")]
     async fn test_unsupported_version_during_internal_metadata_request() {
-        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let (mut client, failure) = create_network_client_with_failure_handle(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        // Disabling auto topic creation for versions less than 4 is not supported.
-        // Build a metadata_request::Builder that targets version 3 only, with
-        // allow_auto_topic_creation=false, which should fail.
+        // disabling auto topic creation for versions less than 4 is not supported
         let builder =
             metadata_request::Builder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         client.send_internal_metadata_request(builder, node.id_string(), now);
 
-        // The MetadataUpdater should have recorded a failure.
-        // We can't easily access the TestMetadataUpdater through the Box<dyn MetadataUpdater>,
-        // but the send_internal_metadata_request will have triggered handle_failed_request.
-        // The best we can verify here is that no in-flight requests remain.
+        // Java: `assertEquals(UnsupportedProtocolFieldException.class,
+        // metadataUpdater.getAndClearFailure().getClass())`. The class is a
+        // crate-private kind of `UnsupportedVersion` here (PLAN D4).
+        let failure = get_and_clear_failure(&failure).expect("the metadata updater records the failure");
+        assert!(
+            UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(&failure),
+            "expected the UnsupportedProtocolField kind, got {failure:?}"
+        );
         assert_eq!(0, client.in_flight_request_count());
     }
 
@@ -2579,8 +3115,8 @@ mod tests {
     ///
     /// Java covers both with a single `try`: `NetworkClient.send` catches
     /// `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-    /// (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
-    /// inside it at `:608`. The serialize half became reachable when the generator
+    /// (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
+    /// inside it at `:673`. The serialize half became reachable when the generator
     /// gained Java's non-default-at-unsupported-version guard (PLAN §9.1); before
     /// that fix this call site was an `.expect(..)`, so the whole class of condition
     /// would have panicked the I/O task instead of taking the path the callers'
@@ -2616,7 +3152,8 @@ mod tests {
         assert_eq!(1, responses.len(), "the failed send must surface exactly one response");
         let mismatch = responses[0]
             .version_mismatch()
-            .expect("an aborted send carries the version mismatch, not a successful response");
+            .expect("an aborted send carries the version mismatch, not a successful response")
+            .message();
         assert!(
             mismatch.contains("Attempted to write a non-default includeTopicAuthorizedOperations at version 7"),
             "got: {mismatch}"
@@ -3606,8 +4143,8 @@ mod tests {
     /// **object** from the channel to the metadata layer —
     /// `processDisconnection` calls
     /// `metadataUpdater.handleServerDisconnect(now, nodeId, Optional.ofNullable(disconnectState.exception()))`
-    /// (`NetworkClient.java:906`, parameter typed
-    /// `Optional<AuthenticationException>` at `:1245`), the updater plants it with
+    /// (`NetworkClient.java:999`, parameter typed
+    /// `Optional<AuthenticationException>` at `:1487`), the updater plants it with
     /// `metadata.fatalError(e)`, and `Metadata.maybeThrowAnyException()` rethrows
     /// that same object. So the application catches a real
     /// `AuthenticationException`.
@@ -3742,7 +4279,7 @@ mod tests {
     /// `UnsupportedVersionException` object built by
     /// `NodeApiVersions.latestUsableVersion` (`NodeApiVersions.java:162-164`)
     /// into the `ClientResponse` and into `handleFailedRequest`
-    /// (`NetworkClient.java:588-595`), so the caller learns which API, which
+    /// (`NetworkClient.java:653-660`), so the caller learns which API, which
     /// range was asked for, and what the broker supports. The literal string
     /// `"UnsupportedVersionError"` was substituted instead.
     #[tokio::test]
@@ -3792,7 +4329,7 @@ mod tests {
             .find(|r| r.version_mismatch().is_some())
             .expect("the send must be aborted with a version mismatch");
         assert_eq!(
-            response.version_mismatch(),
+            response.version_mismatch().map(|e| e.message()),
             Some(expected.as_str()),
             "the caller must get Java's diagnostic verbatim, not the literal \"UnsupportedVersionError\""
         );
@@ -3801,7 +4338,7 @@ mod tests {
     /// Regression for finding 232, second arm: the request builder's own
     /// diagnostic must reach the caller unprefixed. Java propagates the
     /// `UnsupportedVersionException` the builder threw
-    /// (`NetworkClient.java:588-595`); prefixing it with the class name here
+    /// (`NetworkClient.java:653-660`); prefixing it with the class name here
     /// rendered `"UnsupportedVersionError: UnsupportedVersionError: .."` once
     /// `Error`'s `Display` added its own.
     #[tokio::test]
@@ -3824,11 +4361,18 @@ mod tests {
             .iter()
             .find(|r| r.version_mismatch().is_some())
             .expect("the send must be aborted with a version mismatch");
+        let mismatch = response.version_mismatch().unwrap();
         assert_eq!(
-            response.version_mismatch(),
-            Some("MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field"),
+            "The cluster does not support [allowAutoTopicCreation] in METADATA API version 3. Upgrade the \
+             cluster to METADATA API version >= 4 to enable [allowAutoTopicCreation].",
+            mismatch.message(),
             "no class-name prefix of our own: Display adds exactly one"
         );
+        // The object the builder raised reaches the response, so its crate-private
+        // subclass (Kafka 4.4's `UnsupportedProtocolFieldException`) survives.
+        assert!(UnsupportedProtocolFieldError::is_unsupported_protocol_field_error(
+            &Error::UnsupportedVersion(mismatch.clone())
+        ));
     }
 
     /// Translated from `NetworkClientTest.testAuthenticationFailureWithInFlightMetadataRequest`.
@@ -4275,6 +4819,8 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (ApiVersionsRequest)"
         );
+        // Java parses the sent buffer's header: API_VERSIONS at v5 (ede01b871e).
+        assert_eq!(5, last_sent_api_versions(&client, &node).0);
 
         // Prepare UNSUPPORTED_VERSION response with api_keys containing API_VERSIONS max_version=2
         let mut error_data = ApiVersionsResponseData::new();
@@ -4310,6 +4856,7 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (retry ApiVersionsRequest)"
         );
+        assert_eq!(2, last_sent_api_versions(&client, &node).0);
 
         // Prepare a success response for the retry (correlation_id = 1)
         let mut success_response = default_api_versions_response();
@@ -4358,6 +4905,8 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (ApiVersionsRequest)"
         );
+        // Java parses the sent buffer's header: API_VERSIONS at v5 (ede01b871e).
+        assert_eq!(5, last_sent_api_versions(&client, &node).0);
 
         // Prepare UNSUPPORTED_VERSION response WITHOUT api_keys
         let mut error_data = ApiVersionsResponseData::new();
@@ -4389,6 +4938,7 @@ mod tests {
             client.selector().completed_sends().len(),
             "Expected 1 completed send (retry ApiVersionsRequest)"
         );
+        assert_eq!(0, last_sent_api_versions(&client, &node).0);
 
         // Prepare a success response for the retry (correlation_id = 1)
         let mut success_response = default_api_versions_response();
@@ -4446,8 +4996,456 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // `parseResponse`'s two catch clauses (`NetworkClient.java:824-840`).
+    // `parseResponse`'s two catch clauses (`NetworkClient.java:917-933`).
     // ---------------------------------------------------------------------------
+
+    /// Translated from `NetworkClientTest.testMetadataClusterCheckFailureCausesRebootstrap`
+    /// (0ef4a4c80e, KIP-1242).
+    ///
+    /// A `REBOOTSTRAP_REQUIRED` ApiVersions error from one node disconnects
+    /// every node the metadata knows, including an already-ready one, and
+    /// rebootstraps once.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testMetadataClusterCheckFailureCausesRebootstrap")]
+    async fn test_metadata_cluster_check_failure_causes_rebootstrap() {
+        // `TestUtils.clusterWith(2).nodes()`.
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+
+        // Send the ApiVersionsRequest to the first node
+        client.ready(&node0, now).await;
+        client.poll(0, now).await;
+        let mut response = default_api_versions_response();
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node0,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut response,
+        );
+        // handle ApiVersionsResponse
+        client.poll(0, now).await;
+        // the ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node0.id_string()));
+        client.selector_mut().clear();
+
+        // Send the ApiVersionsRequest to the second node
+        client.ready(&node1, now).await;
+        assert!(!client.connection_failed(&node0));
+        assert!(!client.connection_failed(&node1));
+        client.poll(0, now).await;
+        // `TestUtils.errorApiVersionsResponse(0, Errors.REBOOTSTRAP_REQUIRED, BROKER)`.
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node1,
+            1,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut error_response,
+        );
+        // handle ApiVersionsResponse
+        client.poll(0, now).await;
+        // the ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(client.connection_failed(&node0));
+        assert!(client.connection_failed(&node1));
+        client.selector_mut().clear();
+        assert_eq!(1, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `REBOOTSTRAP_REQUIRED` rebootstraps only under the `rebootstrap`
+    /// recovery strategy (`NetworkClient.java:1120`). Under `none` it is an
+    /// ordinary ApiVersions error: only the answering node is disconnected and
+    /// there is no rebootstrap. Rust-only: Java's test covers the
+    /// `rebootstrap` branch alone.
+    #[tokio::test]
+    async fn test_rebootstrap_required_without_rebootstrap_strategy_disconnects_only_that_node() {
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+
+        await_ready(&mut client, &node0).await;
+        client.ready(&node1, now).await;
+        client.poll(0, now).await;
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node1,
+            1,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut error_response,
+        );
+        client.poll(0, now).await;
+
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(!client.connection_failed(&node0));
+        assert!(client.is_ready(&node0, now));
+        assert!(client.connection_failed(&node1));
+        assert_eq!(0, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The ApiVersions request last sent to `node`: its header version and its
+    /// `(ClusterId, NodeId)`. The in-flight entry holds the request the
+    /// `NetworkSend` was serialized from.
+    fn last_sent_api_versions(
+        client: &NetworkClient<MockSelector, TestHostResolver>,
+        node: &Node,
+    ) -> (i16, Option<String>, i32) {
+        let in_flight = client.in_flight_requests.last_sent(node.id_string());
+        assert_eq!(*in_flight.header.api_key(), ApiKeys::API_VERSIONS);
+        let Some(crate::common::requests::AbstractRequest::ApiVersions(request)) = &in_flight.request else {
+            panic!("expected an ApiVersions request in flight, got {:?}", in_flight.request);
+        };
+        assert!(request.is_valid());
+        (
+            in_flight.header.api_version(),
+            request.data().cluster_id.clone(),
+            request.data().node_id,
+        )
+    }
+
+    /// A client over a real `Metadata` (Java's `DefaultMetadataUpdater`) that
+    /// already holds `RequestTestUtils.metadataUpdateWith(2, ..)`: cluster id
+    /// `kafka-cluster`, nodes 0 and 1.
+    fn create_network_client_for_cluster_check(
+        strategy: MetadataRecoveryStrategy,
+        metadata_cluster_check_enable: bool,
+        cluster_id_known: bool,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let metadata = Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        if cluster_id_known {
+            let metadata_response =
+                crate::common::requests::RequestTestUtils::metadata_update_with(2, &std::collections::HashMap::new());
+            metadata.update_with_current_request_version(&metadata_response, false, 0);
+        } else {
+            metadata.bootstrap(vec![(
+                "localhost".to_string(),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1969)),
+            )]);
+        }
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+            MockSelector::new(),
+            metadata,
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            i64::MAX,
+            strategy,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(metadata_cluster_check_enable);
+        client.set_mock_time();
+        client
+    }
+
+    /// KIP-1242 (`NetworkClient.java:1214-1224`): with the check enabled, the
+    /// `rebootstrap` strategy and a known cluster id, the ApiVersions v5
+    /// request carries the cluster id from the metadata
+    /// (`DefaultMetadataUpdater.clusterId`) and the node's id. Rust-only: Java
+    /// asserts the send side only through the broker integration test.
+    #[tokio::test]
+    async fn test_api_versions_request_carries_cluster_id_and_node_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let node = Node::new(1, "localhost".to_string(), 1970);
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!(
+            (5, Some("kafka-cluster".to_string()), 1),
+            last_sent_api_versions(&client, &node)
+        );
+    }
+
+    /// The check is skipped, leaving the v5 defaults (`null` / -1), when it is
+    /// disabled, when the strategy is `none` (the config's documented "ignored
+    /// if rebootstrapping is disabled"), or while the cluster id is unknown
+    /// (bootstrap metadata). Rust-only, the negative counterpart of
+    /// [`test_api_versions_request_carries_cluster_id_and_node_id`].
+    #[tokio::test]
+    async fn test_api_versions_request_omits_cluster_id_and_node_id_unless_checking() {
+        for (strategy, enable, cluster_id_known) in [
+            (MetadataRecoveryStrategy::Rebootstrap, false, true),
+            (MetadataRecoveryStrategy::None, true, true),
+            (MetadataRecoveryStrategy::Rebootstrap, true, false),
+        ] {
+            let mut client = create_network_client_for_cluster_check(strategy, enable, cluster_id_known);
+            let node = if cluster_id_known {
+                Node::new(1, "localhost".to_string(), 1970)
+            } else {
+                // The bootstrap node: `MetadataSnapshot.bootstrap` numbers them from -1.
+                Node::new(-1, "localhost".to_string(), 1969)
+            };
+            client.ready(&node, 0).await;
+            client.poll(0, 0).await;
+            assert_eq!(
+                (5, None, -1),
+                last_sent_api_versions(&client, &node),
+                "strategy {strategy:?}, enable {enable}, cluster id known {cluster_id_known}"
+            );
+        }
+    }
+
+    /// A group coordinator connection (`GroupCoordinatorNode`, connection id
+    /// `+1`) is checked against the broker's real id 1. 7be741d08b replaced the
+    /// old `Integer.MAX_VALUE - id` coordinator ids, which 0ef4a4c80e had to
+    /// exclude (`nodeId < Integer.MAX_VALUE / 2`), with these ids so that
+    /// coordinator connections are checked too. Rust-only.
+    #[tokio::test]
+    async fn test_api_versions_request_to_group_coordinator_carries_the_broker_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let coordinator =
+            crate::consumer::internals::GroupCoordinatorNode::new(1, "localhost".to_string(), 1970).unwrap();
+        assert_eq!("+1", coordinator.id_string());
+        client.ready(&coordinator, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!(
+            (5, Some("kafka-cluster".to_string()), 1),
+            last_sent_api_versions(&client, &coordinator)
+        );
+    }
+
+    /// A negative node id is never sent (`nodeId >= 0`,
+    /// `NetworkClient.java:1220`), even with the cluster id known: bootstrap
+    /// connections use negative ids that name no broker.
+    #[tokio::test]
+    async fn test_api_versions_request_omits_negative_node_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let node = Node::new(-1, "localhost".to_string(), 1969);
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!((5, None, -1), last_sent_api_versions(&client, &node));
+    }
+
+    /// The rebootstrap cadence when every broker is unreachable (Milestone 16
+    /// Phase 4 follow-up). Java's `DefaultMetadataUpdater.maybeUpdate`
+    /// (`NetworkClient.java:1450-1484`) rebootstraps whenever an update is due
+    /// and no node is available, and then, with the bootstrap node still in
+    /// reconnect backoff, returns `reconnectBackoffMs` as the poll bound: one
+    /// rebootstrap per poll, the poll bounded by the reconnect backoff, not 0.
+    /// A failed attempt then defers the next update by the refresh backoff,
+    /// during which there is no rebootstrap at all.
+    #[tokio::test]
+    async fn test_rebootstrap_with_every_node_unavailable_is_paced_by_the_backoffs() {
+        let refresh_backoff_ms = 100;
+        let reconnect_backoff_ms = 50;
+        let metadata = Arc::new(Metadata::new(
+            refresh_backoff_ms,
+            refresh_backoff_ms,
+            300_000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        metadata.bootstrap(vec![(
+            "localhost".to_string(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
+        )]);
+        let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+            MockSelector::new(),
+            metadata.clone(),
+            "mock",
+            usize::MAX,
+            reconnect_backoff_ms,
+            reconnect_backoff_ms,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            false,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            300_000,
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_mock_time();
+        let now = 10_000_i64;
+        // The bootstrap node's connection just failed: it is in reconnect backoff.
+        client.connection_states.connecting("-1", now, "localhost");
+        client.connection_states.disconnected("-1", now);
+        assert!(!client.connection_states.can_connect("-1", now));
+
+        // An update is due and no node is available: one rebootstrap, and the
+        // returned poll bound is the reconnect backoff.
+        let version = metadata.update_version();
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(now).await);
+        assert_eq!(version + 1, metadata.update_version());
+        // The next poll does the same, still bounded, never 0.
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(now + 10).await);
+        assert_eq!(version + 2, metadata.update_version());
+
+        // A failed update (Java's `handleServerDisconnect` -> `failedUpdate`)
+        // defers the next one by the refresh backoff: no rebootstrap until then.
+        metadata.failed_update(now + 10);
+        let wait = client.maybe_update(now + 20).await;
+        assert!(wait > 0 && wait <= refresh_backoff_ms, "refresh backoff remaining, got {wait}");
+        assert_eq!(version + 2, metadata.update_version());
+
+        // Once the reconnect backoff has passed, the bootstrap node is
+        // connectable again: the update connects to it instead of
+        // rebootstrapping.
+        let later = now + 10 + refresh_backoff_ms * 2;
+        assert!(client.connection_states.can_connect("-1", later));
+        assert_eq!(reconnect_backoff_ms, client.maybe_update(later).await);
+        assert_eq!(version + 2, metadata.update_version());
+        assert!(client.connection_states.is_connecting("-1"));
+    }
+
+    /// Critic 94 Issue 1's probe. A `REBOOTSTRAP_REQUIRED` from node 1 and an
+    /// ordinary response from node 0 are drained by the same poll. The
+    /// rebootstrap branch disconnects node 0, which fails its in-flight request,
+    /// so when the branch runs first, node 0's receive no longer has a request
+    /// to complete. Java's `completeNext` throws there; before the fix Rust
+    /// panicked in `InFlightRequests::complete_next` ("There are no in-flight
+    /// requests for node 0"), which ends the consumer's background task. Now
+    /// the stale receive is skipped. Both orders leave both nodes failed and one
+    /// rebootstrap.
+    async fn rebootstrap_required_with_a_concurrent_receive(node0_first: bool) {
+        let node0 = Node::new(0, "localhost".to_string(), 1969);
+        let node1 = Node::new(1, "localhost".to_string(), 1970);
+        let metadata_updater = TestMetadataUpdater::new(vec![node0.clone(), node1.clone()]);
+        let rebootstrap_count = metadata_updater.rebootstrap_count_handle();
+        let mut client = NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(metadata_updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
+        );
+        client.set_metadata_cluster_check_enable(true);
+        client.set_mock_time();
+        let now = 0_i64;
+        await_ready(&mut client, &node0).await;
+        // An ordinary request in flight to node 0.
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let request = client.new_client_request(node0.id_string(), Box::new(builder), now, true);
+        let metadata_correlation_id = request.correlation_id();
+        client.send(request, now);
+        // Node 1 connects; its ApiVersions request goes out.
+        client.ready(&node1, now).await;
+        client.poll(0, now).await;
+        client.poll(0, now).await;
+        let api_versions_correlation_id =
+            client.in_flight_requests.last_sent(node1.id_string()).header.correlation_id();
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::RebootstrapRequired.code());
+        let mut error_response = ApiVersionsResponse::new(error_data);
+        let api_bytes = serialize_response_with_header(
+            &ApiKeys::API_VERSIONS,
+            ApiKeys::API_VERSIONS.latest_version(),
+            error_response.data_mut(),
+            api_versions_correlation_id,
+        );
+        let md_bytes = serialize_response_with_header(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.latest_version(),
+            &mut MetadataResponseData::new(),
+            metadata_correlation_id,
+        );
+        let api_receive = NetworkReceive::with_source_buffer(node1.id_string(), api_bytes);
+        let md_receive = NetworkReceive::with_source_buffer(node0.id_string(), md_bytes);
+        // Both responses land in the same poll.
+        if node0_first {
+            client.selector_mut().complete_receive(md_receive);
+            client.selector_mut().complete_receive(api_receive);
+        } else {
+            client.selector_mut().complete_receive(api_receive);
+            client.selector_mut().complete_receive(md_receive);
+        }
+        client.poll(0, now).await;
+
+        assert!(!client.has_in_flight_requests_for_node(node0.id_string()));
+        assert!(!client.has_in_flight_requests_for_node(node1.id_string()));
+        assert!(client.connection_failed(&node0));
+        assert!(client.connection_failed(&node1));
+        assert_eq!(1, rebootstrap_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// [`rebootstrap_required_with_a_concurrent_receive`], the
+    /// `REBOOTSTRAP_REQUIRED` drained first: the order that panicked.
+    #[tokio::test]
+    async fn test_rebootstrap_required_skips_a_later_receive_from_a_node_it_disconnected() {
+        rebootstrap_required_with_a_concurrent_receive(false).await;
+    }
+
+    /// [`rebootstrap_required_with_a_concurrent_receive`], node 0's response
+    /// drained first: it completes normally, then the rebootstrap disconnects.
+    #[tokio::test]
+    async fn test_rebootstrap_required_after_a_receive_from_another_node() {
+        rebootstrap_required_with_a_concurrent_receive(true).await;
+    }
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
     fn metadata_request_header(correlation_id: i32) -> crate::common::requests::RequestHeader {
@@ -4747,5 +5745,373 @@ mod tests {
         assert!((avg - 250.0).abs() < EPS, "avg = {avg}");
         assert!((max - 400.0).abs() < EPS, "max = {max}");
         client.close().await;
+    }
+    // ---------------------------------------------------------------------------
+    // KIP-909: asynchronous bootstrap resolution (`NetworkClientTest`, 4.4).
+    // ---------------------------------------------------------------------------
+
+    /// Java's `BOOTSTRAP_ADDRESSES`.
+    fn bootstrap_addresses() -> Vec<String> {
+        vec!["127.0.0.1:8000".to_string(), "127.0.0.2:8000".to_string()]
+    }
+
+    /// Java's `new Metadata(50, 50, 5000, new LogContext(), new ClusterResourceListeners())`.
+    fn unbootstrapped_metadata() -> Arc<Metadata> {
+        Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ))
+    }
+
+    /// The Java tests' `new NetworkClient(selector, metadata, ..., config, false)`.
+    fn create_network_client_with_bootstrap_configuration(
+        metadata: Arc<Metadata>,
+        config: BootstrapConfiguration,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let mut client = create_network_client_with_real_metadata(metadata);
+        client.set_bootstrap_configuration(config);
+        client
+    }
+
+    /// Java's `TestUtils.waitForCondition(() -> { client.poll(100, now); return
+    /// metadataUpdater.isBootstrapped(); }, "Bootstrap should complete")`: the
+    /// resolution runs on its own thread, so poll until it lands, with the
+    /// same 15 s default bound.
+    async fn poll_until_bootstrapped(client: &mut NetworkClient<MockSelector, TestHostResolver>, now: i64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !client.is_bootstrapped() {
+            assert!(std::time::Instant::now() < deadline, "Bootstrap should complete");
+            client.poll(100, now).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedSuccess`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedSuccess")]
+    async fn test_ensure_bootstrapped_success() {
+        let metadata = unbootstrapped_metadata();
+        let config =
+            BootstrapConfiguration::enabled(&bootstrap_addresses(), ClientDnsLookup::UseAllDnsIps, 5000, 100).unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Async DNS resolution: first poll starts the resolution
+        client.poll(1000, 1).await;
+
+        // Wait for async DNS resolution to complete and poll again to process result
+        poll_until_bootstrapped(&mut client, 1).await;
+
+        assert!(client.is_bootstrapped());
+        // Both bootstrap servers became bootstrap nodes, keyed by their literal hosts.
+        let cluster = metadata.fetch();
+        assert!(cluster.is_bootstrap_configured());
+        let mut hosts: Vec<&str> = cluster.nodes().iter().map(|n| n.host()).collect();
+        hosts.sort_unstable();
+        assert_eq!(hosts, ["127.0.0.1", "127.0.0.2"]);
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedPollTimeoutReturnsWithoutError`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedPollTimeoutReturnsWithoutError")]
+    async fn test_ensure_bootstrapped_poll_timeout_returns_without_error() {
+        let metadata = unbootstrapped_metadata();
+        // Use invalid addresses that cannot be resolved (using RFC 6761 reserved .invalid TLD)
+        let invalid_addresses = vec!["unresolvable.invalid:9092".to_string()];
+        let config = BootstrapConfiguration::enabled(
+            &invalid_addresses,
+            ClientDnsLookup::UseAllDnsIps,
+            5000, // Long bootstrap timeout
+            100,
+        )
+        .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Directly call ensure_bootstrapped
+        // Should return without error even though bootstrap hasn't succeeded (will retry on next poll)
+        // DNS resolution will fail but timeout hasn't been reached yet
+        client.ensure_bootstrapped(0);
+
+        // Verify that no error was recorded and metadata is still empty
+        assert_eq!(
+            0,
+            metadata.fetch().nodes().len(),
+            "Metadata should have no nodes after failed DNS resolution"
+        );
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+    }
+
+    /// Translated from `NetworkClientTest.testEnsureBootstrappedRetryUntilSuccess`.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testEnsureBootstrappedRetryUntilSuccess")]
+    async fn test_ensure_bootstrapped_retry_until_success() {
+        let metadata = unbootstrapped_metadata();
+        let config =
+            BootstrapConfiguration::enabled(&bootstrap_addresses(), ClientDnsLookup::UseAllDnsIps, 5000, 100).unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // Async DNS resolution: first poll starts the resolution
+        client.poll(1000, 1).await;
+
+        // Wait for async DNS resolution to complete and poll again to process result
+        poll_until_bootstrapped(&mut client, 1).await;
+        assert!(client.is_bootstrapped());
+
+        // Subsequent polls should not fail even if already bootstrapped
+        client.poll(1000, 1).await;
+        assert!(client.is_bootstrapped());
+    }
+
+    /// The timeout half of `ensureBootstrapped` (Rust-side: Java covers it only
+    /// end to end, through the producer / consumer / admin tests). Once the
+    /// budget runs out the `BootstrapResolutionException` is recorded on the
+    /// metadata with Java's exact message, it is permanent, and no new
+    /// resolution is started. The pending resolution is a host that never
+    /// resolves, and the clock is the poll's `now`, so this does not depend on
+    /// how fast the resolver answers.
+    #[tokio::test]
+    async fn test_ensure_bootstrapped_records_the_timeout_failure_once() {
+        let metadata = unbootstrapped_metadata();
+        let config = BootstrapConfiguration::enabled(
+            &["unresolvable.invalid:9092".to_string()],
+            ClientDnsLookup::UseAllDnsIps,
+            3000,
+            100,
+        )
+        .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(Arc::clone(&metadata), config);
+
+        // The timer starts on the first poll, not at construction.
+        client.poll(0, 1_000).await;
+        assert_eq!(client.bootstrap_deadline_ms, Some(4_000));
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+
+        // One millisecond short of the deadline: still retrying.
+        client.poll(0, 3_999).await;
+        assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+
+        // At the deadline (`Timer.isExpired` is `>=`): the failure is recorded.
+        client.poll(0, 4_000).await;
+        let expected = "Failed to resolve bootstrap servers after 3000ms. \
+                        Please check your bootstrap.servers configuration and DNS settings.";
+        for _ in 0..2 {
+            // Every metadata check sees it; none clears it.
+            for result in [
+                metadata.maybe_return_bootstrap_fatal_error(),
+                metadata.maybe_return_fatal_error(),
+                metadata.maybe_return_any_error(),
+                metadata.maybe_return_error_for_topic("t"),
+            ] {
+                match result {
+                    Err(Error::BootstrapResolution(e)) => assert_eq!(e.message(), expected),
+                    other => panic!("expected the bootstrap failure, got {other:?}"),
+                }
+            }
+        }
+        assert!(
+            client.pending_bootstrap_resolution.is_none(),
+            "the pending resolution is cancelled"
+        );
+
+        // Later polls neither restart resolution nor bootstrap.
+        client.poll(0, 10_000).await;
+        assert!(client.pending_bootstrap_resolution.is_none());
+        assert!(!client.is_bootstrapped());
+        client.close().await;
+    }
+
+    /// Bootstrap hosts whose lookup hangs for `SLOW_TEST_HOST_DELAY` (5 s), then fails.
+    fn slow_bootstrap_hosts(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect()
+    }
+
+    /// Critic 92, Issue 2: `close()` waits for an in-flight resolution no
+    /// longer than Java does — `shutdownExecutorServiceQuietly(.., 1, SECONDS)`,
+    /// at most 1 s, then the interrupt and at most 1 s more
+    /// (`NetworkClient.java:805-806`, `ThreadUtils.java:95-117`) — however slow
+    /// the lookups are. Three 5 s lookups used to hold `close()` (and the
+    /// runtime drop behind it) for all 15 s.
+    #[tokio::test]
+    async fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        let config =
+            BootstrapConfiguration::enabled(&slow_bootstrap_hosts(3), ClientDnsLookup::UseAllDnsIps, 60_000, 100)
+                .unwrap();
+        let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+        client.poll(0, 1).await;
+        assert!(client.pending_bootstrap_resolution.is_some(), "the resolution is in flight");
+
+        let started = std::time::Instant::now();
+        client.close().await;
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "close() took {elapsed:?}");
+        assert!(client.pending_bootstrap_resolution.is_none());
+    }
+
+    /// The resolver runs on a detached thread that no runtime owns: dropping
+    /// the runtime the client was polled on does not wait for it.
+    #[test]
+    fn test_runtime_drop_does_not_wait_for_a_bootstrap_resolution() {
+        let started = std::time::Instant::now();
+        {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let config = BootstrapConfiguration::enabled(
+                    &slow_bootstrap_hosts(3),
+                    ClientDnsLookup::UseAllDnsIps,
+                    60_000,
+                    100,
+                )
+                .unwrap();
+                let mut client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+                client.poll(0, 1).await;
+                assert!(client.pending_bootstrap_resolution.is_some());
+                // Dropped unclosed, with the lookup in flight.
+            });
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(2), "runtime drop took {elapsed:?}");
+    }
+
+    /// `handleEmptyNodeList`: before bootstrap completes `leastLoadedNode`
+    /// returns an empty node instead of throwing, so the caller keeps polling;
+    /// with bootstrap disabled an empty cluster is still Java's
+    /// `IllegalStateException` (the panic this translation has always raised).
+    #[tokio::test]
+    async fn test_least_loaded_node_while_bootstrapping() {
+        let config = BootstrapConfiguration::enabled(
+            &["unresolvable.invalid:9092".to_string()],
+            ClientDnsLookup::UseAllDnsIps,
+            5000,
+            100,
+        )
+        .unwrap();
+        let client = create_network_client_with_bootstrap_configuration(unbootstrapped_metadata(), config);
+        let least_loaded = client.least_loaded_node(0);
+        assert!(least_loaded.node().is_none());
+        assert!(!least_loaded.has_node_available_or_connection_ready());
+
+        let disabled = create_network_client_with_real_metadata(unbootstrapped_metadata());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| disabled.least_loaded_node(0)))
+            .expect_err("an empty cluster with bootstrap disabled must still fail");
+        assert_eq!(
+            panic.downcast_ref::<&str>().copied(),
+            Some("There are no nodes in the Kafka cluster")
+        );
+    }
+
+    /// Mode 0 is unchanged: with [`BootstrapConfiguration::DISABLED`] (every
+    /// client's default) `poll()` never starts a resolution, never starts the
+    /// timer and never records a bootstrap failure, however long it runs.
+    #[tokio::test]
+    async fn test_disabled_bootstrap_configuration_never_resolves() {
+        let metadata = unbootstrapped_metadata();
+        metadata.bootstrap(vec![("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())]);
+        let mut client = create_network_client_with_real_metadata(Arc::clone(&metadata));
+        assert!(client.bootstrap_configuration.is_disabled());
+        for now in [0, 1_000_000, i64::MAX / 2] {
+            client.poll(0, now).await;
+            assert!(client.pending_bootstrap_resolution.is_none());
+            assert_eq!(client.bootstrap_deadline_ms, None);
+            assert!(metadata.maybe_return_bootstrap_fatal_error().is_ok());
+        }
+    }
+
+    /// With an external `MetadataUpdater` (the admin client's), the resolved
+    /// addresses and the failure go through the updater's `bootstrap` /
+    /// `bootstrapFailed` hooks.
+    #[tokio::test]
+    async fn test_ensure_bootstrapped_through_an_external_metadata_updater() {
+        #[derive(Default)]
+        struct Recorded {
+            bootstrapped: Vec<(String, SocketAddr)>,
+            failure: Option<Error>,
+        }
+        struct RecordingUpdater(Arc<std::sync::Mutex<Recorded>>);
+        impl MetadataUpdater for RecordingUpdater {
+            fn fetch_nodes(&self) -> Vec<Node> {
+                Vec::new()
+            }
+            fn is_update_due(&self, _now: i64) -> bool {
+                false
+            }
+            fn maybe_update(&mut self, _now: i64) -> i64 {
+                i64::MAX
+            }
+            fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<Error>) {}
+            fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<Error>) {}
+            fn handle_successful_response(
+                &mut self,
+                _request_header: &crate::common::requests::RequestHeader,
+                _now: i64,
+                _metadata_response: &crate::common::requests::MetadataResponse,
+            ) {
+            }
+            fn bootstrap_failed(&mut self, error: Error) {
+                self.0.lock().unwrap().failure = Some(error);
+            }
+            fn is_bootstrapped(&self) -> bool {
+                !self.0.lock().unwrap().bootstrapped.is_empty()
+            }
+            fn bootstrap(&mut self, addresses: Vec<(String, SocketAddr)>) {
+                self.0.lock().unwrap().bootstrapped = addresses;
+            }
+            fn close(&mut self) {}
+        }
+
+        let new_client = |urls: &[&str], timeout_ms: i64| {
+            let recorded = Arc::new(std::sync::Mutex::new(Recorded::default()));
+            let mut client = NetworkClient::with_metadata_updater(
+                MockSelector::new(),
+                Box::new(RecordingUpdater(Arc::clone(&recorded))),
+                "mock",
+                usize::MAX,
+                RECONNECT_BACKOFF_MS_TEST,
+                RECONNECT_BACKOFF_MAX_MS_TEST,
+                64 * 1024,
+                64 * 1024,
+                DEFAULT_REQUEST_TIMEOUT_MS,
+                CONNECTION_SETUP_TIMEOUT_MS_TEST,
+                CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+                false,
+                Arc::new(ApiVersions::new()),
+                TestHostResolver::new(),
+                MetadataRecoveryStrategy::None,
+                LogContext::empty(),
+            );
+            client.set_mock_time();
+            let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+            client.set_bootstrap_configuration(
+                BootstrapConfiguration::enabled(&urls, ClientDnsLookup::UseAllDnsIps, timeout_ms, 100).unwrap(),
+            );
+            (client, recorded)
+        };
+
+        let (mut client, recorded) = new_client(&["127.0.0.1:8000"], 5000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !client.is_bootstrapped() {
+            assert!(std::time::Instant::now() < deadline, "Bootstrap should complete");
+            client.poll(100, 1).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            recorded.lock().unwrap().bootstrapped,
+            vec![("127.0.0.1".to_string(), "127.0.0.1:8000".parse().unwrap())]
+        );
+        assert!(recorded.lock().unwrap().failure.is_none());
+
+        let (mut client, recorded) = new_client(&["unresolvable.invalid:9092"], 10);
+        client.poll(0, 1).await;
+        client.poll(0, 11).await;
+        match recorded.lock().unwrap().failure.take() {
+            Some(Error::BootstrapResolution(e)) => assert_eq!(
+                e.message(),
+                "Failed to resolve bootstrap servers after 10ms. \
+                 Please check your bootstrap.servers configuration and DNS settings."
+            ),
+            other => panic!("expected the bootstrap failure, got {other:?}"),
+        }
     }
 }

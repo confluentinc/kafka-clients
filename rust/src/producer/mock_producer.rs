@@ -1712,7 +1712,7 @@ mod tests {
     /// → `cb(..)` is synchronous with no `catch_unwind`, and the closure's own
     /// `expect` below relies on that. (Java's producer does swallow callback
     /// exceptions, but in `ProducerBatch.completeFutureAndFireCallbacks`
-    /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
+    /// (`ProducerBatch.java:337-339`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testMetadataOnException")]
@@ -3020,9 +3020,9 @@ mod tests {
     //     (Java 430). Despite the name, the `NullPointerException` it asserts does
     //     not come from `sendOffsetsToTransaction`: it comes from evaluating
     //     `new ConsumerGroupMetadata(null)` in the lambda — the one-arg constructor
-    //     at `ConsumerGroupMetadata.java:52`, delegating to the four-arg one
-    //     declared at `:38`, whose first statement is
-    //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `:42` —
+    //     at `ConsumerGroupMetadata.java:54`, delegating to the four-arg one
+    //     declared at `:40`, whose first statement is
+    //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `:44` —
     //     before the mock is entered at all. With `Collections.emptyMap()` for the offsets
     //     there is no other reachable throw — `sendOffsetsToTransaction` would
     //     return at `MockProducer.java:204`. Rust's

@@ -20,11 +20,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
 use crate::common::metrics::stats::WindowedCount;
-use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, RecordingLevel, Sensor};
+use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, Sensor};
 use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::FetchMetricsRegistry;
-use crate::consumer::internals::SensorBuilder;
 use crate::consumer::internals::SubscriptionState;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger, SensorBuilder};
 
 /// Records lag, lead, latency, and fetch metrics. It keeps an internal ID of
 /// the assigned set of partitions which is updated to ensure the set of metrics
@@ -36,7 +36,7 @@ use crate::consumer::internals::SubscriptionState;
 /// the bg task's `maybe_update_assignment` (`&mut self`).
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager")]
 pub(crate) struct FetchMetricsManager {
-    metrics: Arc<Metrics>,
+    inner: AbstractConsumerMetricsManager,
     metrics_registry: FetchMetricsRegistry,
     throttle_time: Arc<Sensor>,
     bytes_fetched: Arc<Sensor>,
@@ -86,7 +86,7 @@ impl FetchMetricsManager {
     /// (CLAUDE.md §12.1 — do not panic where recovery is possible).
     ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
-    /// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
+    /// (`Metrics.java:520`) and lets it propagate out of the fetch path. We
     /// deliberately do NOT propagate: these `record_*` methods are a side channel,
     /// and failing a user's fetch is worse than the metric being absent. The
     /// failure is reported rather than hidden.
@@ -127,32 +127,37 @@ impl FetchMetricsManager {
     /// `-lag-avg`, `-lag-max`, `{tp}.records-lead`, `-lead-min`, `-lead-avg`)
     /// are ALSO registered at INFO — full Java parity. Java's `SensorBuilder`
     /// creates every sensor (including these per-partition detail sensors,
-    /// `FetchMetricsManager.java:133,148`) via `metrics.sensor(name)`, which
+    /// `FetchMetricsManager.java:144,159`) via `metrics.sensor(name)`, which
     /// defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
     /// fetch metrics, so we record the full per-partition metric set per
     /// partition per poll at the default INFO level — the accepted Java-parity
     /// cost (to be measured in M8). The metric VALUES are Java-identical.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#FetchMetricsManager")]
     pub(crate) fn new(metrics: Arc<Metrics>, metrics_registry: FetchMetricsRegistry) -> Self {
+        // Java: `this(new MetricsLedger(metrics), metricsRegistry)` → `super(metrics)`
+        // (KAFKA-19542): every sensor and metric name below goes through the
+        // ledger, and `close()` removes them all.
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(metrics));
+        let metrics = inner.metrics();
         // Each `build_*` closure registers one sensor and returns it (or the
         // registration error). Sensor registration only fails on a duplicate
         // metric name (a construction-time programming error here), so the
         // `.expect`s are unreachable in practice.
         let build_throttle = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "fetch-throttle-time", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "fetch-throttle-time")?
                 .with_avg(&metrics_registry.fetch_throttle_time_avg)?
                 .with_max(&metrics_registry.fetch_throttle_time_max)?
                 .build())
         };
         let build_bytes = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "bytes-fetched", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "bytes-fetched")?
                 .with_avg(&metrics_registry.fetch_size_avg)?
                 .with_max(&metrics_registry.fetch_size_max)?
                 .with_meter(&metrics_registry.bytes_consumed_rate, &metrics_registry.bytes_consumed_total)?
                 .build())
         };
         let build_records = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "records-fetched", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "records-fetched")?
                 .with_avg(&metrics_registry.records_per_request_avg)?
                 .with_meter(
                     &metrics_registry.records_consumed_rate,
@@ -161,10 +166,10 @@ impl FetchMetricsManager {
                 .build())
         };
         let build_latency = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "fetch-latency", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "fetch-latency")?
                 .with_avg(&metrics_registry.fetch_latency_avg)?
                 .with_max(&metrics_registry.fetch_latency_max)?
-                .with_meter_stat(
+                .with_meter_with_sampled_stat(
                     WindowedCount::new().into_sampled_stat(),
                     &metrics_registry.fetch_request_rate,
                     &metrics_registry.fetch_request_total,
@@ -175,12 +180,12 @@ impl FetchMetricsManager {
         // `records-lead-min` are on by default, as are the per-partition DETAIL
         // sensors (full Java parity, see ctor doc + `record_partition_lag/lead`).
         let build_lag = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "records-lag", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "records-lag")?
                 .with_max(&metrics_registry.records_lag_max)?
                 .build())
         };
         let build_lead = || -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::new(&metrics, "records-lead", RecordingLevel::Info)?
+            Ok(SensorBuilder::new(metrics, "records-lead")?
                 .with_min(&metrics_registry.records_lead_min)?
                 .build())
         };
@@ -193,7 +198,7 @@ impl FetchMetricsManager {
         let records_lead = build_lead().expect("registering records-lead sensor");
 
         Self {
-            metrics,
+            inner,
             metrics_registry,
             throttle_time,
             bytes_fetched,
@@ -224,7 +229,7 @@ impl FetchMetricsManager {
     /// Test-only accessor for the registry this manager records into.
     #[cfg(test)]
     pub(crate) fn metrics_for_test(&self) -> Arc<Metrics> {
-        Arc::clone(&self.metrics)
+        Arc::clone(self.inner.metrics().registry())
     }
 
     /// Test-only accessor for the metric-name templates.
@@ -256,7 +261,7 @@ impl FetchMetricsManager {
         self.fetch_latency.record_value(request_latency_ms as f64);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
-            if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
+            if let Some(node_request_time) = self.inner.metrics().get_sensor(&node_time_name) {
                 node_request_time.record_value(request_latency_ms as f64);
             }
         }
@@ -279,7 +284,7 @@ impl FetchMetricsManager {
         let name = FetchMetricsManager::topic_bytes_fetched_metric_name(topic);
 
         let bytes_fetched = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+            Ok(SensorBuilder::with_tags(self.inner.metrics(), &name, || {
                 FetchMetricsManager::single_tag("topic", topic)
             })?
             .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
@@ -302,7 +307,7 @@ impl FetchMetricsManager {
         let name = FetchMetricsManager::topic_records_fetched_metric_name(topic);
 
         let records_fetched = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+            Ok(SensorBuilder::with_tags(self.inner.metrics(), &name, || {
                 FetchMetricsManager::single_tag("topic", topic)
             })?
             .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
@@ -334,7 +339,7 @@ impl FetchMetricsManager {
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
 
         let records_lag = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+            Ok(SensorBuilder::with_tags(self.inner.metrics(), &name, || {
                 FetchMetricsManager::topic_partition_tags_raw(tp)
             })?
             .with_value(&self.metrics_registry.partition_records_lag)?
@@ -360,7 +365,7 @@ impl FetchMetricsManager {
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
 
         let records_lead = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
+            Ok(SensorBuilder::with_tags(self.inner.metrics(), &name, || {
                 FetchMetricsManager::topic_partition_tags_raw(tp)
             })?
             .with_value(&self.metrics_registry.partition_records_lead)?
@@ -408,12 +413,14 @@ impl FetchMetricsManager {
 
         for tp in &assignment.assigned_partitions {
             if !new_assigned_partitions.contains(tp) {
-                self.metrics
+                self.inner
+                    .metrics()
                     .remove_sensor(&FetchMetricsManager::partition_records_lag_metric_name(tp));
-                self.metrics
+                self.inner
+                    .metrics()
                     .remove_sensor(&FetchMetricsManager::partition_records_lead_metric_name(tp));
                 if let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp) {
-                    self.metrics.remove_metric(&metric_name);
+                    self.inner.metrics().remove_metric(&metric_name);
                 }
             }
         }
@@ -424,7 +431,7 @@ impl FetchMetricsManager {
             {
                 let subscription = Arc::clone(subscription);
                 let tp_owned = tp.clone();
-                self.metrics.add_metric_if_absent(
+                self.inner.metrics().add_metric_if_absent(
                     metric_name,
                     None,
                     MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
@@ -443,13 +450,22 @@ impl FetchMetricsManager {
         assignment.assignment_id = new_assignment_id;
     }
 
+    /// Removes every sensor and metric this manager registered, including the
+    /// per-topic and per-partition ones created on the fetch path. Java
+    /// inherits `AbstractConsumerMetricsManager.close()` (KAFKA-19542);
+    /// `AsyncKafkaConsumer.close()` calls it (`AsyncKafkaConsumer.java:1676`).
+    pub(crate) fn close(&self) {
+        self.inner.close();
+    }
+
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#partitionPreferredReadReplicaMetricName"
     )]
     fn partition_preferred_read_replica_metric_name(&self, tp: &TopicPartition) -> Option<crate::common::MetricName> {
         let tags = FetchMetricsManager::topic_partition_tags_raw(tp);
-        self.metrics
-            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
+        self.inner
+            .metrics()
+            .metric_instance(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
     }
 }
@@ -458,8 +474,8 @@ impl FetchMetricsManager {
 mod tests {
     use super::*;
     use crate::common::Metric;
-    use crate::common::metrics::MetricConfig;
     use crate::common::metrics::stats::{Avg, Max};
+    use crate::common::metrics::{MetricConfig, RecordingLevel};
     use crate::common::utils::MockTime;
     use crate::common::{MetricName, MetricNameTemplate};
     use crate::consumer::internals::AutoOffsetResetStrategy;
@@ -921,7 +937,7 @@ mod tests {
     /// `records-lag-max` / `records-lead-min` AND the DETAILED per-partition
     /// lag/lead sensors are recorded — there is NO DEBUG gating (Java's
     /// `SensorBuilder` defaults every fetch sensor to `RecordingLevel.INFO`,
-    /// including the per-partition detail at `FetchMetricsManager.java:133,148`).
+    /// including the per-partition detail at `FetchMetricsManager.java:144,159`).
     #[test]
     fn test_partition_metrics_recording_level() {
         let f = setup();
@@ -960,5 +976,37 @@ mod tests {
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);
+    }
+
+    /// KAFKA-19542: `close()` removes every metric the manager registered —
+    /// the client-level sensors from the constructor, the per-topic and
+    /// per-partition sensors created on the fetch path, and the
+    /// preferred-read-replica gauges. Java's `FetchMetricsManagerTest` does not
+    /// extend `AbstractConsumerMetricsManagerTest`; `KafkaConsumerTest.testMetricsRemovedOnClose`
+    /// covers this through the consumer, and this pins it at the manager.
+    #[test]
+    fn test_close_removes_all_metrics() {
+        let time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_time(time as Arc<_>));
+        let initial = metrics.metrics().len();
+        let registry = FetchMetricsRegistry::new(indexmap::IndexSet::new(), "test");
+        let manager = FetchMetricsManager::new(Arc::clone(&metrics), registry);
+        assert!(metrics.metrics().len() > initial);
+
+        let tp = TopicPartition::new(TOPIC_NAME, 0);
+        manager.record_bytes_fetched_topic(TOPIC_NAME, 2);
+        manager.record_records_fetched_topic(TOPIC_NAME, 2);
+        manager.record_partition_lag(&tp, 14);
+        manager.record_partition_lead(&tp, 11);
+        let subscription = Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
+        subscription
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp.clone()]))
+            .unwrap();
+        manager.maybe_update_assignment(&subscription);
+
+        manager.close();
+        assert_eq!(initial, metrics.metrics().len());
     }
 }

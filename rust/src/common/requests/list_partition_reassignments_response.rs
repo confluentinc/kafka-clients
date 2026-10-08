@@ -94,12 +94,6 @@ impl ListPartitionReassignmentsResponse {
         let data = ListPartitionReassignmentsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
-
-    /// Whether the client should throttle on this response (always true).
-    #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsResponse#shouldClientThrottle")]
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
-    }
 }
 
 impl std::fmt::Display for ListPartitionReassignmentsResponse {

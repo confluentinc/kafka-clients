@@ -83,6 +83,7 @@ use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
 use super::TxnOffsetCommitResponse;
+use super::UnregisterControllerResponse;
 use super::UpdateFeaturesResponse;
 use super::WriteTxnMarkersResponse;
 
@@ -216,6 +217,8 @@ pub enum ConcreteResponse {
     DescribeDelegationToken(DescribeDelegationTokenResponse),
     /// An UpdateFeatures response.
     UpdateFeatures(UpdateFeaturesResponse),
+    /// An UnregisterController response.
+    UnregisterController(UnregisterControllerResponse),
     /// A DescribeProducers response.
     DescribeProducers(DescribeProducersResponse),
     /// A DescribeTransactions response.
@@ -279,6 +282,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.api_key(),
             Self::DescribeDelegationToken(r) => r.api_key(),
             Self::UpdateFeatures(r) => r.api_key(),
+            Self::UnregisterController(r) => r.api_key(),
             Self::DescribeProducers(r) => r.api_key(),
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
@@ -346,6 +350,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeDelegationToken(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::UpdateFeatures(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::UnregisterController(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeProducers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -506,6 +511,9 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::UnregisterController(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::DescribeProducers(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -578,6 +586,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeDelegationToken(r) => Self::serialize_body(r.data_mut(), version),
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
+            Self::UnregisterController(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
@@ -646,6 +655,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.error_counts(),
             Self::DescribeDelegationToken(r) => r.error_counts(),
             Self::UpdateFeatures(r) => r.error_counts(),
+            Self::UnregisterController(r) => r.error_counts(),
             Self::DescribeProducers(r) => r.error_counts(),
             Self::DescribeTransactions(r) => r.error_counts(),
             Self::WriteTxnMarkers(r) => r.error_counts(),
@@ -706,6 +716,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.throttle_time_ms(),
             Self::DescribeDelegationToken(r) => r.throttle_time_ms(),
             Self::UpdateFeatures(r) => r.throttle_time_ms(),
+            Self::UnregisterController(r) => r.throttle_time_ms(),
             Self::DescribeProducers(r) => r.throttle_time_ms(),
             Self::DescribeTransactions(r) => r.throttle_time_ms(),
             Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
@@ -765,6 +776,7 @@ impl ConcreteResponse {
             Self::ExpireDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeDelegationToken(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::UpdateFeatures(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::UnregisterController(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeProducers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -773,21 +785,23 @@ impl ConcreteResponse {
     }
 
     /// Returns whether the client should throttle upon receiving this response.
+    ///
+    /// Translates `AbstractResponse.shouldClientThrottle(short version)`: a response
+    /// class whose Java counterpart overrides it delegates to its own method, and
+    /// every other class gets the base method, which since Kafka 4.4 (KAFKA-20828)
+    /// derives the answer from the response schema — the client throttles when the
+    /// schema for `version` has a `throttle_time_ms` field.
+    #[doc(alias = "org.apache.kafka.common.requests.AbstractResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         match self {
             Self::ApiVersions(r) => r.should_client_throttle(version),
             Self::Metadata(r) => r.should_client_throttle(version),
             Self::Produce(r) => r.should_client_throttle(version),
             Self::Fetch(r) => r.should_client_throttle(version),
-            Self::SaslHandshake(r) => r.should_client_throttle(version),
-            Self::SaslAuthenticate(r) => r.should_client_throttle(version),
             Self::FindCoordinator(r) => r.should_client_throttle(version),
             Self::ListGroups(r) => r.should_client_throttle(version),
             Self::DescribeGroups(r) => r.should_client_throttle(version),
-            Self::ConsumerGroupDescribe(r) => r.should_client_throttle(version),
             Self::ListOffsets(r) => r.should_client_throttle(version),
-            Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
-            Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
             Self::OffsetCommit(r) => r.should_client_throttle(version),
             Self::DeleteGroups(r) => r.should_client_throttle(version),
             Self::LeaveGroup(r) => r.should_client_throttle(version),
@@ -804,29 +818,35 @@ impl ConcreteResponse {
             Self::DeleteRecords(r) => r.should_client_throttle(version),
             Self::DescribeConfigs(r) => r.should_client_throttle(version),
             Self::IncrementalAlterConfigs(r) => r.should_client_throttle(version),
-            Self::ListConfigResources(r) => r.should_client_throttle(version),
-            Self::DescribeCluster(r) => r.should_client_throttle(version),
             Self::DescribeLogDirs(r) => r.should_client_throttle(version),
             Self::AlterReplicaLogDirs(r) => r.should_client_throttle(version),
-            Self::ElectLeaders(r) => r.should_client_throttle(version),
-            Self::AlterPartitionReassignments(r) => r.should_client_throttle(version),
-            Self::ListPartitionReassignments(r) => r.should_client_throttle(version),
             Self::DescribeAcls(r) => r.should_client_throttle(version),
             Self::CreateAcls(r) => r.should_client_throttle(version),
             Self::DeleteAcls(r) => r.should_client_throttle(version),
-            Self::DescribeClientQuotas(r) => r.should_client_throttle(version),
-            Self::AlterClientQuotas(r) => r.should_client_throttle(version),
-            Self::DescribeUserScramCredentials(r) => r.should_client_throttle(version),
-            Self::AlterUserScramCredentials(r) => r.should_client_throttle(version),
             Self::CreateDelegationToken(r) => r.should_client_throttle(version),
             Self::RenewDelegationToken(r) => r.should_client_throttle(version),
             Self::ExpireDelegationToken(r) => r.should_client_throttle(version),
             Self::DescribeDelegationToken(r) => r.should_client_throttle(version),
-            Self::UpdateFeatures(r) => r.should_client_throttle(version),
-            Self::DescribeProducers(r) => r.should_client_throttle(version),
-            Self::DescribeTransactions(r) => r.should_client_throttle(version),
-            Self::WriteTxnMarkers(r) => r.should_client_throttle(version),
-            Self::ListTransactions(r) => r.should_client_throttle(version),
+            Self::SaslHandshake(_)
+            | Self::SaslAuthenticate(_)
+            | Self::ConsumerGroupDescribe(_)
+            | Self::OffsetsForLeaderEpoch(_)
+            | Self::ConsumerGroupHeartbeat(_)
+            | Self::ListConfigResources(_)
+            | Self::DescribeCluster(_)
+            | Self::ElectLeaders(_)
+            | Self::AlterPartitionReassignments(_)
+            | Self::ListPartitionReassignments(_)
+            | Self::DescribeClientQuotas(_)
+            | Self::AlterClientQuotas(_)
+            | Self::DescribeUserScramCredentials(_)
+            | Self::AlterUserScramCredentials(_)
+            | Self::UpdateFeatures(_)
+            | Self::UnregisterController(_)
+            | Self::DescribeProducers(_)
+            | Self::DescribeTransactions(_)
+            | Self::WriteTxnMarkers(_)
+            | Self::ListTransactions(_) => self.api_key().response_schema(version).get("throttle_time_ms").is_some(),
         }
     }
 
@@ -849,7 +869,7 @@ impl ConcreteResponse {
             // Java throws `CorrelationIdMismatchException`
             // (`AbstractResponse.java:105`), which `NetworkClient.parseResponse`
             // catches **by type** and either converts to a `SchemaException` or
-            // rethrows (`NetworkClient.java:829-838`). An untyped
+            // rethrows (`NetworkClient.java:922-931`). An untyped
             // `ErrorKind::InvalidData` made that dispatch unexpressible, so the
             // typed value travels in the `io::Error` payload — the crate's
             // documented mechanism for a Java exception class crossing an
@@ -1058,6 +1078,10 @@ impl ConcreteResponse {
                 let response = UpdateFeaturesResponse::parse(readable, version)?;
                 Ok(Self::UpdateFeatures(response))
             },
+            ApiKeys::UNREGISTER_CONTROLLER => {
+                let response = UnregisterControllerResponse::parse(readable, version)?;
+                Ok(Self::UnregisterController(response))
+            },
             ApiKeys::DESCRIBE_PRODUCERS => {
                 let response = DescribeProducersResponse::parse(readable, version)?;
                 Ok(Self::DescribeProducers(response))
@@ -1155,6 +1179,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ExpireDelegationToken(r) => write!(f, "{r}"),
             Self::DescribeDelegationToken(r) => write!(f, "{r}"),
             Self::UpdateFeatures(r) => write!(f, "{r}"),
+            Self::UnregisterController(r) => write!(f, "{r}"),
             Self::DescribeProducers(r) => write!(f, "{r}"),
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
@@ -1166,6 +1191,157 @@ impl std::fmt::Display for ConcreteResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::{Message, ObjectSerializationCache};
+
+    /// Builds the serialized default data of one response type at a version.
+    type DefaultBytes = fn(i16) -> Vec<u8>;
+
+    /// Serializes the default (all-fields-default) data of a response at `version`.
+    fn serialize_default<M: Message>(mut data: M, version: i16) -> Vec<u8> {
+        let mut cache = ObjectSerializationCache::new();
+        let size = Message::size(&data, &mut cache, version).unwrap();
+        let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+        Message::write(&mut data, &mut buffer, &cache, version).unwrap();
+        buffer.into_buffer()
+    }
+
+    /// Translated from `RequestResponseTest.testClientThrottlesResponsesWithThrottleTime`
+    /// (KAFKA-20828).
+    ///
+    /// Java walks every `ApiKeys` value through `getResponse(apiKey, version)`; the
+    /// Rust walk covers every API [`ConcreteResponse`] has a variant for (the ones
+    /// `ConcreteResponse::parse` accepts), each built by parsing its default data at
+    /// that version. The broker-only and classic-group APIs have no client response
+    /// type to ask.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.RequestResponseTest#testClientThrottlesResponsesWithThrottleTime")]
+    fn test_client_throttles_responses_with_throttle_time() {
+        let post_kip219_version: HashMap<&ApiKeys, i16> = HashMap::from([
+            (&ApiKeys::PRODUCE, 6),
+            (&ApiKeys::FETCH, 8),
+            (&ApiKeys::LIST_OFFSETS, 3),
+            (&ApiKeys::METADATA, 6),
+            (&ApiKeys::OFFSET_COMMIT, 4),
+            (&ApiKeys::OFFSET_FETCH, 4),
+            (&ApiKeys::FIND_COORDINATOR, 2),
+            (&ApiKeys::JOIN_GROUP, 3),
+            (&ApiKeys::HEARTBEAT, 2),
+            (&ApiKeys::LEAVE_GROUP, 2),
+            (&ApiKeys::SYNC_GROUP, 2),
+            (&ApiKeys::DESCRIBE_GROUPS, 2),
+            (&ApiKeys::LIST_GROUPS, 2),
+            (&ApiKeys::API_VERSIONS, 2),
+            (&ApiKeys::CREATE_TOPICS, 3),
+            (&ApiKeys::DELETE_TOPICS, 2),
+            (&ApiKeys::DELETE_RECORDS, 1),
+            (&ApiKeys::INIT_PRODUCER_ID, 1),
+            (&ApiKeys::ADD_PARTITIONS_TO_TXN, 1),
+            (&ApiKeys::ADD_OFFSETS_TO_TXN, 1),
+            (&ApiKeys::END_TXN, 1),
+            (&ApiKeys::TXN_OFFSET_COMMIT, 1),
+            (&ApiKeys::DESCRIBE_ACLS, 1),
+            (&ApiKeys::CREATE_ACLS, 1),
+            (&ApiKeys::DELETE_ACLS, 1),
+            (&ApiKeys::DESCRIBE_CONFIGS, 2),
+            (&ApiKeys::ALTER_CONFIGS, 1),
+            (&ApiKeys::ALTER_REPLICA_LOG_DIRS, 1),
+            (&ApiKeys::DESCRIBE_LOG_DIRS, 1),
+            (&ApiKeys::CREATE_PARTITIONS, 1),
+            (&ApiKeys::CREATE_DELEGATION_TOKEN, 1),
+            (&ApiKeys::RENEW_DELEGATION_TOKEN, 1),
+            (&ApiKeys::EXPIRE_DELEGATION_TOKEN, 1),
+            (&ApiKeys::DESCRIBE_DELEGATION_TOKEN, 1),
+            (&ApiKeys::DELETE_GROUPS, 1),
+        ]);
+
+        macro_rules! default_responses {
+            ($(($key:ident, $data:ty)),* $(,)?) => {
+                vec![$(
+                    (&ApiKeys::$key, (|version| serialize_default(<$data>::new(), version)) as DefaultBytes)
+                ),*]
+            };
+        }
+        let responses: Vec<(&ApiKeys, DefaultBytes)> = default_responses![
+            (API_VERSIONS, crate::ApiVersionsResponseData),
+            (METADATA, crate::MetadataResponseData),
+            (PRODUCE, crate::ProduceResponseData),
+            (FETCH, crate::FetchResponseData),
+            (SASL_HANDSHAKE, crate::SaslHandshakeResponseData),
+            (SASL_AUTHENTICATE, crate::SaslAuthenticateResponseData),
+            (FIND_COORDINATOR, crate::FindCoordinatorResponseData),
+            (LIST_GROUPS, crate::ListGroupsResponseData),
+            (DESCRIBE_GROUPS, crate::DescribeGroupsResponseData),
+            (CONSUMER_GROUP_DESCRIBE, crate::ConsumerGroupDescribeResponseData),
+            (LIST_OFFSETS, crate::ListOffsetsResponseData),
+            (OFFSET_FOR_LEADER_EPOCH, crate::OffsetForLeaderEpochResponseData),
+            (CONSUMER_GROUP_HEARTBEAT, crate::ConsumerGroupHeartbeatResponseData),
+            (OFFSET_COMMIT, crate::OffsetCommitResponseData),
+            (DELETE_GROUPS, crate::DeleteGroupsResponseData),
+            (LEAVE_GROUP, crate::LeaveGroupResponseData),
+            (OFFSET_DELETE, crate::OffsetDeleteResponseData),
+            (OFFSET_FETCH, crate::OffsetFetchResponseData),
+            (CREATE_TOPICS, crate::CreateTopicsResponseData),
+            (DELETE_TOPICS, crate::DeleteTopicsResponseData),
+            (CREATE_PARTITIONS, crate::CreatePartitionsResponseData),
+            (DELETE_RECORDS, crate::DeleteRecordsResponseData),
+            (DESCRIBE_CONFIGS, crate::DescribeConfigsResponseData),
+            (INCREMENTAL_ALTER_CONFIGS, crate::IncrementalAlterConfigsResponseData),
+            (LIST_CONFIG_RESOURCES, crate::ListConfigResourcesResponseData),
+            (DESCRIBE_CLUSTER, crate::DescribeClusterResponseData),
+            (DESCRIBE_LOG_DIRS, crate::DescribeLogDirsResponseData),
+            (ALTER_REPLICA_LOG_DIRS, crate::AlterReplicaLogDirsResponseData),
+            (ELECT_LEADERS, crate::ElectLeadersResponseData),
+            (ALTER_PARTITION_REASSIGNMENTS, crate::AlterPartitionReassignmentsResponseData),
+            (LIST_PARTITION_REASSIGNMENTS, crate::ListPartitionReassignmentsResponseData),
+            (DESCRIBE_ACLS, crate::DescribeAclsResponseData),
+            (CREATE_ACLS, crate::CreateAclsResponseData),
+            (DELETE_ACLS, crate::DeleteAclsResponseData),
+            (DESCRIBE_CLIENT_QUOTAS, crate::DescribeClientQuotasResponseData),
+            (ALTER_CLIENT_QUOTAS, crate::AlterClientQuotasResponseData),
+            (DESCRIBE_USER_SCRAM_CREDENTIALS, crate::DescribeUserScramCredentialsResponseData),
+            (ALTER_USER_SCRAM_CREDENTIALS, crate::AlterUserScramCredentialsResponseData),
+            (CREATE_DELEGATION_TOKEN, crate::CreateDelegationTokenResponseData),
+            (RENEW_DELEGATION_TOKEN, crate::RenewDelegationTokenResponseData),
+            (EXPIRE_DELEGATION_TOKEN, crate::ExpireDelegationTokenResponseData),
+            (DESCRIBE_DELEGATION_TOKEN, crate::DescribeDelegationTokenResponseData),
+            (UPDATE_FEATURES, crate::UpdateFeaturesResponseData),
+            (UNREGISTER_CONTROLLER, crate::UnregisterControllerResponseData),
+            (DESCRIBE_PRODUCERS, crate::DescribeProducersResponseData),
+            (DESCRIBE_TRANSACTIONS, crate::DescribeTransactionsResponseData),
+            (INIT_PRODUCER_ID, crate::InitProducerIdResponseData),
+            (ADD_PARTITIONS_TO_TXN, crate::AddPartitionsToTxnResponseData),
+            (ADD_OFFSETS_TO_TXN, crate::AddOffsetsToTxnResponseData),
+            (END_TXN, crate::EndTxnResponseData),
+            (TXN_OFFSET_COMMIT, crate::TxnOffsetCommitResponseData),
+            (WRITE_TXN_MARKERS, crate::WriteTxnMarkersResponseData),
+            (LIST_TRANSACTIONS, crate::ListTransactionsResponseData),
+        ];
+
+        let mut checked = 0;
+        for (api_key, default_bytes) in responses {
+            for version in api_key.all_versions() {
+                let response_has_throttle_time = api_key.response_schema(version).get("throttle_time_ms").is_some();
+                let first_post_kip219_version = post_kip219_version
+                    .get(api_key)
+                    .copied()
+                    .unwrap_or_else(|| api_key.oldest_version());
+                let should_client_throttle = response_has_throttle_time && version >= first_post_kip219_version;
+                let response =
+                    ConcreteResponse::parse(api_key, &mut ByteBufferAccessor::new(default_bytes(version)), version)
+                        .unwrap();
+                assert_eq!(
+                    should_client_throttle,
+                    response.should_client_throttle(version),
+                    "Unexpected shouldClientThrottle result for {api_key} version {version}: \
+                     responseHasThrottleTime={response_has_throttle_time}, \
+                     firstPostKip219Version={first_post_kip219_version}"
+                );
+                checked += 1;
+            }
+        }
+        // Guard against the walk passing vacuously.
+        assert!(checked > 200, "only {checked} (api, version) pairs were checked");
+    }
 
     /// Java's `parseResponse` default arm throws an `AssertionError` whose text
     /// interpolates the `ApiKeys` value — the enum constant — and ends with the
