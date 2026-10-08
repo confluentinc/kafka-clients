@@ -291,8 +291,7 @@ impl DefaultRecord {
 
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
-                "Invalid record size: expected non-negative size but got {}",
-                size_of_body
+                "Invalid record size: {size_of_body} is negative."
             )));
         }
 
@@ -321,18 +320,30 @@ impl DefaultRecord {
         Ok((record, total_consumed))
     }
 
-    /// Read a `DefaultRecord` from a `Read` stream.
+    /// Decode a record from the (decompressed) stream, rejecting any record
+    /// whose declared body size exceeds `max_record_body_size` before reading
+    /// the body. Callers that do not enforce a configured limit pass
+    /// [`AbstractRecords::SOFT_MAX_ARRAY_LENGTH`], effectively the array-length
+    /// allocation limit (Java's `readFrom(InputStream, ..., int
+    /// maxRecordBodySize)`, b69c07c816).
     ///
     /// # Errors
     /// Returns `InvalidRecordError` if the record is malformed or the stream ends early.
     /// A stream that ends before or inside the record's size fails with Java's
-    /// `Incorrect declared batch size, premature EOF reached`.
+    /// `Incorrect declared batch size, premature EOF reached`. A negative size
+    /// fails with "Invalid record size: N is negative.", and one above
+    /// `max_record_body_size` with "Invalid record size: N exceeds the
+    /// configured maximum record size of M.".
+    ///
+    /// [`AbstractRecords::SOFT_MAX_ARRAY_LENGTH`]: crate::common::record::internal::AbstractRecords::SOFT_MAX_ARRAY_LENGTH
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#readFrom")]
     pub fn read_from_stream<R: Read>(
         input: &mut R,
         base_offset: i64,
         base_timestamp: i64,
         base_sequence: i32,
         log_append_time: Option<i64>,
+        max_record_body_size: i32,
     ) -> Result<DefaultRecord, InvalidRecordError> {
         let size_of_body = ByteUtils::read_varint_reader(input).map_err(|e| {
             // The stream ended before or inside the size: the batch declared more
@@ -353,8 +364,17 @@ impl DefaultRecord {
 
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
-                "Invalid record size: expected non-negative size but got {}",
-                size_of_body
+                "Invalid record size: {size_of_body} is negative."
+            )));
+        }
+        // Reject, before reading the body, any record whose declared
+        // (decompressed) body exceeds the configured per-record maximum
+        // (`DefaultRecord.java:295-301`). Java's guard also keeps an adversarial
+        // size from reaching `ByteBuffer.allocate`; the read below is bounded
+        // by `take` instead, so here it only gives Java's error.
+        if size_of_body > max_record_body_size {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: {size_of_body} exceeds the configured maximum record size of {max_record_body_size}."
             )));
         }
 
@@ -433,8 +453,7 @@ impl DefaultRecord {
 
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
-                "Invalid record size: expected non-negative size but got {}",
-                size_of_body
+                "Invalid record size: {size_of_body} is negative."
             )));
         }
 
@@ -539,8 +558,7 @@ impl<'a> DefaultRecordRef<'a> {
     ) -> Result<DefaultRecordRef<'a>, InvalidRecordError> {
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
-                "Invalid record size: expected non-negative size but got {}",
-                size_of_body
+                "Invalid record size: {size_of_body} is negative."
             )));
         }
 
@@ -851,6 +869,7 @@ impl std::fmt::Display for DefaultRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::record::internal::AbstractRecords;
     use crate::common::record::internal::Record;
 
     #[test]
@@ -933,7 +952,14 @@ mod tests {
 
         // test for stream input
         let mut cursor = std::io::Cursor::new(out.clone());
-        let result = DefaultRecord::read_from_stream(&mut cursor, base_offset, base_timestamp, base_sequence, None);
+        let result = DefaultRecord::read_from_stream(
+            &mut cursor,
+            base_offset,
+            base_timestamp,
+            base_sequence,
+            None,
+            AbstractRecords::SOFT_MAX_ARRAY_LENGTH,
+        );
         assert!(result.is_err());
 
         // test for buffer input
@@ -990,7 +1016,14 @@ mod tests {
     fn assert_decoding_from_buffer_throws(buf: &[u8]) {
         // test for stream input
         let mut cursor = std::io::Cursor::new(buf.to_vec());
-        let result = DefaultRecord::read_from_stream(&mut cursor, 0, 0, RecordBatch::NO_SEQUENCE, None);
+        let result = DefaultRecord::read_from_stream(
+            &mut cursor,
+            0,
+            0,
+            RecordBatch::NO_SEQUENCE,
+            None,
+            AbstractRecords::SOFT_MAX_ARRAY_LENGTH,
+        );
         assert!(result.is_err(), "Expected error for stream, got: {:?}", result);
 
         // test for buffer input
@@ -1213,9 +1246,15 @@ mod tests {
 
         // test for stream input
         let mut cursor = std::io::Cursor::new(out.clone());
-        let record =
-            DefaultRecord::read_from_stream(&mut cursor, base_offset, base_timestamp, RecordBatch::NO_SEQUENCE, None)
-                .unwrap();
+        let record = DefaultRecord::read_from_stream(
+            &mut cursor,
+            base_offset,
+            base_timestamp,
+            RecordBatch::NO_SEQUENCE,
+            None,
+            AbstractRecords::SOFT_MAX_ARRAY_LENGTH,
+        )
+        .unwrap();
         assert_eq!(RecordBatch::NO_SEQUENCE, record.sequence());
 
         // test for buffer input
@@ -1385,23 +1424,32 @@ mod tests {
     }
 
     /// D4: a declared body size is not trusted to size the read
-    /// buffer (Java allocates it up front, `DefaultRecord.java:286`). A record
-    /// declaring `i32::MAX` bytes over a three-byte body allocates for the three
-    /// bytes, then fails with Java's end-of-payload message.
+    /// buffer (Java allocates it up front, `DefaultRecord.java:302`). A record
+    /// declaring the largest size the b69c07c816 bound admits
+    /// (`SOFT_MAX_ARRAY_LENGTH`; `i32::MAX` is now refused before the read)
+    /// over a three-byte body allocates for the three bytes, then fails with
+    /// Java's end-of-payload message.
     #[test]
     fn test_read_from_stream_declared_size_does_not_size_the_buffer() {
         let mut stream = Vec::new();
-        ByteUtils::write_varint(i32::MAX, &mut stream).unwrap();
+        ByteUtils::write_varint(AbstractRecords::SOFT_MAX_ARRAY_LENGTH, &mut stream).unwrap();
         stream.extend_from_slice(b"abc");
 
         let (err, max_allocation) = {
             let _guard = crate::AllocTrackingGuard::new();
-            let err = DefaultRecord::read_from_stream(&mut stream.as_slice(), 0, 0, 0, None)
-                .expect_err("three bytes are not 2 GiB");
+            let err = DefaultRecord::read_from_stream(
+                &mut stream.as_slice(),
+                0,
+                0,
+                0,
+                None,
+                AbstractRecords::SOFT_MAX_ARRAY_LENGTH,
+            )
+            .expect_err("three bytes are not 2 GiB");
             (err, crate::AllocTrackingGuard::max_allocation())
         };
         assert_eq!(
-            "Invalid record size: expected 2147483647 bytes in record payload, but the record payload reached EOF.",
+            "Invalid record size: expected 2147483639 bytes in record payload, but the record payload reached EOF.",
             err.message()
         );
         assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a three-byte body");
@@ -1418,12 +1466,110 @@ mod tests {
     fn test_read_from_stream_ending_in_the_size_is_premature_eof() {
         for stream in [&[][..], &[0x80][..]] {
             let mut input = stream;
-            let err = DefaultRecord::read_from_stream(&mut input, 0, 0, 0, None).expect_err("no size to read");
+            let err =
+                DefaultRecord::read_from_stream(&mut input, 0, 0, 0, None, AbstractRecords::SOFT_MAX_ARRAY_LENGTH)
+                    .expect_err("no size to read");
             assert_eq!(
                 "Incorrect declared batch size, premature EOF reached",
                 err.message(),
                 "stream {stream:?}"
             );
         }
+    }
+
+    // ─── b69c07c816: the per-record body-size bound on the stream decoder ───
+    //
+    // Translated from the consumer-relevant `DefaultRecordTest` cases. The
+    // `readPartiallyFrom` twins (testReadPartiallyFromStream...) have no Rust
+    // counterpart: there is no `readPartiallyFrom` / skip-key-value decoder.
+
+    /// Java's `recordWithForgedBodySize`: only the leading size varint
+    /// matters, since the guard fires before any body bytes are read.
+    fn record_with_forged_body_size(declared_body_size: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ByteUtils::write_varint(declared_body_size, &mut bytes).unwrap();
+        bytes.push(0); // attribute byte, never reached when the guard fires
+        bytes
+    }
+
+    fn read_forged_from_stream(declared_body_size: i32, max_record_body_size: i32) -> InvalidRecordError {
+        let bytes = record_with_forged_body_size(declared_body_size);
+        DefaultRecord::read_from_stream(
+            &mut bytes.as_slice(),
+            0,
+            0,
+            RecordBatch::NO_SEQUENCE,
+            None,
+            max_record_body_size,
+        )
+        .expect_err("the forged size must be rejected")
+    }
+
+    /// Translated from `DefaultRecordTest.testReadFromStreamRejectsInvalidBodySize`.
+    /// A negative size is forgeable via the zig-zag varint; sizes above the
+    /// array length limit can never be allocated. `SOFT_MAX_ARRAY_LENGTH + 1`
+    /// pins the exact upper threshold. Java asserts `contains`; the full
+    /// messages are asserted here.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testReadFromStreamRejectsInvalidBodySize")]
+    fn test_read_from_stream_rejects_invalid_body_size() {
+        assert_eq!(i32::MAX - 8, AbstractRecords::SOFT_MAX_ARRAY_LENGTH);
+        assert_eq!(
+            "Invalid record size: -1 is negative.",
+            read_forged_from_stream(-1, AbstractRecords::SOFT_MAX_ARRAY_LENGTH).message()
+        );
+        assert_eq!(
+            "Invalid record size: 2147483647 exceeds the configured maximum record size of 2147483639.",
+            read_forged_from_stream(i32::MAX, AbstractRecords::SOFT_MAX_ARRAY_LENGTH).message()
+        );
+        assert_eq!(
+            "Invalid record size: 2147483640 exceeds the configured maximum record size of 2147483639.",
+            read_forged_from_stream(
+                AbstractRecords::SOFT_MAX_ARRAY_LENGTH + 1,
+                AbstractRecords::SOFT_MAX_ARRAY_LENGTH
+            )
+            .message()
+        );
+    }
+
+    /// Translated from `DefaultRecordTest.testReadFromStreamRejectsBodySizeExceedingConfiguredMax`:
+    /// a body size well under the array-length limit but over the configured
+    /// maximum trips the configurable guard.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testReadFromStreamRejectsBodySizeExceedingConfiguredMax"
+    )]
+    fn test_read_from_stream_rejects_body_size_exceeding_configured_max() {
+        assert_eq!(
+            "Invalid record size: 1000 exceeds the configured maximum record size of 100.",
+            read_forged_from_stream(1000, 100).message()
+        );
+    }
+
+    /// Translated from `DefaultRecordTest.testReadFromStreamWithConfiguredMaxAcceptsValidRecordAndRejectsWhenTooSmall`:
+    /// a real record decodes under a generous limit and is rejected, before its
+    /// body is read, under a limit below its body.
+    #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testReadFromStreamWithConfiguredMaxAcceptsValidRecordAndRejectsWhenTooSmall"
+    )]
+    fn test_read_from_stream_with_configured_max_accepts_valid_record_and_rejects_when_too_small() {
+        let mut buffer = Vec::new();
+        DefaultRecord::write_to(&mut buffer, 0, 0, Some(b"hi"), Some(b"there"), &[]).unwrap();
+
+        // A generous limit accepts the valid record.
+        let record =
+            DefaultRecord::read_from_stream(&mut buffer.as_slice(), 0, 0, RecordBatch::NO_SEQUENCE, None, 1024)
+                .expect("a valid record under a generous limit");
+        assert_eq!(Some(&b"there"[..]), record.value());
+
+        // A 1-byte limit is below the real body, so the record is rejected.
+        let err = DefaultRecord::read_from_stream(&mut buffer.as_slice(), 0, 0, RecordBatch::NO_SEQUENCE, None, 1)
+            .expect_err("the body exceeds the limit");
+        assert!(
+            err.message().contains("exceeds the configured maximum record size of 1."),
+            "expected the configured-maximum guard, got: {}",
+            err.message()
+        );
     }
 }
