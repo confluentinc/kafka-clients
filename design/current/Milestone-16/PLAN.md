@@ -663,8 +663,11 @@ Phase 2 completion notes (agent 92):
 - **For Phase 12 (shared `KafkaAdminClient`):**
   - `AdminClientRunnable` has a `bootstrap_failure_handled` flag. `run_once` returns right after
     `fail_all_pending_calls`, and `process_requests` breaks on the flag.
-  - Every enqueue goes through `CallSender::call`, which reads `metadata_manager.bootstrap_fatal_error()`
-    once at the top; keep that order relative to the closing and controllers checks when adding
+  - Every app-side and driver enqueue goes through `CallSender::call`, which reads
+    `metadata_manager.bootstrap_fatal_error()` once at the top. (Correction, Phase 12 / Critic 102 Issue 1: not
+    *every* enqueue — a handler's `HandleResult::NewCall`, the createTopics / createPartitions / deleteTopics
+    quota-retry follow-ups, is pushed straight into `pending_calls` by the I/O task and skips `call()`'s checks,
+    where Java's follow-ups go through `runnable.call`.) Keep the order; keep that order relative to the closing and controllers checks when adding
     `unregister_controller`. Java's `enqueue` also starts with a `tries > maxRetries` check that the Rust
     enqueue never had (a pre-existing gap, not KIP-909).
   - `fail_all_remaining` closes the call channel before its final drain, so no accepted call is dropped.
@@ -753,6 +756,190 @@ Phase 2 completion notes (agent 92):
   hunks with reasons.
 - Busy-loop fixes must be shown not to spin in Rust: assert poll-timer / `maximum_time_to_wait` values;
   don't rely on wall-clock behaviour alone.
+
+Phase 3 completion notes (agent 93):
+
+- **Commits:**
+  - 91dcc787 (KAFKA-20854) + fixup 73d04f5f (lint markers);
+  - 02ac689c (KAFKA-20253, pulled forward: coordinator + auto-commit hunks) + fixup 150f4170 (coordinator
+    forwarder wakes the bg task);
+  - e4bf1523 (KAFKA-20970);
+  - 98e6c919 (KAFKA-21010 + the KAFKA-20253 heartbeat hunk it rewrites);
+  - 7ffcfa5b (the bg loop consults the commit manager);
+  - a269808f (selector drains fired readiness every poll iteration);
+  - plus this notes commit.
+- **What landed:**
+  - KAFKA-20854:
+    - `SubscriptionState::has_fetchable_partitions`.
+    - `AbstractFetch`'s nested `FetchRequestPreparationResult`, returned by `prepare_fetch_requests` and
+      `prepare_close_fetch_session_requests`. Close may always wake the buffer.
+    - The "wake on any response" moved from `handle_fetch_success` to `remove_pending_fetch_request`.
+    - The Phase-26 all-nodes-unfetchable short-circuit computes the same `can_wake` flag as the full path:
+      false with nothing buffered, which is the KIP-909 no-nodes window.
+    - `FetchRequestManager` takes `retry_backoff_ms` and overrides `maximum_time_to_wait`
+      (`retry_backoff_ms` with nothing in flight, else `i64::MAX`).
+    - An empty poll wakes the buffer only on `can_wake`. This replaces the Rust-only "wake when nothing is
+      in flight" guard, which still woke the buffer when no partition was fetchable.
+    - `AsyncKafkaConsumer::poll_for_fetches_timeout_ms` (extracted, Rust-only) gains the "fetchable but
+      unbuffered → retry backoff" branch.
+  - KAFKA-20970 / KAFKA-21010:
+    - `CommitRequestManager::maximum_time_to_wait` returns `retry_backoff_ms` while the coordinator is
+      unknown. KAFKA-20970's interval accessor is added and then removed again, as in Java.
+    - `ConsumerHeartbeatRequestManager::maximum_time_to_wait` has its 4.4 shape:
+      - UNSUBSCRIBED or FATAL → `i64::MAX`;
+      - poll timer expired → 0;
+      - coordinator unknown or `should_skip_heartbeat()` → `HeartbeatRequestState::retry_backoff_ms()`.
+    - `HeartbeatRequestState::retry_backoff_ms()` is new. It reads a new `RequestState::exponential_backoff`
+      accessor, which stands in for Java's protected field.
+  - Bg loop (`ConsumerNetworkThread::run_once` Phase 5):
+    - It now also consults the coordinator and commit handles, which `RequestManagers::entries()` skips.
+    - Java's `entries()` includes both. Before this phase the auto-commit timer never bounded the
+      application's wait, so the 20970/21010 commit fixes would have been unreachable.
+- **Regressions found by `make -k verify` and fixed in this phase:**
+  - `consumer_bounce_test::test_async_close` failed 3/3 (baseline ed2e3ce3: 2/2 passed): "Close took too
+    long 3001".
+    - Cause: the KAFKA-20253 coordinator guard made the bg loop sleep (`i64::MAX`) while FindCoordinator was
+      in flight. The FindCoordinator response is applied by a spawned forwarder *after* the network poll
+      returns (Java applies it inside the poll), and nothing woke the loop afterwards.
+    - Before the guard, the loop's 0 timeout hid this.
+    - Fixed in 150f4170: `CoordinatorRequestManager::completion_notify`, wired to `event_notify` as the
+      commit and fetch managers already are.
+  - Selector stranded fire (a269808f):
+    - `drain_fired_queue` ran only inside the WAIT's `readiness_wait`. Its `select!` is `biased` towards the
+      wakeup `Notify`, so a poll entered with a stored permit returned without draining.
+    - The fired channel then kept `armed_read = true` and was never re-armed or processed. A trace showed a
+      coordinator-channel read fire drained 30 s late, after the channel had closed.
+    - This phase makes it reachable: the application task now pokes the bg task once per `retry.backoff.ms`
+      instead of busy-looping, and the loop no longer polls with timeout 0, whose `process_all` sweep used
+      to read every channel anyway.
+    - `test_fire_not_stranded_when_every_poll_starts_woken` fails at its 5 s timeout without the new drain.
+- **`test_async_close` +30 s (corrected after review, COMMENTS.93 Issue 1):** the earlier "broker-side race"
+  diagnosis was wrong.
+  - Critic 93's evidence: the broker answered the first heartbeat in about 380 ms, the response sat unread
+    in the test's in-process `BrokerProxy`, and a sample showed a test-runtime worker busy in
+    `AsyncKafkaConsumer::poll` 99% of the time.
+  - Cause: while a JOINING member's first heartbeat is in flight with a zero interval,
+    `maximumTimeToWait` is 0, as in Java. `poll_inner` then looped without ever returning `Pending`,
+    monopolising its tokio worker and starving the proxy task on that runtime.
+  - Fixed in fixup 9a390dd3: `poll_inner` yields once per empty iteration.
+    `test_poll_yields_while_maximum_time_to_wait_is_zero` fails without the yield.
+  - Result: 9 of 9 logged `test_async_close` runs under the broker lock took about 24.6 s, with no request
+    timeouts. Three earlier unlogged runs took 44 s, 111 s and 111 s while the host load average was above
+    6 from parallel tracks; they did not recur at load ~3.
+- **How each busy loop is shown fixed, by value:**
+  - Background task, while bootstrapping:
+    - `run_once_does_not_spin_while_bootstrap_resolution_is_pending` runs 40 iterations (50 ms model steps)
+      of a group consumer over a client with no nodes: real coordinator, commit (100 ms auto-commit
+      interval), heartbeat (a JOINING member with zero heartbeat interval), offsets and fetch.
+    - It asserts every network poll timeout == `retry.backoff.ms` (100) and the published
+      `cachedMaximumTimeToWait` == 100.
+    - Teeth-checked: without the KAFKA-20253 coordinator guard the poll timeout is 0 from iteration 2. With
+      the heartbeat returning its (zero) interval, or the commit manager ignoring the coordinator, the bound
+      becomes 0 or the timer's remainder.
+  - Application task:
+    - `test_poll_for_fetches_timeout_bounded_by_retry_backoff` asserts the wait in each state:
+      - nothing assigned (the bootstrapping case), no position, or unbuffered fetchable → 100;
+      - everything buffered → the full timeout;
+      - `maximumTimeToWait` 0 → 0, which the caller turns into an immediate return.
+    - `test_poll_with_manual_assignment_does_not_busy_loop` asserts Java's 500.
+  - Per manager, at Java's values:
+    - FRM: the 8 new tests, plus the pre-4.4 `testEmptyFetchResponseWakesUpBuffer`. They assert
+      `maximum_time_to_wait` (`i64::MAX` / 100) and the buffer's pending-wakeup flag
+      (`FetchBuffer::is_woken_up_for_test`, cfg(test)) instead of Java's blocked-thread joins.
+    - Commit and heartbeat assert `DEFAULT_RETRY_BACKOFF_MS` / `Long.MAX_VALUE` exactly.
+    - Both `...DoesNotSpinDuringRealBootstrapDnsResolution` tests drive a real `NetworkClient` that resolves
+      `unresolvable.invalid` asynchronously until the `BootstrapResolutionError`, asserting `> 0` at each
+      step.
+- **Audit of the bootstrapping wait computation (mode > 0):**
+  - Besides the three fixed managers:
+    - the offsets manager returns `EMPTY` / `with_requests` (`i64::MAX`);
+    - the topic-metadata manager returns Java's one-shot `0` only when it emits a request;
+    - the membership manager returns `EMPTY`;
+    - the real `NetworkClient` caps its selector wait at `maybe_update`'s `reconnect_backoff_ms` (50 ms
+      default) while no node is known.
+  - The network poll is never raced in a `select!`, and no guard is held across an `.await`: the new reads
+    take each std `Mutex` briefly, and the commit manager reads its coordinator before taking its state
+    lock.
+  - **Mode 0:** the bootstrap path is untouched. The wait changes apply in both modes, as in Java.
+- **Recorded skips:**
+  - the `Fetcher.java` hunk (classic consumer);
+  - the `StreamsGroupHeartbeatRequestManager` hunks of 20970/21010 and their tests, and the
+    `ShareHeartbeatRequestManagerTest` hunks of 21010/20253 (consumer-threading §20);
+  - checkstyle suppressions;
+  - the fixture-only `AsyncKafkaConsumerTest` hunks: the `retryBackoffMs` local in `newConsumer`, and the
+    Mockito stub reordering in `testSubscribePatternAgainstBrokerNotSupportingRegex`
+    (`AsyncKafkaConsumerTest.java:2482`), which has no Rust counterpart.
+- **Deviations (DoD #7):**
+  - `FetchRequestPreparationResult` is keyed by node id, with the `Node` alongside.
+  - `poll_for_fetches_timeout_ms` is an extracted helper (Java computes it inline).
+  - The FRM "in flight" set can lag Java's by one iteration: completions are drained by the next
+    `poll(now)`, which the forwarder's `completion_notify` schedules at once.
+  - `CoordinatorRequestManager::completion_notify` exists because the Rust forwarder runs outside the
+    network poll.
+  - Two Rust tests were corrected:
+    - the heartbeat "poll timer expired" test answered through `should_heartbeat_now()`, because the Rust
+      poll timer is unarmed until the first reset (Issue 9); it now arms the timer;
+    - several commit timer tests now wire a known coordinator, as Java's mocks do.
+- **DoD #10: N/A** (per-poll / per-iteration paths, not per record). The extra `buffered_partitions()` in the
+  wait bound and in the short-circuit allocates only when the buffer holds data. The selector drain is one
+  uncontended lock per loop iteration.
+- **For Phase 9:**
+  - KAFKA-20253 (28de22de34) is **done here in full**: its three main hunks and its
+    `ConsumerHeartbeatRequestManagerTest` / `CoordinatorRequestManagerTest` tests (the Share test is
+    skipped). Record it as covered by Phase 3.
+  - The heartbeat `maximum_time_to_wait` is the final 4.4 version.
+  - `AbstractHeartbeatRequestManagerTest.testNoCoordinator`'s 21010 assertion lives in
+    `poll_returns_empty_when_no_coordinator`; the e7b0cb7908 file mapping is still Phase 9's decision.
+  - The heartbeat file lost its stale `cfg_attr(test, expect(dead_code))`.
+  - The heartbeat forwarder has no bg-task wake, unlike the coordinator, commit and fetch forwarders.
+    Phase 9 should check whether its responses wait out the poll timeout.
+- **For Phase 4:**
+  - `NetworkClient::set_mock_time` is now `pub(crate)` (cfg(test)) for the shared fixture
+    `network_client_delegate::bootstrapping_network_client_delegate_for_test`.
+  - The selector's loop now drains fired readiness at its top (a269808f).
+- **For Phase 10:**
+  - The FRM wake semantics and `poll_for_fetches_timeout_ms` changed as described above.
+  - Production's `is_unavailable` closure is still the constant `false` under the pre-existing
+    `FIXME(phase-9-sasl)` in `async_kafka_consumer.rs`, so KAFKA-20854's reconnect-backoff skip is
+    reachable only in tests.
+- **Timing log** (2026-10-07/08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts) | 22:44 | 22:52 | 8 |
+  | 1 KAFKA-20854 with tests (91dcc787) | 22:52 | 23:11 | 19 |
+  | 2 KAFKA-20253 coordinator + auto-commit (02ac689c) | 23:11 | 23:15 | 4 |
+  | 3 KAFKA-20970 with tests (e4bf1523) | 23:15 | 23:20 | 5 |
+  | 4 KAFKA-21010 + 20253 heartbeat, with tests (98e6c919) | 23:20 | 23:25 | 5 |
+  | 5 bg-loop consult + proof test + teeth checks (7ffcfa5b) | 23:25 | 23:31 | 6 |
+  | 6 integration (default + 4.4.0-rc4), format-check, full test, lint + fixup (73d04f5f) | 23:31 | 23:38 | 7 |
+  | 7 `make -k verify` #1 | 23:38 | 23:49 | 11 |
+  | 8 regression bisect + root causes (baseline worktree, tracing, broker logs) | 23:49 | 01:17 | 88 |
+  | 9 fixes 150f4170, a269808f, gates, `make -k verify` #2, re-runs, notes | 01:17 | 01:40 | 23 |
+
+- **Verification (HEAD a269808f):**
+  - `cargo build` passes, and so does `cargo xtask format-check`.
+  - `cargo test`: 4369 passed, 0 failed, 10 ignored (lib 4320 / 3 ignored, plus 36, 8, and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: exactly the 15 §5.1 rows; doc-hygiene, module-path and clippy are clean.
+  - Broker-backed tests:
+    - default 4.2.0 broker, `--test integration -- plaintext_consumer consumer_test base_consumer_test
+      bootstrap_resolution_test consumer_topic_creation_test`: 101 / 101 (run before the two late fixes;
+      the consumer subset was re-run after them inside verify);
+    - `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4 -- bootstrap_resolution_test`: 4 / 4.
+  - `make -k verify` #2 (macOS) fails in three targets:
+    - `build-c`: `cmake: command not found` (environment);
+    - `lint`: the 15 §5.1 rows only;
+    - `test-rust-all-features`: lib 4564 passed. The integration suite had 300 passed and 5 failed, all five
+      under full-suite load: `admin_scram_test::…round_trips__rust`, `consumer_bounce_test::test_async_close`,
+      `consumer_bounce_test::test_async_subscribe_when_topic_unavailable` ("TopicExists"),
+      `consumer_test::test_leader_epoch`, `producer_transactions_test::test_fencing_on_transaction_expiration`.
+      Re-run alone they all pass: 8 / 8 including the whole `consumer_bounce_test` module, 2 ignored.
+
+    Verify #1 had 17 integration failures: 15 in `producer_transactions_test` ("Connection refused" to a dead
+    cluster; a solo re-run still failed its `grpc_*` variants and three Rust tests on timeouts, none of
+    them in code this phase touched), and 2 in `consumer_bounce_test`, one of them the then-real
+    `test_async_close` regression.
+  - Python unit tests: 363 passed, 2 skipped. `check-bindings`: 29 passed. Soak: 156 passed.
 
 ### Phase 4 — KIP-1242 misrouted-connection detection + NetworkClient fixes (agent 94)
 
@@ -1517,8 +1704,9 @@ notes commit.
 
 ### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
 
-- KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
-  `CommitRequestManager` and `CoordinatorRequestManager`.
+- ~~KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
+  `CommitRequestManager` and `CoordinatorRequestManager`.~~ **Covered by Phase 3** (02ac689c, 98e6c919),
+  including its consumer tests; do not port it again. See the Phase 3 completion notes.
 - KAFKA-20761 (56410c311b): log the group configs defined on the broker.
 - b8429b93a7: no-op call removed.
 - KAFKA-20681 (6a6b536fbc): heartbeat-success handling consolidated into `AbstractMembershipManager`
@@ -1549,6 +1737,19 @@ notes commit.
   Rust already rejects a negative size with different text, `default_record.rs`); the broker-side
   `maxRecordBodySize` iterators stay out of scope. Reclassified from Broker/O by the Manager after the
   Phase 1 review (COMMENTS.91 Q2).
+  - **After merging master's `a4b3311e` (#205, decode & decompression DoS; agent 93):** master already
+    rejects a negative body size in both `DefaultRecord::read_from_buffer` and `read_from_stream` (the text
+    is still "Invalid record size: expected non-negative size but got N", not Java's "Invalid record size: N
+    is negative."). On the stream path, `read_from_stream` no longer sizes its buffer from the declared size:
+    it reads through `take(size)` and fails with Java's end-of-payload text, so the OOM that motivated
+    Java's upper bound is already closed. Phase 10 still owes three things. First, Java's negative-size
+    message text. Second, the explicit upper-bound check before the read, "Invalid record size: N exceeds
+    the configured maximum record size of M." with `M = Records.SOFT_MAX_ARRAY_LENGTH`
+    (`Integer.MAX_VALUE - 8`, `Records.java:62`); that is the client default, and Rust has no such constant
+    yet. Third, the tests for both, from the consumer-relevant cases in `DefaultRecordTest`. Rust has no
+    `readPartiallyFrom`, no `skipKeyValueIterator` / `streamingIterator(…, maxRecordBodySize)` overloads and
+    no legacy deep-decode (`legacy_record.rs` holds only constants), so the `AbstractLegacyRecordBatch` and
+    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope.
 - Test-only commits:
   - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
     hunks);
@@ -1589,6 +1790,112 @@ notes commit.
 - Tests: the `KafkaAdminClientTest` slices (Java split it into per-domain classes in 1a443b2d23; map them
   to the Rust test layout), `RequestResponseTest` hunks, and FFI / Python tests.
 - Can run as soon as Phase 2 lands (both edit `KafkaAdminClient`).
+
+Phase 12 completion notes (agent 102):
+
+- **KAFKA-20395 (c274a7348f), unregister controllers.**
+  - Wire: `UnregisterControllerRequest` (+ `Builder`, `super(apiKey)` → `latest_version_enable_unstable_last_version(false)`)
+    and `UnregisterControllerResponse`, wired through every `ConcreteRequest`/`ConcreteResponse` arm (the Phase 0
+    "not currently handled" fallthrough is gone). `getErrorResponse(int, Throwable)` takes the crate `Error`
+    (code from `Errors.forException`, message from `getMessage()`), unlike the `&Errors` convention, because the
+    translated `RequestResponseTest.testUnregisterControllerResponseWithUnknownServerError` asserts the custom
+    message; the dispatcher arm builds the `Error` from its code. `errorCounts` skips NONE, as Java does.
+    Byte-level tests: request body and with-header vectors, response with message / null / default (`""`, the
+    spec has no `"default": "null"`), parse through both dispatchers.
+  - API: `Admin::unregister_controller` (trait default) / `unregister_controller_with_options`; public
+    `UnregisterControllerOptions` / `UnregisterControllerResult`. Call: `LeastLoadedBrokerOrActiveKController`
+    (a broker forwards; the API is forwardable), NONE completes, REQUEST_TIMED_OUT is a `HandleResult::Retry`
+    (Java throws from `handleResponse` into `Call.fail`), everything else logs and fails with the broker message.
+  - `MockAdminClient`: Raft controller → completed, else `UnsupportedVersionException("")`. Java's
+    `Builder.usingRaftController` becomes `set_using_raft_controller` (the `set_feature_levels` precedent).
+  - Bindings: `kafka_admin_AdminClient_unregister_controller` / `_async` with
+    `kafka_admin_AdminClient_unregister_controller_callback_t` (no result handle, the B6 void row),
+    `kafka_admin_MockAdminClient_set_using_raft_controller`; Python `Admin.unregister_controller`,
+    `AsyncAdmin.unregister_controller`, mock mixin `set_using_raft_controller`; gRPC `UnregisterController`
+    (`StatusResponse`) in the proto, the C++ server and both Python servers.
+- **58f63f448e / KAFKA-19663 (3b849ff2bd).** Crate-private `admin::internals::InternalDescribeFeaturesResult`.
+  Rust has no subclassing, so it holds the base by value with `From<..> for DescribeFeaturesResult`;
+  `KafkaAdminClient::describe_features_internal` returns it and the trait method upcasts. Both futures complete
+  from the error-code branch and from `handleFailure`. `DescribeFeaturesResult::new` was already `pub(crate)`
+  (Java's new `protected`), so only its doc changed.
+- **KAFKA-20673 follow-up (cb2f143b0d).** The driver call's `handle_node_unavailable` hook returns `false` once a
+  hard-shutdown time is set (Java tests `hardShutdownTimeMs`, not `closing`). Java has no test; a Rust one fails
+  without the guard with "Cannot accept new calls when AdminClient is closing.".
+- **Phase 2's `enqueue` gap.** `CallSender::call` now checks `tries > maxRetries` first in the enqueue part (after
+  `call()`'s hard-shutdown and `bootstrap.controllers` checks, before the bootstrap failure), failing through
+  `handleTimeoutFailure` with "Exceeded maxRetries after N tries.". `handleTimeoutFailure` moved from the runnable
+  onto `Call`, as in Java. Reached by driver specs re-issued with their `tries`; tested at the boundary, for
+  ordering, and end to end (deleteRecords, `retries=0`).
+- **Recorded skips.**
+  - `KafkaAdminClientTest.testUnregisterBroker*` (6, refactored in c274a7348f): Rust has no `unregisterBroker`
+    at all (a pre-existing gap, not 4.4 delta). The shared `runUnregisterScenario` is translated for the
+    controller arm only; Java's `setNodeApiVersions(UNREGISTER_CONTROLLER, 0, 0)` has no `MockClient` analogue.
+  - `ForwardingAdmin.unregisterController`: Rust has no `ForwardingAdmin`.
+  - `DescribeFeaturesTest.testApiVersions` (clients-integration-tests): the broker half is translated as the
+    in-crate Docker test `src/integration_tests/describe_features_test.rs` (it calls the crate-private
+    `describe_features_internal`). Only the controller half is skipped: it needs a `bootstrap.controllers` admin,
+    which the Rust config still rejects. (Critic 102 Issue 3.)
+  - Broker/tool/metadata parts of c274a7348f and 3b849ff2bd (ControllerApis, ClusterControlManager, ClusterTool,
+    MetadataQuorumCommand, KRaftClusterTest): server side, out of scope.
+  - The integration **success** arm of `unregisterController`: Java first shuts down a controller of a 3-node
+    quorum; the harness can stop neither pooled nodes nor controllers. Covered on the mock in Rust, C and Python.
+  - C++ gRPC server handler: not compiled here (no cmake/grpc++ on this host); it mirrors
+    `ForceTerminateTransaction`.
+- **Integration.** New `admin_controllers_test.rs` (3 scenarios × 4 backends) picks its regime from
+  `describeFeatures`' `metadata.version` (level 33 = `IBP_4_4_IV2`): on 4.2.0 every arm is UNSUPPORTED_VERSION; on
+  `4.4.0-rc4` (measured: finalized ≥ 33) the unknown id gives CONTROLLER_ID_NOT_REGISTERED "Controller ID 9999 is
+  not currently registered." and the combined node's own id gives INVALID_REQUEST "Controller cannot unregister
+  itself while it is active.". `__rust`, `__grpc_python`, `__grpc_python_async` green on both brokers (Python
+  arms in `MULTILANG_BACKEND_MODE=native`, which needs `--features ffi` on the test build so the cargo-set dylib
+  path has the FFI symbols); `__grpc_c` not run (no cmake).
+  - `cargo test --features integration-tests --test integration -- admin`: default 4.2.0 82/82 on re-run (first
+    run 81/1: `test_delete_records_nonexistent_partition_fails__rust` failed in cleanup with "Timed out waiting
+    for a node assignment. Call: deleteTopics" under its 8 s API timeout; the module passed 3/3 alone);
+    `4.4.0-rc4` 82/82 on re-run (first run, during the image's cold start, 72/10, all in topic/partition/group
+    setup; each module passed alone).
+- **Gates.** `cargo build` green; `cargo xtask format-check` clean; full `cargo test` 4371 passed / 0 failed / 10
+  ignored (lib 4322 / 3); `cargo xtask lint --keep-going`: lint-custom shows exactly the 15 §5.1 rows (three
+  markers this phase added were fixed in ae43a4bf); every other step clean. C mock suite linked by hand (no
+  cmake): `test_mock_admin` 160/160. Python unit + static: 395 passed, 2 skipped (pre-existing), from a PyPI venv.
+  `make -k verify` (00:01–00:10): fails only `build-c` (`cmake: command not found`, so ctest never ran the new C
+  surface in the gate) and `lint` (the 15 §5.1 rows); the Rust (incl. all-features with Docker), Python and
+  check-bindings arms passed, 4925 tests, 0 failed. DoD #10: N/A (admin is not a per-record path).
+- **Open questions for the human** (from Critic 102; not acted on, Manager decision 2026-10-08):
+  1. **`close(timeout)` does not retry during the grace period** (Critic 102 Issue 1, Medium, pre-existing
+     since M11 `3e84b9bd`, not a Phase 12 regression). `close_with_timeout` stores `shutdown.closing = true` at
+     once; `fail_call` reads it as Java's `runnable.closing` and `should_exit` gates on it. Java's
+     `close(Duration)` (`KafkaAdminClient.java:733-777`) publishes only `hardShutdownTimeMs`; `closing`
+     (`:1209`) is written only in `run()`'s `finally` (`:1551`), so during the grace period `Call.fail`
+     (`:975-979`) still retries via `maybeRetry` (`:1022-1024`), per `Admin.close(Duration)`'s "current
+     operations will be allowed to complete" (`Admin.java:162-165`). The Critic's probe: `unregister_controller`
+     with prepared `[REQUEST_TIMED_OUT, NONE]` gives `Ok` normally but `Err(Timeout)` after `close(60 s)`; Java
+     gives success both times. Related: `HandleResult::NewCall` quota-retry follow-ups bypass `call()`'s
+     hard-shutdown rejection (`:1707-1709`), so Rust keeps retrying what Java fails with "Cannot accept new
+     calls when AdminClient is closing.". **Proposed fix:** gate the I/O task's exit on the hard-shutdown
+     deadline (Java's `curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME`, `:1579-1580`), set `closing` only in
+     `fail_all_remaining` (Java's `finally`), apply `call()`'s hard-shutdown rejection to `NewCall`
+     follow-ups, change the tests that simulate close by storing `closing` to store only the deadline, and
+     translate the probe as a test. It changes close behaviour for every admin RPC, hence the deferral. The
+     `a560d9c7` comment was narrowed to "assigned" meanwhile (fa0bdb52).
+  2. **`unregisterBroker`** is the only member of its family still untranslated (M11 Tier 4 deferral,
+     `design/current/status.md`), though it has `unregisterController`'s shape and shares Java's
+     `runUnregisterScenario`: port it as a follow-up, or keep the deferral?
+- **Timing log** (2026-10-07/08, local):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts) | 22:40 | 22:49 | 9 |
+  | 1 wire wrappers (1c5fd9ed) | 22:49 | 22:53 | 4 |
+  | 2 Admin API + KafkaAdminClient + mock (19d2fbeb) | 22:53 | 23:07 | 14 |
+  | 3 describeFeatures node API versions (19c84e34) | 23:07 | 23:10 | 3 |
+  | 4 closing guard (a560d9c7) | 23:10 | 23:12 | 2 |
+  | 5 retry budget in enqueue (bb03a2b0) | 23:12 | 23:25 | 13 |
+  | 6 C FFI + C tests (f9b9bde6) | 23:25 | 23:30 | 5 |
+  | 7 Python sync/asyncio (96ea1ec8) | 23:30 | 23:33 | 3 |
+  | 8 gRPC harness + scenarios, both brokers (994979fb) | 23:33 | 23:46 | 13 |
+  | 9 admin integration runs, both brokers | 23:46 | 23:56 | 10 |
+  | 10 gates: format, lint + fix (ae43a4bf), full test | 23:56 | 00:01 | 5 |
+  | 11 `make -k verify` and these notes | 00:01 | 00:15 | 14 |
 
 ### Phase 13 — Close-out (agent 103)
 
@@ -1694,6 +2001,39 @@ The summary by component:
 | Security | 2 | – | – | – | 1 | O 1 |
 | **Total** | **190** | **55** | **13** | **21** | **37** | **O 56, R 6, A 2** |
 
-Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 3, P4 4, P5 13, P6 3,
-P7+P8 1 (+1 trunk commit for D3), P9 7, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
-Phase 1 review.)
+Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 4, P3 4, P4 4, P5 13, P6 3,
+P7+P8 1 (+1 trunk commit for D3), P9 6, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
+Phase 1 review; 28de22de34 moved from Phase 9 to Phase 3, which needed it for KAFKA-21010 and the
+bootstrap-window spin.)
+
+### Merges into milestone-16-ak-4.4 (agent 93)
+
+- **`73badfd9`: `origin/master` merged in.** Master was 1 commit ahead: `a4b3311e`, "Fix untrusted broker
+  input - decode & decompression DoS (#205)". There were no textual conflicts. Three files were changed on
+  both sides since the merge base `7ccc9ffb`, and each was checked by hand:
+  - `common/network/selector.rs`: master's `InvalidReceiveError` routing (`channel_error_log`, WARN
+    "Unexpected error …") and Phase 3's fired-queue drain at the top of every poll iteration (`a269808f`)
+    sit in disjoint hunks. Both are kept.
+  - `default_record.rs`: the milestone only changed the `ByteUtils` import path. Master's bounded
+    `take(size)` stream read is kept.
+  - `produce_request.rs`: Phase 1's bounded generated-reader tests and master's `validate_records` rewrite
+    over `ByteBufferLogInputStream` are independent. Both are kept.
+  - The milestone has not touched `completed_fetch.rs` or the other record files, so master's changes
+    applied as they are.
+  - The b69c07c816 split (what master covers and what Phase 10 still owes) is recorded under Phase 10.
+- **`bdaf958a`: `milestone-16-admin` merged in (Phase 12, `852f5063`, forked at `ed2e3ce3`).** There were no
+  conflicts. The only file both sides changed is this PLAN, in different sections. Phase 3 did not touch
+  `kafka_admin_client.rs`, `call.rs` or `admin_client_runnable.rs`. Phase 12's open questions (the
+  close grace period and `unregisterBroker`) stay open.
+- **Gates after both merges.**
+  - `cargo build` is green, and `cargo xtask format-check` is clean.
+  - `cargo test`: 4443 passed, 0 failed, 10 ignored (lib 4394 / 3).
+  - `cargo xtask lint --keep-going`: lint-custom shows exactly the 15 §5.1 rows, the same set as Phase 3
+    (Phase 5 2, Phases 7/8 2, Phase 9 1, Phase 11 10). Clippy, doc-hygiene and module-path are clean.
+- **Broker tests**, on the default broker under `lockf … m16-broker.lock`:
+  - the lib suite, `--lib -- integration_tests::`: 32/32;
+  - `--test integration -- plaintext_consumer consumer_test base_consumer_test bootstrap_resolution_test
+    consumer_topic_creation_test consumer_bounce_test`: 106 passed / 2 ignored;
+  - `-- admin`: 82/82.
+  - Everything passed on the first run.
+- `make verify` was skipped (no cmake). `git status --ignored` shows no new untracked or ignored files.

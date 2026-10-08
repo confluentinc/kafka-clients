@@ -1760,6 +1760,7 @@ mod tests {
                 FetchRequestManager::no_auth_failure(),
                 Arc::new(ApiVersions::new()),
                 crate::consumer::internals::FetchMetricsManager::for_test(),
+                100,
             ))
         } else {
             None

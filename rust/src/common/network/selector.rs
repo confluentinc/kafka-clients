@@ -41,9 +41,9 @@ use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
-use super::is_authentication_error;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
+use super::{is_authentication_error, is_invalid_receive_error};
 
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -683,16 +683,8 @@ impl Selector {
                 format!("unknown (channelId={channel_id})")
             };
 
-            // Route by typed error, not by an opaque ErrorKind heuristic
-            // (mirrors Java's `e instanceof AuthenticationException` in
-            // Selector): only genuine authentication failures log "Failed
-            // authentication"; everything else (connection reset, broken pipe,
-            // EOF) is a retriable network disconnect.
-            if is_authentication_error(&e) {
-                kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
-            } else {
-                kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
-            }
+            let (level, message) = channel_error_log(&desc, &e);
+            log::log!(level, "{}{}", self.log_context.prefix(), message);
 
             self.close_channel_internal(channel_id, CloseMode::Graceful).await;
         }
@@ -746,16 +738,8 @@ impl Selector {
                     format!("unknown (channelId={id})")
                 };
 
-                // Route by typed error, not by an opaque ErrorKind heuristic
-                // (mirrors Java's `e instanceof AuthenticationException`): only
-                // genuine authentication failures log "Failed authentication";
-                // a transient handshake/write I/O error is a retriable
-                // disconnect.
-                if is_authentication_error(&error) {
-                    kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, error);
-                } else {
-                    kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
-                }
+                let (level, message) = channel_error_log(&desc, &error);
+                log::log!(level, "{}{}", self.log_context.prefix(), message);
 
                 let close_mode = if send_failed {
                     CloseMode::NotifyOnly
@@ -1362,6 +1346,25 @@ impl Selectable for Selector {
         let mut process_all = deadline.is_none();
 
         loop {
+            // Pick up every fire recorded since the last drain before choosing
+            // what pass-1 processes. The WAIT below is not the only place a
+            // fire can be waiting: a `ChannelWaker` fires whenever the reactor
+            // runs, and the WAIT's `select!` is `biased` towards the wakeup
+            // `Notify`, so a poll entered with a wakeup permit already stored
+            // returns without ever polling `readiness_wait` — the drain inside
+            // it never runs. A fire left in the queue keeps its channel's
+            // armed flag set, so the channel is neither re-armed nor processed
+            // until some later WAIT happens to drain it; if every poll starts
+            // with a permit, that is never (the next response on that socket
+            // then sits until the request times out). Draining here is cheap
+            // — one uncontended lock and an empty `Vec` take in the steady
+            // state — and safe: it only moves `(token, direction)` entries
+            // into the selector-owned ready set. (Milestone 16 Phase 3: seen
+            // as a JOINING heartbeat stuck for the 30 s request timeout once
+            // the consumer's application task stopped busy-looping and began
+            // poking the background task every `retry.backoff.ms`.)
+            self.drain_fired_queue(&mut ready_ids);
+
             // Process channels with buffered data (reads only)
             if data_in_buffers {
                 let buffered_ids: Vec<Arc<str>> = self.channels_with_buffered_read.drain().collect();
@@ -1736,6 +1739,36 @@ impl Selectable for Selector {
     }
 }
 
+/// The level and text with which the error closing a channel is logged: the
+/// `catch` in Java's `Selector.pollSelectionKeys` (`Selector.java:600-626`),
+/// shared by the read and the write path, which Java handles in one block.
+///
+/// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
+/// `instanceof`:
+///
+///   - an authentication failure logs "Failed authentication" (Java: INFO,
+///     `:622`; this client logs it at ERROR, left as it was);
+///   - an invalid receive logs "Unexpected error" at WARN (`:625`). Java gets
+///     there because `InvalidReceiveException` is a `KafkaException`, not an
+///     `IOException`, and it is the one such payload the receive path raises
+///     here, so the `else` of the Java chain reduces to it. At DEBUG, as it
+///     was, a size header the client refuses left no trace: the client closed,
+///     reconnected and refetched with nothing in the logs;
+///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
+///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
+fn channel_error_log(desc: &str, e: &io::Error) -> (log::Level, String) {
+    if is_authentication_error(e) {
+        (log::Level::Error, format!("Failed authentication with {desc} ({e})"))
+    } else if is_invalid_receive_error(e) {
+        (
+            log::Level::Warn,
+            format!("Unexpected error from {desc}; closing connection: {e}"),
+        )
+    } else {
+        (log::Level::Debug, format!("Connection with {desc} disconnected: {e}"))
+    }
+}
+
 /// Result of a single channel write operation.
 struct ChannelWriteResult {
     bytes_written: usize,
@@ -1840,6 +1873,7 @@ mod tests {
     use super::*;
     use crate::common::network::ByteBufferSend;
     use crate::common::network::PlaintextChannelBuilder;
+    use crate::common::network::{InvalidReceiveError, auth_io_error};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -3658,6 +3692,62 @@ mod tests {
         selector.poll(0).await.unwrap();
     }
 
+    /// A read fire must not be stranded when every poll starts with a wakeup
+    /// permit already stored. The WAIT's `select!` is `biased` towards the
+    /// wakeup `Notify`, so such a poll returns without polling the
+    /// fired-queue drain inside `readiness_wait`; unless the loop drains the
+    /// queue itself, the fired channel keeps its armed flag, is neither
+    /// re-armed nor processed, and its response is never delivered. Milestone
+    /// 16 Phase 3 made this reachable: the consumer's application task stopped
+    /// busy-looping and pokes the background task once per
+    /// `retry.backoff.ms`.
+    ///
+    /// Mutation check: removing the `drain_fired_queue` call at the top of the
+    /// poll loop makes the delivery `timeout` below fail.
+    #[tokio::test]
+    async fn test_fire_not_stranded_when_every_poll_starts_woken() {
+        use std::time::Duration;
+
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+        let resp = blocking_request(&mut selector, "0", "warmup").await;
+        assert_eq!(resp, "warmup");
+
+        // Send, and write it with ONE non-blocking poll: it writes and arms the
+        // channel for the echo, then returns without waiting (a blocking poll
+        // would stay in its WAIT and drain the echo's fire itself).
+        selector.send(create_send("0", "echo-me")).unwrap();
+        selector.poll(0).await.unwrap();
+        assert_eq!(1, selector.completed_sends().len(), "the request is written by the first poll");
+        assert!(
+            selector.completed_receives().iter().all(|r| r.source() != "0"),
+            "the echo cannot have been read before the peer saw the request"
+        );
+
+        // From here on every poll starts with a stored wakeup permit. The sleep
+        // lets the reactor run, so the echo's readiness fires the channel's
+        // waker between polls.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                selector.wakeup();
+                selector.poll(5_000).await.unwrap();
+            }
+        })
+        .await
+        .expect("a fired channel was stranded: the echo was not delivered while every poll started woken");
+
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
     /// Phase 30 — multi-channel ready-set exactness. With N connected channels,
     /// sending on K of them must process exactly those K (one `try_read` minimum
     /// on each that has data) and leave the idle N-K untouched by any recv
@@ -3744,5 +3834,46 @@ mod tests {
             selector.close_channel(id).await;
         }
         selector.poll(0).await.unwrap();
+    }
+
+    /// The `catch` in Java's `pollSelectionKeys` logs the error closing a channel
+    /// at one of three levels (`Selector.java:600-626`). An invalid receive is a
+    /// `KafkaException`, so it takes the WARN "Unexpected error" branch (`:625`),
+    /// not the DEBUG disconnect every `IOException` gets (`:612`). Both selector
+    /// paths log through `channel_error_log`, so this pins the level and the text.
+    #[test]
+    fn test_channel_error_log_routes_as_java_does() {
+        let desc = "127.0.0.1:9092 (channelId=0)";
+
+        let invalid = io::Error::from(InvalidReceiveError::new("Invalid receive (size = -1)"));
+        assert_eq!(
+            (
+                log::Level::Warn,
+                "Unexpected error from 127.0.0.1:9092 (channelId=0); closing connection: \
+                 InvalidReceiveError: Invalid receive (size = -1)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &invalid)
+        );
+
+        let reset = io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 104)");
+        assert_eq!(
+            (
+                log::Level::Debug,
+                "Connection with 127.0.0.1:9092 (channelId=0) disconnected: Connection reset by peer (os error 104)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &reset)
+        );
+
+        let auth = auth_io_error("bad credentials");
+        assert_eq!(
+            (
+                log::Level::Error,
+                "Failed authentication with 127.0.0.1:9092 (channelId=0) (AuthenticationError: bad credentials)"
+                    .to_string()
+            ),
+            channel_error_log(desc, &auth)
+        );
     }
 }

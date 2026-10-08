@@ -432,6 +432,7 @@ mod tests {
             FetchRequestManager::no_auth_failure(),
             std::sync::Arc::new(crate::ApiVersions::new()),
             crate::consumer::internals::FetchMetricsManager::for_test(),
+            100,
         )
     }
 

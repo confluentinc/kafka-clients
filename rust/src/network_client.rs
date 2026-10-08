@@ -511,7 +511,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// `selector.poll()` using `self.time.milliseconds()`. For tests with mock
     /// selectors (instant poll), the fresh timestamp should equal `now`.
     #[cfg(test)]
-    fn set_mock_time(&mut self) {
+    pub(crate) fn set_mock_time(&mut self) {
         self.time = Arc::new(PollTime(Arc::clone(&self.poll_time_store)));
     }
 

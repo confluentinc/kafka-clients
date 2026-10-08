@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::admin::KafkaAdminClient;
-use crate::common::errors::{DisconnectError, TimeoutError};
+use crate::common::errors::DisconnectError;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::{
@@ -712,7 +712,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
         // If the call has timed out, fail.
         if calc_timeout_ms_remaining_as_int(now, call.deadline_ms) <= 0 {
-            self.handle_timeout_failure(call, now, error);
+            call.handle_timeout_failure(now, error);
             return;
         }
         // If the exception is not retriable, fail.
@@ -722,7 +722,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
         // If we are out of retries, fail.
         if call.tries > self.max_retries {
-            self.handle_timeout_failure(call, now, error);
+            call.handle_timeout_failure(now, error);
             return;
         }
         // Otherwise, retry. `maybeRetry` re-queues into pending calls by
@@ -732,27 +732,6 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             MaybeRetryOutcome::Requeue => self.pending_calls.push(call),
             MaybeRetryOutcome::Handled => {},
         }
-    }
-
-    /// Wraps a non-timeout cause as a timeout and fails the call terminally.
-    ///
-    /// Translated from `Call.handleTimeoutFailure`.
-    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: Error) {
-        let error = if cause.error() == Errors::RequestTimedOut {
-            cause
-        } else {
-            // `new TimeoutException(this + " timed out at " + now + " after " + tries
-            // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
-            // renders through `Call.toString()` (`:1001-1004`).
-            //
-            // The message used to gain an invented `"Aborted due to timeout: "`
-            // prefix (a string that appears nowhere in the Kafka tree), drop the
-            // `Call(...)` rendering, and append the cause as text — which left
-            // `Error::source()` empty where Java's `getCause()` is populated.
-            let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
-            Error::Timeout(TimeoutError::with_source(message, cause))
-        };
-        call.handle_failure(&error);
     }
 
     /// Fails all remaining calls (finally-block on shutdown).

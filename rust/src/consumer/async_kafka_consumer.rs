@@ -2168,6 +2168,13 @@ where
         if let Some(commit_arc) = commit.as_ref() {
             commit_arc.set_completion_notify(Arc::clone(&event_notify));
         }
+        // Likewise when the FindCoordinator forwarder applies a response: the
+        // coordinator manager reports `i64::MAX` while its request is in flight
+        // (KAFKA-20253), so without this wake the newly discovered coordinator
+        // would sit unused until the network poll timed out.
+        if let Some(coord_arc) = coordinator.as_ref() {
+            coord_arc.set_completion_notify(Arc::clone(&event_notify));
+        }
         if let (Some(coord_arc), Some(commit_arc)) = (coordinator.as_ref(), commit.as_ref()) {
             commit_arc.set_coordinator(Arc::clone(coord_arc));
         }
@@ -2339,6 +2346,7 @@ where
                 maybe_auth,
                 Arc::clone(&api_versions),
                 Arc::clone(&fetch_metrics_manager),
+                config.retry_backoff_ms(),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
@@ -4120,6 +4128,22 @@ where
             if self.time.milliseconds() >= poll_deadline_ms {
                 break;
             }
+
+            // Rust-only (CLAUDE.md §11.6; Java's thread spins without starving
+            // anything): an iteration can come round without ever returning
+            // `Pending`. `poll_for_fetches` returns at once when
+            // `maximumTimeToWait` is 0 (Java's value while, for example, a
+            // JOINING member's first heartbeat is in flight with a zero
+            // interval, or an auto-commit timer has expired), and
+            // `await_wakeup` / the reconciliation-check wait complete without
+            // suspending when the buffer was already woken. Looping straight
+            // back would monopolise the caller's tokio worker for the whole
+            // window: no other task on it runs and its I/O driver is not
+            // polled. Yield once per empty iteration, as `Selector::poll`
+            // does on its non-blocking path, so co-scheduled tasks progress.
+            // The background task runs on its own thread, so this only
+            // changes how the waiting app task shares its worker.
+            tokio::task::yield_now().await;
         }
 
         Ok(ConsumerRecords::empty())
@@ -4291,53 +4315,14 @@ where
             return Ok(fetch);
         }
 
-        // Java (AK 4.3.1): `pollTimeout` is computed AFTER the first
-        // `collectFetch()` returns empty — no need to compute it when data is
-        // already available.
-        // `pollTimeout = min(maximumTimeToWait, timer.remainingMs())` when
-        // committed-offset management is enabled (always true for a group
-        // consumer). Capping at `maximumTimeToWait` bounds how long this
-        // blocks so the poll loop re-runs `check_inflight_poll` — draining §31
-        // background events / rebalance callbacks — at least that often. The
-        // heartbeat manager's `maximum_time_to_wait` shrinks during membership
-        // work, exactly as in Java.
+        // Java: `pollTimeout` is computed AFTER the first `collectFetch()`
+        // returns empty — no need to compute it when data is already
+        // available. See [`Self::poll_for_fetches_timeout_ms`].
         let remaining = self.remaining_ms(poll_deadline_ms);
-        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
+        let poll_timeout_ms = self.poll_for_fetches_timeout_ms(remaining);
         if poll_timeout_ms <= 0 {
             // No time left to wait; the caller's loop re-checks the deadline.
             return Ok(fetch);
-        }
-
-        // Java (`AsyncKafkaConsumer.java:1888-1904`): clamp the wait to
-        // `retry.backoff.ms` when there are no assigned partitions, or any
-        // assigned partition lacks a valid position. In those states the
-        // background task is looking up positions (offset reset / committed
-        // fetch) and may be backing off after a failure, so blocking for the
-        // full timeout would stall poll() unnecessarily. This matters in this
-        // port specifically because `OffsetsRequestManager` does not shrink
-        // `maximum_time_to_wait`, so without this clamp the `await_wakeup`
-        // below could park up to `MAX_POLL_TIMEOUT_MS` during the
-        // join / post-rebalance window before positions are valid. No
-        // `.await` is held across the `SubscriptionState` guard (§16).
-        if poll_timeout_ms > self.retry_backoff_ms {
-            // Java copies the assignment set (`subscriptions.assignedPartitions()`)
-            // and iterates it calling `hasValidPosition(tp)` — a fresh HashSet +
-            // per-partition map lookup on EVERY poll(). The observable predicate
-            // is exactly "no assigned partitions, or any assigned partition
-            // lacks a valid position", which the existing Java-mirrored
-            // accessors compute allocation-free (`numAssignedPartitions`,
-            // `hasAllFetchPositions`). Java's copy is a cheap TLAB nursery
-            // allocation the GC absorbs; in Rust it was a malloc + 24 Arc
-            // clones + SipHash inserts per poll (~1.3% of app-thread CPU on
-            // the cloud profile). CLAUDE.md §13: keep it off the heap
-            // (Phase 27 Fix #3).
-            let needs_backoff = {
-                let subs = self.subscriptions.lock().unwrap();
-                subs.num_assigned_partitions() == 0 || !subs.has_all_fetch_positions()
-            };
-            if needs_backoff {
-                poll_timeout_ms = self.retry_backoff_ms;
-            }
         }
 
         // Ensure a fetch is in flight before we block. `await_wakeup` only
@@ -4371,6 +4356,67 @@ where
         // a wakeup; the caller's loop re-checks the deadline / surfaces the
         // wakeup. All three of its guards run again, as in Java.
         self.collect_fetch().await
+    }
+
+    /// How long [`Self::poll_for_fetches`] may block on the fetch buffer,
+    /// given `remaining_ms` of the caller's poll timer. Java computes this
+    /// inline in `pollForFetches` (`AsyncKafkaConsumer.java:1987-2012`, 4.4);
+    /// it is a separate method here so the value the application task waits
+    /// for can be asserted directly (the KAFKA-20854 / KAFKA-20970 /
+    /// KAFKA-21010 busy-loop tests).
+    ///
+    /// `pollTimeout = min(maximumTimeToWait, timer.remainingMs())`. Capping at
+    /// `maximumTimeToWait` (the background task's cached minimum over the
+    /// request managers) bounds how long this blocks, so the poll loop re-runs
+    /// `check_inflight_poll` — draining §31 background events / rebalance
+    /// callbacks — at least that often. KAFKA-20854 dropped Java's
+    /// `isCommittedOffsetsManagementEnabled()` condition on the `min`; this
+    /// port always applied it.
+    ///
+    /// Then the wait is bounded by `retry.backoff.ms` when background progress
+    /// may make fetching possible soon, judged from the current application-task
+    /// state rather than possibly stale background-task state:
+    ///   - no assigned partitions: group membership not established yet,
+    ///     assignments revoked but not reassigned, bootstrap DNS resolution
+    ///     (KIP-909) still in progress, or manual assignment not done yet;
+    ///   - some partition without a valid position: the background task may be
+    ///     fetching committed offsets, looking up offsets by timestamp, or
+    ///     backing off after a failure;
+    ///   - (KAFKA-20854) some fetchable partition with no buffered data: it may
+    ///     have been skipped for reconnect backoff, an in-flight request or a
+    ///     missing leader, and the background task no longer wakes the buffer
+    ///     for those states, so bound the wait to retry once the condition
+    ///     clears.
+    ///
+    /// Java copies the assignment for the position check; the first two
+    /// predicates here use the allocation-free `num_assigned_partitions` /
+    /// `has_all_fetch_positions` (Phase 27 Fix #3). Each `SubscriptionState`
+    /// read takes and drops the lock, as each Java `synchronized` call does,
+    /// and the buffer's lock is never taken while it is held. No `.await` is
+    /// held across either guard (§16).
+    fn poll_for_fetches_timeout_ms(&self, remaining_ms: i64) -> i64 {
+        let poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining_ms);
+        if poll_timeout_ms <= self.retry_backoff_ms {
+            return poll_timeout_ms;
+        }
+        let needs_backoff = {
+            let subs = self.subscriptions.lock().unwrap();
+            subs.num_assigned_partitions() == 0 || !subs.has_all_fetch_positions()
+        };
+        if needs_backoff {
+            return self.retry_backoff_ms;
+        }
+        let buffered = self.fetch_buffer.buffered_partitions();
+        let has_unbuffered_fetchable = self
+            .subscriptions
+            .lock()
+            .unwrap()
+            .has_fetchable_partitions(|tp| !buffered.contains(tp));
+        if has_unbuffered_fetchable {
+            self.retry_backoff_ms
+        } else {
+            poll_timeout_ms
+        }
     }
 
     /// AK 4.3.1 (KAFKA-20106): the first stage of `collectFetch()`.
@@ -12249,5 +12295,150 @@ mod tests {
         // The consumer is still marked closed — the wrap happens after the
         // state flip, as in Java.
         assert!(consumer.is_closed());
+    }
+
+    // ─── KAFKA-20854: the `pollForFetches` wait bound ────────────────────
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop`,
+    /// as KAFKA-20854 amended it. With a manually assigned, positioned
+    /// partition whose data is already buffered, and the background task
+    /// reporting `maximumTimeToWait() == Long.MAX_VALUE` (the UNSUBSCRIBED
+    /// heartbeat manager, KAFKA-20426), nothing bounds the wait: the
+    /// application task waits the full 500 ms user timeout, not 0.
+    ///
+    /// Java drives `poll(Duration.ofMillis(500))` with a mocked buffer and
+    /// captures the `Timer` handed to `awaitWakeup`; that `Timer` is
+    /// [`AsyncKafkaConsumer::poll_for_fetches_timeout_ms`]'s value, asserted
+    /// here directly.
+    #[tokio::test]
+    async fn test_poll_with_manual_assignment_does_not_busy_loop() {
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            subs.seek(&tp, 0).unwrap();
+        }
+        consumer.max_time_to_wait_ms.store(i64::MAX, Ordering::Release);
+        // The partition is fetchable but already buffered, so the wait is not bounded.
+        consumer.fetch_buffer.add(CompletedFetch::new(tp.clone(), PartitionData::new()));
+
+        let poll_timeout_ms = 500;
+        assert_eq!(
+            poll_timeout_ms,
+            consumer.poll_for_fetches_timeout_ms(poll_timeout_ms),
+            "Expected poll wait timer to use the full user timeout (no busy loop)"
+        );
+    }
+
+    /// The other branches of the same bound (KAFKA-20854; Java has no
+    /// dedicated test): each "background progress may enable fetching" state
+    /// waits exactly `retry.backoff.ms`, never 0 and never the full timeout.
+    /// The first case is the bootstrapping consumer (KIP-909): nothing
+    /// assigned yet.
+    #[tokio::test]
+    async fn test_poll_for_fetches_timeout_bounded_by_retry_backoff() {
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let retry_backoff_ms = consumer.retry_backoff_ms;
+        assert_eq!(retry_backoff_ms, 100, "the fixture's retry.backoff.ms default");
+        consumer.max_time_to_wait_ms.store(i64::MAX, Ordering::Release);
+
+        // No assigned partitions (bootstrap resolution / group join pending).
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Assigned, but without a valid position.
+        let tp0 = TopicPartition::new("topic1", 0);
+        let tp1 = TopicPartition::new("topic1", 1);
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone(), tp1.clone()]))
+            .unwrap();
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Positioned, but tp1 is fetchable with nothing buffered (skipped for
+        // backoff / an in-flight request / a missing leader).
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.seek(&tp0, 0).unwrap();
+            subs.seek(&tp1, 0).unwrap();
+        }
+        consumer
+            .fetch_buffer
+            .add(CompletedFetch::new(tp0.clone(), PartitionData::new()));
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Everything fetchable is buffered: the full timeout.
+        consumer
+            .fetch_buffer
+            .add(CompletedFetch::new(tp1.clone(), PartitionData::new()));
+        assert_eq!(30_000, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Below the backoff, the smaller of the background bound and the
+        // caller's timer wins unchanged — including 0, which the caller turns
+        // into an immediate return rather than a wait.
+        assert_eq!(40, consumer.poll_for_fetches_timeout_ms(40));
+        consumer.max_time_to_wait_ms.store(0, Ordering::Release);
+        assert_eq!(0, consumer.poll_for_fetches_timeout_ms(30_000));
+    }
+
+    /// Critic 93 Issue 1: while `maximumTimeToWait` is 0 (Java's value, for
+    /// instance while a JOINING member's first heartbeat is in flight with a
+    /// zero interval), `poll()` loops without blocking. It must still yield
+    /// every iteration, or it monopolises its tokio worker: on a
+    /// `current_thread` runtime a co-scheduled task would not run until
+    /// `poll()` returns. In the integration harness that task was the
+    /// `BrokerProxy` forwarding the very heartbeat response the spin was
+    /// waiting for, so every first join stalled for the 30 s request timeout.
+    ///
+    /// Mutation check: without the `yield_now` in `poll_inner` the spawned
+    /// task has not run at all by the time `poll()` returns 300 ms later, and
+    /// the test fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_poll_yields_while_maximum_time_to_wait_is_zero() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            subs.seek(&tp, 0).unwrap();
+        }
+        // The background task's published bound: no wait at all.
+        consumer.max_time_to_wait_ms.store(0, Ordering::Release);
+
+        let start = std::time::Instant::now();
+        let ran_after = Arc::new(Mutex::new(None::<Duration>));
+        let ran_after_task = Arc::clone(&ran_after);
+        tokio::spawn(async move {
+            *ran_after_task.lock().unwrap() = Some(start.elapsed());
+        });
+
+        let poll_timeout = Duration::from_millis(300);
+        let records = crate::consumer::Consumer::poll(&mut consumer, poll_timeout)
+            .await
+            .expect("poll");
+        let poll_took = start.elapsed();
+        assert!(records.is_empty());
+        // Waits out (about) its timeout: the deadline is on the fixture's
+        // millisecond clock, so allow for rounding.
+        assert!(
+            poll_took >= Duration::from_millis(250),
+            "poll waits out its timeout: {poll_took:?}"
+        );
+
+        let ran_after = ran_after.lock().unwrap().expect("the co-scheduled task ran during poll()");
+        assert!(
+            ran_after < Duration::from_millis(100),
+            "a task on the same current_thread runtime first ran {ran_after:?} into a {poll_timeout:?} poll(): \
+             poll() spun without yielding while maximumTimeToWait was 0"
+        );
+        drop(handles.subscriptions);
     }
 }

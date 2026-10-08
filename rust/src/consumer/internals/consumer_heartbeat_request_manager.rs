@@ -21,8 +21,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager`.
 
-#![cfg_attr(test, expect(dead_code))]
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -1037,12 +1035,11 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
     }
 
     fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
-        // AK 4.3.1 (KAFKA-20426): when the member is UNSUBSCRIBED (for example,
-        // with manual assignment and no group), return i64::MAX to indicate
-        // there is no next heartbeat to wait for — allowing the application
-        // thread to block for the full user-specified poll timeout rather than
-        // spinning in a busy loop. Java:
-        //   `if (membershipManager().state() == MemberState.UNSUBSCRIBED) return Long.MAX_VALUE;`
+        // When the member is UNSUBSCRIBED (for example, with manual assignment;
+        // KAFKA-20426) or in the terminal FATAL state (KAFKA-21010), return
+        // i64::MAX to indicate there is no next heartbeat to wait for —
+        // allowing the application thread to block for the full user-specified
+        // poll timeout rather than spinning in a busy loop.
         //
         // Deviation note (Critic 64, Observation 1): Java 4.3.1
         // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:255) calls
@@ -1057,28 +1054,42 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         // method also takes `&self`, so it cannot mutate timer state. Thus
         // the `pollTimer.update` step has no Rust counterpart on this path and
         // its omission is behavior-faithful.
-        {
+        //
+        // The membership state is read once, under one lock, for all three
+        // predicates below: Java's mocked/`synchronized` reads are separate
+        // calls, but nothing else runs on the background task between them.
+        let (state, should_skip_heartbeat, should_heartbeat_now) = {
             let inner = self.membership_manager.abstract_mm.inner.lock();
             let guard = match inner {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            if guard.state == MemberState::Unsubscribed {
-                return i64::MAX;
-            }
+            (guard.state, guard.should_skip_heartbeat(), guard.should_heartbeat_now())
+        };
+        // No heartbeat can be sent in these states: UNSUBSCRIBED has nothing to heartbeat for,
+        // and FATAL is terminal. The fatal error has already been propagated to the
+        // application thread, so there is no need to wake it before its poll timeout expires.
+        if state == MemberState::Unsubscribed || state == MemberState::Fatal {
+            return i64::MAX;
         }
+        // Unblock the application thread so STALE/FENCED members can run
+        // assignment-release callbacks and rejoin during the next poll.
         if self.inner.poll_timer_is_expired(current_time_ms) {
             return 0;
         }
-        let should_now = {
-            let inner = self.membership_manager.abstract_mm.inner.lock();
-            let guard = match inner {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.should_heartbeat_now() && !self.inner.heartbeat_request_state.request_in_flight()
-        };
-        if should_now {
+        // Mirror the guard in poll(). A heartbeat is only sent when the coordinator is known and the
+        // member is in a state that can send heartbeats. This covers cases such as:
+        // - The coordinator is unavailable (for example, during bootstrap DNS resolution or after a
+        //   re-authentication failure).
+        // - The member is FENCED (or STALE with the poll timer already reset) and waiting for the
+        //   application thread to run assignment-release callbacks before rejoining.
+        // Return retryBackoffMs rather than the heartbeat interval, since the interval remains 0 until
+        // the first heartbeat response is received, which would also lead to busy-spinning.
+        // (KAFKA-20253 added this branch returning the heartbeat interval; KAFKA-21010 changed it.)
+        if self.inner.coordinator_request_manager.coordinator().is_none() || should_skip_heartbeat {
+            return self.inner.heartbeat_request_state.retry_backoff_ms();
+        }
+        if should_heartbeat_now && !self.inner.heartbeat_request_state.request_in_flight() {
             return 0;
         }
         let remaining_poll = self.inner.poll_timer_remaining_ms(current_time_ms);
@@ -1108,6 +1119,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
 ///   (in `heartbeat_request_state.rs`; Phase 35)
 /// - `testFirstHeartbeatIncludesRequiredInfoToJoinGroupAndGetAssignments` —
 ///   `first_heartbeat_includes_required_info_to_join_group` (Phase 35)
+/// - KAFKA-20253 / KAFKA-21010 (Milestone 16 Phase 3):
+///   `testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin`,
+///   `testMaximumTimeToWaitWhenJoiningAndCoordinatorUnknownDoesNotSpin`,
+///   `testMaximumTimeToWaitWhenFatalReturnsMaxValue`,
+///   `testMaximumTimeToWaitWhenFencedWaitsRetryBackoff`,
+///   `testMaximumTimeToWaitDoesNotSpinDuringRealBootstrapDnsResolution` — the
+///   same names in snake case; `AbstractHeartbeatRequestManagerTest#testNoCoordinator`
+///   — `poll_returns_empty_when_no_coordinator`
 /// - `testValidateConsumerGroupHeartbeatRequest` — `validate_consumer_group_heartbeat_request` (Phase 35)
 /// - `testValidateConsumerGroupHeartbeatRequestAssignmentSentWhenLocalEpochChanges` —
 ///   `validate_heartbeat_request_assignment_sent_when_local_epoch_changes` (Phase 35)
@@ -1323,11 +1342,24 @@ mod tests {
     }
 
     /// When the coordinator is unknown, poll returns EMPTY.
+    ///
+    /// Also translates `AbstractHeartbeatRequestManagerTest#testNoCoordinator`
+    /// (formerly in `ConsumerHeartbeatRequestManagerTest`): `poll` waits
+    /// forever and, since KAFKA-21010, `maximumTimeToWait` is the retry
+    /// backoff (it was the heartbeat interval). Java's mocked membership
+    /// manager reports neither UNSUBSCRIBED nor FATAL; STABLE stands in.
     #[test]
     fn poll_returns_empty_when_no_coordinator() {
         let mut mgr = make();
         let result = mgr.poll(0);
         assert!(result.unsent_requests.is_empty());
+
+        let (mut mgr, _coord, mm) = make_with_coord(Some(DEFAULT_HEARTBEAT_INTERVAL_MS));
+        force_state(&mm, MemberState::Stable);
+        let result = mgr.poll(0);
+        assert_eq!(i64::MAX, result.time_until_next_poll_ms);
+        assert_eq!(DEFAULT_RETRY_BACKOFF_MS, mgr.maximum_time_to_wait(0));
+        assert_eq!(0, result.unsent_requests.len());
     }
 
     /// `should_send_leave_heartbeat_now` returns false when not in
@@ -1376,13 +1408,24 @@ mod tests {
     }
 
     /// `maximum_time_to_wait` returns 0 when the poll timer has
-    /// expired. (AK 4.3.1: the member must NOT be UNSUBSCRIBED, else the
-    /// KAFKA-20426 short-circuit returns i64::MAX first — see
+    /// expired. (The member must NOT be UNSUBSCRIBED or FATAL, else the
+    /// KAFKA-20426 / KAFKA-21010 short-circuit returns i64::MAX first — see
     /// `maximum_time_to_wait_returns_max_when_unsubscribed`.)
+    ///
+    /// The expiry check comes before the coordinator-unknown guard
+    /// (KAFKA-20253 / KAFKA-21010), so it holds with no coordinator. This
+    /// test used to return 0 through `should_heartbeat_now()` (JOINING)
+    /// instead, because the Rust poll timer is unarmed until the first
+    /// `reset_poll_timer` (Issue 9); it now arms the timer, as the
+    /// application task's first poll does, so the expiry branch is what
+    /// answers.
     #[test]
     fn maximum_time_to_wait_returns_zero_when_poll_timer_expired() {
-        let (mgr, _coord, mm) = make_with_coord(None);
+        let (mut mgr, _coord, mm) = make_with_coord(None);
         mm.transition_to_joining().unwrap();
+        mgr.inner.reset_poll_timer(0);
+        // Not expired yet, coordinator unknown: the retry backoff.
+        assert_eq!(mgr.maximum_time_to_wait(300_000 - 1), DEFAULT_RETRY_BACKOFF_MS);
         // Default max.poll.interval.ms is 300_000; advance past it.
         assert_eq!(mgr.maximum_time_to_wait(300_001), 0);
     }
@@ -1406,12 +1449,178 @@ mod tests {
 
         // isUnsubscribed = false (JOINING): the zero heartbeat interval timer
         // has already expired, so it returns 0.
-        let (mgr2, _c2, mm2) = make_with_coord(Some(0));
+        // Java's `@BeforeEach` stubs a known coordinator.
+        let (mgr2, c2, mm2) = make_with_coord(Some(0));
+        set_coordinator(&c2);
         mm2.transition_to_joining().unwrap();
         assert_eq!(
             mgr2.maximum_time_to_wait(0),
             0,
             "maximumTimeToWait must return 0 when the heartbeat interval timer has expired",
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin`
+    /// (KAFKA-20253): when the coordinator is unavailable (e.g. after a
+    /// re-authentication failure), poll() returns EMPTY, so no heartbeat can
+    /// be sent. maximumTimeToWait() must return a positive value in that case;
+    /// returning 0 busy-spins the application task (and, via wakeups, the
+    /// background task).
+    ///
+    /// Java mocks `state() == STABLE` together with `shouldHeartbeatNow() ==
+    /// true`, a pair a real membership manager cannot produce; both halves are
+    /// run here instead (STABLE, and JOINING, where `should_heartbeat_now()` is
+    /// true).
+    #[test]
+    fn test_maximum_time_to_wait_when_coordinator_unavailable_does_not_spin() {
+        for state in [MemberState::Stable, MemberState::Joining] {
+            let (mgr, coord, mm) = make_with_coord(Some(DEFAULT_HEARTBEAT_INTERVAL_MS));
+            assert!(coord.coordinator().is_none());
+            force_state(&mm, state);
+
+            let result = mgr.maximum_time_to_wait(0);
+
+            assert!(
+                result > 0,
+                "maximumTimeToWait must be > 0 when the coordinator is unavailable to avoid a busy-spin; got {result}"
+            );
+            // KAFKA-21010: a retry backoff, not the heartbeat interval.
+            assert_eq!(DEFAULT_RETRY_BACKOFF_MS, result, "state {state:?}");
+        }
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitWhenJoiningAndCoordinatorUnknownDoesNotSpin`
+    /// (KAFKA-21010): while bootstrap DNS resolution is still in progress the
+    /// coordinator is unknown, and a member that wants to join has a zero
+    /// heartbeat interval, since the interval is only learned from the first
+    /// heartbeat response. maximumTimeToWait() must wait a retry backoff rather
+    /// than the (zero) heartbeat interval; returning 0 busy-spins the
+    /// application and background tasks.
+    #[test]
+    fn test_maximum_time_to_wait_when_joining_and_coordinator_unknown_does_not_spin() {
+        let (mgr, coord, mm) = make_with_coord(Some(0));
+        assert!(coord.coordinator().is_none());
+        mm.transition_to_joining().unwrap();
+        assert!(mm.abstract_mm.inner.lock().unwrap().should_heartbeat_now());
+
+        let result = mgr.maximum_time_to_wait(0);
+
+        assert!(
+            result > 0,
+            "maximumTimeToWait must be > 0 while the member is joining and the coordinator is unknown to avoid a \
+             busy-spin; got {result}"
+        );
+        assert_eq!(DEFAULT_RETRY_BACKOFF_MS, result);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitWhenFatalReturnsMaxValue`
+    /// (KAFKA-21010).
+    #[test]
+    fn test_maximum_time_to_wait_when_fatal_returns_max_value() {
+        let (mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        force_state(&mm, MemberState::Fatal);
+
+        assert_eq!(
+            i64::MAX,
+            mgr.maximum_time_to_wait(0),
+            "maximumTimeToWait should return Long.MAX_VALUE in the terminal FATAL state"
+        );
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitWhenFencedWaitsRetryBackoff`
+    /// (KAFKA-21010). The coordinator is known (Java's `@BeforeEach` stubs
+    /// it), so the `should_skip_heartbeat()` half of the guard is what applies.
+    #[test]
+    fn test_maximum_time_to_wait_when_fenced_waits_retry_backoff() {
+        let (mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        force_state(&mm, MemberState::Fenced);
+        assert!(mm.abstract_mm.inner.lock().unwrap().should_skip_heartbeat());
+
+        let result = mgr.maximum_time_to_wait(0);
+
+        assert!(
+            result > 0,
+            "maximumTimeToWait must be > 0 while the member is fenced to avoid a busy-spin; got {result}"
+        );
+        assert_eq!(DEFAULT_RETRY_BACKOFF_MS, result);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitDoesNotSpinDuringRealBootstrapDnsResolution`
+    /// (KAFKA-21010): a real `NetworkClient` resolving an unresolvable
+    /// bootstrap host asynchronously (KIP-909) with a 1000 ms timeout, a real
+    /// coordinator manager that never learns a coordinator, and a JOINING
+    /// member whose heartbeat interval is still zero. `maximum_time_to_wait`
+    /// stays positive at every step until the `BootstrapResolutionError`
+    /// surfaces. As in the `CommitRequestManager` translation, the loop
+    /// advances the poll's `now` (the client's clock) by the 50 ms poll
+    /// timeout per step, where Java uses a `MockTime`.
+    #[tokio::test]
+    async fn test_maximum_time_to_wait_does_not_spin_during_real_bootstrap_dns_resolution() {
+        let bootstrap_resolve_timeout_ms = 1_000;
+        let bootstrap_servers = vec!["unresolvable.invalid:9092".to_string()];
+        let mut config = ConsumerConfig {
+            bootstrap_servers: bootstrap_servers.clone(),
+            group_id: Some(DEFAULT_GROUP_ID.to_string()),
+            ..Default::default()
+        };
+        config.retry_backoff_ms = DEFAULT_RETRY_BACKOFF_MS;
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = Arc::new(ConsumerMetadata::with_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let mut network_client_delegate =
+            crate::consumer::internals::network_client_delegate::bootstrapping_network_client_delegate_for_test(
+                &config,
+                metadata.metadata_arc(),
+                &bootstrap_servers,
+                bootstrap_resolve_timeout_ms,
+            );
+
+        // The member wants to join, but its heartbeat interval is still zero
+        // (unknown until the first heartbeat response).
+        let (mut real_heartbeat_request_manager, real_coordinator_request_manager, mm) = make_with_coord(Some(0));
+        mm.transition_to_joining().unwrap();
+
+        let deadline = bootstrap_resolve_timeout_ms + 3_000;
+        let mut now = 0;
+        let mut saw_bootstrap_error = false;
+        while now < deadline {
+            // Drives the real NetworkClient's ensureBootstrapped()/async DNS
+            // resolution forward; the coordinator never becomes known since
+            // there is no real broker to respond.
+            network_client_delegate.poll_default(50, now).await;
+            assert!(real_coordinator_request_manager.coordinator().is_none());
+            assert!(real_heartbeat_request_manager.poll(now).unsent_requests.is_empty());
+
+            let wait_ms = real_heartbeat_request_manager.maximum_time_to_wait(now);
+            assert!(
+                wait_ms > 0,
+                "maximumTimeToWait must be > 0 while real bootstrap DNS resolution is pending; got {wait_ms}"
+            );
+
+            if let Some(error) = network_client_delegate.get_and_clear_metadata_error() {
+                assert!(
+                    matches!(error, Error::BootstrapResolution(_)),
+                    "unexpected metadata error: {error:?}"
+                );
+                saw_bootstrap_error = true;
+                break;
+            }
+            now += 50;
+        }
+        assert!(
+            saw_bootstrap_error,
+            "Expected a real BootstrapResolutionException within {}ms",
+            bootstrap_resolve_timeout_ms + 3_000
         );
     }
 

@@ -61,6 +61,19 @@ pub(crate) struct CoordinatorRequestManagerInner {
     closing: Mutex<bool>,
     /// Most recent fatal error (e.g. `GROUP_AUTHORIZATION_FAILED`).
     fatal_error: Mutex<Option<Error>>,
+    /// The bg task's wakeup `Notify` (a clone of `event_notify`), poked by the
+    /// spawned FindCoordinator forwarder once it has applied the response or
+    /// failure, so the next `run_once` acts on it at once. Java needs no
+    /// equivalent: its `whenComplete` callback runs inside the network poll,
+    /// so the coordinator is updated before the next `runOnce`. Here the
+    /// forwarder runs after the poll has returned; without the poke the bg
+    /// loop sleeps out its poll timeout with the coordinator already known.
+    /// That timeout is long (`PollResult::empty()` → `MAX_POLL_TIMEOUT_MS`)
+    /// since KAFKA-20253 stopped returning the in-flight request's elapsed
+    /// backoff (`0`), which used to spin the loop until the forwarder ran.
+    /// Wired once via [`CoordinatorRequestManager::set_completion_notify`];
+    /// unset in tests that drive no bg task.
+    completion_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 /// `CoordinatorRequestManager` — sends a single in-flight
@@ -108,6 +121,7 @@ impl CoordinatorRequestManager {
             total_disconnected_min: Mutex::new(0),
             closing: Mutex::new(false),
             fatal_error: Mutex::new(None),
+            completion_notify: std::sync::OnceLock::new(),
         });
         Self { inner }
     }
@@ -411,6 +425,10 @@ impl CoordinatorRequestManager {
                     );
                 },
             }
+            // Every lock above is released; the poke is lock-free.
+            if let Some(notify) = inner_for_handler.completion_notify.get() {
+                notify.notify_one();
+            }
         });
         unsent
     }
@@ -444,6 +462,21 @@ impl CoordinatorRequestManager {
             let request = Self::make_find_coordinator_request(&self.inner, current_time_ms);
             return PollResult::single(request);
         }
+
+        // KAFKA-20253: when a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the
+        // network thread to poll again immediately which causes a busy spin. Wait instead by returning a
+        // PollResult with a Long.MAX_VALUE backoff. (During KIP-909 bootstrap resolution the FindCoordinator
+        // request stays unsent, hence in flight, for the whole resolution window.)
+        if self
+            .inner
+            .request_state
+            .lock()
+            .expect("request_state poisoned")
+            .request_in_flight()
+        {
+            return PollResult::empty();
+        }
+
         let remaining = self
             .inner
             .request_state
@@ -487,6 +520,15 @@ impl CoordinatorRequestManager {
     /// `StopFindCoordinatorOnClose` arm signalled correctly.
     pub(crate) fn is_closing(&self) -> bool {
         *self.inner.closing.lock().expect("closing poisoned")
+    }
+
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
+    /// the spawned FindCoordinator forwarder can wake the network poll once
+    /// the response is applied. See `CoordinatorRequestManagerInner::completion_notify`.
+    /// Mirrors `CommitRequestManager::set_completion_notify`; the first
+    /// installed handle wins (it is wired exactly once, at construction).
+    pub(crate) fn set_completion_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.inner.completion_notify.set(notify);
     }
 
     /// `&self`-callable signal-close. Mirrors
@@ -809,6 +851,39 @@ mod tests {
         assert!(manager.coordinator().is_none());
     }
 
+    /// Translated from `CoordinatorRequestManagerTest.testNoBusyPollWhileFindCoordinatorRequestInFlight`
+    /// (KAFKA-20253): while a FindCoordinator request is in flight and its
+    /// backoff has already elapsed, poll() must not return
+    /// `time_until_next_poll_ms == 0`, which drives the background task into a
+    /// `NetworkClient::poll(0)` busy-spin. Java asserts `> 0`; the value is
+    /// `PollResult.EMPTY`'s `Long.MAX_VALUE`, asserted exactly here.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testNoBusyPollWhileFindCoordinatorRequestInFlight"
+    )]
+    async fn test_no_busy_poll_while_find_coordinator_request_in_flight() {
+        let mut manager = setup_manager();
+
+        // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        // Advance well past the retry backoff while the request is still in flight.
+        let res2 = manager.poll(60_000);
+        assert_eq!(
+            0,
+            res2.unsent_requests.len(),
+            "no new request should be sent while one is in flight"
+        );
+        assert!(
+            res2.time_until_next_poll_ms > 0,
+            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got {}",
+            res2.time_until_next_poll_ms
+        );
+        assert_eq!(PollResult::WAIT_FOREVER, res2.time_until_next_poll_ms);
+        drop(res);
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testNullGroupIdShouldThrow`.
     /// Rust's empty-string analog: an empty group id panics in the
     /// constructor.
@@ -981,6 +1056,30 @@ mod tests {
         assert_eq!(i32::MAX - node().id(), n.id());
         assert_eq!(node().host(), n.host());
         assert_eq!(node().port(), n.port());
+    }
+
+    /// The forwarder wakes the bg task once it has applied the
+    /// FindCoordinator response: the network poll has already returned by
+    /// then (Java applies it inside the poll), and since KAFKA-20253 the
+    /// in-flight poll reported `i64::MAX`, so without the poke the discovered
+    /// coordinator would wait out the poll timeout (seen as a 3 s+ close in
+    /// `consumer_bounce_test::test_async_close`). The wake is ordered after
+    /// the update: once the permit is stored, the coordinator is visible.
+    #[tokio::test]
+    async fn test_forwarder_wakes_bg_task_after_applying_the_response() {
+        let mut manager = setup_manager();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let result = manager.poll(0);
+        let mut unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        let response = build_client_response(&mut unsent, Errors::None, 0);
+        unsent.handler().on_complete(response);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the forwarder must wake the bg task after applying the response");
+        assert!(manager.coordinator().is_some(), "the coordinator is applied before the wake");
     }
 
     /// Phase 12.5 regression — failure path: when the response receiver
