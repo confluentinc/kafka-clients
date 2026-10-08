@@ -203,9 +203,10 @@ producer-perf-test: build
 format-check:
 	cargo xtask format-check
 
-# Checks the generated protocol code's formatting and that the checked-in
-# error-code tables are current; it reads the build's output, so it follows
-# a build in every verify target.
+# Checks that the message specs copied into generator/messages match the kafka
+# submodule's, the generated protocol code's formatting, and that the
+# checked-in error-code tables are current; it reads the build's output, so it
+# follows a build in every verify target.
 check-generated:
 	cargo xtask check-generated
 
