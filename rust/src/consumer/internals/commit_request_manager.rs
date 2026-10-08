@@ -452,6 +452,14 @@ impl OffsetFetchRequestState {
         self.requested_partitions == other.requested_partitions
     }
 
+    /// Java's `future.isDone()` on this request's future: `true` once the
+    /// response handler (or a failure path) has completed it, i.e. taken the
+    /// sender. Read by the dedup in [`CommitRequestManager::fetch_offsets`]
+    /// (KAFKA-20765).
+    fn is_done(&self) -> bool {
+        self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned").is_none()
+    }
+
     fn complete_ok(&self, value: OffsetFetchResult) {
         let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
         if let Some(tx) = guard.take() {
@@ -1210,20 +1218,38 @@ impl CommitRequestManager {
             now_ms,
         );
         // Dedupe against an unsent or in-flight identical request — Java does
-        // this in `PendingRequests.addOffsetFetchRequest`: if the same request
-        // is already pending, chain this call's future to the existing one
-        // (`chainFuture`) instead of enqueuing a second wire request. The
-        // existing request's retry driver resolves all chained senders with
-        // the same result when it completes, so one wire request serves all
-        // identical concurrent fetches.
+        // this in `PendingRequests.addOffsetFetchRequest`
+        // (`CommitRequestManager.java:1426-1444`): if the same request is
+        // already pending and has not completed yet, chain this call's future
+        // to the existing one (`chainFuture`) instead of enqueuing a second
+        // wire request. The existing request's retry driver resolves all
+        // chained senders with the same result when it completes, so one wire
+        // request serves all identical concurrent fetches.
+        //
+        // A request that already completed cannot deliver a result anymore, but may still appear in the
+        // buffers while its completion callbacks run (removal from the buffer is itself one of those
+        // callbacks). Chaining onto it would complete the new request immediately with the stale outcome
+        // instead of sending it (e.g. re-failing the retry of a STALE_MEMBER_EPOCH error in a tight loop).
+        // (KAFKA-20765.) In Rust the forwarder completes the request's sender
+        // and only then takes the state lock to remove it from
+        // `inflight_offset_fetches`, so a completed request is visible here in
+        // that window; chaining onto it would hand this caller's sender to a
+        // driver that may already have fanned its result out, and the dropped
+        // sender would fail this caller instead of sending its request.
         let chained_public_senders = {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
             let existing = guard
                 .pending
                 .unsent_offset_fetches
                 .iter()
-                .find(|r| r.same_request(&request))
-                .or_else(|| guard.pending.inflight_offset_fetches.iter().find(|r| r.same_request(&request)));
+                .find(|r| r.same_request(&request) && !r.is_done())
+                .or_else(|| {
+                    guard
+                        .pending
+                        .inflight_offset_fetches
+                        .iter()
+                        .find(|r| r.same_request(&request) && !r.is_done())
+                });
             if let Some(existing) = existing {
                 existing
                     .chained_public_senders
@@ -1915,15 +1941,20 @@ fn build_offset_fetch_unsent_request(
         }
         // Drain the matching entry from `inflight_offset_fetches`.
         // Mirrors Java's `pendingRequests.inflightOffsetFetches.remove(fetchRequest)`
-        // inside `fetchOffsetsWithRetries.whenComplete`. Phase 9 leaked
-        // these entries because the completion path did not remove them.
+        // inside `fetchOffsetsWithRetries.whenComplete`
+        // (`CommitRequestManager.java:567-576`). Phase 9 leaked these entries
+        // because the completion path did not remove them.
         let mut state_guard = inner_for_handler.state.lock().expect("commit manager state poisoned");
         let inflight = &mut state_guard.pending.inflight_offset_fetches;
         if let Some(pos) = inflight.iter().position(|r| r.request_id == request_id) {
             inflight.swap_remove(pos);
         } else {
-            log::warn!(
-                "A duplicated, inflight, request was identified, but unable to find it in the outbound buffer: request_id={request_id}"
+            // A completed request may legitimately not be in the in-flight buffer for a few
+            // reasons: it was deduplicated and chained onto an existing request (so it was never
+            // added to the buffers), or it completed before it was ever sent (e.g. while there
+            // was no coordinator available). In all these cases there is nothing to remove here.
+            log::debug!(
+                "Completed offset fetch request was not found in the in-flight buffer: request_id={request_id}"
             );
         }
     });
@@ -2062,6 +2093,30 @@ fn handle_offset_fetch_response(
         // a freshly discovered coordinator.
         if matches!(group_error, Errors::NotCoordinator | Errors::CoordinatorNotAvailable) {
             inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), inner.time.milliseconds());
+        }
+        // KAFKA-20765 (`CommitRequestManager.java:1243-1251`): the stale-epoch
+        // error only claims the request "cannot be retried" when the member has
+        // no epoch anymore; otherwise the retry driver
+        // (`fetch_offsets_with_retries`) retries it with the latest epoch.
+        if group_error == Errors::StaleMemberEpoch {
+            let has_member_epoch = inner
+                .state
+                .lock()
+                .expect("commit manager state poisoned")
+                .member_info
+                .member_epoch
+                .is_some();
+            if has_member_epoch {
+                log::debug!(
+                    "OffsetFetch failed with {group_error}. The member is still in the group, so the request can be \
+                     retried with the latest member epoch as long as it has not expired."
+                );
+            } else {
+                log::error!(
+                    "OffsetFetch failed with {group_error} and the consumer is not part of the group anymore (it \
+                     probably left the group, got fenced or failed). The request cannot be retried and will fail."
+                );
+            }
         }
         send(Err(classify_fetch_group_error(group_error, group_id)));
         return;
@@ -5864,6 +5919,138 @@ mod tests {
         } else {
             panic!("expected an OffsetFetch request");
         }
+    }
+
+    /// `testDuplicatedOffsetFetchFailsWithStaleEpochAndRetriesWithNewEpoch`
+    /// (KAFKA-20765): same as the test above, but with a duplicated fetch for
+    /// the same partitions chained onto the in-flight request when the
+    /// STALE_MEMBER_EPOCH error is received. Java's retry of the chained
+    /// request was deduplicated against the already-completed in-flight
+    /// request and failed again at once, a synchronous loop that never sent
+    /// the new epoch and never completed the callers' futures. The assertions
+    /// are on values: the buffers' sizes, both futures pending, exactly one
+    /// retry on the wire carrying the new member id and epoch, no second one,
+    /// and both futures completed by its response.
+    ///
+    /// Rust has one retry driver per logical fetch (the duplicate call only
+    /// adds its sender to the driver's chained list), and the driver seeds
+    /// the retry with the failed attempt, so the retry is sent after its
+    /// backoff where Java's chained fresh request goes out on the next poll.
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicated_offset_fetch_fails_with_stale_epoch_and_retries_with_new_epoch() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("t1", 0);
+        let partitions = HashSet::from([tp.clone()]);
+
+        // Two callers fetch offsets for the same partitions; the second request is deduplicated
+        // and chained onto the first.
+        let mut first_result = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        let mut second_result = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        assert_eq!(1, manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.len());
+
+        // A single deduplicated request goes on the wire.
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+
+        // Mock member has a new valid epoch, so STALE_MEMBER_EPOCH is retriable.
+        let new_epoch = 8;
+        manager.on_member_epoch_updated(Some(new_epoch), "member1".to_string());
+
+        // Receive error when member already has a newer member epoch. Request should be retried.
+        unsent
+            .handler()
+            .on_complete(offset_fetch_response(GROUP_ID, vec![], Errors::StaleMemberEpoch));
+
+        // The failed request should be removed from the in-flight buffer, a retry should be
+        // enqueued, and the callers' futures should still be waiting for the retry's outcome.
+        yield_until(
+            || {
+                let guard = manager.inner.state.lock().unwrap();
+                (guard.pending.inflight_offset_fetches.is_empty() && guard.pending.unsent_offset_fetches.len() == 1)
+                    .then_some(())
+            },
+            "the stale-epoch failure did not leave exactly one retry queued and nothing in flight",
+        )
+        .await;
+        assert_still_pending(&mut first_result).await;
+        assert_still_pending(&mut second_result).await;
+        // Still exactly one queued request: nothing spun or duplicated it.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert_eq!(0, guard.pending.inflight_offset_fetches.len());
+            assert_eq!(1, guard.pending.unsent_offset_fetches.len());
+        }
+
+        // The retry is sent once its backoff has elapsed, carrying the latest member ID and epoch.
+        let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2);
+        let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
+        let req = retried.request_builder_mut().expect("builder present").build().expect("build");
+        if let crate::common::requests::AbstractRequest::OffsetFetch(fetch) = req {
+            let groups = &fetch.data().groups;
+            assert_eq!(1, groups.len());
+            assert_eq!(new_epoch, groups[0].member_epoch);
+            assert_eq!(Some("member1"), groups[0].member_id.as_deref());
+        } else {
+            panic!("expected an OffsetFetch request");
+        }
+        assert!(
+            manager
+                .poll_with_coordinator(&coordinator, poll_step)
+                .unsent_requests
+                .is_empty(),
+            "exactly one retry goes on the wire"
+        );
+
+        // A successful response should complete both callers' futures.
+        retried.handler().on_complete(offset_fetch_response_for_partitions(&partitions));
+        for result in [&mut first_result, &mut second_result] {
+            let offsets = recv_fetch_result(result).await.expect("the retry succeeds");
+            let committed = offsets.offsets().get(&tp).cloned().flatten().expect("a committed offset");
+            assert_eq!(100, committed.offset());
+        }
+    }
+
+    /// KAFKA-20765's dedup guard on its own: a request whose future already
+    /// completed but that is still in `inflight_offset_fetches` (the window
+    /// between the forwarder completing it and removing it) is not a
+    /// duplicate. A new fetch for the same partitions is enqueued as its own
+    /// request rather than chained onto the completed one, whose driver may
+    /// already have fanned its result out (Java's `!r.future.isDone()` filter,
+    /// `CommitRequestManager.java:1431-1434`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_is_not_chained_onto_a_completed_request() {
+        let manager = make_manager(0, false);
+        let coordinator = coordinator_with_node();
+        let partitions = HashSet::from([topic_partition("t1", 0)]);
+        let _first_result = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        let _unsent = poll_one_unsent(&manager, &coordinator, 0);
+
+        // Complete the in-flight request's future without removing it from
+        // the buffer, as the forwarder does before it takes the state lock.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert_eq!(1, guard.pending.inflight_offset_fetches.len());
+            let in_flight = &guard.pending.inflight_offset_fetches[0];
+            in_flight.complete_err(Error::new(Errors::StaleMemberEpoch));
+            assert!(in_flight.is_done());
+            assert!(in_flight.chained_public_senders.lock().unwrap().is_empty());
+        }
+
+        let _second_result = manager.fetch_offsets(partitions.clone(), i64::MAX, 0);
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(
+            1,
+            guard.pending.unsent_offset_fetches.len(),
+            "the new fetch is enqueued as its own request"
+        );
+        assert!(
+            guard.pending.inflight_offset_fetches[0]
+                .chained_public_senders
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "the new fetch is not chained onto the completed request"
+        );
     }
 
     /// `testSyncOffsetFetchFailsWithStaleEpochAndNotRetriedIfMemberNotInGroupAnymore`:
