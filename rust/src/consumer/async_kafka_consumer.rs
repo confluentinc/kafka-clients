@@ -5044,7 +5044,7 @@ where
     //
     // Translates Java's `seek(...)` / `seekToBeginning(...)` /
     // `seekToEnd(...)` / `position(...)` / `committed(...)` /
-    // `currentLag(...)` (`AsyncKafkaConsumer.java:1238-1338, 1413-1425`).
+    // `currentLag(...)` (`AsyncKafkaConsumer.java:1155-1291, 1514-1526`).
     //
     // The seek methods route through a `SeekUnvalidated` /
     // `ResetOffset` event. `position` and `committed` route through

@@ -1420,7 +1420,9 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
   - ac1506c4 the test-only commits (7c010c7583, 624ca392ef, 36aab4fddd, 40e9fcd742, a5137f7c38);
   - 55cc35be Critic 96 F3;
   - 65d785c4 b69c07c816 (partial);
-  - 354e41a4 check-java-name markers + the Java line-cite refresh (comment-only, ~140 cites).
+  - 354e41a4 check-java-name markers + the Java line-cite refresh (comment-only, ~140 cites). Correction (Critic 100
+    L3): its message says the `seek`…`currentLag` span was left as it was, but the diff changed it, wrongly, to
+    `1238-1338, 1413-1425`; the fix round sets it to `AsyncKafkaConsumer.java:1155-1291, 1514-1526`.
 - **Behaviour beyond the Java diff:**
   - KAFKA-20187: Java chains the flag clear with `.whenComplete` on the returned future. A `oneshot::Receiver` cannot
     carry a continuation, so the action (`WhenComplete`) travels with `ListOffsetsRequestState` and runs right after the
@@ -1493,6 +1495,24 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
     hand-built and run, above) and `lint` (the 14 §5.1 rows). `test-rust-all-features`: lib 4702 / 3 ignored, consumer
     42, integration 309 / 0 failed / 2 ignored, 8, 5 / 7 ignored. Python: 371 passed / 2 skipped, 156, 29 + 29.
 - `git status --ignored` shows no new files from this phase (the rebuilt Python `.so` is ignored, as before).
+- **Open question for the human (Critic 100 Q1; not implemented). Decide together with Phase 4 open question (a):**
+  - KAFKA-18812's per-event `catch_unwind` in `process_application_events` is the Rust form of Java's
+    `processApplicationEvents` catch (`ConsumerNetworkThread.java:269-274`). It does not pre-empt (a): a panic
+    anywhere else in `run_once` still ends the task, and `add()` then fails fast with the 18812 error.
+  - Caveat, with Critic's probe evidence (a `process()` that panics while holding `SubscriptionState`): the first
+    `run_once` fails that event with `KafkaError("<panic text>")` and the loop continues; the next event is
+    processed normally, because the processor's `lock_subscriptions` recovers the poisoned lock with
+    `into_inner`. But `SubscriptionState` is left poisoned, so on the app side `assignment()`, `subscription()`,
+    `paused()` and the `ConsumerHandle` getters panic, and the fetch path's
+    `.expect("SubscriptionState mutex poisoned")` panics on the next collect or fetch build. Before db8c6d17 the same
+    panic ended the task and left the same mutex poisoned, so this is no worse; but Java's "log, fail the event,
+    continue" holds in Rust only for a panic that poisons nothing.
+  - Options: keep it (Java-faithful), or treat a caught panic as fatal (fail the event, then end the task).
+- **Critic 100 fix round:** L1 (da84120c), the head fetch stays buffered while it is initialized
+  (`FetchBuffer::poll_checked_out`), with Critic's probe as a test and the KAFKA-15529 test catching a double drain;
+  L2 and L3, a stale comment and cites (the next commit). The `ConfigDef.java:729-731` cites in
+  `producer_config.rs` and `admin_client_config.rs` are the same 4.3.1 numbering, but those files are outside this
+  phase and were left alone.
 - **Timing log** (2026-10-08, IST):
 
   | Step | Start | End | Min |

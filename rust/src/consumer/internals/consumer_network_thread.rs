@@ -721,9 +721,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // of the four notifiable+completable variants. Our erased
             // handle's `complete_with_error(err)` calls
             // `tx.send(Err(err))` on the inner oneshot — identical
-            // semantics. The method is misnamed in Rust for historical
-            // reasons (it was originally only used by the reaper); the
-            // generic implementation accepts any `Error`.
+            // semantics.
             handle.complete_with_error(err.clone());
         }
         // The handles will be pruned on the next iteration's

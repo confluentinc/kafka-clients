@@ -350,7 +350,7 @@ impl DefaultRecord {
             // the `-1` that `read()` returns at the end of the stream for a
             // continuation byte, so it throws `IllegalArgumentException`, which
             // `StreamRecordIterator.readNext` reports as a premature EOF
-            // (`DefaultRecordBatch.java:636-644`). That iterator is Java's one caller
+            // (`DefaultRecordBatch.java:646-654`). That iterator is Java's one caller
             // of `DefaultRecord.readFrom(InputStream)`, as `DefaultRecordBatch::iter_records`
             // is this function's; the iterator's text is chosen here because the
             // `InvalidRecordError` it receives no longer carries the I/O error kind.
@@ -378,7 +378,7 @@ impl DefaultRecord {
         }
 
         // Java allocates the declared body size before reading a byte of it
-        // (`DefaultRecord.java:286`). The size is read off the stream, so here the
+        // (`DefaultRecord.java:302`). The size is read off the stream, so here the
         // buffer grows with the bytes actually read instead — `take` stops the
         // read at the declared size — and a record declaring 2 GiB over three
         // bytes of payload allocates for three bytes, then fails as Java's does.
@@ -1459,7 +1459,7 @@ mod tests {
     /// `ByteUtils.readVarint(InputStream)` reads an exhausted stream's `-1` as a
     /// continuation byte and throws `IllegalArgumentException`, which
     /// `StreamRecordIterator.readNext` reports this way
-    /// (`DefaultRecordBatch.java:636-644`). A size read in full that outruns the
+    /// (`DefaultRecordBatch.java:646-654`). A size read in full that outruns the
     /// body keeps Java's end-of-payload text (the test above).
     #[test]
     fn test_read_from_stream_ending_in_the_size_is_premature_eof() {

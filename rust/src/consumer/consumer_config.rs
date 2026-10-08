@@ -642,16 +642,16 @@ impl ConsumerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_rack = value.trim().to_string();
                 },
                 Self::GROUP_ID_CONFIG => {
                     // Trimmed, as `ConfigDef.parseType` trims every `Type.STRING`
-                    // value (`ConfigDef.java:729-731`), so `" "` becomes `""`.
+                    // value (`ConfigDef.java:731-733`), so `" "` becomes `""`.
                     // The empty string is then kept, not coerced to `None`. Java's
                     // `ConfigDef` defines `group.id` as `Type.STRING` with a
                     // `null` default and does not coerce `""` to null, so
@@ -667,7 +667,7 @@ impl ConsumerConfig {
                     config.group_id = Some(value.trim().to_string());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:729-731`)
+                    // `ConfigDef.parseType` trims the value (`ConfigDef.java:731-733`)
                     // before `NonEmptyString.ensureValid` runs on it (`:1226-1231`).
                     let value = value.trim();
                     if value.is_empty() {
