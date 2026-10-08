@@ -383,7 +383,6 @@ mod tests {
     /// [`test_poll_idle_ratio`]: Java also drives `kafkaConsumerMetrics()`
     /// directly, through a consumer it builds only to reach the registry.
     #[test]
-    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollIdleRatioZero")]
     fn test_poll_idle_ratio_zero() {
         use crate::common::metrics::Metrics;
         use crate::common::utils::MockTime;
