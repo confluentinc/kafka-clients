@@ -3495,7 +3495,7 @@ mod tests {
                 .inner
                 .logged_heartbeat_interval_messages
                 .iter()
-                .filter(|message| message.contains("received heartbeat interval"))
+                .filter(|(_, message)| message.contains("received heartbeat interval"))
                 .count()
         };
 
@@ -3512,12 +3512,15 @@ mod tests {
             "The heartbeat interval received from the coordinator should be logged when it changes."
         );
         assert_eq!(
-            vec![format!(
-                "Member {ABSTRACT_DEFAULT_MEMBER_ID} received heartbeat interval {changed_interval_ms}ms \
+            vec![(
+                log::Level::Info,
+                format!(
+                    "Member {ABSTRACT_DEFAULT_MEMBER_ID} received heartbeat interval {changed_interval_ms}ms \
                  from the group coordinator"
+                )
             )],
             f.mgr.inner.logged_heartbeat_interval_messages,
-            "The logged message should contain the member id and the received interval."
+            "The logged message should contain the member id and the received interval, at INFO."
         );
 
         // A subsequent heartbeat carrying the same interval must not be logged again.
