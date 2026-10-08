@@ -24,6 +24,7 @@
 mod common;
 
 mod api_versions_test;
+mod cluster_check_test;
 mod connection_test;
 mod describe_features_test;
 mod metadata_test;
