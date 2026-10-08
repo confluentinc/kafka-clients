@@ -56,9 +56,15 @@
 //!     `Consumer` interface); `<prefix>_destroy` for every handle;
 //!   - every `pub fn` of its inherent impls: `<prefix>_<name>`, `self` first
 //!     as `*const <prefix>_t` for `&self` and `*mut` for `&mut self` or
-//!     `self`, the parameters mapped positionally, a `Result<T, Error>`
+//!     `self` (a unit enum is the exception: its instances are borrowed
+//!     singletons, so `self` and `Self` are `*const` in every position and
+//!     nothing it returns has a `_destroy`), the parameters mapped
+//!     positionally (a struct by value as `*const`, copied out of the
+//!     caller's handle; `Error` by value as `*mut`, consumed), a `Result<T, Error>`
 //!     returned as `*mut kafka_common_Error_t` with `T` through a trailing
 //!     `out_*` slot, a fluent `self -> Self` setter returning nothing;
+//!   - `<prefix>_to_string(const <prefix>_t *)` returning an owned string
+//!     when the type implements `Display` (Java's `toString()`);
 //!   - an `async fn` (or one returning `impl Future`, `Pin<Box<dyn Future>>`,
 //!     `BoxFuture`): the blocking form above plus `<fn>_cb(.., cb, opaque)`
 //!     and the typedef `<fn>_cb_t = fn(value, error, opaque)`, value and
@@ -68,8 +74,11 @@
 //!     one `<prefix>_<variant>(void)` returning the borrowed singleton per
 //!     unit variant; data variants are built by the Java static factories,
 //!     which are ordinary methods;
-//!   - a public trait: the interface handle `<prefix>_t` and one invoker per
-//!     method, shaped like an inherent method; a trait some public method
+//!   - a public trait some public method accepts or returns, or a public
+//!     struct with a handle implements: the interface handle `<prefix>_t` and
+//!     one invoker per method, shaped like an inherent method (a trait
+//!     nothing builds, such as `ClusterResourceListener`, expects
+//!     nothing); a trait some public method
 //!     accepts (`Box<dyn T>`, `Arc<dyn T>`, `&dyn T`, `impl T`, a bounded
 //!     type parameter) also `<prefix>_new(void *self, <prefix>_<m>_fn_t ..)`
 //!     with one `_fn_t` per method, nullable (`Option<..>`) when the Rust
@@ -395,7 +404,15 @@ impl Mapper<'_> {
                 };
             }
             if name == "Self" {
-                return Ok(CType::Handle { prefix: self.owner.to_string(), mutable: true });
+                // A unit enum's instances are borrowed singletons (D5), so
+                // `Self` returned from `parse` / `for_id` is `*const` like any
+                // other mention of the type; a struct's `Self` is owned.
+                let singleton = self.by_name.get(self.owner_name).is_some_and(|classes| {
+                    classes
+                        .iter()
+                        .any(|(prefix, class)| prefix == self.owner && *class == TypeClass::UnitEnum)
+                });
+                return Ok(CType::Handle { prefix: self.owner.to_string(), mutable: !singleton });
             }
             if let Some(scalar) = scalar_of(&name) {
                 return Ok(CType::Scalar(scalar));
@@ -452,8 +469,16 @@ impl Mapper<'_> {
         match self.by_name.get(&name).map(Vec::as_slice) {
             Some([(prefix, class)]) => Ok(match class {
                 TypeClass::UnitEnum => CType::Handle { prefix: prefix.clone(), mutable: false },
-                TypeClass::Struct | TypeClass::Trait => {
-                    CType::Handle { prefix: prefix.clone(), mutable: owned || mut_ref }
+                // An implementation handed to Rust (`Box<dyn Serializer>`) is
+                // the client's from then on: `*mut`.
+                TypeClass::Trait => CType::Handle { prefix: prefix.clone(), mutable: owned || mut_ref },
+                // A struct passed by value is copied out of the caller's handle,
+                // which stays the caller's to destroy: `*const`. Only `Error`
+                // moves — an error handle handed to Rust is consumed — as does
+                // every struct returned by value, which the caller then owns.
+                TypeClass::Struct => CType::Handle {
+                    prefix: prefix.clone(),
+                    mutable: mut_ref || (owned && (dir == Dir::Out || name == "Error")),
                 },
             }),
             Some(several) => Err(format!(
@@ -507,6 +532,10 @@ impl Mapper<'_> {
                     }
                     return Err(format!("`impl {}`", shown()));
                 },
+                // `impl Display` / `impl ToString`: a value the callee only
+                // formats (`Error::config_name_value(name, value)`), so C
+                // passes the text.
+                "Display" | "ToString" => return Ok(CType::Str { owned: false }),
                 "IntoIterator" | "Iterator" | "ExactSizeIterator" | "DoubleEndedIterator" => {
                     let item = assoc_type(&last.arguments, "Item");
                     return match item {
@@ -1097,13 +1126,15 @@ impl FfiTranslation {
                         let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
                             continue;
                         };
-                        if !trait_names.contains(&trait_name) {
-                            continue;
-                        }
                         let Some(self_name) = type_ident(&i.self_ty) else {
                             continue;
                         };
-                        if public.contains(&(module.clone(), self_name.clone())) {
+                        if !public.contains(&(module.clone(), self_name.clone())) {
+                            continue;
+                        }
+                        if trait_name == "Display" {
+                            surface.display.insert(self_name);
+                        } else if trait_names.contains(&trait_name) {
                             surface.impls.insert((self_name, trait_name));
                         }
                     },
@@ -1199,12 +1230,6 @@ impl FfiTranslation {
                 }
             }
         }
-        let handles: BTreeSet<&str> = surface
-            .types
-            .iter()
-            .filter(|t| t.needs_handle() || referenced.contains(&t.prefix))
-            .map(|t| t.prefix.as_str())
-            .collect();
         let traits: BTreeMap<&str, &RustType> = surface
             .types
             .iter()
@@ -1245,6 +1270,39 @@ impl FfiTranslation {
             }
         }
 
+        // The traits some public struct with a handle implements: its
+        // `__as_<Trait>` view builds an instance.
+        let implemented: BTreeSet<&str> = surface
+            .impls
+            .iter()
+            .filter(|(s, _)| {
+                surface.types.iter().any(|t| {
+                    &t.name == s
+                        && !matches!(t.kind, Kind::Trait { .. })
+                        && (t.needs_handle() || referenced.contains(&t.prefix))
+                })
+            })
+            .map(|(_, t)| t.as_str())
+            .collect();
+        let handles: BTreeSet<&str> = surface
+            .types
+            .iter()
+            .filter(|t| match &t.kind {
+                // An interface no public method accepts or returns and no
+                // public struct implements has no instance C could hold
+                // (`ClusterResourceListener`): neither handle nor invokers.
+                // A client trait is what C holds, whatever builds it.
+                Kind::Trait { .. } => {
+                    CLIENT_TRAITS.contains(&t.name.as_str())
+                        || accepted.contains(&t.name)
+                        || referenced.contains(&t.prefix)
+                        || implemented.contains(t.name.as_str())
+                },
+                _ => t.needs_handle() || referenced.contains(&t.prefix),
+            })
+            .map(|t| t.prefix.as_str())
+            .collect();
+
         for ty in &surface.types {
             let has_handle = handles.contains(ty.prefix.as_str());
             let prefix = &ty.prefix;
@@ -1258,8 +1316,23 @@ impl FfiTranslation {
                 generics: generics_in_scope(&ty.generics, sig),
             };
 
+            if matches!(ty.kind, Kind::Trait { .. }) && !has_handle {
+                continue;
+            }
             if has_handle {
                 out.add(format!("{prefix}_t"), Shape::Opaque, file);
+            }
+            // Java's `toString()`: `Display` on the Rust side, an owned string
+            // in C.
+            if has_handle && surface.display.contains(&ty.name) && !matches!(ty.kind, Kind::Trait { .. }) {
+                out.add(
+                    format!("{prefix}_to_string"),
+                    Shape::Fn(Sig {
+                        params: vec![Param::new("self", format!("*const {prefix}_t"))],
+                        ret: Some(CType::Str { owned: true }.render()),
+                    }),
+                    file,
+                );
             }
             let owned_handle = match &ty.kind {
                 Kind::Trait { .. } => {
@@ -1303,7 +1376,11 @@ impl FfiTranslation {
                 }
             }
 
-            let self_mutable = |recv: Receiver| recv == Receiver::Mut;
+            // `&mut self`, or `self` by value, is `*mut` — except on a unit
+            // enum, whose by-value `self` (`TimestampType::id(self)`) only reads
+            // the borrowed singleton.
+            let singleton = ty.class() == TypeClass::UnitEnum;
+            let self_mutable = |recv: Receiver| recv == Receiver::Mut && !singleton;
             for m in &ty.methods {
                 if mentions_any(&m.sig, NO_C_TYPE) {
                     continue;
@@ -1445,6 +1522,8 @@ struct Surface {
     error_types: BTreeSet<String>,
     /// `(struct, trait)` of every `impl Trait for Struct` between public types.
     impls: BTreeSet<(String, String)>,
+    /// The public types implementing `Display` (Java's `toString`).
+    display: BTreeSet<String>,
     /// The payload types of `Error`'s variants.
     error_payloads: BTreeSet<String>,
 }
@@ -2212,6 +2291,7 @@ mod tests {
                 class("clients.admin", &["CreateTopicsResult", "TopicMetadataAndConfig"]),
                 class("common", &["TopicPartition"]),
                 class("common", &["Cluster"]),
+                class("common.record", &["TimestampType"]),
                 class("common.errors", &["TopicAuthorizationException"]),
                 class("common.errors", &["ResourceNotFoundException"]),
                 class(
@@ -2616,6 +2696,68 @@ mod tests {
     }
 
     #[test]
+    fn test_trait_nothing_builds_expects_no_handle() {
+        let rust = r#"
+            pub mod common {
+                #[doc(alias = "org.apache.kafka.common.ClusterResource")]
+                pub struct ClusterResource;
+                impl ClusterResource { pub fn new() -> Self { ClusterResource } }
+                #[doc(alias = "org.apache.kafka.common.ClusterResourceListener")]
+                pub trait ClusterResourceListener: Send {
+                    fn on_update(&self, cluster_resource: &ClusterResource);
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_ClusterResource_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_ClusterResource_new() -> *mut kafka_common_ClusterResource_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_ClusterResource_destroy(this: *mut kafka_common_ClusterResource_t) {}
+        "#;
+        assert!(run("trait-unbuilt", rust, ffi).is_empty());
+        // Once a public method accepts it, the whole interface is expected.
+        let accepted = rust.replace(
+            "impl ClusterResource { pub fn new() -> Self { ClusterResource } }",
+            "impl ClusterResource { pub fn new() -> Self { ClusterResource } \
+             pub fn watch(&self, listener: Box<dyn ClusterResourceListener>) {} }",
+        );
+        let findings = run("trait-accepted", &accepted, ffi);
+        let found = keys(&findings);
+        for key in [
+            "missing kafka_common_ClusterResourceListener_t",
+            "missing kafka_common_ClusterResourceListener_new",
+            "missing kafka_common_ClusterResourceListener_on_update",
+        ] {
+            assert!(found.contains(&key), "{key} not in {found:?}");
+        }
+    }
+
+    #[test]
+    fn test_display_expects_to_string() {
+        let rust = r#"
+            pub mod common {
+                use std::fmt;
+                #[doc(alias = "org.apache.kafka.common.Uuid")]
+                pub struct Uuid;
+                impl Uuid { pub fn random_uuid() -> Self { Uuid } }
+                impl fmt::Display for Uuid {
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { Ok(()) }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Uuid_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Uuid_random_uuid() -> *mut kafka_common_Uuid_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Uuid_destroy(this: *mut kafka_common_Uuid_t) {}
+        "#;
+        let findings = run("display", rust, ffi);
+        assert_eq!(keys(&findings), ["missing kafka_common_Uuid_to_string"]);
+        assert_eq!(
+            detail(&findings, "missing kafka_common_Uuid_to_string"),
+            "expected `fn(self: *const kafka_common_Uuid_t) -> *mut c_char`"
+        );
+    }
+
+    #[test]
     fn test_async_trait_method_fn_t_takes_callback_id() {
         let rust = r#"
             pub mod common {
@@ -2841,6 +2983,8 @@ mod tests {
         assert_eq!(map("impl Into<String>", Dir::In).unwrap(), "*const c_char");
         assert_eq!(map("impl Into<Arc<str>>", Dir::In).unwrap(), "*const c_char");
         assert_eq!(map("impl AsRef<[u8]>", Dir::In).unwrap(), "kafka_Bytes_t");
+        assert_eq!(map("impl std::fmt::Display", Dir::In).unwrap(), "*const c_char");
+        assert_eq!(map("impl ToString", Dir::In).unwrap(), "*const c_char");
         assert_eq!(map("&str", Dir::Out).unwrap(), "*const c_char");
         assert_eq!(map("String", Dir::Out).unwrap(), "*mut c_char");
         assert_eq!(map("Arc<str>", Dir::Out).unwrap(), "*mut c_char");
@@ -2969,7 +3113,12 @@ mod tests {
             map("&mut TopicPartition", Dir::In).unwrap(),
             "*mut kafka_common_TopicPartition_t"
         );
-        assert_eq!(map("TopicPartition", Dir::In).unwrap(), "*mut kafka_common_TopicPartition_t");
+        // By value in: copied out of the caller's handle. By value out: owned.
+        assert_eq!(map("TopicPartition", Dir::In).unwrap(), "*const kafka_common_TopicPartition_t");
+        assert_eq!(
+            map("Option<TopicPartition>", Dir::In).unwrap(),
+            "*const kafka_common_TopicPartition_t"
+        );
         assert_eq!(map("TopicPartition", Dir::Out).unwrap(), "*mut kafka_common_TopicPartition_t");
         assert_eq!(map("OffsetSpec", Dir::Out).unwrap(), "*const kafka_admin_OffsetSpec_t");
         assert_eq!(
@@ -2991,6 +3140,53 @@ mod tests {
         assert_eq!(map("Error", Dir::In).unwrap(), "*mut kafka_common_Error_t");
         assert_eq!(map("Option<&Error>", Dir::In).unwrap(), "*const kafka_common_Error_t");
         assert_eq!(map("Self", Dir::Out).unwrap(), "*mut kafka_x_Owner_t");
+    }
+
+    #[test]
+    fn test_unit_enum_self_and_receiver_are_borrowed_singletons() {
+        let rust = r#"
+            pub mod common {
+                pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+                pub use error::Error;
+                pub mod record {
+                    use crate::common::Error;
+                    #[doc(alias = "org.apache.kafka.common.record.TimestampType")]
+                    pub enum TimestampType { CreateTime, LogAppendTime }
+                    impl TimestampType {
+                        pub fn id(self) -> i32 { 0 }
+                        pub fn for_name(name: &str) -> Result<Self, Error> { Ok(Self::CreateTime) }
+                        pub fn parse(name: &str) -> Self { Self::CreateTime }
+                    }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_record_TimestampType_t { _p: [u8; 0] }
+            #[repr(C)] pub enum kafka_common_record_TimestampType_e { create_time, log_append_time }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::create_time }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_create_time() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
+        "#;
+        let findings = run("unit-enum-self", rust, ffi);
+        assert_eq!(
+            detail(&findings, "missing kafka_common_record_TimestampType_id"),
+            "expected `fn(self: *const kafka_common_record_TimestampType_t) -> i32`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_record_TimestampType_parse"),
+            "expected `fn(name: *const c_char) -> *const kafka_common_record_TimestampType_t`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_record_TimestampType_for_name"),
+            "expected `fn(name: *const c_char, out_for_name: *mut *const kafka_common_record_TimestampType_t) -> *mut kafka_common_Error_t`"
+        );
+        // No `_destroy`: nothing a unit enum returns is owned.
+        assert!(
+            !findings
+                .iter()
+                .any(|(key, _)| key == "missing kafka_common_record_TimestampType_destroy"),
+            "{findings:#?}"
+        );
     }
 
     #[test]

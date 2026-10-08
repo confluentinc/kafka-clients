@@ -68,6 +68,8 @@ use crate::consumer::{
     GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
 };
 
+use super::common::partition_info::{PartitionInfoInner, kafka_common_PartitionInfo_t};
+use super::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t};
 use super::common::{
     self, CallbackTarget, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     dispatch_and_wait, enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
@@ -1471,64 +1473,6 @@ unsafe fn read_topics(topics: *const *const c_char, count: i32) -> Vec<String> {
 // string getters return cached, NUL-terminated `CString`s owned by the handle.
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a [`TopicPartition`].
-#[repr(C)]
-pub struct kafka_common_TopicPartition_t {
-    _private: [u8; 0],
-}
-
-/// Cached topic-partition handle: owns the value and a NUL-terminated topic
-/// `CString` for the string getter.
-struct TopicPartitionInner {
-    tp: TopicPartition,
-    topic_c: std::ffi::CString,
-}
-
-/// Returns the topic of a topic-partition handle as a NUL-terminated C string
-/// (owned by the handle; valid until it is destroyed).
-///
-/// # Safety
-///
-/// `tp` must be a valid topic-partition handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartition_topic(tp: *const kafka_common_TopicPartition_t) -> *const c_char {
-    let inner = unsafe { &*(tp as *const TopicPartitionInner) };
-    inner.topic_c.as_ptr()
-}
-
-/// Returns the partition of a topic-partition handle.
-///
-/// # Safety
-///
-/// `tp` must be a valid topic-partition handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartition_partition(tp: *const kafka_common_TopicPartition_t) -> i32 {
-    let inner = unsafe { &*(tp as *const TopicPartitionInner) };
-    inner.tp.partition()
-}
-
-/// Destroys a topic-partition handle. Safe with null (no-op).
-///
-/// # Safety
-///
-/// `tp` must be null or a valid topic-partition handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartition_destroy(tp: *mut kafka_common_TopicPartition_t) {
-    if !tp.is_null() {
-        unsafe { drop(Box::from_raw(tp as *mut TopicPartitionInner)) };
-    }
-}
-
-/// Boxes a single [`TopicPartition`] into an owned handle, mirroring the
-/// per-entry construction used by the map/list handles below. Reused by
-/// `kafka_common_RecordDeserializationError_partition`
-/// (`src/ffi/common.rs`) since `RecordDeserializationError` carries a single
-/// non-optional `TopicPartition` rather than a collection.
-pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_common_TopicPartition_t {
-    let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_common_TopicPartition_t
-}
-
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
 pub struct kafka_consumer_OffsetAndMetadata_t {
@@ -1537,9 +1481,33 @@ pub struct kafka_consumer_OffsetAndMetadata_t {
 
 /// Cached offset-and-metadata handle: owns the value and a NUL-terminated
 /// metadata `CString`.
-struct OffsetAndMetadataInner {
+pub(crate) struct OffsetAndMetadataInner {
     oam: OffsetAndMetadata,
     metadata_c: std::ffi::CString,
+}
+
+impl OffsetAndMetadataInner {
+    pub(crate) fn new(oam: OffsetAndMetadata) -> Self {
+        let metadata_c = std::ffi::CString::new(oam.metadata().as_bytes()).unwrap_or_default();
+        Self { oam, metadata_c }
+    }
+}
+
+/// Hands `oam` to C as an owned handle, freed with
+/// `kafka_consumer_OffsetAndMetadata_destroy` or by the container owning it.
+pub(crate) fn box_offset_and_metadata(oam: OffsetAndMetadata) -> *mut kafka_consumer_OffsetAndMetadata_t {
+    Box::into_raw(Box::new(OffsetAndMetadataInner::new(oam))) as *mut kafka_consumer_OffsetAndMetadata_t
+}
+
+/// The value behind an offset-and-metadata handle.
+///
+/// # Safety
+///
+/// `oam` must be a valid offset-and-metadata handle.
+pub(crate) unsafe fn offset_and_metadata_ref<'a>(
+    oam: *const kafka_consumer_OffsetAndMetadata_t,
+) -> &'a OffsetAndMetadata {
+    &unsafe { &*(oam as *const OffsetAndMetadataInner) }.oam
 }
 
 /// Returns the committed offset.
@@ -1782,218 +1750,6 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_destroy(
     }
 }
 
-/// Opaque handle to a [`Node`] (broker).
-#[repr(C)]
-pub struct kafka_common_Node_t {
-    _private: [u8; 0],
-}
-
-/// Returns the node id.
-///
-/// # Safety
-///
-/// `node` must be a valid node handle obtained from a `PartitionInfo` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Node_id(node: *const kafka_common_Node_t) -> i32 {
-    unsafe { &*(node as *const Node) }.id()
-}
-
-/// Returns the node host as a (ptr, len) pair (NOT NUL-terminated; borrows into
-/// the owning `PartitionInfo`). `out_len` receives the byte length.
-///
-/// # Safety
-///
-/// `node` must be a valid node handle; `out_len` a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Node_host(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
-    let host = unsafe { &*(node as *const Node) }.host();
-    if !out_len.is_null() {
-        unsafe { *out_len = host.len() as i32 };
-    }
-    host.as_ptr() as *const c_char
-}
-
-/// Returns the node port.
-///
-/// # Safety
-///
-/// `node` must be a valid node handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Node_port(node: *const kafka_common_Node_t) -> i32 {
-    unsafe { &*(node as *const Node) }.port()
-}
-
-/// Returns the node rack as a (ptr, len) pair, or (null, -1) if no rack.
-///
-/// # Safety
-///
-/// `node` must be a valid node handle; `out_len` a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
-    match unsafe { &*(node as *const Node) }.rack() {
-        Some(rack) => {
-            if !out_len.is_null() {
-                unsafe { *out_len = rack.len() as i32 };
-            }
-            rack.as_ptr() as *const c_char
-        },
-        None => {
-            if !out_len.is_null() {
-                unsafe { *out_len = -1 };
-            }
-            std::ptr::null()
-        },
-    }
-}
-
-/// Opaque handle to a [`PartitionInfo`].
-#[repr(C)]
-pub struct kafka_common_PartitionInfo_t {
-    _private: [u8; 0],
-}
-
-/// Cached partition-info handle: owns the value plus a NUL-terminated topic
-/// `CString`. `Node` getters borrow directly into the owned `PartitionInfo`.
-struct PartitionInfoInner {
-    info: PartitionInfo,
-    topic_c: std::ffi::CString,
-}
-
-/// Returns the topic as a NUL-terminated C string (owned by the handle).
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(info: *const kafka_common_PartitionInfo_t) -> *const c_char {
-    unsafe { &*(info as *const PartitionInfoInner) }.topic_c.as_ptr()
-}
-
-/// Returns the partition number.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(info: *const kafka_common_PartitionInfo_t) -> i32 {
-    unsafe { &*(info as *const PartitionInfoInner) }.info.partition()
-}
-
-/// Returns the leader node (borrowed; valid until the handle is destroyed), or
-/// null if the partition has no leader.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
-    info: *const kafka_common_PartitionInfo_t,
-) -> *const kafka_common_Node_t {
-    match unsafe { &*(info as *const PartitionInfoInner) }.info.leader() {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns the number of replica nodes.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_replica_count(info: *const kafka_common_PartitionInfo_t) -> i32 {
-    unsafe { &*(info as *const PartitionInfoInner) }.info.replicas().len() as i32
-}
-
-/// Returns the replica node at `index` (borrowed), or null if out of range.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_replica(
-    info: *const kafka_common_PartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.replicas(), index)
-}
-
-/// Returns the number of in-sync replica nodes.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica_count(
-    info: *const kafka_common_PartitionInfo_t,
-) -> i32 {
-    unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas().len() as i32
-}
-
-/// Returns the in-sync replica node at `index` (borrowed), or null if out of
-/// range.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica(
-    info: *const kafka_common_PartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas(), index)
-}
-
-/// Returns the number of offline replica nodes.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica_count(
-    info: *const kafka_common_PartitionInfo_t,
-) -> i32 {
-    unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas().len() as i32
-}
-
-/// Returns the offline replica node at `index` (borrowed), or null if out of
-/// range.
-///
-/// # Safety
-///
-/// `info` must be a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica(
-    info: *const kafka_common_PartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas(), index)
-}
-
-/// Returns the node at `index` in `nodes` (borrowed), or null if out of range.
-fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    match nodes.get(index as usize) {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
-}
-
-/// Destroys a partition-info handle. Safe with null (no-op). Invalidates any
-/// `Node` handles obtained from it.
-///
-/// # Safety
-///
-/// `info` must be null or a valid partition-info handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_PartitionInfo_destroy(info: *mut kafka_common_PartitionInfo_t) {
-    if !info.is_null() {
-        unsafe { drop(Box::from_raw(info as *mut PartitionInfoInner)) };
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Phase E — map / list result handles
 //
@@ -2022,10 +1778,8 @@ pub(crate) fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) ->
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, oam) in map {
-        let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-        keys.push(TopicPartitionInner { tp, topic_c });
-        let metadata_c = std::ffi::CString::new(oam.metadata().as_bytes()).unwrap_or_default();
-        values.push(OffsetAndMetadataInner { oam, metadata_c });
+        keys.push(TopicPartitionInner::new(tp));
+        values.push(OffsetAndMetadataInner::new(oam));
     }
     Box::into_raw(Box::new(OffsetMapInner { keys, values })) as *mut kafka_consumer_OffsetMap_t
 }
@@ -2112,8 +1866,7 @@ pub(crate) fn box_offset_and_timestamp_map(
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, oat) in map {
-        let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-        keys.push(TopicPartitionInner { tp, topic_c });
+        keys.push(TopicPartitionInner::new(tp));
         values.push(oat);
     }
     Box::into_raw(Box::new(OffsetAndTimestampMapInner { keys, values })) as *mut kafka_consumer_OffsetAndTimestampMap_t
@@ -2206,8 +1959,7 @@ pub(crate) fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kaf
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, offset) in map {
-        let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-        keys.push(TopicPartitionInner { tp, topic_c });
+        keys.push(TopicPartitionInner::new(tp));
         values.push(offset);
     }
     Box::into_raw(Box::new(LongOffsetMapInner { keys, values })) as *mut kafka_consumer_LongOffsetMap_t
@@ -2287,13 +2039,7 @@ struct PartitionInfoListInner {
 }
 
 pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_common_PartitionInfoList_t {
-    let items = infos
-        .into_iter()
-        .map(|info| {
-            let topic_c = std::ffi::CString::new(info.topic().as_bytes()).unwrap_or_default();
-            PartitionInfoInner { info, topic_c }
-        })
-        .collect();
+    let items = infos.into_iter().map(PartitionInfoInner::new).collect();
     Box::into_raw(Box::new(PartitionInfoListInner { items })) as *mut kafka_common_PartitionInfoList_t
 }
 
@@ -2566,13 +2312,7 @@ fn box_topic_partition_info_map(map: HashMap<String, Vec<PartitionInfo>>) -> *mu
     let mut lists = Vec::with_capacity(map.len());
     for (topic, infos) in map {
         topics.push(std::ffi::CString::new(topic.as_bytes()).unwrap_or_default());
-        let items = infos
-            .into_iter()
-            .map(|info| {
-                let topic_c = std::ffi::CString::new(info.topic().as_bytes()).unwrap_or_default();
-                PartitionInfoInner { info, topic_c }
-            })
-            .collect();
+        let items = infos.into_iter().map(PartitionInfoInner::new).collect();
         lists.push(PartitionInfoListInner { items });
     }
     Box::into_raw(Box::new(TopicPartitionInfoMapInner { topics, lists })) as *mut kafka_common_TopicPartitionInfoMap_t
@@ -2663,13 +2403,7 @@ struct TopicPartitionListInner {
 pub(crate) fn box_topic_partition_list(
     tps: impl IntoIterator<Item = TopicPartition>,
 ) -> *mut kafka_common_TopicPartitionList_t {
-    let items = tps
-        .into_iter()
-        .map(|tp| {
-            let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-            TopicPartitionInner { tp, topic_c }
-        })
-        .collect();
+    let items = tps.into_iter().map(TopicPartitionInner::new).collect();
     Box::into_raw(Box::new(TopicPartitionListInner { items })) as *mut kafka_common_TopicPartitionList_t
 }
 

@@ -551,13 +551,12 @@ static void test_mock_consumer_partitions_and_topics(void) {
     TEST_ASSERT_NOT_NULL(leader);
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(leader));
     TEST_ASSERT_EQUAL_INT32(9092, kafka_common_Node_port(leader));
-    int32_t host_len = 0;
-    const char *host = kafka_common_Node_host(leader, &host_len);
-    TEST_ASSERT_EQUAL_INT32(7, host_len);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(host, "broker1", 7));
-    TEST_ASSERT_EQUAL_INT32(1, kafka_common_PartitionInfo_replica_count(p0));
-    TEST_ASSERT_NOT_NULL(kafka_common_PartitionInfo_replica(p0, 0));
-    TEST_ASSERT_NULL(kafka_common_PartitionInfo_replica(p0, 5));
+    TEST_ASSERT_EQUAL_STRING("broker1", kafka_common_Node_host(leader));
+    kafka_List_t *replicas = kafka_common_PartitionInfo_replicas(p0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(replicas));
+    TEST_ASSERT_NOT_NULL(kafka_List_get(replicas, 0));
+    TEST_ASSERT_NULL(kafka_List_get(replicas, 5));
+    kafka_List_destroy(replicas);
     kafka_common_PartitionInfoList_destroy(infos);
 
     kafka_common_TopicPartitionInfoMap_t *map = NULL;

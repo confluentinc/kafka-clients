@@ -393,8 +393,10 @@ static void test_mock_admin_create_topics_replicas_assignment(void) {
         kafka_admin_DescribeTopicsResult_get_value(described, 0);
     TEST_ASSERT_NOT_NULL(d);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicDescription_partition_count(d));
-    TEST_ASSERT_EQUAL_INT32(3, kafka_common_TopicPartitionInfo_replica_count(
-        kafka_admin_TopicDescription_partition(d, 0)));
+    kafka_List_t *replicas =
+        kafka_common_TopicPartitionInfo_replicas(kafka_admin_TopicDescription_partition(d, 0));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_List_size(replicas));
+    kafka_List_destroy(replicas);
 
     kafka_admin_DescribeTopicsResult_destroy(described);
     kafka_admin_CreateTopicsResult_destroy(result);
@@ -639,23 +641,28 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_NOT_NULL(leader);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Node_id(leader));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(leader));
-    int32_t host_len = 0;
-    const char *host = kafka_common_Node_host(leader, &host_len);
-    TEST_ASSERT_EQUAL_INT32(9, host_len);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
+    TEST_ASSERT_EQUAL_STRING("localhost", kafka_common_Node_host(leader));
 
-    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TopicPartitionInfo_replica_count(p0));
+    kafka_List_t *replicas = kafka_common_TopicPartitionInfo_replicas(p0);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(replicas));
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(
-        kafka_common_TopicPartitionInfo_replica(p0, 1)));
-    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_replica(p0, 2));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_isr_count(p0));
-    /* The mock reports an empty (not absent) ELR set: count 0 with the presence
-     * bit set. An absent set would also count 0, with the bit clear. */
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_elr(p0));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_last_known_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_last_known_elr(p0));
-    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_elr(p0, 0));
+        (const kafka_common_Node_t *)kafka_List_get(replicas, 1)));
+    TEST_ASSERT_NULL(kafka_List_get(replicas, 2));
+    kafka_List_destroy(replicas);
+    kafka_List_t *isr = kafka_common_TopicPartitionInfo_isr(p0);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(isr));
+    kafka_List_destroy(isr);
+    /* The mock reports an empty (not absent) ELR set: a non-NULL list of size
+     * 0. An absent set (Java null) is a NULL list instead. */
+    kafka_List_t *elr = kafka_common_TopicPartitionInfo_elr(p0);
+    TEST_ASSERT_NOT_NULL(elr);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(elr));
+    TEST_ASSERT_NULL(kafka_List_get(elr, 0));
+    kafka_List_destroy(elr);
+    kafka_List_t *last_known_elr = kafka_common_TopicPartitionInfo_last_known_elr(p0);
+    TEST_ASSERT_NOT_NULL(last_known_elr);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(last_known_elr));
+    kafka_List_destroy(last_known_elr);
 
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, 2));
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, -1));
@@ -1349,10 +1356,7 @@ static void test_mock_admin_describe_cluster_sync(void) {
     const kafka_common_Node_t *node = kafka_admin_DescribeClusterResult_get_node(result, 0);
     TEST_ASSERT_NOT_NULL(node);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Node_id(node));
-    int32_t host_len = 0;
-    const char *host = kafka_common_Node_host(node, &host_len);
-    TEST_ASSERT_EQUAL_INT32(9, host_len);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
+    TEST_ASSERT_EQUAL_STRING("localhost", kafka_common_Node_host(node));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(node));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, 3));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, -1));

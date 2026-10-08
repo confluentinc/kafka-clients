@@ -103,8 +103,6 @@
 //! - `kafka_admin_ConsumerGroupDescription_has_authorized_operations`
 //! - `kafka_admin_ClassicGroupDescription_has_authorized_operations`
 //! - `kafka_admin_DescribeClusterResult_has_authorized_operations`
-//! - `kafka_common_TopicPartitionInfo_has_elr`
-//! - `kafka_common_TopicPartitionInfo_has_last_known_elr`
 //!
 //! An in-band `-1` sentinel was rejected because a count flows straight into
 //! `malloc(count * sizeof *p)` and into `for (size_t i = 0; i < count; i++)`,
@@ -112,7 +110,7 @@
 //! no count function in this module having a negative range, that mistake is not
 //! expressible: there is no sentinel a caller can forget to test for, and the
 //! presence bit is a `bool` that cannot be mistaken for a length. The element
-//! accessors (`_authorized_operation(i)`, `_elr(i)`, ...) independently return
+//! accessors (`_authorized_operation(i)`, ...) independently return
 //! -1 / null for an absent or out-of-range index, so a caller that ignores the
 //! presence bit still cannot read past the end.
 //!
@@ -170,15 +168,16 @@ use crate::common::security::token::delegation::{DelegationToken, TokenInformati
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{
     ElectionType, Error, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection, TopicPartition,
-    TopicPartitionInfo, TopicPartitionReplica, Uuid,
+    TopicPartitionReplica, Uuid,
 };
 use crate::consumer::OffsetAndMetadata;
 
+use super::common::node::{NodeInner, kafka_common_Node_t, optional_node_ptr};
+use super::common::topic_partition_info::{TopicPartitionInfoInner, kafka_common_TopicPartitionInfo_t};
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
-use super::consumer::kafka_common_Node_t;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -1985,233 +1984,6 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
     inner.configs.get(index as usize)
 }
 
-/// Opaque handle to a `TopicPartitionInfo`.
-#[repr(C)]
-pub struct kafka_common_TopicPartitionInfo_t {
-    _private: [u8; 0],
-}
-
-/// Backing state for [`kafka_common_TopicPartitionInfo_t`].
-///
-/// Node lists are owned here so [`kafka_common_Node_t`] pointers handed out by
-/// the getters stay valid for the lifetime of the owning result handle.
-struct TopicPartitionInfoInner {
-    partition: i32,
-    leader: Option<Node>,
-    replicas: Vec<Node>,
-    isr: Vec<Node>,
-    /// `None` when the broker did not report an eligible-leader-replica set
-    /// (Java's `TopicPartitionInfo.elr()` returns null).
-    elr: Option<Vec<Node>>,
-    last_known_elr: Option<Vec<Node>>,
-}
-
-impl TopicPartitionInfoInner {
-    fn new(info: &TopicPartitionInfo) -> Self {
-        Self {
-            partition: info.partition(),
-            leader: info.leader().cloned(),
-            replicas: info.replicas().to_vec(),
-            isr: info.isr().to_vec(),
-            elr: info.elr().map(<[Node]>::to_vec),
-            last_known_elr: info.last_known_elr().map(<[Node]>::to_vec),
-        }
-    }
-}
-
-/// Casts a `*const kafka_common_TopicPartitionInfo_t` to a reference.
-///
-/// # Safety
-///
-/// `info` must be a non-null borrowed pointer from a `TopicDescription` getter.
-unsafe fn partition_info_ref(info: *const kafka_common_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
-    unsafe { &*(info as *const TopicPartitionInfoInner) }
-}
-
-/// Returns a borrowed [`kafka_common_Node_t`] pointer for `nodes[index]`, or null
-/// if out of range.
-fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
-    if index < 0 {
-        return std::ptr::null();
-    }
-    match nodes.get(index as usize) {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns the partition id.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> i32 {
-    unsafe { partition_info_ref(info) }.partition
-}
-
-/// Returns the partition leader (borrowed), or null if there is no leader.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> *const kafka_common_Node_t {
-    match unsafe { partition_info_ref(info) }.leader.as_ref() {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns the number of replicas.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica_count(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> i32 {
-    unsafe { partition_info_ref(info) }.replicas.len() as i32
-}
-
-/// Returns the replica at `index` (borrowed), or null if out of range.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica(
-    info: *const kafka_common_TopicPartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    node_at(&unsafe { partition_info_ref(info) }.replicas, index)
-}
-
-/// Returns the number of in-sync replicas.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr_count(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> i32 {
-    unsafe { partition_info_ref(info) }.isr.len() as i32
-}
-
-/// Returns the in-sync replica at `index` (borrowed), or null if out of range.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
-    info: *const kafka_common_TopicPartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    node_at(&unsafe { partition_info_ref(info) }.isr, index)
-}
-
-/// Returns the number of eligible leader replicas, always non-negative. An
-/// absent ELR set (Java's `elr()` returns null) and a reported-but-empty one both
-/// count 0; use [`kafka_common_TopicPartitionInfo_has_elr`] to tell them apart.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr_count(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> i32 {
-    unsafe { partition_info_ref(info) }
-        .elr
-        .as_ref()
-        .map_or(0, |nodes| nodes.len() as i32)
-}
-
-/// Returns whether the broker reported an ELR set at all: `false` is Java's
-/// `elr() == null`, `true` with a count of 0 is a reported-but-empty set.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_elr(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> bool {
-    unsafe { partition_info_ref(info) }.elr.is_some()
-}
-
-/// Returns the eligible leader replica at `index` (borrowed), or null if absent
-/// or out of range.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
-    info: *const kafka_common_TopicPartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    match unsafe { partition_info_ref(info) }.elr.as_ref() {
-        Some(nodes) => node_at(nodes, index),
-        None => std::ptr::null(),
-    }
-}
-
-/// Returns the number of last-known eligible leader replicas, always
-/// non-negative. An absent set (Java's `lastKnownElr()` returns null) and a
-/// reported-but-empty one both count 0; use
-/// [`kafka_common_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr_count(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> i32 {
-    unsafe { partition_info_ref(info) }
-        .last_known_elr
-        .as_ref()
-        .map_or(0, |nodes| nodes.len() as i32)
-}
-
-/// Returns whether the broker reported a last-known-ELR set at all: `false` is
-/// Java's `lastKnownElr() == null`.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_last_known_elr(
-    info: *const kafka_common_TopicPartitionInfo_t,
-) -> bool {
-    unsafe { partition_info_ref(info) }.last_known_elr.is_some()
-}
-
-/// Returns the last-known eligible leader replica at `index` (borrowed), or null
-/// if absent or out of range.
-///
-/// # Safety
-///
-/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
-    info: *const kafka_common_TopicPartitionInfo_t,
-    index: i32,
-) -> *const kafka_common_Node_t {
-    match unsafe { partition_info_ref(info) }.last_known_elr.as_ref() {
-        Some(nodes) => node_at(nodes, index),
-        None => std::ptr::null(),
-    }
-}
-
 /// Opaque handle to a `TopicDescription`.
 #[repr(C)]
 pub struct kafka_admin_TopicDescription_t {
@@ -2235,7 +2007,12 @@ impl TopicDescriptionInner {
             name_c: to_cstring(description.name()),
             topic_id_c: to_cstring(&description.topic_id().to_string()),
             internal: description.is_internal(),
-            partitions: description.partitions().iter().map(TopicPartitionInfoInner::new).collect(),
+            partitions: description
+                .partitions()
+                .iter()
+                .cloned()
+                .map(TopicPartitionInfoInner::new)
+                .collect(),
             authorized_operations: description
                 .authorized_operations()
                 .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
@@ -2314,7 +2091,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
         return std::ptr::null();
     }
     match unsafe { description_ref(description) }.partitions.get(index as usize) {
-        Some(info) => info as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t,
+        Some(info) => info.as_ptr(),
         None => std::ptr::null(),
     }
 }
@@ -4713,8 +4490,8 @@ pub struct kafka_admin_DescribeClusterResult_t {
 /// directly and any failure is a whole-call failure.
 struct DescribeClusterResultInner {
     cluster_id_c: CString,
-    nodes: Vec<Node>,
-    controller: Option<Node>,
+    nodes: Vec<NodeInner>,
+    controller: Option<NodeInner>,
     /// `None` is Java's null (the broker did not report the operations), which
     /// the C surface exposes through
     /// [`kafka_admin_DescribeClusterResult_has_authorized_operations`] rather than
@@ -4726,8 +4503,8 @@ struct DescribeClusterResultInner {
 fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_admin_DescribeClusterResult_t {
     let inner = DescribeClusterResultInner {
         cluster_id_c: to_cstring(&outcome.cluster_id),
-        nodes: outcome.nodes,
-        controller: outcome.controller,
+        nodes: outcome.nodes.into_iter().map(NodeInner::new).collect(),
+        controller: outcome.controller.map(NodeInner::new),
         authorized_operations: outcome
             .authorized_operations
             .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
@@ -4781,7 +4558,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
-    node_at(&unsafe { describe_cluster_result_ref(result) }.nodes, index)
+    if index < 0 {
+        return std::ptr::null();
+    }
+    unsafe { describe_cluster_result_ref(result) }
+        .nodes
+        .get(index as usize)
+        .map_or(std::ptr::null(), NodeInner::as_ptr)
 }
 
 /// Returns the current controller node (borrowed), or null if there is none
@@ -4794,10 +4577,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const kafka_common_Node_t {
-    match &unsafe { describe_cluster_result_ref(result) }.controller {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
+    optional_node_ptr(unsafe { describe_cluster_result_ref(result) }.controller.as_ref())
 }
 
 /// Returns the number of authorized operations reported for the cluster, always
@@ -8679,14 +8459,6 @@ fn authorized_operation_count(codes: Option<&[i32]>) -> i32 {
     codes.map_or(0, |codes| codes.len() as i32)
 }
 
-/// Returns a borrowed [`kafka_common_Node_t`] for an optional coordinator.
-fn optional_node_ptr(node: Option<&Node>) -> *const kafka_common_Node_t {
-    match node {
-        Some(node) => node as *const Node as *const kafka_common_Node_t,
-        None => std::ptr::null(),
-    }
-}
-
 /// Opaque handle to a `ConsumerGroupDescription` (Java's
 /// `org.apache.kafka.clients.admin.ConsumerGroupDescription`).
 ///
@@ -8705,7 +8477,7 @@ struct ConsumerGroupDescriptionInner {
     partition_assignor_c: CString,
     group_type_c: CString,
     group_state_c: CString,
-    coordinator: Option<Node>,
+    coordinator: Option<NodeInner>,
     /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
     /// `None` when the broker did not report them (Java's null).
     authorized_operations: Option<Vec<i32>>,
@@ -8722,7 +8494,7 @@ impl ConsumerGroupDescriptionInner {
             partition_assignor_c: to_cstring(description.partition_assignor()),
             group_type_c: to_cstring(description.r#type().name()),
             group_state_c: to_cstring(description.group_state().name()),
-            coordinator: description.coordinator().cloned(),
+            coordinator: description.coordinator().cloned().map(NodeInner::new),
             authorized_operations: description
                 .authorized_operations()
                 .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
@@ -8954,7 +8726,7 @@ struct ClassicGroupDescriptionInner {
     is_simple_consumer_group: bool,
     members: Vec<MemberDescriptionInner>,
     state_c: CString,
-    coordinator: Option<Node>,
+    coordinator: Option<NodeInner>,
     /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
     /// `None` when the broker did not report them (Java's null).
     authorized_operations: Option<Vec<i32>>,
@@ -8969,7 +8741,7 @@ impl ClassicGroupDescriptionInner {
             is_simple_consumer_group: description.is_simple_consumer_group(),
             members: description.members().iter().map(MemberDescriptionInner::new).collect(),
             state_c: to_cstring(description.state().name()),
-            coordinator: description.coordinator().cloned(),
+            coordinator: description.coordinator().cloned().map(NodeInner::new),
             authorized_operations: description
                 .authorized_operations()
                 .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
@@ -20601,7 +20373,7 @@ mod tests {
     /// reports UNSUPPORTED per group), so this is the only C-side coverage.
     #[test]
     fn group_description_coordinator_keeps_its_host_and_port() {
-        use crate::ffi::consumer::{kafka_common_Node_host, kafka_common_Node_id, kafka_common_Node_port};
+        use crate::ffi::common::node::{kafka_common_Node_host, kafka_common_Node_id, kafka_common_Node_port};
 
         let consumer = ConsumerGroupDescription::new(
             "g",
@@ -20641,12 +20413,7 @@ mod tests {
                 assert!(!node.is_null());
                 assert_eq!(kafka_common_Node_id(node), 7);
                 assert_eq!(kafka_common_Node_port(node), 19092);
-                let mut len = 0;
-                let host = kafka_common_Node_host(node, &mut len);
-                // `.cast()` rather than `as *const u8`: `c_char` is `i8` on Darwin but
-                // `u8` on aarch64 Linux, so the `as` form is a required cast on one and
-                // a no-op the `unnecessary_cast` lint rejects on the other.
-                let host = std::str::from_utf8(std::slice::from_raw_parts(host.cast::<u8>(), len as usize));
+                let host = std::ffi::CStr::from_ptr(kafka_common_Node_host(node)).to_str();
                 assert_eq!(host, Ok("broker-7.example"));
             }
             kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
@@ -20771,54 +20538,6 @@ mod tests {
             kafka_admin_DescribeClusterResult_destroy(absent);
             kafka_admin_DescribeClusterResult_destroy(reported_empty);
             kafka_admin_DescribeClusterResult_destroy(reported_two);
-        }
-    }
-
-    /// `elr` / `last_known_elr` follow the same rule: no negative count, presence
-    /// on a separate bit. Java's `elr()` / `lastKnownElr()` are null for a
-    /// partition built with the four-argument constructor.
-    #[test]
-    fn elr_counts_are_never_negative_and_absence_is_a_separate_bit() {
-        let absent = TopicPartitionInfoInner::new(&TopicPartitionInfo::new(0, None, vec![], vec![]));
-        let reported_empty = TopicPartitionInfoInner::new(&TopicPartitionInfo::with_elr_last_known_elr(
-            0,
-            None,
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        ));
-        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::with_elr_last_known_elr(
-            0,
-            None,
-            vec![],
-            vec![],
-            vec![Node::new(1, "h1".to_string(), 9091)],
-            vec![
-                Node::new(2, "h2".to_string(), 9092),
-                Node::new(3, "h3".to_string(), 9093),
-            ],
-        ));
-        let p = |inner: &TopicPartitionInfoInner| {
-            inner as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t
-        };
-        unsafe {
-            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&absent)), 0);
-            assert!(!kafka_common_TopicPartitionInfo_has_elr(p(&absent)));
-            assert!(kafka_common_TopicPartitionInfo_elr(p(&absent), 0).is_null());
-            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
-            assert!(!kafka_common_TopicPartitionInfo_has_last_known_elr(p(&absent)));
-
-            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported_empty)));
-            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
-
-            // Distinct lengths, so swapping the two accessors fails.
-            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported)), 1);
-            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
-            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported)));
-            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
     }
 

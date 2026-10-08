@@ -1129,13 +1129,23 @@ struct StringArray {
 
 void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   dst->set_id(kafka_common_Node_id(node));
-  int32_t host_len = 0;
-  const char* host = kafka_common_Node_host(node, &host_len);
-  if (host != nullptr) dst->set_host(std::string(host, host_len));
+  const char* host = kafka_common_Node_host(node);  // NUL-terminated, borrowed
+  if (host != nullptr) dst->set_host(host);
   dst->set_port(kafka_common_Node_port(node));
-  int32_t rack_len = 0;
-  const char* rack = kafka_common_Node_rack(node, &rack_len);
-  if (rack != nullptr) dst->set_rack(std::string(rack, rack_len));
+  const char* rack = kafka_common_Node_rack(node);  // nullptr when Java's rack is null
+  if (rack != nullptr) dst->set_rack(rack);
+}
+
+// Converts every `kafka_common_Node_t *` of an owned list into the proto node
+// returned by `add()`, then frees the list. A null list (Java null) adds nothing.
+template <typename Add>
+void node_list_to_proto(kafka_List_t* nodes, Add add) {
+  if (nodes == nullptr) return;
+  const int32_t n = kafka_List_size(nodes);
+  for (int32_t i = 0; i < n; i++) {
+    node_to_proto(static_cast<const kafka_common_Node_t*>(kafka_List_get(nodes, i)), add());
+  }
+  kafka_List_destroy(nodes);
 }
 
 void partition_info_to_proto(const kafka_common_PartitionInfo_t* info,
@@ -1145,20 +1155,12 @@ void partition_info_to_proto(const kafka_common_PartitionInfo_t* info,
   dst->set_partition(kafka_common_PartitionInfo_partition(info));
   const kafka_common_Node_t* leader = kafka_common_PartitionInfo_leader(info);
   if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-  int32_t n = kafka_common_PartitionInfo_replica_count(info);
-  for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_common_PartitionInfo_replica(info, i), dst->add_replicas());
-  }
-  n = kafka_common_PartitionInfo_in_sync_replica_count(info);
-  for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_common_PartitionInfo_in_sync_replica(info, i),
-                  dst->add_in_sync_replicas());
-  }
-  n = kafka_common_PartitionInfo_offline_replica_count(info);
-  for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_common_PartitionInfo_offline_replica(info, i),
-                  dst->add_offline_replicas());
-  }
+  node_list_to_proto(kafka_common_PartitionInfo_replicas(info),
+                     [dst] { return dst->add_replicas(); });
+  node_list_to_proto(kafka_common_PartitionInfo_in_sync_replicas(info),
+                     [dst] { return dst->add_in_sync_replicas(); });
+  node_list_to_proto(kafka_common_PartitionInfo_offline_replicas(info),
+                     [dst] { return dst->add_offline_replicas(); });
 }
 
 void tp_to_proto(const kafka_common_TopicPartition_t* tp, TopicPartition* dst) {
@@ -4690,29 +4692,20 @@ class AdminServiceImpl final : public AdminService::Service {
     dst->set_partition(kafka_common_TopicPartitionInfo_partition(info));
     const kafka_common_Node_t* leader = kafka_common_TopicPartitionInfo_leader(info);
     if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-    const int32_t replicas = kafka_common_TopicPartitionInfo_replica_count(info);
-    for (int32_t i = 0; i < replicas; i++) {
-      node_to_proto(kafka_common_TopicPartitionInfo_replica(info, i), dst->add_replicas());
+    node_list_to_proto(kafka_common_TopicPartitionInfo_replicas(info),
+                       [dst] { return dst->add_replicas(); });
+    node_list_to_proto(kafka_common_TopicPartitionInfo_isr(info),
+                       [dst] { return dst->add_isr(); });
+    // elr / last_known_elr are nullable in Java: the getters return nullptr for
+    // an absent set and an empty list for a reported-but-empty one, so only a
+    // non-null list creates the proto field.
+    if (kafka_List_t* elr = kafka_common_TopicPartitionInfo_elr(info)) {
+      NodeList* out = dst->mutable_elr();
+      node_list_to_proto(elr, [out] { return out->add_nodes(); });
     }
-    const int32_t isr = kafka_common_TopicPartitionInfo_isr_count(info);
-    for (int32_t i = 0; i < isr; i++) {
-      node_to_proto(kafka_common_TopicPartitionInfo_isr(info, i), dst->add_isr());
-    }
-    // elr / last_known_elr are nullable in Java, and an absent list reports the
-    // same count 0 as an empty one — hence the dedicated has_* predicates.
-    if (kafka_common_TopicPartitionInfo_has_elr(info)) {
-      NodeList* elr = dst->mutable_elr();
-      const int32_t n = kafka_common_TopicPartitionInfo_elr_count(info);
-      for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_common_TopicPartitionInfo_elr(info, i), elr->add_nodes());
-      }
-    }
-    if (kafka_common_TopicPartitionInfo_has_last_known_elr(info)) {
-      NodeList* last = dst->mutable_last_known_elr();
-      const int32_t n = kafka_common_TopicPartitionInfo_last_known_elr_count(info);
-      for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_common_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
-      }
+    if (kafka_List_t* last = kafka_common_TopicPartitionInfo_last_known_elr(info)) {
+      NodeList* out = dst->mutable_last_known_elr();
+      node_list_to_proto(last, [out] { return out->add_nodes(); });
     }
   }
 

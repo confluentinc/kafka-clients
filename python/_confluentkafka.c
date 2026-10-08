@@ -2721,54 +2721,49 @@ static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
 static PyObject* node_to_py(const kafka_common_Node_t* node) {
     if (node == NULL) Py_RETURN_NONE;
     int32_t id = kafka_common_Node_id(node);
-    int32_t host_len = 0;
-    const char* host = kafka_common_Node_host(node, &host_len);
+    const char* host = kafka_common_Node_host(node);  // NUL-terminated, borrowed
     int32_t port = kafka_common_Node_port(node);
-    int32_t rack_len = 0;
-    const char* rack = kafka_common_Node_rack(node, &rack_len);
-    PyObject* py_host = PyUnicode_FromStringAndSize(host ? host : "", host ? host_len : 0);
-    PyObject* py_rack = rack ? PyUnicode_FromStringAndSize(rack, rack_len) : (Py_INCREF(Py_None), Py_None);
+    const char* rack = kafka_common_Node_rack(node);  // NULL when Java's rack is null
+    PyObject* py_host = PyUnicode_FromString(host ? host : "");
+    PyObject* py_rack = rack ? PyUnicode_FromString(rack) : (Py_INCREF(Py_None), Py_None);
     if (py_host == NULL || py_rack == NULL) { Py_XDECREF(py_host); Py_XDECREF(py_rack); return NULL; }
     PyObject* out = Py_BuildValue("(iOiO)", id, py_host, port, py_rack);
     Py_DECREF(py_host); Py_DECREF(py_rack);
     return out;
 }
 
+// Converts an owned list of `kafka_common_Node_t *` into a list of node tuples
+// and frees it. A NULL list (Java null) becomes None, distinct from an empty
+// list.
+static PyObject* node_list_to_py(kafka_List_t* nodes) {
+    if (nodes == NULL) Py_RETURN_NONE;
+    int32_t n = kafka_List_size(nodes);
+    PyObject* out = PyList_New(n);
+    if (out == NULL) { kafka_List_destroy(nodes); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* item = node_to_py((const kafka_common_Node_t*)kafka_List_get(nodes, i));
+        if (item == NULL) { Py_DECREF(out); kafka_List_destroy(nodes); return NULL; }
+        PyList_SET_ITEM(out, i, item);
+    }
+    kafka_List_destroy(nodes);
+    return out;
+}
+
 static PyObject* partition_info_to_py(const kafka_common_PartitionInfo_t* info) {
-    int32_t r = 0;
     const char* topic = kafka_common_PartitionInfo_topic(info);  // NUL-terminated
     int32_t partition = kafka_common_PartitionInfo_partition(info);
     PyObject* leader = node_to_py(kafka_common_PartitionInfo_leader(info));
-    if (leader == NULL) return NULL;
-    int32_t nrep = kafka_common_PartitionInfo_replica_count(info);
-    int32_t nisr = kafka_common_PartitionInfo_in_sync_replica_count(info);
-    int32_t noff = kafka_common_PartitionInfo_offline_replica_count(info);
-    PyObject* replicas = PyList_New(nrep < 0 ? 0 : nrep);
-    PyObject* isr = PyList_New(nisr < 0 ? 0 : nisr);
-    PyObject* offline = PyList_New(noff < 0 ? 0 : noff);
-    if (!replicas || !isr || !offline) { Py_XDECREF(replicas); Py_XDECREF(isr); Py_XDECREF(offline); Py_DECREF(leader); return NULL; }
-    for (r = 0; r < nrep; r++) {
-        PyObject* n = node_to_py(kafka_common_PartitionInfo_replica(info, r));
-        if (!n) goto fail;
-        PyList_SET_ITEM(replicas, r, n);
-    }
-    for (r = 0; r < nisr; r++) {
-        PyObject* n = node_to_py(kafka_common_PartitionInfo_in_sync_replica(info, r));
-        if (!n) goto fail;
-        PyList_SET_ITEM(isr, r, n);
-    }
-    for (r = 0; r < noff; r++) {
-        PyObject* n = node_to_py(kafka_common_PartitionInfo_offline_replica(info, r));
-        if (!n) goto fail;
-        PyList_SET_ITEM(offline, r, n);
-    }
+    PyObject* replicas = node_list_to_py(kafka_common_PartitionInfo_replicas(info));
+    PyObject* isr = node_list_to_py(kafka_common_PartitionInfo_in_sync_replicas(info));
+    PyObject* offline = node_list_to_py(kafka_common_PartitionInfo_offline_replicas(info));
     PyObject* py_topic = PyUnicode_FromString(topic ? topic : "");
-    if (!py_topic) goto fail;
-    PyObject* out = Py_BuildValue("(NiNNNN)", py_topic, partition, leader, replicas, isr, offline);
-    return out;  // Py_BuildValue "N" steals refs to py_topic/leader/replicas/isr/offline
-fail:
-    Py_DECREF(leader); Py_DECREF(replicas); Py_DECREF(isr); Py_DECREF(offline);
-    return NULL;
+    if (!leader || !replicas || !isr || !offline || !py_topic) {
+        Py_XDECREF(leader); Py_XDECREF(replicas); Py_XDECREF(isr); Py_XDECREF(offline);
+        Py_XDECREF(py_topic);
+        return NULL;
+    }
+    // Py_BuildValue "N" steals refs to py_topic/leader/replicas/isr/offline
+    return Py_BuildValue("(NiNNNN)", py_topic, partition, leader, replicas, isr, offline);
 }
 
 static PyObject* py_OffsetMap_drain(PyObject* self, PyObject* args) {
@@ -3866,37 +3861,16 @@ static PyObject* acl_codes_to_py(bool present, int32_t count, int32_t (*get)(con
     return out;
 }
 
-// Builds a list of `count` node tuples via `get(index)`.
-static PyObject* admin_node_list_to_py(const kafka_common_TopicPartitionInfo_t* info, int32_t count,
-                                       const kafka_common_Node_t* (*get)(const kafka_common_TopicPartitionInfo_t*,
-                                                                        int32_t)) {
-    PyObject* out = PyList_New(count);
-    if (out == NULL) return NULL;
-    for (int32_t i = 0; i < count; i++) {
-        PyObject* n = node_to_py(get(info, i));
-        if (n == NULL) { Py_DECREF(out); return NULL; }
-        PyList_SET_ITEM(out, i, n);
-    }
-    return out;
-}
-
 // (partition, leader, replicas, isr, elr, last_known_elr)
 static PyObject* topic_partition_info_to_py(const kafka_common_TopicPartitionInfo_t* info) {
     PyObject* leader = node_to_py(kafka_common_TopicPartitionInfo_leader(info));
-    PyObject* replicas = admin_node_list_to_py(info,
-        kafka_common_TopicPartitionInfo_replica_count(info), kafka_common_TopicPartitionInfo_replica);
-    PyObject* isr = admin_node_list_to_py(info,
-        kafka_common_TopicPartitionInfo_isr_count(info), kafka_common_TopicPartitionInfo_isr);
+    PyObject* replicas = node_list_to_py(kafka_common_TopicPartitionInfo_replicas(info));
+    PyObject* isr = node_list_to_py(kafka_common_TopicPartitionInfo_isr(info));
     // Java's elr()/lastKnownElr() are null when the broker did not report the
-    // set, which stays distinct from a reported-but-empty one.
-    PyObject* elr = kafka_common_TopicPartitionInfo_has_elr(info)
-        ? admin_node_list_to_py(info, kafka_common_TopicPartitionInfo_elr_count(info),
-                                kafka_common_TopicPartitionInfo_elr)
-        : (Py_INCREF(Py_None), Py_None);
-    PyObject* last_elr = kafka_common_TopicPartitionInfo_has_last_known_elr(info)
-        ? admin_node_list_to_py(info, kafka_common_TopicPartitionInfo_last_known_elr_count(info),
-                                kafka_common_TopicPartitionInfo_last_known_elr)
-        : (Py_INCREF(Py_None), Py_None);
+    // set, which stays distinct from a reported-but-empty one: the C getters
+    // return NULL for the former, which node_list_to_py maps to None.
+    PyObject* elr = node_list_to_py(kafka_common_TopicPartitionInfo_elr(info));
+    PyObject* last_elr = node_list_to_py(kafka_common_TopicPartitionInfo_last_known_elr(info));
     if (!leader || !replicas || !isr || !elr || !last_elr) {
         Py_XDECREF(leader); Py_XDECREF(replicas); Py_XDECREF(isr);
         Py_XDECREF(elr); Py_XDECREF(last_elr);

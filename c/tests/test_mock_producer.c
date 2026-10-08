@@ -660,10 +660,10 @@ void test_error_payload_topic_authorization(void) {
 
     const kafka_common_TopicAuthorizationError_t *handle = kafka_common_Error_topic_authorization_error(err);
     TEST_ASSERT_NOT_NULL(handle);
-    kafka_consumer_StringList_t *topics = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
+    kafka_List_t *topics = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
     TEST_ASSERT_NOT_NULL(topics);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
-    kafka_consumer_StringList_destroy(topics);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(topics));
+    kafka_List_destroy(topics);
 
     /* Wrong-variant extraction returns null. */
     TEST_ASSERT_NULL(kafka_common_Error_group_authorization_error(err));
@@ -681,10 +681,10 @@ void test_error_payload_group_authorization(void) {
 
     const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization_error(err);
     TEST_ASSERT_NOT_NULL(handle);
-    char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
+    /* Borrowed from the handle, like every `&str` getter. */
+    const char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
     TEST_ASSERT_NOT_NULL(group_id);
     TEST_ASSERT_EQUAL_STRING("", group_id);
-    kafka_consumer_string_destroy(group_id);
 
     TEST_ASSERT_NULL(kafka_common_Error_topic_authorization_error(err));
 
@@ -701,10 +701,10 @@ void test_error_payload_invalid_topic(void) {
 
     const kafka_common_InvalidTopicError_t *handle = kafka_common_Error_invalid_topic(err);
     TEST_ASSERT_NOT_NULL(handle);
-    kafka_consumer_StringList_t *topics = kafka_common_InvalidTopicError_invalid_topics(handle);
+    kafka_List_t *topics = kafka_common_InvalidTopicError_invalid_topics(handle);
     TEST_ASSERT_NOT_NULL(topics);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
-    kafka_consumer_StringList_destroy(topics);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(topics));
+    kafka_List_destroy(topics);
 
     TEST_ASSERT_NULL(kafka_common_Error_topic_authorization_error(err));
 

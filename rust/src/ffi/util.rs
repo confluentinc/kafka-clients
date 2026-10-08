@@ -35,6 +35,7 @@
 //! [`kafka_string_destroy`]; a borrowed `&str` is a `const char *` valid as
 //! long as its owner.
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 
@@ -100,8 +101,6 @@ pub(crate) unsafe fn c_str_to_string(s: *const c_char) -> String {
 /// # Safety
 ///
 /// `s` must be null or a valid NUL-terminated string.
-// wired by the nullable-string constructors of `TopicPartition` & co. (Phase 1b.2)
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) unsafe fn c_str_to_option(s: *const c_char) -> Option<String> {
     if s.is_null() {
         None
@@ -217,8 +216,6 @@ pub(crate) fn box_list(elements: Vec<*mut c_void>, destroy: Option<ElementDestro
 }
 
 /// Hands `strings` to C as an owned list of `char *`.
-// wired by the collection getters of the error payloads (Phase 1b.2)
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn box_string_list<I, S>(strings: I) -> *mut kafka_List_t
 where
     I: IntoIterator<Item = S>,
@@ -271,6 +268,29 @@ pub(crate) unsafe fn list_strings(list: *const kafka_List_t) -> Vec<String> {
         .iter()
         .map(|&element| unsafe { c_str_to_string(element as *const c_char) })
         .collect()
+}
+
+/// Reads a list of `const char *` into a set, the shape of a Java
+/// `Set<String>` parameter; null reads as empty.
+///
+/// # Safety
+///
+/// `list` must be null or a valid list whose elements are NUL-terminated
+/// strings.
+pub(crate) unsafe fn list_string_set(list: *const kafka_List_t) -> HashSet<String> {
+    unsafe { list_strings(list) }.into_iter().collect()
+}
+
+/// Hands a Java `Set<String>` to C as an owned, sorted list of `char *`, so
+/// the order a C caller sees is deterministic.
+pub(crate) fn sorted_string_list<I, S>(strings: I) -> *mut kafka_List_t
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut strings: Vec<S> = strings.into_iter().collect();
+    strings.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+    box_string_list(strings)
 }
 
 /// Creates an empty list whose elements the caller owns.
@@ -406,7 +426,7 @@ pub(crate) fn box_map(
 /// Hands string-keyed `entries` to C as an owned map: the keys become owned
 /// `char *`, compared by content in `kafka_Map_get`, and `value_destroy`
 /// frees each value.
-// wired by the map-valued getters of the error payloads (Phase 1b.2)
+// wired by the string-keyed result maps of the admin RPCs (Phase 4)
 #[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn box_string_keyed_map<I, S>(entries: I, value_destroy: Option<ElementDestroy>) -> *mut kafka_Map_t
 where
@@ -442,8 +462,6 @@ pub(crate) unsafe fn map_ref<'a>(map: *const kafka_Map_t) -> &'a MapInner {
 /// # Safety
 ///
 /// `map` must be null or a valid map handle.
-// wired by the map-valued inputs of the admin RPCs (Phase 4)
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) unsafe fn map_entries<'a>(map: *const kafka_Map_t) -> &'a [(*mut c_void, *mut c_void)] {
     if map.is_null() {
         &[]
