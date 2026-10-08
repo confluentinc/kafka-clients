@@ -2259,6 +2259,12 @@ where
                     // paths record `last-heartbeat-seconds-ago` /
                     // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
                     hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    // Wake the bg task when the heartbeat response forwarder (a
+                    // spawned task) has queued a completion, so a new
+                    // assignment, fence or fatal error is applied at once
+                    // rather than after the poll timeout (up to the heartbeat
+                    // interval while the request is in flight).
+                    hb.set_completion_notify(Arc::clone(&event_notify));
                     Some(hb)
                 },
                 _ => None,

@@ -284,6 +284,20 @@ pub(crate) struct ConsumerHeartbeatRequestManager {
     /// bg-task `poll(now)` cycle touches it. (`mpsc::UnboundedReceiver`
     /// is `Send` but not `Sync`; single-ownership keeps it sound.)
     pending_completion_rx: mpsc::UnboundedReceiver<PendingHeartbeatCompletion>,
+    /// The bg task's wakeup `Notify` (a clone of `event_notify`), poked by the
+    /// spawned response forwarder once it has queued a completion for
+    /// [`Self::drain_pending_completions`], so the next `run_once` drains it
+    /// at once. Java needs no equivalent: its `whenComplete` lambda runs
+    /// inside the network poll, so `onResponse` / `onFailure` have run before
+    /// the next `runOnce`. Here the forwarder runs after the poll returned;
+    /// without the poke the response waits out the poll timeout, which while
+    /// the request is in flight is up to the heartbeat interval
+    /// ([`RequestManager::maximum_time_to_wait`]) — delaying a new assignment,
+    /// a fence or a fatal error by that much. The FindCoordinator, commit and
+    /// fetch forwarders wake the bg task the same way. A default no-listener
+    /// `Notify` stands in until [`Self::set_completion_notify`] installs the
+    /// real one (unit tests that drive no bg task keep the default).
+    completion_notify: Arc<tokio::sync::Notify>,
 }
 
 impl ConsumerHeartbeatRequestManager {
@@ -316,7 +330,16 @@ impl ConsumerHeartbeatRequestManager {
             heartbeat_state,
             pending_completion_tx,
             pending_completion_rx,
+            completion_notify: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
+    /// the spawned response forwarder can wake the network poll once a
+    /// heartbeat completion is queued. See [`Self::completion_notify`].
+    /// Mirrors `FetchRequestManager::set_completion_notify`.
+    pub(crate) fn set_completion_notify(&mut self, notify: Arc<tokio::sync::Notify>) {
+        self.completion_notify = notify;
     }
 
     /// Wire up the [`HeartbeatMetricsManager`] so the heartbeat send/response
@@ -411,6 +434,7 @@ impl ConsumerHeartbeatRequestManager {
         // uncompleted (`NetworkClient::close` with it in flight) and this
         // task would never exit.
         let completion_time_ms = unsent.handler().completion_time_ms_cell();
+        let completion_notify = Arc::clone(&self.completion_notify);
         tokio::spawn(async move {
             let result = response_rx.await;
             // Java: `long completionTimeMs = request.handler().completionTimeMs()`
@@ -463,6 +487,12 @@ impl ConsumerHeartbeatRequestManager {
                 // ignore the send error in case the manager has been
                 // dropped during a shutdown race.
                 let _ = tx.send(completion);
+                // Wake the bg task so the next `poll(now)` drains the
+                // completion now rather than after the poll timeout. Ordered
+                // after the send: once the permit is stored, the completion
+                // is queued. The ignore path drives no state, so it does not
+                // wake.
+                completion_notify.notify_one();
             }
         });
         unsent
@@ -3496,5 +3526,67 @@ mod tests {
             f.drain_events().is_empty(),
             "no background event for GROUP_ID_NOT_FOUND while unsubscribed"
         );
+    }
+
+    /// The heartbeat response forwarder wakes the bg task once it has queued
+    /// the completion: the network poll has already returned by then (Java
+    /// handles the response inside the poll), and while the request was in
+    /// flight `maximum_time_to_wait` was up to the heartbeat interval, so
+    /// without the poke the response would wait that long to be drained. The
+    /// wake is ordered after the enqueue: once the permit is stored, the
+    /// completion is there for the next `poll(now)` to drain. Same contract as
+    /// `CoordinatorRequestManager`'s
+    /// `test_forwarder_wakes_bg_task_after_applying_the_response`.
+    #[tokio::test]
+    async fn test_forwarder_wakes_bg_task_after_queueing_the_response() {
+        let mut f = AbstractFixture::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        f.mgr.set_completion_notify(Arc::clone(&notify));
+
+        f.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let result = f.poll();
+        assert_eq!(1, result.unsent_requests.len());
+        // While the request is in flight the bg loop would sleep this long.
+        assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_MS, f.mgr.maximum_time_to_wait(f.now));
+        result.unsent_requests[0].handler().on_complete(create_heartbeat_response(
+            Errors::None,
+            DEFAULT_HEARTBEAT_INTERVAL_MS + 500,
+            f.now,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the forwarder must wake the bg task after queueing the response");
+        assert!(
+            !f.mgr.pending_completions_empty_for_test(),
+            "the completion is queued before the wake"
+        );
+        let _ = f.poll();
+        assert_eq!(
+            DEFAULT_HEARTBEAT_INTERVAL_MS + 500,
+            f.mgr.inner.heartbeat_request_state.heartbeat_interval_ms(),
+            "the woken poll drains and applies the response"
+        );
+    }
+
+    /// The `logResponse` (ignore-response) forwarder drives no state, so it
+    /// queues nothing and does not wake the bg task.
+    #[tokio::test]
+    async fn test_ignore_response_forwarder_does_not_wake_bg_task() {
+        let mut f = AbstractFixture::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        f.mgr.set_completion_notify(Arc::clone(&notify));
+
+        let unsent = f.mgr.build_heartbeat_request(true);
+        unsent
+            .handler()
+            .on_complete(create_heartbeat_response(Errors::None, DEFAULT_HEARTBEAT_INTERVAL_MS, f.now));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), notify.notified())
+                .await
+                .is_err(),
+            "the ignore-response forwarder must not wake the bg task"
+        );
+        assert!(f.mgr.pending_completions_empty_for_test());
     }
 }
