@@ -4159,17 +4159,33 @@ where
     }
 
     /// Java: `private void checkInflightPoll(Timer timer, boolean firstPass)`
-    /// (`AsyncKafkaConsumer.java:893-928`).
+    /// (`AsyncKafkaConsumer.java:992-1029`).
     ///
-    /// Drives the lifetime of the inflight [`ApplicationEvent::AsyncPoll`]
-    /// event. On the first pass of a `poll()` call it clears any leftover
-    /// event from the previous invocation. If no event is currently
-    /// inflight it submits a fresh one. The pending `OffsetCommitCallback`
-    /// queue is drained and `process_background_events` is invoked, so a
-    /// failed callback / fatal background error short-circuits with the
-    /// inflight event cleared (matching Java's `try { … } catch (Throwable t) { … }`).
+    /// Manages the lifecycle of the [`ApplicationEvent::AsyncPoll`] event. If
+    /// no event is currently processing, a new one is started asynchronously.
+    /// Each invocation checks whether the *inflight* event has completed; if
+    /// so, a new event is submitted in its place so a fetch request stays in
+    /// flight. If the completed event left records buffered no new event is
+    /// submitted here (it would gate those records behind a fresh
+    /// validate-positions stage). Instead the buffered records are returned and
+    /// the next fetch is pipelined by [`Self::poll`] via `send_prefetches`.
+    ///
+    /// The pending `OffsetCommitCallback` queue is drained and
+    /// `process_background_events` is invoked, so a failed callback / fatal
+    /// background error short-circuits with the inflight event cleared
+    /// (matching Java's `try { … } catch (Throwable t) { … }`).
     async fn check_inflight_poll(&mut self, poll_deadline_ms: i64, first_pass: bool) -> Result<(), Error> {
-        if first_pass && self.inflight_poll.is_some() {
+        // Clear the current inflight poll if we can, so a new one (and a new
+        // fetch) is submitted below. On the first pass this may clear a
+        // leftover from the previous poll(). On later passes it clears
+        // inflights that have completed (KAFKA-20780). A completed poll that
+        // filled the buffer is kept, so its records are returned first (see
+        // `maybe_clear_previous_inflight_poll`).
+        if self
+            .inflight_poll
+            .as_ref()
+            .is_some_and(|inflight| first_pass || inflight.state.is_complete())
+        {
             self.maybe_clear_previous_inflight_poll()?;
         }
 
@@ -4228,7 +4244,7 @@ where
     }
 
     /// Java: `private void maybeClearPreviousInflightPoll()`
-    /// (`AsyncKafkaConsumer.java:930-963`).
+    /// (`AsyncKafkaConsumer.java:1031-1064`).
     fn maybe_clear_previous_inflight_poll(&mut self) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
@@ -4264,7 +4280,7 @@ where
     }
 
     /// Java: `private void maybeClearCurrentInflightPoll(boolean newlySubmittedEvent)`
-    /// (`AsyncKafkaConsumer.java:965-986`).
+    /// (`AsyncKafkaConsumer.java:1066-1087`).
     fn maybe_clear_current_inflight_poll(&mut self, newly_submitted_event: bool) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
@@ -12304,6 +12320,198 @@ mod tests {
         // The consumer is still marked closed — the wrap happens after the
         // state flip, as in Java.
         assert!(consumer.is_closed());
+    }
+
+    // ─── KAFKA-20780 / KAFKA-20315: the inflight `AsyncPoll` lifecycle ───
+
+    /// Assigns and positions `topic1-0` so `poll()` gets past its
+    /// preconditions without the background task.
+    fn assign_and_seek_for_poll(handles: &ConsumerTestHandles) -> TopicPartition {
+        let tp = TopicPartition::new("topic1", 0);
+        let mut subs = handles.subscriptions.lock().unwrap();
+        subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+        subs.seek(&tp, 0).unwrap();
+        tp
+    }
+
+    /// Drains every queued application event, returning the `AsyncPoll`
+    /// states and the number of `CreateFetchRequests` events seen.
+    fn drain_poll_events(handles: &mut ConsumerTestHandles) -> (Vec<Arc<AsyncPollState>>, usize) {
+        let mut polls = Vec::new();
+        let mut prefetches = 0;
+        while let Ok(env) = handles.app_event_rx.try_recv() {
+            match env.event {
+                ApplicationEvent::AsyncPoll { state, .. } => polls.push(state),
+                ApplicationEvent::CreateFetchRequests { .. } => prefetches += 1,
+                _ => {},
+            }
+        }
+        (polls, prefetches)
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testInflightPollResubmittedAfterCompletionWithEmptyBuffer`
+    /// (KAFKA-20780). One `poll()` runs two internal passes over an empty
+    /// buffer; the poll event submitted on the first completes during the
+    /// first wait, and the second pass must submit a fresh one so a fetch stays
+    /// pending. Before the fix only the first pass submitted (the second was
+    /// starved until a third pass cleared the completed event).
+    ///
+    /// Java completes the event from a mocked `awaitWakeup` and advances a
+    /// `MockTime` 150 ms per pass under a 200 ms timeout. Here the stand-in
+    /// background task completes each event 30 ms after it arrives, while the
+    /// real wait is bounded at `retry.backoff.ms` (100 ms: the partition is
+    /// fetchable with nothing buffered), so the 200 ms poll also runs exactly
+    /// two passes and the event completes inside the first wait.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testInflightPollResubmittedAfterCompletionWithEmptyBuffer"
+    )]
+    async fn test_inflight_poll_resubmitted_after_completion_with_empty_buffer() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        consumer.max_time_to_wait_ms.store(150, Ordering::Release);
+
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let submitted_in_task = Arc::clone(&submitted);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    submitted_in_task.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        state.mark_validate_positions_complete();
+                        state.complete_successfully();
+                    });
+                }
+            }
+        });
+
+        let records = consumer.poll(Duration::from_millis(200)).await.expect("poll ok");
+        assert!(records.is_empty());
+        // Let the drainer count the last event.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // A fresh poll event on each of the two passes.
+        assert_eq!(2, submitted.load(Ordering::SeqCst));
+        drainer.abort();
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollSurfacesInflightPollErrorAndResumes`
+    /// (KAFKA-20780): an inflight poll that completed with an error surfaces it
+    /// from `poll()` and is cleared, so the next `poll()` submits a fresh event.
+    ///
+    /// Java's mock completes the event inside `add()`, so the first `poll()`
+    /// throws. The Rust handler's `add` is a channel send, so the event is
+    /// completed between two `poll()` calls and surfaces at the start of the
+    /// second; the third resumes.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testPollSurfacesInflightPollErrorAndResumes"
+    )]
+    async fn test_poll_surfaces_inflight_poll_error_and_resumes() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+
+        consumer.poll(Duration::ZERO).await.expect("first poll ok");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len());
+        // The inflight poll completes with an error (e.g. a failed fetch);
+        // poll() must surface it and clear it.
+        polls[0].complete_with_error(Error::kafka_message("fetch failed"));
+        let err = consumer.poll(Duration::ZERO).await.expect_err("the inflight error surfaces");
+        assert_eq!("fetch failed", err.message());
+        assert!(err.is_kafka_error());
+        assert!(consumer.inflight_poll.is_none(), "the errored event is cleared");
+
+        // The next (successful) poll submits a fresh event rather than
+        // re-raising.
+        consumer.poll(Duration::ZERO).await.expect("poll resumes");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len(), "two AsyncPoll events in all");
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testBufferedRecordsReturnedWithoutResubmittingPollEvent`
+    /// (KAFKA-20780): when the inflight poll completed and filled the buffer,
+    /// the next `poll()` returns those records without submitting a new poll
+    /// event (a fresh one would re-run validate-positions and starve them).
+    ///
+    /// Also carries the assertion 20e952c783 added to Java's
+    /// `testCommitInRebalanceCallback`: when `poll()` returns records the next
+    /// fetch is pipelined (`CreateFetchRequests`), so a fetch request stays
+    /// pending while the application processes them.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testBufferedRecordsReturnedWithoutResubmittingPollEvent"
+    )]
+    async fn test_buffered_records_returned_without_resubmitting_poll_event() {
+        use crate::common::compress::Compression;
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::{MemoryRecords, SimpleRecord};
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = assign_and_seek_for_poll(&handles);
+
+        // The first poll submits a poll event; it stays in flight.
+        consumer.poll(Duration::ZERO).await.expect("first poll ok");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len());
+
+        // That poll event now completes and its fetch has filled the buffer.
+        polls[0].mark_validate_positions_complete();
+        polls[0].complete_successfully();
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            0,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            &[SimpleRecord::with_timestamp_key_value(
+                0,
+                Some(b"key".to_vec()),
+                Some(b"value".to_vec()),
+            )],
+        );
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(1);
+        partition_data.set_records(Some(bytes::Bytes::from(records.buffer().to_vec())));
+        consumer.fetch_buffer.add(CompletedFetch::new(tp, partition_data));
+
+        // The next poll returns the buffered records and submits no new poll
+        // event (only the original one exists).
+        let polled = consumer.poll(Duration::ZERO).await.expect("poll ok");
+        assert_eq!(1, polled.count());
+        let (polls, prefetches) = drain_poll_events(&mut handles);
+        assert!(polls.is_empty(), "no AsyncPoll event resubmitted");
+        assert!(prefetches >= 1, "the next fetch is pipelined when poll() returns records");
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollDoesNotAddNewAsyncPollEventWhenOneIsAlreadyInFlight`
+    /// (KAFKA-20315, 0fd8327920): while the poll event stays in flight, the
+    /// many internal passes of one `poll()` add it only once.
+    ///
+    /// Java bounds each wait with a mocked `awaitWakeup` over `MockTime`
+    /// (`maximumTimeToWait` 100 ms, 450 ms timeout). Here the waits are real,
+    /// bounded at `retry.backoff.ms` (100 ms).
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest#testPollDoesNotAddNewAsyncPollEventWhenOneIsAlreadyInFlight"
+    )]
+    async fn test_poll_does_not_add_new_async_poll_event_when_one_is_already_in_flight() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        consumer.max_time_to_wait_ms.store(100, Ordering::Release);
+
+        let started = std::time::Instant::now();
+        let records = consumer.poll(Duration::from_millis(450)).await.expect("poll ok");
+        assert!(records.is_empty());
+        // The "wait for fetches" path ran, i.e. more than one pass.
+        assert!(started.elapsed() >= Duration::from_millis(400));
+
+        let (polls, prefetches) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len(), "only one AsyncPoll event despite multiple loop iterations");
+        assert!(prefetches >= 2, "each pass waited for fetches ({prefetches} prefetches)");
     }
 
     // ─── KAFKA-20854: the `pollForFetches` wait bound ────────────────────
