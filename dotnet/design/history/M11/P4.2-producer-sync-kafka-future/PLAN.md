@@ -872,3 +872,21 @@ Loop: S0 → S1 → S2 → S2m → Critic pass 1 → fixes → S3 → S4 → S4m
   - "After" is the main tree at that commit. Its production code differs from the S3 commit only by `EnsurePump`'s visibility and three read-only test probes; everything else after S3 is comments, docs and tests.
   - The Rust sources and both Makefiles are identical to `d6ce0512`. The perf harness differs from `d6ce0512` only by S3's `.Get()` in `PerfV3/V3Backends.cs`.
   - Resume after P-1: S6 → Critic pass 4 → fixes → P-2 → close-out.
+- **P-1 (user, 2026-10-08): passed.** Mean of 2 reps, measured windows only (`python/test/performance/performance_common.py:216`); files in `~/perf-p42/`.
+
+  | Run | Before → after | Result |
+  |---|---|---|
+  | S1 sync throughput | 133.1 → 132.2 msg/s (−0.7 %) | pass |
+  | S1 p50 | 7.5 → 7.9 ms (avg latency +0.06 ms) | pass |
+  | S2 p99 | 8.8 → 8.9 ms (worst window 13.5 ms) | pass |
+  | R1 throughput | 575.9k → 573.0k msg/s (−0.5 %) | pass |
+  | R1 CPU | 382 → 373 % (−2.4 %) | pass |
+  | R1 RSS peak | 215 → 222 MiB (+2.9 %) | pass |
+
+  Informational, not a gate: sync CPU 5.4 → 6.3 % of one core (S1), 4.2 → 5.1 % (S2).
+- **User rulings on the three approved-text items (2026-10-08):**
+  - F1: re-pad the diagram borders, with no wording change.
+  - E5: add the missing period.
+  - "blocks only while `buffer.memory` is full" becomes "blocks only while the core waits for metadata or for `buffer.memory`, up to `max.block.ms`", at every copy.
+
+  These are the S6 Actor's first commits, as `fixup!`s of the commits that introduced each text.
