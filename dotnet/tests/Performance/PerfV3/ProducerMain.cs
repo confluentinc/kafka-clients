@@ -22,9 +22,9 @@ namespace Confluent.Kafka.Performance.V3;
 /// <summary>
 /// The <c>MODE=producer</c> entry — the C# analog of <c>producer_performance_test.py</c>'s <c>__main__</c>:
 /// generate the cycled messages, (optionally) capture the VERIFY_CONSUMED baseline, start the metrics
-/// sampler, run the sync (serial) or async (pipelined) engine over the v3 backend, cool down (GC + await),
-/// then run the optional consume-all verification and return the exit code (non-zero if the p99 budget was
-/// exceeded).
+/// sampler, run the sync (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the v3 backend,
+/// cool down (GC + await), then run the optional consume-all verification and return the exit code
+/// (non-zero if the p99 budget was exceeded).
 /// </summary>
 internal static class ProducerMain
 {

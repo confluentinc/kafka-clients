@@ -23,9 +23,9 @@ namespace Confluent.Kafka.Performance.V2;
 /// <summary>
 /// The <c>MODE=producer</c> entry for the v2 (ckd) baseline — the C# analog of
 /// <c>producer_performance_test.py</c>'s <c>__main__</c> with <c>CLIENT_VERSION=2</c>: generate the cycled
-/// messages, build the librdkafka-form producer config, start the metrics sampler, run the sync (serial)
-/// or async (pipelined) engine over the ckd backend, cool down (GC + await), then return the exit code
-/// (non-zero if the p99 budget was exceeded).
+/// messages, build the librdkafka-form producer config, start the metrics sampler, run the sync
+/// (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the ckd backend, cool down
+/// (GC + await), then return the exit code (non-zero if the p99 budget was exceeded).
 /// </summary>
 /// <remarks>
 /// The v2 baseline is manual-comparison only (not the p99 gate — D10). <c>VERIFY_CONSUMED</c> is a v3
