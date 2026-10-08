@@ -3057,11 +3057,19 @@ async fn test_wrong_serializer_errors_send() {
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_from_sender_thread() {
+    close_with_zero_timeout_from_sender_thread_inner(&crate::common::backend_factory::RustNativeFactory).await;
+}
+
+/// Body of [`test_close_with_zero_timeout_from_sender_thread`], generic over the native
+/// factories so `IncrementalAllocationProducerSendTest`'s analog can run it too.
+#[cfg(feature = "integration-tests")]
+async fn close_with_zero_timeout_from_sender_thread_inner<F>(factory: &F)
+where
+    F: ProducerBackendFactory<Producer = confluent_kafka::producer::KafkaProducer<Vec<u8>, Vec<u8>>>,
+{
     use std::sync::Arc;
 
     use confluent_kafka::producer::KafkaProducer;
-
-    use crate::common::backend_factory::RustNativeFactory;
 
     type NativeProducer = KafkaProducer<Vec<u8>, Vec<u8>>;
 
@@ -3087,7 +3095,7 @@ async fn test_close_with_zero_timeout_from_sender_thread() {
     for _ in 0..50 {
         let producer: Arc<NativeProducer> = Arc::new(
             ProducerBackendFactory::create(
-                &RustNativeFactory,
+                factory,
                 send_test_producer_config(
                     ctx.bootstrap_servers(),
                     &SendTestProducerOpts {
@@ -3415,5 +3423,190 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delivery_callback_logs_metadata() {
         delivery_callback_logs_metadata_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+}
+
+/// Translated from `kafka.api.IncrementalAllocationProducerSendTest`
+/// (`core/src/test/scala/integration/kafka/api/IncrementalAllocationProducerSendTest.scala`, Apache
+/// Kafka 4.4, KIP-1332): runs the whole `BaseProducerSendTest` suite with the producer configured
+/// with the incremental buffer.memory allocation strategy, plus a few scenarios specific to chunked
+/// allocation.
+///
+/// Java's `producerOverrides` hook (`BaseProducerSendTest.scala:104-109`) adds properties to every
+/// producer `createProducer` builds. Here that is [`IncrementalAllocationFactory`], a producer
+/// factory that adds the strategy to every config it is handed and otherwise builds the native
+/// producer, so each `BaseProducerSendTest` body runs unchanged with it in place of
+/// `RustNativeFactory`.
+///
+/// Native only, like Java's suite: the strategy is an internal producer config with no binding
+/// surface, and the suite verifies the producer, not the bindings.
+#[cfg(feature = "integration-tests")]
+mod incremental_allocation_producer_send {
+    use super::*;
+    use crate::common::backend_factory::RustNativeFactory;
+    use crate::common::callback_log::ProducerCallbackLog;
+    use confluent_kafka::producer::KafkaProducer;
+
+    /// `IncrementalAllocationProducerSendTest.producerOverrides`: `buffer.memory.allocation.strategy
+    /// = incremental` on every producer under test.
+    pub(super) struct IncrementalAllocationFactory;
+
+    impl IncrementalAllocationFactory {
+        fn with_overrides(mut config: HashMap<String, String>) -> HashMap<String, String> {
+            config.insert("buffer.memory.allocation.strategy".to_string(), "incremental".to_string());
+            config
+        }
+    }
+
+    impl ProducerBackendFactory for IncrementalAllocationFactory {
+        type Producer = KafkaProducer<Vec<u8>, Vec<u8>>;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
+            ProducerBackendFactory::create(&RustNativeFactory, Self::with_overrides(config)).await
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
+            RustNativeFactory.create_with_callback_log(Self::with_overrides(config)).await
+        }
+
+        /// The native backend's label: the suite bodies key native-only behaviour on it.
+        fn name(&self) -> &'static str {
+            "rust"
+        }
+    }
+
+    async fn send_ctx() -> TestContext {
+        TestContext::new(producer_send_cluster_config()).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_offset() {
+        send_offset_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    // `testSendCompressedMessageWithCreateTime` is not run: the incremental strategy does not
+    // support compression yet, and the base test would fail at producer construction (Java
+    // overrides it with an empty body). The construction failure itself is pinned by the unit test
+    // `test_incremental_allocation_strategy_rejects_compression`.
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_non_compressed_message_with_create_time() {
+        send_non_compressed_message_with_create_time_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_close() {
+        close_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_to_partition() {
+        send_to_partition_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
+        let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
+        send_to_partition_with_follower_shutdown_should_not_timeout_inner(&mut ctx, &IncrementalAllocationFactory)
+            .await;
+        ctx.cleanup().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_before_and_after_partition_expansion() {
+        send_before_and_after_partition_expansion_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flush() {
+        flush_sends_pending_records_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_close_with_zero_timeout_from_caller_thread() {
+        close_with_zero_timeout_from_caller_thread_inner(&IncrementalAllocationFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_close_with_zero_timeout_from_sender_thread() {
+        close_with_zero_timeout_from_sender_thread_inner(&IncrementalAllocationFactory).await;
+    }
+
+    /// `batch.size=0` is below the internal chunk size, so the incremental strategy falls back to
+    /// the full allocation path (a batch is smaller than one chunk). Verifies that fallback yields
+    /// a working producer.
+    ///
+    /// Translated from `IncrementalAllocationProducerSendTest.testBatchSizeZero`:
+    /// `sendAndVerify(createProducer(lingerMs = Int.MaxValue, deliveryTimeoutMs = Int.MaxValue,
+    /// batchSize = 0))`, which is `batch_size_zero_inner`'s body.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_size_zero() {
+        batch_size_zero_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
+    }
+
+    /// Translated from `IncrementalAllocationProducerSendTest.testSendLargeRecordsSpanningMultipleChunks`.
+    ///
+    /// Java's `TODO: also exercise the compressed codecs here once the incremental strategy
+    /// supports compression` is KAFKA-20579; compression is rejected at construction for now.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_large_records_spanning_multiple_chunks() {
+        let mut ctx = send_ctx().await;
+        let topic = ctx.topic("topic");
+        let admin = send_test_admin(&ctx);
+        create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+        let partition = 0;
+        let tp = TopicPartition::new(topic.clone(), partition);
+        let value_size = 600_000; // far larger than one chunk, so each record spans many chunks
+
+        let producer = IncrementalAllocationFactory
+            .create(send_test_producer_config(
+                ctx.bootstrap_servers(),
+                &SendTestProducerOpts {
+                    batch_size: 1024 * 1024,
+                    buffer_size: 8 * 1024 * 1024,
+                    ..SendTestProducerOpts::default()
+                },
+            ))
+            .await
+            .expect("Failed to create producer");
+        let value = random_bytes(value_size);
+        let record =
+            ProducerRecord::with_partition_key(topic.clone(), Some(partition), Some(b("key")), Some(value.clone()))
+                .expect("valid record");
+        let metadata = Producer::send(&producer, record)
+            .await
+            .expect("send should be accepted")
+            .get_with_timeout(Duration::from_secs(60))
+            .await
+            .expect("the record should be acknowledged");
+        assert_eq!(value_size as i32, metadata.serialized_value_size());
+
+        // Verify the exact bytes round-trip.
+        let mut consumer = send_test_consumer(&ctx);
+        consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+        consumer
+            .seek_to_beginning(&[tp])
+            .await
+            .expect("seek_to_beginning should succeed");
+        let consumed = consume_records(consumer.as_mut(), 1).await;
+        assert_eq!(metadata.offset(), consumed[0].offset);
+        assert!(
+            consumed[0].value.as_deref() == Some(value.as_slice()),
+            "the value must round-trip byte for byte"
+        );
+        consumer.close().await.expect("consumer close should succeed");
+
+        Producer::close(&producer).await.expect("close should succeed");
+        admin.close_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    fn random_bytes(size: usize) -> Vec<u8> {
+        use rand::RngCore;
+        let mut bytes = vec![0u8; size];
+        rand::rng().fill_bytes(&mut bytes);
+        bytes
     }
 }

@@ -5162,9 +5162,9 @@ mod tests {
         assert_eq!(
             manager.sequence_number(&tp1()),
             batch.record_count,
-            "incrementSequenceNumber advances by the record count (Java 919)"
+            "incrementSequenceNumber advances by the record count (Java 967)"
         );
-        assert!(manager.has_inflight_batches(&tp1()), "addInFlightBatch ran (Java 924)");
+        assert!(manager.has_inflight_batches(&tp1()), "addInFlightBatch ran (Java 972)");
         assert_eq!(manager.first_in_flight_sequence(&tp1()).expect("tracked"), 0);
     }
 

@@ -6470,7 +6470,7 @@ mod tests {
         assert_eq!(
             ctx.sender.client().request_count(),
             sent_before,
-            "KafkaProducer.java:738 returns before touching the transaction state"
+            "KafkaProducer.java:800 returns before touching the transaction state"
         );
 
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
@@ -7316,7 +7316,7 @@ mod tests {
             exited.load(Ordering::SeqCst),
             "close returned before the Sender task finished: the graceful wait expired, \
              so close force-closed and must then have joined the handle \
-             (KafkaProducer.java:1414-1418, CLAUDE.md §11.4)"
+             (KafkaProducer.java:1517-1521, CLAUDE.md §11.4)"
         );
 
         init.abort();
@@ -7634,7 +7634,7 @@ mod tests {
         MockPartitioner::reset_counters();
     }
 
-    /// KIP-1332 (`KafkaProducer.java:457-509`): `buffer.memory.allocation.strategy=incremental`
+    /// KIP-1332 (`KafkaProducer.java:458-509`): `buffer.memory.allocation.strategy=incremental`
     /// (any case) builds a `ChunkedRecordAccumulator` over a pool serving 16 KiB chunks when
     /// `batch.size` is at least one chunk, and falls back to the full strategy, with a pool of
     /// `batch.size` buffers, when it is not. The default is the full strategy.
