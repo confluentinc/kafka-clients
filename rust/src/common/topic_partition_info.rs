@@ -56,14 +56,26 @@ impl TopicPartitionInfo {
         elr: Vec<Node>,
         last_known_elr: Vec<Node>,
     ) -> Self {
-        Self {
-            partition,
-            leader,
-            replicas,
-            isr,
-            elr: Some(elr),
-            last_known_elr: Some(last_known_elr),
-        }
+        Self::with_nullable_elr_last_known_elr(partition, leader, replicas, isr, Some(elr), Some(last_known_elr))
+    }
+
+    /// The six-argument constructor with Java's nullable `elr` /
+    /// `lastKnownElr` lists spelled as `Option`s: Java's constructor stores
+    /// whatever reference it is given, `null` included.
+    ///
+    /// Crate-internal: the public forms are [`Self::new`] (both `None`) and
+    /// [`Self::with_elr_last_known_elr`] (both present).
+    /// `DescribeTopicPartitionsResponse::partition_to_topic_partition_info` uses
+    /// it to keep a null wire list as `None`.
+    pub(crate) fn with_nullable_elr_last_known_elr(
+        partition: i32,
+        leader: Option<Node>,
+        replicas: Vec<Node>,
+        isr: Vec<Node>,
+        elr: Option<Vec<Node>>,
+        last_known_elr: Option<Vec<Node>>,
+    ) -> Self {
+        Self { partition, leader, replicas, isr, elr, last_known_elr }
     }
 
     /// Create an instance without eligible-leader-replica information (the Java
