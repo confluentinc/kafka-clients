@@ -1,6 +1,15 @@
-# AK 4.3.1 → 4.4.0-rc4: commits touching clients/src (190)
+# AK 4.3.1 → 4.4.0-rc4: commits touching clients/src (191)
 
-Source: `git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`. Classified from subject + touched files (planning scan, 2026-10-07); Phase 13 confirms each row.
+Source: `git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`, which yields
+**191** commits. Classified from subject + touched files (planning scan, 2026-10-07); Phase 13 confirms each row.
+
+Correction (Phase 13 fix round, Critic 113 L4): the planning scan actually listed
+`-- clients/src/main clients/src/test` (189 commits) plus `6be48c6e54`. That missed the two
+`clients/src/testFixtures`-only commits `25d0906029` and `4bb5d39c90`, now added below as N. It also
+included `6be48c6e54`, which `--cherry-pick` drops: it is patch-equivalent (`--cherry-mark` shows `=`) to
+`cf9f8ad376`, already in 4.3.0 / 4.3.1 and synced in M13. Its row is kept below, marked A, outside the
+191. The line counts cover `clients/src` only; a commit's files elsewhere (for example
+`clients/clients-integration-tests`, where 45c4bdc48a added a test) are not counted.
 
 rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java refactor/idiom/already applied), O = out of scope, R = reverted within range, A = already in 4.3.1 (ported in M13)
 
@@ -10,6 +19,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 112686cfa8 | Admin | D |  | 2026-04-08 | MINOR: fix typo in KafkaAdminClient to align the meaning (#21988) | 3+/3- / +/- |
 | 74ef4dd97a | Admin | D |  | 2026-07-29 | MINOR: Fix duplicated closing brace in `{@link}` Javadoc tags in admin Result classes (#22986) | 4+/4- / +/- |
 | f4afec0cb2 | Admin | D |  | 2026-04-08 | MINOR: Fix double negative typos in Javadoc and exception messages (#21977) | 2+/2- / +/- |
+| 25d0906029 | Admin | N |  | 2026-05-08 | MINOR: Move testCallInFlightTimeouts to Java and remove internal factory hack (#22220) | testFixtures 0+/87- |
 | 1a443b2d23 | Admin | N |  | 2026-08-06 | MINOR: Split KafkaAdminClientTest into per-domain test classes (#22339) | +/- / 11455+/10966- |
 | 9a8fd60fa2 | Admin | N |  | 2026-04-01 | KAFKA-19932: adding handling of OOM and avoiding wrapped as timeout (#21117) | 6+/0- / 26+/0- |
 | b56323874b | Admin | O | raft | 2026-05-04 | MINOR: Add tests for RaftVoterEndpoint (#22195) | 1+/1- / 128+/0- |
@@ -19,7 +29,6 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | cb2f143b0d | Admin | P |  | 2026-07-22 | KAFKA-20673 Skip stale-leader lookup retry while the AdminClient is closing (follow-up) (#22529) | 9+/0- / +/- |
 | 01ba1b2d4d | Broker | O |  | 2026-07-21 | MINOR: Fix RandomAccessFile leak in FileRecords.openChannel (#22878) | 7+/2- / +/- |
 | 3bfcd4cfbf | Broker | O |  | 2026-06-30 | KAFKA-20633: Update the default value of remote copy lag bytes (#22394) | 14+/12- / +/- |
-| 6be48c6e54 | Broker | O |  | 2026-05-04 | KAFKA-20441: Fix handling of cordoned log dirs (#22070) | 6+/9- / +/- |
 | 70dfc4236c | Broker | O |  | 2026-03-24 | KAFKA-19562 Replace hand-written AbortedTxn with generated protocol (#21577) | 36+/0- / +/- |
 | 72b21c706e | Broker | O |  | 2026-09-15 | KAFKA-20979: Fix another gap in index metadata sync logic (#23316) | 2+/15- / 2+/0- |
 | 86328c25ee | Broker | O |  | 2026-04-06 | KAFKA-19566 Deprecate ClientQuotaCallback#updateClusterMetadata (#21958) | 6+/2- / +/- |
@@ -41,6 +50,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 7c7fc5fac2 | Common | D |  | 2026-06-30 | MINOR: Clarify SerializationException Javadoc (#22700) | 1+/1- / +/- |
 | 8c15611221 | Common | D |  | 2026-07-07 | MINOR: Fix various typos in javadoc, logs and messages (#22565) | 5+/5- / +/- |
 | da3b5e78ed | Common | D |  | 2026-07-14 | MINOR: Document connections.max.idle.ms dependency on max.poll.interval.ms for Classic consumer (#22752) | 29+/2- / +/- |
+| 4bb5d39c90 | Common | N |  | 2026-05-11 | MINOR: Use testFixturesImplementation instead of testFixturesApi (#22243) | testFixtures file move |
 | 0a367aa1ec | Common | N | move | 2026-04-21 | KAFKA-20297 Move OperatingSystem, Java, Exit... into internal (#22093) | 11+/12- / 8+/10- |
 | 10805c9782 | Common | N | move | 2026-05-02 | KAFKA-20297 Move SecurityUtils, ConfigUtils, LogContext, AppInfoParser into internal (#22110) | 113+/114- / 94+/93- |
 | 162b3a1bcf | Common | N |  | 2026-05-02 | MINOR: Fix various typos and formatting issues across multiple modules (#22177) | +/- / 6+/6- |
@@ -196,3 +206,9 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 7997c9ebe0 | Wire | P | specsync | 2026-06-03 | KAFKA-20620: Add StreamsGroupTopologyDescriptionUpdate RPC schema and extend StreamsGroupDescribe/Heartbeat (#22397) | 420+/13- / 141+/11- |
 | baa064e422 | Wire | P | kip1319 | 2026-05-07 | KAFKA-20444: [4/N] Prepare TxnOffsetCommitResponse for topic IDs (KIP-1319) (#22224) | 58+/34- / 112+/42- |
 | f66a67fcef | Wire | P | hardening | 2026-09-25 | MINOR: Apply MessageUtil array limits in ArrayOf and CompactArrayOf | 18+/6- / 25+/0- |
+
+**Outside the 191** (dropped by `--cherry-pick`):
+
+| sha | component | rel | tag | date | subject | main / test lines |
+|---|---|---|---|---|---|---|
+| 6be48c6e54 | Broker | A |  | 2026-05-04 | KAFKA-20441: Fix handling of cordoned log dirs (#22070) — cherry-pick of 4.3.1's `cf9f8ad376` | 6+/9- / +/- |

@@ -17,19 +17,19 @@
 >   `common::utils::internals` moves; consumer heartbeat / fetch / offsets /
 >   metrics fixes; `MockConsumer::lose_partitions`; `Admin::unregister_controller`.
 >   See `design/history/MILESTONES.md` → Milestone 16.
-> - **Audit:** `Milestone-16/PLAN.md` §7 maps all 190 `clients/src` commits of
+> - **Audit:** `Milestone-16/PLAN.md` §7 maps all 191 `clients/src` commits of
 >   `4.3.1...4.4.0-rc4`, KAFKA-20864 and the two master merges to a phase or a
 >   reasoned skip, with no gaps.
 > - **Open:** `Milestone-16/PLAN.md` §8 lists the decisions left to the human
 >   (S1/S2 producer batch timing, admin close grace period, `unregisterBroker`,
->   the consumer I/O-loop catch-all, two upstream JIRAs) and the follow-ups;
+>   the consumer I/O-loop catch-all, two upstream JIRAs, the keyed-send cost) and the follow-ups;
 >   `Milestone-16/rules-errata.md` holds the drafted rules amendments.
 > - **Tests at the last merge (`5c207c9f`):** `cargo test` 4641 passed / 0
 >   failed / 10 ignored (lib 4585 / 3); `--features ffi --lib` 4835 / 0 / 3.
->   Broker reruns of the consumer modules on 4.2.0 and of
->   `cluster_check_test` / `producer_transactions_test` on 4.4.0-rc4 are still
->   owed on that merge (Docker was down), and `make verify` runs on the
->   milestone branch after Phase 13 merges back.
+>   The broker reruns owed on that merge passed on the same code (Critic 103:
+>   4.2.0 consumer 109/109, producer 100/100, lib 35/35; 4.4.0-rc4
+>   `cluster_check_test` 3/3, `producer_transactions_test` 40/40).
+>   `make verify` runs on the milestone branch after Phase 13 merges back.
 > - The Milestone-13 block below ("tracks Apache Kafka 4.3.1") is now
 >   historical, like the older blocks.
 

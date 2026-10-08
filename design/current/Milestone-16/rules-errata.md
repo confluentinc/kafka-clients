@@ -490,13 +490,20 @@ later phase. None is in a rules file yet. For a human to decide whether they bel
 - **A partial test translation carries no `#[doc(alias)]`** (PLAN Phase 5 notes). `check-java-name`
   rejects a test whose alias names a Java test it is not named after. Suggested DoD #3 addition: "A
   Rust test that translates only part of a Java test, or is Rust-only, carries no Java test marker."
+- **Perf deltas inside the layout noise** (Critic 103, merge review of the pre-close-out merges). In the
+  production bench, forcing function alignment alone moved one path by up to 4.4 %, and two
+  single-layout readings in this milestone pointed in opposite directions (the merge "~1 % slower"
+  and Phase 8's keyed "+0.6 %"). Suggested DoD #10 text: "A production perf comparison whose delta
+  is within ±5 % reports either the geometric mean over at least three
+  `-C llvm-args=-align-all-functions=N` layouts (N ∈ {5, 6, 7}) plus the default, or shows that the
+  timed loop is instruction-identical; a single-layout delta in that band is not evidence either way."
 - **Tooling, not a rule (Critic 101):** `check-java-name` accepts a constructor marker on any `with_*`
   function (`rust/xtask/src/java.rs:197-198`), so a method marked with its class's constructor skips
   the CLAUDE.md §2 overload check. Tracked as a follow-up in PLAN §8; no rules text needed.
 
 ### Hand-off index
 
-Every suggestion in this file, in one list. "Done in code" means the Rust tree already follows it, so
+Every suggestion in this file, in one list (14 rows after the fix round). "Done in code" means the Rust tree already follows it, so
 only the rules text is outstanding.
 
 | # | Rules file | Section | Suggestion | Where above | Code status |
@@ -511,6 +518,7 @@ only the rules text is outstanding.
 | 8 | `producer-transactions.md`, `consumer-threading.md` | headers, §2, §12, §20 | Restate the stale "4.2" stamps and the spec-corpus paragraph against 4.4 | Not line citations | n/a |
 | 9 | `consumer-threading.md` | §28, §31 | Event names (`RebalanceListenerCallbackNeeded` split), still pending from Milestone 13 | Not line citations | n/a |
 | 10 | `producer-transactions.md` | §2, §3 | Manager → `Metadata` lock edge, plus its anti-pattern | Phase 5 section | Done in code (Phase 5) |
-| 11 | `producer-transactions.md` | §7 | `ChunkedProducerBatch` folded into `ProducerBatch`; `ChunkedRecordAccumulator` by composition; four anti-patterns | Phase 8 section | Done in code (Phases 7-8) |
+| 11 | `producer-transactions.md` | §7 | `ChunkedProducerBatch` folded into `ProducerBatch`; `ChunkedRecordAccumulator` by composition; five anti-patterns | Phase 8 section | Done in code (Phases 7-8) |
 | 12 | `admin-client.md` | §11 (and §2) | Replace the stale branch-state caveat with the in-tree sync/async admin FFI helpers; name both enqueue paths | Phase 12 section | Done in code (Phase 12) |
 | 13 | `definition-of-done.md` | 3, 9 | Cite refresh with the port; `lint --keep-going`; no marker on a partial test | Process section | Applied by convention in Phases 4-12 |
+| 14 | `definition-of-done.md` | 10 | Production perf deltas under ±5 % need several code layouts or an instruction-identity check | Process section | Applied in Critic 103's merge review |
