@@ -4128,6 +4128,22 @@ where
             if self.time.milliseconds() >= poll_deadline_ms {
                 break;
             }
+
+            // Rust-only (CLAUDE.md §11.6; Java's thread spins without starving
+            // anything): an iteration can come round without ever returning
+            // `Pending`. `poll_for_fetches` returns at once when
+            // `maximumTimeToWait` is 0 (Java's value while, for example, a
+            // JOINING member's first heartbeat is in flight with a zero
+            // interval, or an auto-commit timer has expired), and
+            // `await_wakeup` / the reconciliation-check wait complete without
+            // suspending when the buffer was already woken. Looping straight
+            // back would monopolise the caller's tokio worker for the whole
+            // window: no other task on it runs and its I/O driver is not
+            // polled. Yield once per empty iteration, as `Selector::poll`
+            // does on its non-blocking path, so co-scheduled tasks progress.
+            // The background task runs on its own thread, so this only
+            // changes how the waiting app task shares its worker.
+            tokio::task::yield_now().await;
         }
 
         Ok(ConsumerRecords::empty())
@@ -12371,5 +12387,58 @@ mod tests {
         assert_eq!(40, consumer.poll_for_fetches_timeout_ms(40));
         consumer.max_time_to_wait_ms.store(0, Ordering::Release);
         assert_eq!(0, consumer.poll_for_fetches_timeout_ms(30_000));
+    }
+
+    /// Critic 93 Issue 1: while `maximumTimeToWait` is 0 (Java's value, for
+    /// instance while a JOINING member's first heartbeat is in flight with a
+    /// zero interval), `poll()` loops without blocking. It must still yield
+    /// every iteration, or it monopolises its tokio worker: on a
+    /// `current_thread` runtime a co-scheduled task would not run until
+    /// `poll()` returns. In the integration harness that task was the
+    /// `BrokerProxy` forwarding the very heartbeat response the spin was
+    /// waiting for, so every first join stalled for the 30 s request timeout.
+    ///
+    /// Mutation check: without the `yield_now` in `poll_inner` the spawned
+    /// task has not run at all by the time `poll()` returns 300 ms later, and
+    /// the test fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_poll_yields_while_maximum_time_to_wait_is_zero() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            subs.seek(&tp, 0).unwrap();
+        }
+        // The background task's published bound: no wait at all.
+        consumer.max_time_to_wait_ms.store(0, Ordering::Release);
+
+        let start = std::time::Instant::now();
+        let ran_after = Arc::new(Mutex::new(None::<Duration>));
+        let ran_after_task = Arc::clone(&ran_after);
+        tokio::spawn(async move {
+            *ran_after_task.lock().unwrap() = Some(start.elapsed());
+        });
+
+        let poll_timeout = Duration::from_millis(300);
+        let records = crate::consumer::Consumer::poll(&mut consumer, poll_timeout)
+            .await
+            .expect("poll");
+        let poll_took = start.elapsed();
+        assert!(records.is_empty());
+        // Waits out (about) its timeout: the deadline is on the fixture's
+        // millisecond clock, so allow for rounding.
+        assert!(
+            poll_took >= Duration::from_millis(250),
+            "poll waits out its timeout: {poll_took:?}"
+        );
+
+        let ran_after = ran_after.lock().unwrap().expect("the co-scheduled task ran during poll()");
+        assert!(
+            ran_after < Duration::from_millis(100),
+            "a task on the same current_thread runtime first ran {ran_after:?} into a {poll_timeout:?} poll(): \
+             poll() spun without yielding while maximumTimeToWait was 0"
+        );
+        drop(handles.subscriptions);
     }
 }
