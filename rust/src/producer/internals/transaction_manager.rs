@@ -1239,7 +1239,7 @@ pub(crate) struct TransactionManager {
     /// true of the other three and **false of this one**: Java reads it from the
     /// *application* thread on every failed send, through
     /// `KafkaProducer.doSend`'s `catch (ApiException e)`
-    /// (`KafkaProducer.java:1066`) → [`Self::maybe_transition_to_error_state`]
+    /// (`KafkaProducer.java:1140`) → [`Self::maybe_transition_to_error_state`]
     /// (`:781`) → [`Self::need_to_trigger_epoch_bump_from_client`] (`:1310`). That
     /// call site already exists here, at `kafka_producer.rs:775`, so a
     /// Sender-confined field could not serve it.
@@ -1361,7 +1361,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
-    /// (`KafkaProducer.java:654`). This returns the [`TransactionalRequestResult`]
+    /// (`KafkaProducer.java:714`). This returns the [`TransactionalRequestResult`]
     /// instead, and Phase 6's `KafkaProducer::init_transactions` awaits it — the
     /// manager must not await anything, because the caller holds the shared mutex
     /// and rules §4 forbids holding it across an `.await`.
@@ -1552,7 +1552,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
-    /// (`KafkaProducer.java:742`); this returns the
+    /// (`KafkaProducer.java:807`); this returns the
     /// [`TransactionalRequestResult`] and Phase 6's
     /// `KafkaProducer::commit_transaction` awaits it, because the caller holds the
     /// shared mutex and rules §4 forbids holding it across an `.await`.
@@ -1589,14 +1589,14 @@ impl TransactionManager {
     /// `beginAbort()` is the **only** transactional entry point Java reaches from two
     /// threads (`grep -rn '\.beginAbort(' producer/`):
     ///
-    ///   - `KafkaProducer.abortTransaction` (`KafkaProducer.java:818`) — application;
+    ///   - `KafkaProducer.abortTransaction` (`KafkaProducer.java:909`) — application;
     ///   - `Sender.run`'s shutdown abort loop (`Sender.java:273`) — the Sender task.
     ///
     /// So rules §1's "where a method is reachable from both, it takes `caller` as a
     /// parameter and forwards it — do NOT default it" applies here and nowhere else in
-    /// this phase: `beginCommit` (`KafkaProducer.java:783`),
-    /// `sendOffsetsToTransaction` (`:740`), `maybeAddPartition` (`:1045`),
-    /// `initializeTransactions` (`:652`) and `beginTransaction` (`:679`) each have
+    /// this phase: `beginCommit` (`KafkaProducer.java:874`),
+    /// `sendOffsetsToTransaction` (`:805`), `maybeAddPartition` (`:1119`),
+    /// `initializeTransactions` (`:712`) and `beginTransaction` (`:738`) each have
     /// exactly one Java caller, all application-side.
     ///
     /// The difference is not cosmetic. An invalid `→ ABORTING_TRANSACTION` on the
@@ -1684,7 +1684,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// As [`Self::begin_commit`]: Java's caller blocks on
-    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:820`); Phase 6 awaits
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:911`); Phase 6 awaits
     /// the returned handle.
     ///
     /// # Errors
@@ -2441,7 +2441,7 @@ impl TransactionManager {
     /// lines above the call (`Sender.java:288-289`): "fail all the incomplete
     /// transactional requests and batches and *wake up the threads waiting on the
     /// futures*". Those threads are `KafkaProducer.initTransactions` &c. blocked in
-    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`). Phase 5a
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:714`). Phase 5a
     /// makes half of that real — [`Self::initialize_transactions`] now hands out a
     /// result and this method's `pendingTransition` branch fails it — and Phase 6
     /// adds the `KafkaProducer` method that awaits it.
@@ -2792,7 +2792,7 @@ impl TransactionManager {
     ///
     /// Translated from `isSendToPartitionAllowed(TopicPartition)` (Java 466),
     /// called from `RecordAccumulator.shouldStopDrainBatchesForPartition`
-    /// (`RecordAccumulator.java:818`) — which Phase 4 translates, hence this method
+    /// (`RecordAccumulator.java:866`) — which Phase 4 translates, hence this method
     /// arriving before the rest of the transactional entry points.
     ///
     /// Phase 5a completed the transactional arm; since Phase 5b filled
@@ -6236,7 +6236,7 @@ mod tests {
     /// the application side.
     ///
     /// The pair matters because `beginAbort` is the *only* transactional entry point
-    /// Java reaches from both threads — `KafkaProducer.java:818` and
+    /// Java reaches from both threads — `KafkaProducer.java:909` and
     /// `Sender.java:273` — and the Sender is currently this crate's only live caller
     /// (see [`TransactionManager::begin_abort`]). Hardcoding [`Caller::App`] there
     /// compiled, passed every other test, and silently dropped the poisoning contract

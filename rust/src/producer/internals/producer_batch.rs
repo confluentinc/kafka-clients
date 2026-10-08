@@ -464,7 +464,7 @@ impl ProducerBatch {
         self.produce_future.set(base_offset, log_append_time, record_errors.clone());
 
         // Java's `ProducerBatch` thunk callback is the `AppendCallbacks` wrapper
-        // installed by `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`),
+        // installed by `KafkaProducer.doSend` (`KafkaProducer.java:1676-1683`),
         // which substitutes a sentinel `RecordMetadata` (real topic-partition
         // kept, offset/batch-index/timestamp/sizes all `-1`) whenever it is
         // invoked with `null` metadata, before ever reaching the user's own
@@ -484,7 +484,7 @@ impl ProducerBatch {
         for (i, thunk) in thunks.iter_mut().enumerate() {
             if let Some(callback) = thunk.callback.take() {
                 // Java's try/catch sits INSIDE the loop
-                // (`ProducerBatch.java:307-322`), which is what isolates each user
+                // (`ProducerBatch.java:326-341`), which is what isolates each user
                 // callback: one bad callback must neither skip the remaining records
                 // nor stop `produceFuture.done()` from running.
                 //
@@ -622,14 +622,14 @@ impl ProducerBatch {
     /// base sequence derived from its predecessor's record count.
     ///
     /// Translated from `assignProducerStateToBatches(Deque<ProducerBatch>)`
-    /// (`ProducerBatch.java:395-405`), reached from `finalizeSplitBatches` at `:392`.
+    /// (`ProducerBatch.java:414-424`), reached from `finalizeSplitBatches` at `:411`.
     ///
     /// This was previously omitted, on the strength of
     /// `createBatchOffAccumulatorForRecord`'s comment that producer state "will be set
     /// when the batch is dequeued for sending". That comment is about the *fresh*
     /// batch; `assignProducerStateToBatches` then fills it in before `split` returns,
     /// which is what `splitAndReenqueue`'s own comment ("they already have assigned
-    /// sequences", `RecordAccumulator.java:531`) refers to. Without it,
+    /// sequences", `RecordAccumulator.java:576`) refers to. Without it,
     /// `RecordAccumulator::split_and_reenqueue` cannot call `addInFlightBatch` on an
     /// idempotent producer — it fails with "Can't track batch for partition … when
     /// sequence is not set" — so a `MESSAGE_TOO_LARGE` response would break the
@@ -742,7 +742,7 @@ impl ProducerBatch {
 
     /// The built memory records for this batch.
     ///
-    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:483-485`), which
+    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:502-504`), which
     /// is a bare `recordsBuilder.build()` and is therefore **re-callable**: the send
     /// path calls it to serialise the produce request, and `split` calls it again (via
     /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     /// `ProducerBatch.completeFutureAndFireCallbacks` puts its `try`/`catch`
-    /// **inside** the per-record loop (`ProducerBatch.java:307-322`), so one bad user
+    /// **inside** the per-record loop (`ProducerBatch.java:326-341`), so one bad user
     /// callback neither skips the remaining records nor stops
     /// `produceFuture.done()`:
     ///
@@ -1467,7 +1467,7 @@ mod tests {
     ///
     /// No Java counterpart, because Java cannot get this wrong:
     /// `ProducerBatch.records()` is a bare `recordsBuilder.build()`
-    /// (`ProducerBatch.java:483-485`) and Java's `build()` memoises, so it is
+    /// (`ProducerBatch.java:502-504`) and Java's `build()` memoises, so it is
     /// re-callable by construction. Rust's used to hand its only copy away, and
     /// `Sender.completeBatch`'s `MESSAGE_TOO_LARGE` arm (`Sender.java:674-688`) is
     /// exactly a `split()` after a `records()` — the batch cannot receive that error
@@ -1671,7 +1671,7 @@ mod tests {
     /// `complete_future_and_fire_callbacks`.
     ///
     /// Java's thunk callback is the `AppendCallbacks` wrapper from
-    /// `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`), which replaces a
+    /// `KafkaProducer.doSend` (`KafkaProducer.java:1676-1683`), which replaces a
     /// `null` `RecordMetadata` with a sentinel — the real topic-partition, and
     /// `-1` for offset, timestamp and both serialized sizes — before the user's
     /// `Callback` sees it. Rust stores the raw user `Callback` in the thunk, so

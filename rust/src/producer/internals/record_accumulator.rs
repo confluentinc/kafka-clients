@@ -122,9 +122,9 @@ impl Default for PartitionerConfig {
 /// DoD #7: this type has no Java counterpart, and the reason is purely a Rust
 /// ownership one. Java's `KafkaProducer.doSend` builds one `AppendCallbacks`
 /// object and passes the *reference* to `accumulator.append(..)`
-/// (`KafkaProducer.java:1049`), so after `append` throws it still holds the
+/// (`KafkaProducer.java:1110`), so after `append` throws it still holds the
 /// callback and its `catch (ApiException e)` block invokes it exactly once with a
-/// null-metadata `RecordMetadata` (`KafkaProducer.java:1056-1062`). Rust's
+/// null-metadata `RecordMetadata` (`KafkaProducer.java:1130-1136`). Rust's
 /// [`Callback`] is a `Box<dyn FnOnce>` — deliberately non-`Clone`, which is what
 /// makes "exactly once" a type-level guarantee — so it is *moved* into `append`
 /// and the only way the caller can still honour the callback obligation
@@ -210,14 +210,14 @@ pub struct RecordAppendResult {
     /// The topic-partition the record was actually appended to; `None` exactly when `future` is.
     ///
     /// Java reports the resolved partition through
-    /// `RecordAccumulator.AppendCallbacks.setPartition` (`KafkaProducer.java:1606`),
+    /// `RecordAccumulator.AppendCallbacks.setPartition` (`KafkaProducer.java:1686`),
     /// which the accumulator calls once the built-in partitioner has resolved
     /// `UNKNOWN_PARTITION`; `KafkaProducer.doSend` then reads it back as
     /// `appendCallbacks.topicPartition()` to pass to
-    /// `transactionManager.maybeAddPartition` (`:1045`). The Rust `append` takes a
+    /// `transactionManager.maybeAddPartition` (`:1119`). The Rust `append` takes a
     /// plain completion `Callback` rather than an `AppendCallbacks` trait object, so
     /// it is reported here instead. Its partition is never
-    /// `RecordMetadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1038`.
+    /// `RecordMetadata::UNKNOWN_PARTITION`, which is what Java asserts at `:1112`.
     ///
     /// # Why the whole `TopicPartition` and not just the index
     ///
@@ -452,7 +452,7 @@ pub struct RecordAccumulator {
     /// sequence numbers per partition; `None` for a producer with idempotence
     /// disabled.
     ///
-    /// Translated from `RecordAccumulator.transactionManager` (Java 90), which is
+    /// Translated from `RecordAccumulator.transactionManager` (Java 95), which is
     /// nullable — hence [`Option`].
     ///
     /// # Lock topology and ordering
@@ -460,7 +460,7 @@ pub struct RecordAccumulator {
     /// `std::sync::Mutex`, shared with `KafkaProducer` and `Sender`
     /// (`.claude/rules/producer-transactions.md` §2 and PLAN §6.3). Every
     /// critical section here is CPU-bound with no `.await`, matching
-    /// `RecordAccumulator.java:877-926`, so the async mutex is wrong (rules §3).
+    /// `RecordAccumulator.java:925-974`, so the async mutex is wrong (rules §3).
     ///
     /// **The lock order is per-partition deque → transaction manager, never
     /// inverted** (rules §3). Java assigns sequences inside
@@ -649,7 +649,7 @@ impl RecordAccumulator {
     }
 
     /// Register the three buffer-pool gauges in the metric group. Translated
-    /// from `RecordAccumulator.registerMetrics` (RecordAccumulator.java:198-213).
+    /// from `RecordAccumulator.registerMetrics` (RecordAccumulator.java:205-220).
     ///
     /// Each gauge is a [`ClosureMeasurable`] over an [`Arc<BufferPool>`] clone,
     /// the analog of Java's lambdas capturing the `free` field. Registration
@@ -752,7 +752,7 @@ impl RecordAccumulator {
         //
         //   - the error return: `try_append` propagates
         //     `KafkaException("Producer closed while send in progress")`
-        //     (`RecordAccumulator.java:473-474`) with a buffer already allocated,
+        //     (`RecordAccumulator.java:472-473`) with a buffer already allocated,
         //     which then never went back to the pool. `BufferPool::allocate` has
         //     already debited `non_pooled_available_memory` and `deallocate` is the
         //     only thing that credits it, so every send that raced `close()`
@@ -1342,7 +1342,7 @@ impl RecordAccumulator {
     /// strategy's override.
     ///
     /// `throw new KafkaException("Producer closed while send in progress")`
-    /// (`RecordAccumulator.java:473-474`) — a *bare* `KafkaException`, so it
+    /// (`RecordAccumulator.java:472-473`) — a *bare* `KafkaException`, so it
     /// is not an `ApiException`. `Error::with_message(UnknownServerError, ..)`
     /// resolves the code to `UnknownServerException`, which IS an
     /// `ApiException`, and `doSend` dispatches on exactly that difference:
@@ -1420,7 +1420,7 @@ impl RecordAccumulator {
 
     /// Re-enqueue the given record batch in the accumulator.
     ///
-    /// Translated from `reenqueue(ProducerBatch, long)` (Java 496). In
+    /// Translated from `reenqueue(ProducerBatch, long)` (Java 541). In
     /// `Sender.completeBatch` we check whether the batch has reached
     /// `deliveryTimeoutMs` or not, hence we do not do the delivery timeout check
     /// here.
@@ -1450,7 +1450,7 @@ impl RecordAccumulator {
     /// Inserts `batch` into `deque` at the position its base sequence requires.
     ///
     /// Translated from `insertInSequenceOrder(Deque<ProducerBatch>, ProducerBatch)`
-    /// (Java 552-592), with Java's comment at 542-551 reproduced below.
+    /// (Java 597-637), with Java's comment at 587-596 reproduced below.
     ///
     /// We will have to do extra work to ensure the queue is in order when requests are being retried and there are
     /// multiple requests in flight to that partition. If the first in flight request fails to append, then all the
@@ -1705,7 +1705,7 @@ impl RecordAccumulator {
         let mut unknown_leader_topics = HashSet::new();
 
         // Java reads `transactionManager.isCompleting()` inside `batchReady`
-        // (`RecordAccumulator.java:614`), i.e. once per batch. The value is
+        // (`RecordAccumulator.java:659`), i.e. once per batch. The value is
         // partition-independent, so it is read once per `ready()` here: that avoids
         // taking the manager lock per partition and removes the (Java-visible)
         // possibility of two partitions in the same `ready()` pass disagreeing about
@@ -1775,8 +1775,8 @@ impl RecordAccumulator {
     /// Whether the drain must stop at `first` for `tp`.
     ///
     /// Translated from `shouldStopDrainBatchesForPartition(ProducerBatch,
-    /// TopicPartition)` (Java 815-850). Returns `false` when idempotence is
-    /// disabled, matching Java's fall-through at `:849`.
+    /// TopicPartition)` (Java 863-898). Returns `false` when idempotence is
+    /// disabled, matching Java's fall-through at `:897`.
     ///
     /// Called with `tp`'s deque lock held, so the manager lock taken here observes
     /// rules §3's deque → manager order.
@@ -1835,8 +1835,8 @@ impl RecordAccumulator {
     /// Assigns `batch`'s producer id, epoch and base sequence, and tracks it as in
     /// flight.
     ///
-    /// Translated from `RecordAccumulator.java:900-925`, the block between
-    /// `deque.pollFirst()` (`:898`) and `batch.close()` (`:930`). It **must** stay
+    /// Translated from `RecordAccumulator.java:948-973`, the block between
+    /// `deque.pollFirst()` (`:946`) and `batch.close()` (`:978`). It **must** stay
     /// here rather than move to the `Sender`: `Sender::send_producer_data` reads
     /// `batch.records()`, which serialises the v2 batch header, so the producer
     /// state has to be set before the batch leaves the accumulator.
@@ -1999,7 +1999,7 @@ impl RecordAccumulator {
                 }
 
                 let mut batch = deque.pop_front().unwrap();
-                // Still inside `synchronized (deque)` in Java (:900-925), and still
+                // Still inside `synchronized (deque)` in Java (:948-973), and still
                 // before `batch.close()` below, because closing serialises the v2
                 // batch header.
                 self.maybe_assign_producer_state(&mut batch)?;
@@ -2178,7 +2178,7 @@ impl RecordAccumulator {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#abortIncompleteBatches")]
     pub fn abort_incomplete_batches(&self) {
         loop {
-            // Java's no-argument `abortBatches()` (Java 1145-1147) supplies this
+            // Java's no-argument `abortBatches()` (Java 1193-1195) supplies this
             // reason; Rust has no overloading, so it is inlined at the two call
             // sites that used it.
             self.abort_batches(Self::producer_closed_forcefully_error());
@@ -2190,7 +2190,7 @@ impl RecordAccumulator {
         self.topic_info_map.clear();
     }
 
-    /// The reason Java's no-argument `abortBatches()` passes (Java 1146).
+    /// The reason Java's no-argument `abortBatches()` passes (Java 1194).
     ///
     /// `pub(crate)` because `Sender::run`'s force-close branch needs the same reason
     /// for the batches the accumulator cannot reach — see
@@ -2201,7 +2201,7 @@ impl RecordAccumulator {
 
     /// Abort all incomplete batches (whether they have been sent or not).
     ///
-    /// Translated from `abortBatches(RuntimeException)` (Java 1152).
+    /// Translated from `abortBatches(RuntimeException)` (Java 1200).
     ///
     /// `pub(crate)` because `Sender.maybeAbortBatches` (`Sender.java:535`) calls it
     /// with the transaction manager's `lastError`.
@@ -2217,7 +2217,7 @@ impl RecordAccumulator {
     /// by `Sender::maybe_abort_batches`, which documents why dropping them
     /// un-aborted would leave their futures pending forever.
     ///
-    /// Java's tail (`:1160-1167`) *is* translated: each aborted batch is removed
+    /// Java's tail (`:1208-1215`) *is* translated: each aborted batch is removed
     /// from `incomplete`, and deallocated unless it is still marked in flight
     /// (KAFKA-19012 — the pooled buffer may still be in use by the network client,
     /// in which case `Sender::complete_batch` / `fail_batch` deallocates it when the
@@ -2231,7 +2231,7 @@ impl RecordAccumulator {
                 loop {
                     // Java holds `synchronized (dq)` only for `abortRecordAppends()`
                     // and the removal, then calls `batch.abort(reason)` *outside* it
-                    // (`RecordAccumulator.java:1155-1159`). That matters twice over:
+                    // (`RecordAccumulator.java:1203-1207`). That matters twice over:
                     // `abort` fires the user's delivery callbacks, so holding the
                     // deque lock across them would let a callback that re-enters the
                     // producer deadlock, and a panicking callback would poison this
@@ -2339,7 +2339,7 @@ impl RecordAccumulator {
     ///
     /// Test-only. `KafkaProducer` disables adaptive partitioning whenever a custom
     /// [`Partitioner`](crate::producer::Partitioner) is configured
-    /// (`KafkaProducer.java:428-433`: "There is no need to do work required for
+    /// (`KafkaProducer.java:447-452`: "There is no need to do work required for
     /// adaptive partitioning, if we use a custom partitioner."); this accessor lets a
     /// producer-level test verify that gating against the built-in-partitioner case.
     #[cfg(test)]
@@ -2411,7 +2411,7 @@ impl RecordAccumulator {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#awaitFlushCompletion")]
     pub async fn await_flush_completion(&self) {
         // Java's `finally { this.flushesInProgress.decrementAndGet(); }`
-        // (`RecordAccumulator.java:1111-1113`), which covers the
+        // (`RecordAccumulator.java:1159-1161`), which covers the
         // `InterruptedException` the method declares. In Rust the uncovered exit is
         // the future being dropped at one of the `await`s below — `flush()` is
         // `async` public API, so a caller may wrap it in `tokio::time::timeout` or
@@ -2438,9 +2438,9 @@ impl RecordAccumulator {
 
     /// Abort any batches which have not been drained.
     ///
-    /// Translated from `RecordAccumulator.abortUndrainedBatches` (Java 1174).
+    /// Translated from `RecordAccumulator.abortUndrainedBatches` (Java 1222).
     ///
-    /// Java's predicate at `:1179` forks on whether idempotence is enabled:
+    /// Java's predicate at `:1227` forks on whether idempotence is enabled:
     ///
     /// ```java
     /// if ((transactionManager != null && !batch.hasSequence()) ||
@@ -2448,7 +2448,7 @@ impl RecordAccumulator {
     /// ```
     ///
     /// With a transaction manager, "undrained" means *no sequence assigned yet* —
-    /// a drained batch has one (`drainBatchesForOneNode` assigns it at Java 918),
+    /// a drained batch has one (`drainBatchesForOneNode` assigns it at Java 966),
     /// and a *re-enqueued* batch keeps its sequence and so must not be aborted here
     /// even though the accumulator owns it again (rules §7). Without one it means
     /// "not yet closed". This is reachable idempotently:
@@ -2462,7 +2462,7 @@ impl RecordAccumulator {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
                 // As in `abort_batches`, Java releases `synchronized (dq)` before
-                // `batch.abort(reason)` (`RecordAccumulator.java:1177-1188`), so the
+                // `batch.abort(reason)` (`RecordAccumulator.java:1225-1236`), so the
                 // user callbacks it fires do not run under the deque lock. `i` is
                 // carried across re-locks: the only mutation is our own removal, and
                 // the Sender is the sole other writer on this path.
@@ -2487,7 +2487,7 @@ impl RecordAccumulator {
                         batch
                     };
                     batch.abort(reason.clone());
-                    // Java 1187. Without this the batch stays in `incomplete`
+                    // Java 1235. Without this the batch stays in `incomplete`
                     // forever, so `has_incomplete()` never falls back to false.
                     self.complete_and_deallocate_batch(&mut batch);
                 }
@@ -2605,7 +2605,7 @@ impl RecordAccumulator {
 
     /// Split a big batch and re-enqueue the resulting sub-batches.
     ///
-    /// Translated from `RecordAccumulator.splitAndReenqueue` (Java 511).
+    /// Translated from `RecordAccumulator.splitAndReenqueue` (Java 556).
     ///
     /// # Errors
     ///
@@ -2652,7 +2652,7 @@ impl RecordAccumulator {
         while let Some(batch) = sub_batches.pop_back() {
             self.incomplete.add(Arc::clone(&batch.produce_future));
             // We treat the newly split batches as if they are not even tried
-            // (Java 528-537).
+            // (Java 573-582).
             if let Some(transaction_manager) = &self.transaction_manager {
                 // We should track the newly created batches since they already have
                 // assigned sequences: `ProducerBatch::split` carries the producer
@@ -2834,7 +2834,7 @@ mod tests {
     }
 
     /// Rust-added smoke test: `RecordAccumulator::register_metrics`
-    /// (RecordAccumulator.java:198-213) registers the three buffer-pool gauges
+    /// (RecordAccumulator.java:205-220) registers the three buffer-pool gauges
     /// in `producer-metrics` with the values read live from the `BufferPool`.
     /// Java's `RecordAccumulatorTest` has no dedicated metric assertions, so
     /// this verifies the Rust wiring rather than translating a Java test.
@@ -5110,8 +5110,8 @@ mod tests {
     // the way an application would (PLAN §10.8).
     //
     // The tests below cover the accumulator half of the Phase-4 delta directly:
-    // `RecordAccumulator.java:900-925` (sequence assignment), `:815-850`
-    // (`shouldStopDrainBatchesForPartition`) and `:552-592`
+    // `RecordAccumulator.java:948-973` (sequence assignment), `:863-898`
+    // (`shouldStopDrainBatchesForPartition`) and `:597-637`
     // (`insertInSequenceOrder`). The end-to-end paths that combine them with the
     // `Sender` are the three `TransactionManagerTest` methods in `sender.rs`.
     // =====================================================================
@@ -5127,7 +5127,7 @@ mod tests {
             .expect("append should succeed");
     }
 
-    /// `RecordAccumulator.java:900-925`: the drain assigns the producer id, epoch and
+    /// `RecordAccumulator.java:948-973`: the drain assigns the producer id, epoch and
     /// base sequence, advances the partition's next sequence by the record count, and
     /// tracks the batch as in flight — all before `batch.close()` serialises the v2
     /// header.
@@ -5168,7 +5168,7 @@ mod tests {
         assert_eq!(manager.first_in_flight_sequence(&tp1()).expect("tracked"), 0);
     }
 
-    /// `RecordAccumulator.java:822-824`: nothing is drained until a producer id has
+    /// `RecordAccumulator.java:870-872`: nothing is drained until a producer id has
     /// been acquired.
     #[tokio::test]
     async fn test_drain_stops_while_the_producer_id_is_invalid() {
@@ -5199,7 +5199,7 @@ mod tests {
         assert!(accum.has_undrained());
     }
 
-    /// `RecordAccumulator.java:826-839`: a partition with an unresolved sequence
+    /// `RecordAccumulator.java:874-887`: a partition with an unresolved sequence
     /// drains nothing, so the state of the previous sequence numbers is not guessed
     /// at.
     #[tokio::test]
@@ -5226,7 +5226,7 @@ mod tests {
         assert!(accum.has_undrained());
     }
 
-    /// `RecordAccumulator.java:841-847`: while a retried batch is at the head of the
+    /// `RecordAccumulator.java:889-895`: while a retried batch is at the head of the
     /// in-flight set, only the batch whose base sequence matches it may be drained —
     /// which reduces the partition to a single in-flight request.
     #[tokio::test]
@@ -5274,7 +5274,7 @@ mod tests {
         assert_eq!(drained.get(&node1().id()).expect("node1 drained").len(), 1);
     }
 
-    /// `RecordAccumulator.java:553-560`: re-enqueueing rejects a batch with no
+    /// `RecordAccumulator.java:598-605`: re-enqueueing rejects a batch with no
     /// sequence, and one that is no longer tracked as in flight.
     #[tokio::test]
     async fn test_reenqueue_rejects_an_untracked_or_unsequenced_batch() {
@@ -5326,7 +5326,7 @@ mod tests {
         );
     }
 
-    /// `RecordAccumulator.java:562-591`: a re-enqueued batch is inserted behind every
+    /// `RecordAccumulator.java:607-636`: a re-enqueued batch is inserted behind every
     /// queued batch with a lower base sequence, not blindly at the front.
     #[tokio::test]
     async fn test_reenqueue_inserts_in_sequence_order() {
@@ -5364,7 +5364,7 @@ mod tests {
         );
     }
 
-    /// `RecordAccumulator.java:530-536`: split sub-batches already carry sequences, so
+    /// `RecordAccumulator.java:575-581`: split sub-batches already carry sequences, so
     /// they are tracked as in flight and inserted in sequence order rather than pushed
     /// blindly to the front.
     #[tokio::test]
@@ -5376,7 +5376,7 @@ mod tests {
         // A batch bigger than the accumulator's `batch.size`, built the way
         // `test_split_and_reenqueue` does, so `split` produces more than one
         // sub-batch. The producer state is assigned as the drain would
-        // (`RecordAccumulator.java:918`), which is the precondition
+        // (`RecordAccumulator.java:966`), which is the precondition
         // `assignProducerStateToBatches` needs.
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 4096],
@@ -5398,7 +5398,7 @@ mod tests {
         {
             let mut manager = transaction_manager.lock().unwrap();
             // `sequence_number` creates the partition entry, exactly as the drain's
-            // own call at `RecordAccumulator.java:918` does.
+            // own call at `RecordAccumulator.java:966` does.
             assert_eq!(manager.sequence_number(&tp1()), 0);
             manager
                 .increment_sequence_number(&tp1(), big_batch.record_count)
@@ -5484,8 +5484,8 @@ mod tests {
     }
 
     /// `RecordAccumulator.append`'s `finally free.deallocate(buffer)`
-    /// (`RecordAccumulator.java:355-358`) on the **error** path: `tryAppend` throws
-    /// `KafkaException("Producer closed while send in progress")` (`:427-428`) with
+    /// (`RecordAccumulator.java:358-361`) on the **error** path: `tryAppend` throws
+    /// `KafkaException("Producer closed while send in progress")` (`:472-473`) with
     /// a buffer already allocated, and the `finally` returns it.
     ///
     /// Reaching that state needs care. `try_append` tests `closed` as its first
@@ -5619,7 +5619,7 @@ mod tests {
     }
 
     /// `awaitFlushCompletion`'s `finally { flushesInProgress.decrementAndGet(); }`
-    /// (`RecordAccumulator.java:1111-1113`) on the drop path.
+    /// (`RecordAccumulator.java:1159-1161`) on the drop path.
     ///
     /// A lost decrement makes `flush_in_progress()` answer `true` forever, and it
     /// feeds the sendable predicate in `ready()` — so every partition would look
@@ -5703,7 +5703,7 @@ mod tests {
 
     /// Same hand-back contract for the "producer closed while send in
     /// progress" failure, which Java raises from
-    /// `RecordAccumulator.tryAppend` (`RecordAccumulator.java:427-428`).
+    /// `RecordAccumulator.tryAppend` (`RecordAccumulator.java:472-473`).
     #[tokio::test]
     async fn test_append_returns_the_callback_when_closed() {
         let now: i64 = 0;
@@ -5732,9 +5732,9 @@ mod tests {
     }
 
     /// Java brackets the whole of `append` in
-    /// `finally { free.deallocate(buffer); }` (`RecordAccumulator.java:355-358`)
+    /// `finally { free.deallocate(buffer); }` (`RecordAccumulator.java:358-361`)
     /// and nulls `buffer` only once a batch has taken ownership of it
-    /// (`:347-348`), so every exit returns an unused buffer to the pool —
+    /// (`:353-354`), so every exit returns an unused buffer to the pool —
     /// including the **success** exit of the *first* `synchronized (dq)` block.
     ///
     /// That exit holds a live buffer when a sticky-partition switch sends us

@@ -840,7 +840,7 @@ impl ProducerConfig {
     ///
     /// This is the Rust stand-in for Java's
     /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
-    /// ...)` (`KafkaProducer.java:382-385`), which reflectively loads and
+    /// ...)` (`KafkaProducer.java:389-392`), which reflectively loads and
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
@@ -892,7 +892,7 @@ impl ProducerConfig {
     /// Java names a class, which the producer instantiates by reflection; here
     /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
     /// `configure`s it with the user configs plus the resolved `client.id`, as
-    /// Java does (`KafkaProducer.java:381-388`), and closes it on `close`. As
+    /// Java does (`KafkaProducer.java:388-395`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
     /// The producer built from this config takes ownership of the partitioner.
     ///
@@ -1421,7 +1421,7 @@ mod tests {
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
-    /// `partitioner.class` (`KafkaProducer.java:382-385`).
+    /// `partitioner.class` (`KafkaProducer.java:389-392`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();

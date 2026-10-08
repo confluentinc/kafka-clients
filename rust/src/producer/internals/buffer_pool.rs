@@ -379,8 +379,8 @@ impl BufferPool {
             // `ApiException`. `Error::with_message(Errors::UnknownServerError, ..)`
             // resolves the code to `UnknownServerException`, which IS an
             // `ApiException`, and `KafkaProducer.doSend` dispatches on exactly that
-            // difference: `catch (ApiException e)` (`:1056`) records the error state
-            // and returns a failed future, `catch (KafkaException e)` (`:1072`)
+            // difference: `catch (ApiException e)` (`KafkaProducer.java:1130`) records the error state
+            // and returns a failed future, `catch (KafkaException e)` (`KafkaProducer.java:1147`)
             // rethrows out of `send()`.
             // `KafkaProducer.doSend` therefore rethrows it out of `send()`
             // without invoking the user callback.

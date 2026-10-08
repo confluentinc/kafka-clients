@@ -562,7 +562,7 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// Three Java paths complete a batch *now* and deallocate it *later*:
     /// `maybeAbortBatches` → `abortBatches`'s `isInflight()` fork
-    /// (`RecordAccumulator.java:1160-1164`), `failBatch(deallocateBatch=false)` →
+    /// (`RecordAccumulator.java:1208-1212`), `failBatch(deallocateBatch=false)` →
     /// `maybeRemoveAndDeallocateBatchLater` (`Sender.java:177-180`), and
     /// `abortIncompleteBatches` on a force close. All three rely on the request's
     /// `RequestCompletionHandler` closing over `recordsByPartition`
@@ -1001,7 +1001,7 @@ impl<C: KafkaClient> Sender<C> {
         // any batch Java was still holding for a response keeps its `ByteBuffer` — the
         // `BufferPool` never gets it back. That is unobservable in Java only because
         // the pool is constructed inside `KafkaProducer`'s constructor
-        // (`KafkaProducer.java:438`), is reachable solely through the accumulator, and
+        // (`KafkaProducer.java:508`), is reachable solely through the accumulator, and
         // is collected with the producer.
         //
         // Releasing them here instead keeps `BufferPool`'s accounting exact for the
@@ -1025,7 +1025,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Java's catch is *blanket*, so it also covers the throws Rust spells as
     /// panics — `ProducerBatch`'s state-machine violations
-    /// (`ProducerBatch.java:292`, `"A {} batch must not attempt another state
+    /// (`ProducerBatch.java:311`, `"A {} batch must not attempt another state
     /// change to {}"`, and `abort`'s `"Batch has already been completed in final
     /// state"`). Handling only `Result::Err` here left those aborting the whole I/O
     /// task, after which nothing drains the accumulator or completes futures and
@@ -1801,7 +1801,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Aborts every batch the `Sender` still owns, with `reason`.
     ///
     /// Java has no counterpart because it does not need one: `abortBatches`
-    /// (`RecordAccumulator.java:1152`) iterates `incomplete.copyAll()`, which returns
+    /// (`RecordAccumulator.java:1200`) iterates `incomplete.copyAll()`, which returns
     /// the `ProducerBatch` objects themselves and so covers batches already drained
     /// into the Sender. Rust's [`IncompleteBatches`](super::IncompleteBatches) tracks
     /// [`ProduceRequestResult`]s rather than batches — a `ProducerBatch` has exactly
@@ -3697,7 +3697,7 @@ mod tests {
     /// throws Rust spells as panics: `getExpiredInflightBatches`'s
     /// `IllegalStateException("<tp> batch created at <ms> gets unexpected final
     /// state <state>")`, and `ProducerBatch`'s two state-machine violations
-    /// (`ProducerBatch.java:292` and `abort`).
+    /// (`ProducerBatch.java:311` and `abort`).
     ///
     /// Here an already-completed batch reaches the delivery-timeout sweep, which is
     /// the first of those. Java logs it and the I/O thread keeps running; the Rust
@@ -6134,7 +6134,7 @@ mod tests {
         let in_flight = ctx.sender.in_flight_batches(&tp0);
         assert_eq!(in_flight.len(), 1);
         // The drain assigned the producer state before the batch was serialised
-        // (`RecordAccumulator.java:900-925`).
+        // (`RecordAccumulator.java:948-973`).
         assert_eq!(in_flight[0].producer_id(), 13131);
         assert_eq!(in_flight[0].producer_epoch(), 1);
         assert_eq!(in_flight[0].base_sequence(), 0);
@@ -6244,7 +6244,7 @@ mod tests {
         assert_eq!(in_flight[0].base_sequence(), 0);
         // `sequence_has_been_reset()` is deliberately not asserted here: both Java and
         // this port clear the `reopened` flag in `ProducerBatch::close()`
-        // (`ProducerBatch.java:525`), which the drain calls on the way out. Java's
+        // (`ProducerBatch.java:544`), which the drain calls on the way out. Java's
         // `testHealthyPartitionRetriesDuringEpochBump` can assert it only because it
         // holds the batch itself and never re-drains it.
     }
@@ -6809,7 +6809,7 @@ mod tests {
     /// Two produce requests are in flight for the same partition. Both are answered
     /// in the same poll, the first with a retriable error whose re-enqueue is made to
     /// fail (its partition is no longer tracked, so `insertInSequenceOrder` rejects
-    /// it, `RecordAccumulator.java:558-560`). The second response must still be
+    /// it, `RecordAccumulator.java:603-605`). The second response must still be
     /// dispatched and complete its record.
     #[tokio::test]
     async fn test_a_failing_response_handler_does_not_abandon_the_rest_of_the_poll() {
@@ -6999,7 +6999,7 @@ mod tests {
 
     /// A force close must complete the record futures of batches the `Sender` owns,
     /// not only those still in the accumulator's deques
-    /// (`Sender.java:294-295` → `RecordAccumulator.java:1152-1168`).
+    /// (`Sender.java:294-295` → `RecordAccumulator.java:1200-1216`).
     ///
     /// Critic 44 note 2: `abort_incomplete_batches` walks the deques only, because
     /// Rust's `IncompleteBatches` tracks `ProduceRequestResult`s rather than batches,
@@ -7989,7 +7989,7 @@ mod tests {
         // Java asserts the *send* fails while the error is outstanding. The recovery at
         // `Sender.java:325` runs first in the very `runOnce` that `assert_send_failure`
         // drives, so the failure is observed through `maybe_add_partition` instead —
-        // which is exactly what `doSend` calls (`KafkaProducer.java:1045`).
+        // which is exactly what `doSend` calls (`KafkaProducer.java:1119`).
         {
             let manager = ctx.transaction_manager();
             let mut manager = manager.lock().unwrap();
@@ -8705,7 +8705,7 @@ mod tests {
     /// the split instead of driving the retry to completion, it omitted Java's closing
     /// `time.sleep(2000)` + `runOnce()`, and it asserted `deque_size == 2` ("one
     /// sub-batch per record") — an invention: `splitAndReenqueue` targets
-    /// `this.batchSize` (`RecordAccumulator.java:517`), which is 16 KiB here, so both
+    /// `this.batchSize` (`RecordAccumulator.java:562`), which is 16 KiB here, so both
     /// small records land in a *single* sub-batch. Java asserts no sub-batch count at
     /// all.
     #[tokio::test]
@@ -8742,7 +8742,7 @@ mod tests {
         // Not in Java, but it is what this test exists to pin down after §9.18: the big
         // batch is untracked and gone from the Sender's map, and the split sub-batch is
         // queued in the accumulator carrying its own sequence
-        // (`RecordAccumulator.java:530-533`).
+        // (`RecordAccumulator.java:575-578`).
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
         assert_eq!(ctx.accumulator.deque_size(&tp0), 1);
         assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
@@ -9080,7 +9080,7 @@ mod tests {
         assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
         // Java 2455-2457: "The compression ratio should have been improved once."
         // `splitAndReenqueue` resets the estimate to `max(1.0, bigBatch.compressionRatio())`
-        // (`RecordAccumulator.java:515`), and closing each sub-batch then walks it down
+        // (`RecordAccumulator.java:560`), and closing each sub-batch then walks it down
         // by one improving step.
         let estimation = CompressionRatioEstimator::estimation(tp.topic(), CompressionType::Gzip);
         let expected = CompressionType::Gzip.rate() - CompressionRatioEstimator::COMPRESSION_RATIO_IMPROVING_STEP;
@@ -9286,7 +9286,7 @@ mod tests {
     ///
     /// A retriable failure schedules the batch for retry. Discovering a **new leader
     /// epoch** must let it go out immediately, skipping the retry backoff
-    /// (`RecordAccumulator.shouldBackoff`, Java 796-813, whose
+    /// (`RecordAccumulator.shouldBackoff`, Java 844-861, whose
     /// `hasLeaderChanged` term is what suppresses the wait); a retry to the *same*
     /// leader must wait the backoff, and go out once it has elapsed.
     ///

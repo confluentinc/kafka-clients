@@ -319,7 +319,7 @@ impl TxnPartitionEntry {
     /// but — unlike the `MESSAGE_TOO_LARGE` split path at `:685` — it does **not**
     /// call `transactionManager.removeInFlightBatch`. Java relies on this and
     /// asserts it: `RecordAccumulator.insertInSequenceOrder`
-    /// (`RecordAccumulator.java:558-560`) throws
+    /// (`RecordAccumulator.java:603-605`) throws
     /// `IllegalStateException("We are re-enqueueing a batch which is not tracked
     /// as part of the in flight requests")` when the batch is *not* still
     /// tracked.
@@ -762,7 +762,7 @@ mod tests {
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) does **not** call
     /// `transactionManager.removeInFlightBatch`, unlike the split path at `:685`,
     /// and Java asserts the batch is still tracked
-    /// (`RecordAccumulator.java:558-560`).
+    /// (`RecordAccumulator.java:603-605`).
     ///
     /// Both halves are pinned: supplying only one owner's batches errors, and
     /// supplying both succeeds. `bump_idempotent_producer_epoch` exists precisely

@@ -1536,7 +1536,7 @@ impl Metadata {
     ///
     /// A bare `KafkaException`, so `is_kafka_error()` is `true` while
     /// `is_api_error()` is `false` — which is what makes `KafkaProducer.doSend`'s
-    /// `catch (KafkaException e)` (`KafkaProducer.java:995`) pick it up and
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1070`) pick it up and
     /// relabel it as `"Producer closed while send in progress"`.
     fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
         if inner.is_closed {

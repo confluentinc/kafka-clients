@@ -68,7 +68,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// See [`KafkaProducer::begin_transaction`](super::KafkaProducer::begin_transaction).
     ///
     /// Stays synchronous because Java's `beginTransaction`
-    /// (`KafkaProducer.java:674-681`) is a pure state transition and never
+    /// (`KafkaProducer.java:734-740`) is a pure state transition and never
     /// blocks.
     ///
     /// # Errors

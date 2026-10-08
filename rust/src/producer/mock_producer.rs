@@ -1712,7 +1712,7 @@ mod tests {
     /// → `cb(..)` is synchronous with no `catch_unwind`, and the closure's own
     /// `expect` below relies on that. (Java's producer does swallow callback
     /// exceptions, but in `ProducerBatch.completeFutureAndFireCallbacks`
-    /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
+    /// (`ProducerBatch.java:337-339`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testMetadataOnException")]

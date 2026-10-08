@@ -439,9 +439,9 @@ impl MemoryRecordsBuilder {
     /// is set (`:373-374`), and nothing but `reopenAndRewriteProducerState` ever clears
     /// it. So Java's `build()` may be called any number of times and hands back the
     /// same `MemoryRecords` view every time. Callers depend on that —
-    /// `ProducerBatch.records()` (`ProducerBatch.java:483-485`) is `build()`, and it is
+    /// `ProducerBatch.records()` (`ProducerBatch.java:502-504`) is `build()`, and it is
     /// called once to serialise the produce request and again by
-    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:334`) when the broker
+    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:353`) when the broker
     /// answers `MESSAGE_TOO_LARGE`.
     ///
     /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
