@@ -1609,6 +1609,9 @@ mod tests {
             h.fetch_buffer.is_empty(),
             "queue-empty state must match (record_count == 0) for record_count={record_count}"
         );
+        // The discarded empty fetch no longer counts as buffered (the
+        // checked-out marker is cleared, Critic 100 L4); a requeued one does.
+        assert_eq!(record_count != 0, !h.fetch_buffer.buffered_partitions().is_empty());
     }
 
     /// `testErrorInInitialize(10, RuntimeException)` — record-bearing fetch,

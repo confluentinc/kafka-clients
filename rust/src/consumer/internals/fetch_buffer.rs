@@ -691,6 +691,11 @@ mod tests {
         assert_eq!(all, buffer.buffered_partitions());
         buffer.push_front(fetch);
         assert_eq!(all, buffer.buffered_partitions());
+        // `push_front` cleared the marker: once the queued fetch is removed
+        // with a plain `poll()`, nothing is buffered.
+        let fetch = buffer.poll().expect("head");
+        assert!(buffer.buffered_partitions().is_empty());
+        buffer.add(fetch);
 
         let fetch = buffer.poll_checked_out().expect("head");
         buffer.set_next_in_line_fetch(Some(fetch));
