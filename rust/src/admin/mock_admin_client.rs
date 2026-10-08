@@ -172,6 +172,18 @@ pub struct MockAdminClient {
 }
 
 impl MockAdminClient {
+    /// Poisons the mock's state lock, so the next call that locks it panics on
+    /// the `unwrap`: how the FFI tests make an admin RPC's submission panic.
+    /// Test-only; no Java counterpart.
+    #[cfg(all(test, feature = "ffi"))]
+    pub(crate) fn poison_state_for_test(&self) {
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.state.lock().unwrap();
+            panic!("poisoning the mock's state lock for a test");
+        }));
+        assert!(poisoned.is_err() && self.state.is_poisoned());
+    }
+
     /// Creates a mock with `num_brokers` brokers (`localhost:1000+id`),
     /// controller = broker 0, default partitions 1 and default replication
     /// factor `min(num_brokers, 3)` — matching Java's `Builder` defaults.
