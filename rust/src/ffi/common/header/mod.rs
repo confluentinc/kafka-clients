@@ -159,7 +159,8 @@ impl HeadersInner {
         Self { headers: HeadersImpl::Owned(Box::new(headers)), views: OnceLock::new() }
     }
 
-    fn headers(&self) -> &dyn Headers {
+    /// The implementation.
+    pub(crate) fn headers(&self) -> &dyn Headers {
         match &self.headers {
             HeadersImpl::Borrowed(headers) => unsafe { &**headers },
             HeadersImpl::Owned(headers) => &**headers,
@@ -178,6 +179,11 @@ impl HeadersInner {
     fn views(&self) -> &[RecordHeaderInner] {
         self.views
             .get_or_init(|| self.headers().to_array().iter().cloned().map(RecordHeaderInner::new).collect())
+    }
+
+    /// A borrowed handle on `self`, valid as long as `self`.
+    pub(crate) fn as_ptr(&self) -> *const kafka_common_header_Headers_t {
+        self as *const Self as *const kafka_common_header_Headers_t
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
@@ -218,7 +224,12 @@ fn view_list<'a>(views: impl Iterator<Item = &'a RecordHeaderInner>) -> *mut kaf
     box_list(views.map(|view| view.as_ptr() as *mut c_void).collect(), None)
 }
 
-unsafe fn headers_ref<'a>(self_: *const kafka_common_header_Headers_t) -> &'a HeadersInner {
+/// The handle behind a pointer.
+///
+/// # Safety
+///
+/// `self_` must be a valid headers handle.
+pub(crate) unsafe fn headers_ref<'a>(self_: *const kafka_common_header_Headers_t) -> &'a HeadersInner {
     unsafe { &*(self_ as *const HeadersInner) }
 }
 

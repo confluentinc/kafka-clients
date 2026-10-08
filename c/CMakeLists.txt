@@ -85,6 +85,10 @@ add_executable(test_kafka_admin tests/test_kafka_admin.c)
 target_include_directories(test_kafka_admin PRIVATE ${RUST_INCLUDE_DIR})
 target_link_libraries(test_kafka_admin unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
+add_executable(test_serialization tests/test_serialization.c)
+target_include_directories(test_serialization PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_serialization unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
@@ -93,6 +97,7 @@ add_test(NAME kafka_consumer COMMAND test_kafka_consumer)
 add_test(NAME consumer_callbacks COMMAND test_consumer_callbacks)
 add_test(NAME mock_admin COMMAND test_mock_admin)
 add_test(NAME kafka_admin COMMAND test_kafka_admin)
+add_test(NAME serialization COMMAND test_serialization)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).

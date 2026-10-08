@@ -160,6 +160,76 @@ impl kafka_Bytes_t {
     }
 }
 
+/// An owned byte array behind a `kafka_Bytes_t *`: what a built-in
+/// deserializer hands out as its `void *` (CLAUDE.md §4, "Generic types"),
+/// freed with [`kafka_Bytes_destroy`]. The view is the first field, so the
+/// pointer to the box is the pointer to the view; `bytes` keeps the buffer
+/// the view points into alive.
+#[repr(C)]
+struct OwnedBytes {
+    view: kafka_Bytes_t,
+    bytes: bytes::Bytes,
+}
+
+/// Hands `bytes` to C as an owned array, freed with [`kafka_Bytes_destroy`].
+pub(crate) fn box_bytes(bytes: bytes::Bytes) -> *mut kafka_Bytes_t {
+    // `Bytes` is a pointer into a shared buffer: moving it into the box
+    // leaves the bytes where they are, so the view taken first stays valid.
+    let view = kafka_Bytes_t::from_slice(&bytes);
+    Box::into_raw(Box::new(OwnedBytes { view, bytes })) as *mut kafka_Bytes_t
+}
+
+/// Frees an owned byte array built by Rust — the `void *` a built-in
+/// deserializer returns. Null is a no-op; a `kafka_Bytes_t` borrowed from a
+/// record or a header is never passed here.
+///
+/// # Safety
+///
+/// `bytes` must be null or an owned array not yet destroyed.
+#[unsafe(no_mangle)]
+// an owned-array destructor standing for `byte[]` (CLAUDE.md §4 rule 6)
+#[doc(alias = "rust-only")]
+pub unsafe extern "C" fn kafka_Bytes_destroy(bytes: *mut kafka_Bytes_t) {
+    if !bytes.is_null() {
+        drop(unsafe { Box::from_raw(bytes as *mut OwnedBytes) });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic arguments
+// ---------------------------------------------------------------------------
+
+/// The value of a Java generic argument (`K`, `V`, `T`) as it crosses the
+/// boundary: the `void *` CLAUDE.md §4 ("Generic types") puts in its place.
+///
+/// Rust never reads what it points at — only the serializer or deserializer
+/// the C caller paired with it does — so it carries no lifetime, and it
+/// crosses tasks like every other C registration: the thread-safety of the
+/// pointee is the C caller's responsibility. A null pointer is Java's `null`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GenericValue(*mut c_void);
+
+// SAFETY: see the type's documentation — the pointee is the C caller's.
+unsafe impl Send for GenericValue {}
+unsafe impl Sync for GenericValue {}
+
+impl GenericValue {
+    /// The value behind `ptr`; null is Java's `null`.
+    pub(crate) fn new(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
+    /// The `void *`.
+    pub(crate) fn as_ptr(self) -> *mut c_void {
+        self.0
+    }
+
+    /// Whether this is Java's `null`.
+    pub(crate) fn is_null(self) -> bool {
+        self.0.is_null()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Lists
 // ---------------------------------------------------------------------------
@@ -611,6 +681,32 @@ mod tests {
         let owned = into_c_string("hello");
         assert_eq!(unsafe { CStr::from_ptr(owned) }.to_str().unwrap(), "hello");
         unsafe { kafka_string_destroy(owned) };
+    }
+
+    #[test]
+    fn bytes_destroy_accepts_null_and_owned_arrays() {
+        unsafe { kafka_Bytes_destroy(ptr::null_mut()) };
+        let owned = box_bytes(bytes::Bytes::from_static(b"abc"));
+        unsafe {
+            assert_eq!((*owned).as_slice(), Some(&b"abc"[..]));
+            kafka_Bytes_destroy(owned);
+        }
+        // An empty array is not Java's null.
+        let empty = box_bytes(bytes::Bytes::new());
+        unsafe {
+            assert!(!(*empty).data.is_null());
+            assert_eq!((*empty).len, 0);
+            kafka_Bytes_destroy(empty);
+        }
+    }
+
+    #[test]
+    fn generic_value_null_is_java_null() {
+        assert!(GenericValue::new(ptr::null_mut()).is_null());
+        let mut x = 1_i32;
+        let value = GenericValue::new(&raw mut x as *mut c_void);
+        assert!(!value.is_null());
+        assert_eq!(value.as_ptr(), &raw mut x as *mut c_void);
     }
 
     #[test]

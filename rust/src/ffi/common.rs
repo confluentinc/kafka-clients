@@ -65,6 +65,7 @@ pub(crate) mod quota;
 pub(crate) mod record;
 pub(crate) mod resource;
 pub(crate) mod security;
+pub(crate) mod serialization;
 pub(crate) mod topic_collection;
 pub(crate) mod topic_id_partition;
 pub(crate) mod topic_partition;
