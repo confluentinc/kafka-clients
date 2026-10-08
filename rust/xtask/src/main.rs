@@ -720,6 +720,9 @@ fn run_grcov_html() -> anyhow::Result<()> {
 // that only resolves through the workspace lock file, fails here and not after
 // a release. It also bounds the compressed size, so the package cannot grow
 // back unnoticed (tests, the C FFI, generated output, ...).
+//
+// It packages the way `.semaphore/publish-crates-io.yml` publishes: without the
+// unpublished `ffi-macros` dependency (see `strip_ffi_macros`), and `--locked`.
 
 const PACKAGE_NAME: &str = "confluent-kafka";
 /// The largest `.crate` accepted, compressed: 3 MiB (crates.io allows 10 MiB).
@@ -728,10 +731,24 @@ const PACKAGE_CHECK_DIR: &str = "target/package-check";
 
 fn package_check() -> anyhow::Result<()> {
     println!("📦 Packaging {PACKAGE_NAME}...");
-    // `--no-verify`: the install below builds the packaged crate anyway.
-    // `--allow-dirty`: check the working tree as it is, so the task also runs
-    // before a commit; CI works on a clean checkout.
-    run_command("cargo", &["package", "-p", PACKAGE_NAME, "--no-verify", "--allow-dirty"])?;
+    with_ffi_macros_stripped(|| {
+        // `--no-verify`: the install below builds the packaged crate anyway.
+        // `--allow-dirty`: the stripped files are uncommitted, and the task also
+        // runs before a commit.
+        // `--locked`: as the publish pipeline does, so a stripped lock file that
+        // no longer matches the manifest fails here and not at release time.
+        run_command(
+            "cargo",
+            &[
+                "package",
+                "-p",
+                PACKAGE_NAME,
+                "--no-verify",
+                "--allow-dirty",
+                "--locked",
+            ],
+        )
+    })?;
 
     let version = package_version()?;
     let crate_file = PathBuf::from(format!("target/package/{PACKAGE_NAME}-{version}.crate"));
@@ -797,6 +814,81 @@ fn package_check() -> anyhow::Result<()> {
 
     println!("✅ {PACKAGE_NAME} {version} packages within the size limit and builds as a dependency");
     Ok(())
+}
+
+/// The `ffi-macros` dependency line in `Cargo.toml` starts with this.
+const FFI_MACROS_DEPENDENCY: &str = "ffi-macros = ";
+/// Its entry in the `ffi` feature, with the separator before it.
+const FFI_MACROS_FEATURE_ENTRY: &str = ", \"dep:ffi-macros\"";
+/// The line listing it among [`PACKAGE_NAME`]'s dependencies in `Cargo.lock`.
+const FFI_MACROS_LOCK_LINE: &str = " \"ffi-macros\",";
+
+/// Runs `package` with `Cargo.toml` and `Cargo.lock` stripped by
+/// [`strip_ffi_macros`], then puts both files back, whatever `package` returned.
+/// An interrupted run leaves them stripped, and the next one stops in
+/// [`strip_ffi_macros`].
+fn with_ffi_macros_stripped(package: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    let lock = fs::read_to_string("Cargo.lock")?;
+    let (stripped_manifest, stripped_lock) = strip_ffi_macros(&manifest, &lock)?;
+    let result = fs::write("Cargo.toml", stripped_manifest)
+        .and_then(|()| fs::write("Cargo.lock", stripped_lock))
+        .map_err(anyhow::Error::from)
+        .and_then(|()| package());
+    fs::write("Cargo.toml", manifest)?;
+    fs::write("Cargo.lock", lock)?;
+    result
+}
+
+/// `Cargo.toml` and `Cargo.lock` without the `ffi-macros` dependency.
+///
+/// `cargo package` requires every dependency to come from a registry, even an
+/// optional one whose only user, `src/ffi`, is not packaged; `ffi-macros` is not
+/// published. So the manifest loses its line and its entry in the `ffi` feature,
+/// and the lock file the line listing it, which keeps the lock file valid under
+/// `--locked`. `.semaphore/publish-crates-io.yml` makes the same edit with
+/// `sed`, because no code built from the repository may run on its publish VM;
+/// `test_publish_pipeline_strips_the_same_lines` keeps the two in step.
+///
+/// Each of the three must occur exactly once, so a reformatted manifest, or
+/// files an interrupted run left stripped, stop the check instead of packaging
+/// something else.
+fn strip_ffi_macros(manifest: &str, lock: &str) -> anyhow::Result<(String, String)> {
+    let manifest = remove_line(manifest, "Cargo.toml", FFI_MACROS_DEPENDENCY, |line| {
+        line.starts_with(FFI_MACROS_DEPENDENCY)
+    })?;
+    let entries = manifest.matches(FFI_MACROS_FEATURE_ENTRY).count();
+    if entries != 1 {
+        anyhow::bail!(strip_error("Cargo.toml", FFI_MACROS_FEATURE_ENTRY, entries));
+    }
+    let lock = remove_line(lock, "Cargo.lock", FFI_MACROS_LOCK_LINE, |line| line == FFI_MACROS_LOCK_LINE)?;
+    Ok((manifest.replacen(FFI_MACROS_FEATURE_ENTRY, "", 1), lock))
+}
+
+/// `text` without the one line `is_target` accepts, named `pattern` in the error.
+fn remove_line(text: &str, file: &str, pattern: &str, is_target: impl Fn(&str) -> bool) -> anyhow::Result<String> {
+    let mut found = 0;
+    let kept: String = text
+        .split_inclusive('\n')
+        .filter(|line| {
+            let target = is_target(line.strip_suffix('\n').unwrap_or(line));
+            found += usize::from(target);
+            !target
+        })
+        .collect();
+    if found != 1 {
+        anyhow::bail!(strip_error(file, pattern, found));
+    }
+    Ok(kept)
+}
+
+fn strip_error(file: &str, pattern: &str, found: usize) -> String {
+    format!(
+        "expected `{pattern}` once in {file}, found it {found} times. A `cargo xtask package-check` \
+         interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: `git diff` shows what \
+         to restore. Otherwise update `strip_ffi_macros` in xtask/src/main.rs and the `sed` in \
+         .semaphore/publish-crates-io.yml together."
+    )
 }
 
 /// The version of [`PACKAGE_NAME`], from `cargo pkgid`
@@ -1187,7 +1279,8 @@ fn print_help() {
   coverage-all    Run all test coverage including integration (requires Docker)
   test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
   producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
-  package-check   Package the crate, fail above 3 MiB, and build a fresh project depending on it
+  package-check   Package the crate as the crates.io publish does (without ffi-macros),
+                  fail above 3 MiB, and build a fresh project depending on it
 
 Usage:
   cargo xtask format
@@ -1211,6 +1304,118 @@ Usage:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MANIFEST: &str = r#"[workspace]
+members = [".", "ffi-macros"]
+
+[features]
+ffi = ["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]
+
+[dependencies]
+# Packaging removes this line and `dep:ffi-macros` from the `ffi` feature.
+ffi-macros = { path = "ffi-macros", optional = true }
+flate2 = "1"
+"#;
+
+    const LOCK: &str = r#"[[package]]
+name = "confluent-kafka"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "ffi-macros",
+ "flate2",
+]
+
+[[package]]
+name = "ffi-macros"
+version = "0.1.0"
+"#;
+
+    #[test]
+    fn test_strip_ffi_macros_drops_the_dependency_and_its_feature_entry() {
+        let (manifest, lock) = strip_ffi_macros(MANIFEST, LOCK).unwrap();
+        // The workspace member, the comment and the lock file's own entry for the
+        // `ffi-macros` package stay.
+        assert_eq!(
+            manifest,
+            r#"[workspace]
+members = [".", "ffi-macros"]
+
+[features]
+ffi = ["dep:cbindgen", "dep:env_logger"]
+
+[dependencies]
+# Packaging removes this line and `dep:ffi-macros` from the `ffi` feature.
+flate2 = "1"
+"#
+        );
+        assert_eq!(
+            lock,
+            r#"[[package]]
+name = "confluent-kafka"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "flate2",
+]
+
+[[package]]
+name = "ffi-macros"
+version = "0.1.0"
+"#
+        );
+    }
+
+    #[test]
+    fn test_strip_ffi_macros_needs_each_line_exactly_once() {
+        // What an interrupted run leaves behind.
+        let (manifest, lock) = strip_ffi_macros(MANIFEST, LOCK).unwrap();
+        assert_eq!(
+            strip_ffi_macros(&manifest, &lock).unwrap_err().to_string(),
+            "expected `ffi-macros = ` once in Cargo.toml, found it 0 times. A `cargo xtask \
+             package-check` interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: \
+             `git diff` shows what to restore. Otherwise update `strip_ffi_macros` in \
+             xtask/src/main.rs and the `sed` in .semaphore/publish-crates-io.yml together."
+        );
+        let second_line = MANIFEST.replace("flate2", "ffi-macros = { path = \"ffi-macros\" }\nflate2");
+        assert_eq!(
+            strip_ffi_macros(&second_line, LOCK).unwrap_err().to_string(),
+            strip_error("Cargo.toml", "ffi-macros = ", 2)
+        );
+        // First in the list, the entry has no comma before it.
+        let entry_first = MANIFEST.replace(
+            r#"["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]"#,
+            r#"["dep:ffi-macros", "dep:cbindgen", "dep:env_logger"]"#,
+        );
+        assert_eq!(
+            strip_ffi_macros(&entry_first, LOCK).unwrap_err().to_string(),
+            strip_error("Cargo.toml", r#", "dep:ffi-macros""#, 0)
+        );
+        assert_eq!(
+            strip_ffi_macros(MANIFEST, &lock).unwrap_err().to_string(),
+            strip_error("Cargo.lock", r#" "ffi-macros","#, 0)
+        );
+    }
+
+    /// The publish pipeline cannot run this crate, so it strips the real files with
+    /// `sed`, which reads the three patterns as regular expressions.
+    #[test]
+    fn test_publish_pipeline_strips_the_same_lines() {
+        let rust_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |path: &str| fs::read_to_string(rust_dir.join(path)).unwrap();
+        strip_ffi_macros(&read("Cargo.toml"), &read("Cargo.lock")).unwrap();
+
+        for pattern in [FFI_MACROS_DEPENDENCY, FFI_MACROS_FEATURE_ENTRY, FFI_MACROS_LOCK_LINE] {
+            assert!(!pattern.contains(['.', '*', '[', ']', '^', '$', '\\', '/']), "{pattern}");
+        }
+        let pipeline = read("../.semaphore/publish-crates-io.yml");
+        for command in [
+            format!("sed -i -e '/^{FFI_MACROS_DEPENDENCY}/d' -e 's/{FFI_MACROS_FEATURE_ENTRY}//' rust/Cargo.toml"),
+            format!("sed -i -e '/^{FFI_MACROS_LOCK_LINE}$/d' rust/Cargo.lock"),
+        ] {
+            assert!(pipeline.contains(&command), "publish-crates-io.yml does not run `{command}`");
+        }
+    }
 
     fn specs(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
         files
