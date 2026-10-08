@@ -667,7 +667,7 @@ Phase 2 completion notes (agent 92):
     `metadata_manager.bootstrap_fatal_error()` once at the top. (Correction, Phase 12 / Critic 102 Issue 1: not
     *every* enqueue — a handler's `HandleResult::NewCall`, the createTopics / createPartitions / deleteTopics
     quota-retry follow-ups, is pushed straight into `pending_calls` by the I/O task and skips `call()`'s checks,
-    where Java's follow-ups go through `runnable.call`.) Keep the order; keep that order relative to the closing and controllers checks when adding
+    where Java's follow-ups go through `runnable.call`.) Keep this order, relative to the closing and controllers checks, when adding
     `unregister_controller`. Java's `enqueue` also starts with a `tries > maxRetries` check that the Rust
     enqueue never had (a pre-existing gap, not KIP-909).
   - `fail_all_remaining` closes the call channel before its final drain, so no accepted call is dropped.
