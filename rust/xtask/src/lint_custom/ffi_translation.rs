@@ -125,7 +125,11 @@
 //! associated consts expect nothing (cbindgen exports no constants); a
 //! struct generic over a closure (`ClosureGauge<F>`, a Java lambda's
 //! stand-in) expects nothing, since C implements the trait's interface
-//! instead.
+//! instead; a Java functional interface the Rust API takes as a closure
+//! ([`C_ONLY_CLOSURE_INTERFACES`]) has no Rust item, so its §4 rule 3
+//! interface — `_t`, `_new`, `_destroy`, one invoker and one `_fn_t` per
+//! method — is accepted as C-only, while the closure-taking Rust method stays
+//! `unmapped`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -156,6 +160,14 @@ const NO_C_TYPE: &[&str] = &["KafkaError"];
 /// Package-less free helpers the FFI may export besides the `kafka_<Type>_t`
 /// containers: the deallocator of an owned string (CLAUDE.md §4 rule 6).
 const C_ONLY_FREE_FUNCTIONS: &[&str] = &["kafka_string_destroy"];
+
+/// Java functional interfaces that the Rust API takes as closures, with their
+/// methods. C has no closures, so each is translated as a CLAUDE.md §4 rule 3
+/// interface (`<prefix>_t`, `_new`, `_destroy`, `<prefix>_<method>` and
+/// `<prefix>_<method>_fn_t`) that no Rust item stands behind: the closure
+/// parameter of the Rust method is `unmapped` by design, and these are the C
+/// items it takes instead.
+const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[("kafka_common_KafkaFuture_BaseFunction", &["apply"])];
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
 /// caller classifies an error "beyond its numeric code" through the
@@ -2236,10 +2248,26 @@ fn render_fn_ptr_decl(name: &str, sig: &Sig, nullable: bool) -> String {
 /// Compares the expected surface with the declared one.
 fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &mut Vec<Finding>) {
     let c_only = actual.c_only_prefixes();
+    let closure_interfaces: BTreeSet<String> = C_ONLY_CLOSURE_INTERFACES
+        .iter()
+        .flat_map(|(prefix, methods)| {
+            let mut items = vec![
+                format!("{prefix}_t"),
+                format!("{prefix}_new"),
+                format!("{prefix}_destroy"),
+            ];
+            for m in methods.iter() {
+                items.push(format!("{prefix}_{m}"));
+                items.push(format!("{prefix}_{m}_fn_t"));
+            }
+            items
+        })
+        .collect();
     let is_c_only = |name: &str| {
         c_only.iter().any(|p| name == p.as_str() || name.starts_with(&format!("{p}_")))
             || C_ONLY_FREE_FUNCTIONS.contains(&name)
             || C_ONLY_ERROR_CODE.contains(&name)
+            || closure_interfaces.contains(name)
     };
 
     for (name, exp) in expected {
@@ -3201,6 +3229,45 @@ mod tests {
             [
                 "unexpected kafka_common_metrics_ClosureGauge_new",
                 "unexpected kafka_common_metrics_ClosureGauge_t",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_closure_interface_is_accepted_as_c_only() {
+        // `then_apply` takes a closure (Java's `KafkaFuture.BaseFunction`): the
+        // method is `unmapped`, and the rule 3 interface C gets instead has no
+        // Rust item, so it is admitted — but only its rule 3 items.
+        let rust = r#"
+            pub mod common {
+                #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
+                pub struct KafkaFuture<T>(T);
+                impl<T> KafkaFuture<T> {
+                    pub fn then_apply<R, F: Fn(T) -> R>(&self, function: F) -> KafkaFuture<R> { unimplemented!() }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *mut c_void, out_apply: *mut *mut c_void) -> *mut kafka_common_Error_t;
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(self_: *mut c_void, apply: kafka_common_KafkaFuture_BaseFunction_apply_fn_t) -> *mut kafka_common_KafkaFuture_BaseFunction_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *mut c_void, out_apply: *mut *mut c_void) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_stray(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(self_: *const kafka_common_KafkaFuture_t, function: *const kafka_common_KafkaFuture_BaseFunction_t) -> *mut kafka_common_KafkaFuture_t { std::ptr::null_mut() }
+        "#;
+        let findings = run("closure-interface", rust, ffi);
+        let keys: Vec<&str> = keys(&findings)
+            .into_iter()
+            .filter(|k| k.contains("BaseFunction") || k.contains("then_apply"))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "unexpected kafka_common_KafkaFuture_BaseFunction_stray",
+                "unmapped kafka_common_KafkaFuture_then_apply"
             ]
         );
     }
