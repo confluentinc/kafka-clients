@@ -1484,8 +1484,7 @@ internal sealed class SendAccumulator
         {
             // ⚠ OWNERSHIP TRANSFERS HERE, AND THE NULLING BELOW MUST STAY BELOW IT.
             //
-            // If Enqueue throws (its queue growing under out-of-memory — its own _stopped branch
-            // frees the futures and returns normally), ownership never transferred, so FaultNode
+            // If Enqueue throws (out of memory), ownership never transferred, so FaultNode
             // must still see a live future at each of these indices and free it. Nulling first would
             // make those indices look like "the core never saw this record", and FaultNode would
             // then fire delivery callbacks the pump is also about to fire — DUPLICATES, which the
