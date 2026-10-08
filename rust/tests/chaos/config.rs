@@ -50,6 +50,17 @@ const RUNTIME_CONSUMER_INSTANCE_BASE: u32 = 1000;
 /// Kafka's limit on a topic name's length (`Topic.MAX_NAME_LENGTH`).
 const MAX_TOPIC_NAME_LENGTH: usize = 249;
 
+/// Worker threads of the sync Python gRPC server (`max_workers` in
+/// `python/grpc_server.py`; keep the two equal). Every `RunProducer` /
+/// `RunConsumer` stream holds one for the whole run.
+const PYTHON_SERVER_WORKERS: usize = 64;
+
+/// Of [`PYTHON_SERVER_WORKERS`], how many a run's streams must leave free for
+/// the unary calls that arrive while they run (`StopWorkload`,
+/// `MarkWorkload`). With none free those queue behind the streams, the stop
+/// never reaches the server, and the run ends as a watchdog wedge.
+const PYTHON_SERVER_UNARY_RESERVE: usize = 8;
+
 /// The kind of fault a cycle injects: broker rolling (default-on, disabled by
 /// `--no-broker-roll`) plus whichever of `--change-leader`,
 /// `--reassign-partitions`, `--topic-recreate` and `--all-brokers-down` were
@@ -833,6 +844,8 @@ impl ChaosConfig {
             ));
         }
 
+        check_python_server_streams(&workloads, num_topics, rebalance_add_cycle.is_some())?;
+
         Ok(Self {
             brokers,
             partitions,
@@ -1070,6 +1083,34 @@ fn check_controller_quorum(
     Ok(())
 }
 
+/// Reject a run whose sync-Python (`python`) workloads would hold so many of
+/// the Python server's workers that its unary calls could not run (see
+/// [`PYTHON_SERVER_UNARY_RESERVE`]). A producer workload opens one stream per
+/// topic, a consumer one; `adds_consumer` (`--rebalance-add-cycle`) adds one
+/// more consumer of the first consumer's backend mid-run. Consumer churn adds
+/// only Rust consumers. The asyncio server (`python-async`) and the C server
+/// have no fixed pool.
+fn check_python_server_streams(workloads: &[WorkloadSpec], num_topics: u16, adds_consumer: bool) -> Result<(), String> {
+    let python = |w: &&WorkloadSpec| w.backend == Backend::Python;
+    let producers = workloads.iter().filter(python).filter(|w| w.role == Role::Producer).count();
+    let mut consumers = workloads.iter().filter(python).filter(|w| w.role == Role::Consumer).count();
+    let first_consumer = workloads.iter().find(|w| w.role == Role::Consumer);
+    if adds_consumer && first_consumer.is_some_and(|w| w.backend == Backend::Python) {
+        consumers += 1;
+    }
+    let streams = producers * usize::from(num_topics) + consumers;
+    let limit = PYTHON_SERVER_WORKERS - PYTHON_SERVER_UNARY_RESERVE;
+    if streams > limit {
+        return Err(format!(
+            "the python workloads would open {streams} gRPC stream(s) ({producers} producer(s) x {num_topics} \
+             topic(s) + {consumers} consumer(s)), more than the {limit} the sync Python server can hold while \
+             keeping {PYTHON_SERVER_UNARY_RESERVE} of its {PYTHON_SERVER_WORKERS} workers free for StopWorkload \
+             and MarkWorkload. Use fewer python workloads or topics, or the python-async backend"
+        ));
+    }
+    Ok(())
+}
+
 /// Check `topic` (with `num_topics > 1`, the prefix of `<topic>_<i>`) against
 /// Kafka's topic-name rules (`Topic.validate`): only ASCII letters, digits,
 /// `.`, `_` and `-`; at most 249 characters, counting the longest generated
@@ -1236,6 +1277,31 @@ mod tests {
         ])
         .expect("producer-only parses with a consumer added mid-run");
         assert_eq!(producer_only.added_consumer_backend(), Backend::Rust);
+    }
+
+    /// The sync Python server's streams (one per topic for a producer, one per
+    /// consumer, plus a consumer added mid-run) must leave workers free for its
+    /// unary calls; the asyncio server's do not count.
+    #[test]
+    fn python_streams_must_leave_the_server_free_workers() {
+        let python = ("CHAOS_WORKLOADS", "producer:python,consumer:python");
+        // 55 + 1 = 56 streams: the limit.
+        parse(&[python, ("CHAOS_NUM_TOPICS", "55")]).expect("56 streams fit");
+        assert_eq!(
+            parse_err(&[python, ("CHAOS_NUM_TOPICS", "56")]),
+            "the python workloads would open 57 gRPC stream(s) (1 producer(s) x 56 topic(s) + 1 consumer(s)), more \
+             than the 56 the sync Python server can hold while keeping 8 of its 64 workers free for StopWorkload \
+             and MarkWorkload. Use fewer python workloads or topics, or the python-async backend"
+        );
+        // The consumer added mid-run takes the first consumer's backend.
+        let err = parse_err(&[python, ("CHAOS_NUM_TOPICS", "55"), ("CHAOS_REBALANCE_ADD_CYCLE", "1")]);
+        assert!(err.starts_with("the python workloads would open 57 gRPC stream(s)"), "{err}");
+        // The asyncio server has no fixed pool.
+        parse(&[
+            ("CHAOS_WORKLOADS", "producer:python-async,consumer:python-async"),
+            ("CHAOS_NUM_TOPICS", "100"),
+        ])
+        .expect("python-async streams are not limited");
     }
 
     /// A gRPC-backed workload takes the run's security protocol like a Rust
