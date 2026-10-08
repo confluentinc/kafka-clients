@@ -1599,6 +1599,16 @@ Phase 11 completion notes (agent 101):
   (the 4 rows). `test-rust-all-features`: lib 4719 / 3 ignored, consumer 43, integration 311 / 0 failed,
   8, and 5 / 7 ignored. Python: 371 passed / 2 skipped, 156, 29 + 29. `git status --ignored` shows no new
   files.
+- **Critic 101 fixes:** L1 f36c48ee (`with_meter_with_sampled_stat`, marked `SensorBuilder#withMeter`), L2 829fade8
+  (`structure.md` `metrics/` tree, "extends `AbstractConsumerMetricsManager`" docs). Lint still 4 rows.
+- **Follow-ups (recorded, not implemented):**
+  - (a) Tighten `check-java-name` so a constructor marker accepts only `with_` names built from that
+    constructor's parameters (`xtask/src/java.rs:197-198`). Today any `with_*` passes, which is how L1's
+    `with_meter_stat` escaped the §2 overload rule.
+  - (b) Pre-existing: Rust `RequestManagers::close()` does not close the `FetchRequestManager`. Java closes
+    every `Closeable` manager, so `AbstractFetch.close` → `FetchBuffer.close` drains buffered fetches during
+    network-thread cleanup; Rust drains only on drop (`AbstractFetch::drop`). A fix must run that drain before
+    `fetch_metrics_manager.close()`, or the drain re-creates per-topic sensors after close.
 - **Timing log** (2026-10-08, IST):
 
   | Step | Start | End | Min |
