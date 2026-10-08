@@ -22,7 +22,8 @@ use crate::common::metrics::{Metrics, Sensor};
 use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records background-task / event-queue timing and depth metrics. Mirrors
-/// Java's `AsyncConsumerMetrics implements AutoCloseable`.
+/// Java's `AsyncConsumerMetrics extends AbstractConsumerMetricsManager`
+/// (an `AutoCloseable`; KAFKA-19542).
 ///
 /// All ten sensors are created via `metrics.sensor(name)` — the INFO-default
 /// overload (`Metrics.java`: `sensor(name)` → `sensor(name, INFO)`). The Java

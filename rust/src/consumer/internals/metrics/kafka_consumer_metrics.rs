@@ -26,7 +26,8 @@ use crate::consumer::internals::ConsumerUtils;
 use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records consumer poll/commit timing metrics. Mirrors Java's
-/// `KafkaConsumerMetrics implements AutoCloseable`.
+/// `KafkaConsumerMetrics extends AbstractConsumerMetricsManager` (an
+/// `AutoCloseable`; KAFKA-19542).
 ///
 /// Owned by the consumer (app task); `record_poll_*` / `record_commit_*` run
 /// per-poll / per-commit (low frequency, never per-record). The shared scalar
