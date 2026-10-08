@@ -1327,6 +1327,145 @@ Commits: `005844bf` (BufferPool), `3271f906` (ChunkedByteBufferOutputStream), `1
 - Deliverable: draft the `ProducerBatch`-fold rules note into `rules-errata.md` (§2.3).
 - DoD #10 applies.
 
+#### Phase 8 completion notes (agent 98)
+
+Commits: `6442a838` (accumulator, batch fold, chunked accumulator, config, producer wiring),
+`6573e08b` (D3, KAFKA-20864), `d529098c` (separate chunked guard for DoD #10; rules note),
+`1daace6b` (Java cites to rc4), `5475f4e4` (IncrementalAllocationProducerSendTest analog), plus this
+notes commit.
+
+- **How the types compose (§2.3).**
+  - `ChunkedRecordAccumulator { base: Arc<RecordAccumulator>, chunked_free: Arc<BufferPool> }` in
+    `chunked_record_accumulator.rs`, with its own `append` / `try_append` / `create_producer_batch` /
+    `chunked_records_builder` / `allocate_extension_chunks` / `deallocate_extension_chunks`.
+    `ChunkedRecordAccumulator::new` builds the base itself (Java's `super(..)`) after Java's two
+    checks (incremental pool; compression `none`).
+  - `RecordAccumulator::append_new_batch` takes Java's two virtual steps as parameters: a
+    `try_append` closure, a records-builder supplier, and a `create_producer_batch` closure. Both
+    strategies use it; neither boxes anything.
+  - `Sender` is unchanged (`Arc<RecordAccumulator>`). `KafkaProducer` holds `accumulator` (the shared
+    base) and `chunked_accumulator: Option<ChunkedRecordAccumulator>`; `do_send_bytes` dispatches
+    `append` on it (two concrete awaits, no boxed future). `build_accumulator` picks the strategy
+    and returns both.
+  - `ChunkedProducerBatch` is `pub(crate) type ChunkedProducerBatch = ProducerBatch;` (carrying the
+    Java marker) plus an `impl` block in `chunked_producer_batch.rs` (`new_chunked`, `is_chunked`,
+    `extension_bytes_needed`, `add_buffers`, `stream`). The three overrides branch on `is_chunked()`
+    inside `ProducerBatch::try_append` / `deallocate_buffer` / `deallocate_inflight_buffer`.
+- **DoD #7 deviations.**
+  - The `ProducerBatch` fold (above; rules note drafted in `rules-errata.md`).
+  - `ChunkedAppendGuard`: the chunked `append`'s `finally` (new-batch stream, extension chunks,
+    `appendsInProgress`) as a `Drop` type, for the same cancellation reason as `AppendGuard`. It is a
+    separate type so the full path's per-append future does not grow (see DoD #10).
+  - Test-only: `ChunkedAccumulatorTestHooks` (stands in for the anonymous `BufferPool` /
+    `ChunkedRecordAccumulator` subclasses of `ChunkedRecordAccumulatorTest`),
+    `BufferPool::deallocate_observer`, `ProducerBatch::close_for_record_appends_calls`.
+- **Other deviations, recorded.**
+  - `RecordAppendResult.future` and `.topic_partition` are `Option`s (Java's nullable `future`); the
+    static `appended(..)` factory is `appended_result` (no marker: the instance predicate holds the
+    name). `KafkaProducer` turns a non-appended result into an `IllegalState` error, not a panic.
+  - `setPartition` has no Rust call: the partition reaches the caller as `topic_partition`
+    (pre-existing).
+  - `partition_changed` keeps the pre-4.4 Rust shape (no `StickyPartitionInfo` identity), now with
+    an `unknown_partition` flag for Java's `partitionInfo != null`. Java tests that rely on
+    `super.partitionChanged` detecting a moved info have their hook report the move itself.
+  - The full path does not refresh `nowMs` after `allocate` (Java does): kept as before, because
+    the brief requires the full path behaviour-identical and many unit tests fix `now`. The
+    incremental path refreshes it as Java does.
+  - `ChunkedRecordAccumulator`'s compression check returns `Error::UnsupportedVersion` (Java's
+    `UnsupportedOperationException`; no Rust variant, same mapping as `MockAdminClient`). The
+    producer rejects the combination first with Java's `ConfigException`, inside
+    `build_accumulator`, so the partitioner-close path covers it (tested).
+  - Java's second constructor without `partitionerConfig` is not separate: pass
+    `PartitionerConfig::default()`.
+  - An under-sized first chunked append is refused before writing (Critic 97 (b)) and surfaces as
+    Java's `IllegalStateException` message from `append_new_batch`. The plain-batch "should have
+    room" case is now an error too, not a panic.
+  - `RecordAccumulator::deallocate` still panics on an inflight batch (pre-existing); the chunked
+    test catches the panic and checks the pool is fully restored.
+  - The batch-to-extend identity (D3) is the batch's `ProduceRequestResult`, held as an `Arc` so a
+    replacement batch cannot reuse the address.
+- **D3, KAFKA-20864 (`cc6d42206f`, trunk; ahead of 4.4).** Ported in `6573e08b`:
+  `append_deadline_ms`, `remaining_time_to_block_ms`, `return_if_no_more_retries_allowed`, the
+  `batch_to_extend` close check, and every retry bounded by the deadline. Its nine
+  `ChunkedRecordAccumulatorTest` and two `RecordAccumulatorTest` additions are translated. These
+  items carry no Java marker (the rc4 tree the markers resolve against predates them); a later bump
+  past `cc6d42206f` should add them.
+- **Skips.** None of the Java tests. Notes:
+  - `KafkaProducerTest` hunk (`RecordAppendResult.appended(..)` in a Mockito stub of
+    `testPartitionAddedToTransaction`): the Rust test uses a real accumulator, so there is no stub to
+    rename.
+  - `IncrementalAllocationProducerSendTest.testSendCompressedMessageWithCreateTime` is skipped exactly
+    as Java skips it.
+  - `RecordAccumulator.recordsBuilder` and `ProducerBatch.isWritable` are removed as in Java; the
+    `testFull` hunk now asserts `is_full()` instead.
+- **Tests.** `ChunkedRecordAccumulatorTest`: 14 (4.4) + 9 (D3), `@ParameterizedTest` as a loop over
+  both values. Rust-only: cancelled append refunds and counts out; `ChunkedAppendGuard` refunds
+  stream and chunks; no over-credit on deallocate (completed and inflight); undersized first append
+  errors without panicking; constructor messages; steady-state incremental append allocates exactly
+  what a full one does. `ProducerConfigTest` +3, `RecordAccumulatorTest` +2 and the `testFull` hunk;
+  `KafkaProducer` wiring tests (strategy and fallback, compression `ConfigException`, partitioner
+  closed on that failure). Integration: 12 tests in
+  `producer_test::incremental_allocation_producer_send`.
+- **DoD #10.**
+  - Producer send path: `test_send_allocations_do_not_grow_*` = 2 allocations per steady send,
+    unchanged (measured with a temporary `eprintln`, not committed).
+  - Incremental path: a steady append that needs no extension costs exactly what a full one does
+    (1 at the accumulator level; pinned by a committed test). Records that extend the batch add about
+    3 allocations per 16 KiB chunk (the chunk, the chunk list, the stream's list growth): 100 x 1000 B
+    appends cost 124 allocations against 104 for the full strategy, about 0.2 per record. That is the
+    on-demand allocation the strategy exists for, per chunk rather than per record.
+  - Throughput, full strategy: a temporary release-mode test, not committed (500 000 appends of a
+    10 B key and a 100 B value into 16 KiB batches, best of 5), interleaved runs of 3957e76f and
+    HEAD. First version: 10.3-10.7 M rec/s before, 9.65-9.94 after (about -7 %). The extra
+    `Option`s in `AppendGuard` were most of it; splitting out `ChunkedAppendGuard` (`d529098c`)
+    brought it to 10.19-10.47 after vs 10.70-10.78 before (-2 to -5 %, about 3-4 ns per append).
+    Allocation counts are unchanged. The rest is the wider `RecordAppendResult` (outcome tag,
+    optional future and partition) on every return. It is under 1 % of a producer `send`.
+- **Cites.** `KafkaProducer.java`, `RecordAccumulator.java` and `ProducerBatch.java` cites across
+  `rust/src` refreshed to rc4 by content (204 cites in 13 files, `1daace6b`), including the bare
+  `:1056` / `:1072` in `buffer_pool.rs` (now `KafkaProducer.java:1130` / `:1147`). One historical
+  statement in `kafka_producer.rs` (`:1449-1450` vs 4.3.1's `:1446`) is left as written. One cite,
+  `record_accumulator.rs` "the second `try_append` (`:553-575`)", matches no `append` region in 4.2,
+  4.3.1 or rc4 and is left for review.
+- **§5.1:** the two shared rows (`ProducerBatch.isWritable`, `RecordAccumulator.recordsBuilder`) are
+  cleared and removed. Lint shows exactly the 11 remaining rows.
+- **Environment.** Docker Desktop's backend was killed at 11:06 (`com.docker.backend ... signal:
+  killed`), so the daemon was down. I quit and reopened Docker Desktop at 11:58 before the broker
+  runs. No containers were running at the time.
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (PLAN, Java commit + D3, tests, Rust sources) | 10:55 | 11:03 | 8 |
+  | 1 refactor, batch fold, chunked accumulator, config, wiring, 4.4 tests, commit | 11:03 | 11:31 | 28 |
+  | 2 D3 + its tests, teeth check, commit | 11:31 | 11:37 | 6 |
+  | 3 DoD #10 alloc counts, throughput A/B, guard split, commit | 11:37 | 11:56 | 19 |
+  | 4 integration analog (written during step 3's builds) | 11:40 | 11:45 | 5 |
+  | 5 cite refresh (subagent, in parallel), cherry-pick, leftovers | 11:42 | 11:57 | 15 |
+  | 6 Docker recovery | 11:46 | 11:58 | 12 |
+  | 7 producer broker tests, both strategies (under the lock), re-run of the one failure | 11:59 | 12:06 | 7 |
+  | 8 gates (format-check, full test, lint), `make -k verify`, integration re-run | 12:06 | 12:20 | 14 |
+
+- **Verification.**
+  - `cargo build` passes; `cargo xtask format-check` passes.
+  - `cargo test`: 4406 passed, 0 failed, 3 ignored (lib), plus 36, 8 and 5 (7 ignored).
+  - `cargo xtask lint --keep-going`: clippy clean; exactly the 11 §5.1 rows.
+  - `cargo test --features integration-tests --test integration -- producer` (under the lock):
+    104 passed, 1 failed out of 105. All 12 incremental-strategy tests passed. The failure,
+    `client_rebootstrap_test::test_producer_rebootstrap_disabled`, was a container startup
+    timeout under load, and it passed when re-run alone.
+  - `make -k verify` (12:08-12:14, under the lock):
+    - lib with all features: 4649 passed, 1 failed, 3 ignored. The failure,
+      `integration_tests::api_versions_test::test_metadata_api_version_range`, was a container
+      startup timeout, and it passed when re-run alone. That failure stopped `cargo test` before the
+      integration target, so I ran it separately afterwards.
+    - Python: 363 passed, 2 skipped. check-bindings: 29 + 29. soak: 156.
+    - `build-c` failed: `cmake: command not found` (environment).
+    - `lint` failed on the 11 §5.1 rows.
+  - `cargo test --all-features --test integration` (re-run under the lock): 316 passed, 0 failed of
+    the native tests, 2 ignored. All 381 failures were `__grpc_*` multilanguage variants, which cannot
+    run on this macOS host (Linux-artifact images).
+
 ### Phase 9 — Consumer: heartbeat, membership, commit fixes (agent 99)
 
 - KAFKA-20253 (28de22de34): heartbeat CPU spin, in `AbstractHeartbeatRequestManager`,
