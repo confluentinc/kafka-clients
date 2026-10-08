@@ -540,6 +540,16 @@ impl KafkaAdminClient {
     /// does not change what is sent; it matters to `least_loaded_node` and
     /// `ready`, which treat a node with an in-flight request as busy only when the
     /// connection cannot take another one.
+    ///
+    /// The `NetworkClient`'s default request timeout is one hour,
+    /// `(int) TimeUnit.HOURS.toMillis(1)` (`:626`), not `request.timeout.ms`.
+    /// Every admin call is sent with its own timeout, `min(request.timeout.ms,
+    /// time left to the call deadline)` (`sendEligibleCalls`), so the default
+    /// bounds only what the `NetworkClient` sends on its own, the `ApiVersions`
+    /// handshake, and caps its `poll` timeout. A broker that takes longer than
+    /// `request.timeout.ms` to answer the handshake is therefore waited for, not
+    /// disconnected; the admin loop still bounds each call by its deadline and
+    /// each node assignment by `request.timeout.ms` (`nodeReadyDeadlines`).
     pub(crate) fn create_network_client<S: Selectable, H: HostResolver>(
         config: &AdminClientConfig,
         selector: S,
@@ -558,7 +568,7 @@ impl KafkaAdminClient {
             config.reconnect_backoff_max_ms(),
             config.send_buffer_bytes(),
             config.receive_buffer_bytes(),
-            config.request_timeout_ms(),
+            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_max_ms(),
             true, // discover_broker_versions
@@ -15794,6 +15804,213 @@ mod tests {
         assert!(shutdown.admit_new_call(true, &backoff, now, rejected(now, &captured)).is_none());
         let error = captured.lock().unwrap().take().expect("the call failed");
         assert!(matches!(error, Error::UnsupportedEndpointType(_)), "got {error:?}");
+    }
+
+    /// The bootstrap cluster `new_inner` seeds the manager with, for
+    /// `bootstrap.servers=localhost:9092` (node id -1).
+    fn bootstrap_cluster() -> Cluster {
+        Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())])
+    }
+
+    /// The node ids the manager hands the `NetworkClient` (`fetchNodes`), sorted.
+    fn fetched_node_ids(manager: &AdminMetadataManager) -> Vec<i32> {
+        let mut ids: Vec<i32> = manager.updater().fetch_nodes().iter().map(Node::id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A broker that answers the `ApiVersions` handshake after `request.timeout.ms`
+    /// still serves the admin client, as in Java.
+    ///
+    /// Java builds the admin `NetworkClient` with a one-hour default request
+    /// timeout (`KafkaAdminClient.java:626`), which is the timeout of the
+    /// handshake. With `request.timeout.ms=5000`, a `listTopics` against a broker
+    /// that answers the handshake after 8 s succeeds: the bootstrap metadata call
+    /// times out at 5 s and is retried on the same, still-handshaking connection.
+    /// With `request.timeout.ms` as the default, the handshake timed out at 5 s,
+    /// the node was disconnected, and every reconnect hit the same slow answer, so
+    /// the call failed with "Timed out waiting for a node assignment.".
+    ///
+    /// Timeline (mock time, relative to the start):
+    ///
+    /// - 0 s: `listTopics` is issued; the bootstrap metadata call connects to
+    ///   node -1, which sends `ApiVersions`.
+    /// - 5 s: the metadata call times out and is replaced by a fresh one, but the
+    ///   handshake survives: `ApiVersions` is still in flight on the same
+    ///   connection, and the node is not marked as failed.
+    /// - 8 s: node -1 answers `ApiVersions`; the retried metadata call goes out on
+    ///   it and discovers broker 0.
+    /// - then broker 0: `listTopics` connects to it, completes its handshake, sends
+    ///   its `Metadata` request, and succeeds.
+    ///
+    /// Stepped with `run_once` over a `NetworkClient` built by
+    /// `create_network_client` on a `MockSelector` and mock time. Each stage steps
+    /// until the condition it is waiting for holds (bounded), so the test does
+    /// not depend on how many loop passes a stage takes.
+    #[tokio::test]
+    async fn a_slow_api_versions_answer_does_not_disconnect_the_admin_client() {
+        use crate::api_message_type::ListenerType;
+        use crate::common::network::{MockSelector, NetworkReceive};
+        use crate::common::requests::{ApiVersionsResponse, RequestTestUtils, ResponseHeader};
+
+        type Runnable = AdminClientRunnable<NetworkClient<MockSelector, DefaultHostResolver>>;
+
+        let time = mock_time(1000);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "5000".to_string());
+        props.insert("default.api.timeout.ms".to_string(), "20000".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        let manager = AdminMetadataManager::new(
+            config.retry_backoff_ms(),
+            config.metadata_max_age_ms(),
+            false,
+            LogContext::empty(),
+        );
+        manager.update(bootstrap_cluster(), time.milliseconds());
+        let api_versions_store = Arc::new(ApiVersions::new());
+        let mut client = KafkaAdminClient::create_network_client(
+            &config,
+            MockSelector::new(),
+            manager.updater(),
+            "admin",
+            Arc::clone(&api_versions_store),
+            DefaultHostResolver::new(),
+            LogContext::empty(),
+        );
+        client.set_time(Arc::clone(&time) as Arc<dyn Time>);
+        let (admin, mut runnable) = KafkaAdminClient::build(
+            client,
+            manager.clone(),
+            &config,
+            "admin".to_string(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            LogContext::empty(),
+        )
+        .unwrap();
+
+        // Delivers a response on `node`'s connection, as the broker would.
+        fn respond(
+            runnable: &mut Runnable,
+            node: &str,
+            correlation_id: i32,
+            api_key: ApiKeys,
+            response: ConcreteResponse,
+        ) {
+            let version = api_key.latest_version();
+            let header = ResponseHeader::with_correlation_id(correlation_id, api_key.response_header_version(version));
+            let mut response = response;
+            let bytes = response.serialize_with_header(&header, version).unwrap().into_buffer();
+            runnable
+                .client_mut()
+                .selector_mut()
+                .complete_receive(NetworkReceive::with_source_buffer(node, bytes));
+        }
+        // Runs `processRequests` iterations until `condition` holds, failing with
+        // `what` after a bound. The mock selector keeps completed sends until
+        // cleared, where a real selector reports each send once.
+        async fn step_until(runnable: &mut Runnable, what: &str, mut condition: impl FnMut(&mut Runnable) -> bool) {
+            const MAX_ITERATIONS: usize = 50;
+            for _ in 0..MAX_ITERATIONS {
+                if condition(runnable) {
+                    return;
+                }
+                runnable.run_once().await;
+                runnable.client_mut().selector_mut().clear_completed_sends();
+            }
+            assert!(
+                condition(runnable),
+                "condition not met after {MAX_ITERATIONS} run_once iterations: {what}"
+            );
+        }
+        fn api_versions() -> ConcreteResponse {
+            ConcreteResponse::ApiVersions(ApiVersionsResponse::default_api_versions_response(ListenerType::Broker))
+        }
+        let in_flight =
+            |runnable: &mut Runnable, node: &str| runnable.client_mut().in_flight_request_count_for_node(node);
+        // The node's handshake has completed and one request — necessarily not
+        // `ApiVersions` — is in flight on it.
+        let handshaken_with_one_in_flight = |runnable: &mut Runnable, node: &str| {
+            api_versions_store.get(node).is_some() && in_flight(runnable, node) == 1
+        };
+
+        let result = admin.list_topics_with_options(ListTopicsOptions::new());
+
+        // 0 s: the bootstrap metadata call connects to node -1 and sends ApiVersions.
+        step_until(&mut runnable, "ApiVersions in flight on node -1", |r| in_flight(r, "-1") == 1).await;
+        let first_deadline = time.milliseconds() + 5_000;
+        assert_eq!(
+            runnable.metadata_call_deadlines_for_test(),
+            vec![first_deadline],
+            "one metadata call, bound by request.timeout.ms"
+        );
+
+        // 5 s: past request.timeout.ms the metadata call times out and is replaced,
+        // but the handshake is still awaited on the same connection.
+        time.sleep(5_001);
+        let retried_deadline = time.milliseconds() + 5_000;
+        step_until(&mut runnable, "the timed-out metadata call was replaced", |r| {
+            r.metadata_call_deadlines_for_test() == vec![retried_deadline]
+        })
+        .await;
+        assert_eq!(in_flight(&mut runnable, "-1"), 1, "the handshake outlives request.timeout.ms");
+        assert!(
+            !runnable
+                .client_mut()
+                .connection_failed(&Node::new(-1, "localhost".to_string(), 9092))
+        );
+
+        // 8 s: the broker answers the handshake; the retried metadata call then
+        // goes out on node -1 and discovers broker 0.
+        time.sleep(2_999);
+        respond(&mut runnable, "-1", 0, ApiKeys::API_VERSIONS, api_versions());
+        step_until(&mut runnable, "the retried metadata call in flight on node -1", |r| {
+            handshaken_with_one_in_flight(r, "-1")
+        })
+        .await;
+        let broker = Node::new(0, "localhost".to_string(), 9092);
+        respond(
+            &mut runnable,
+            "-1",
+            1,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        step_until(&mut runnable, "broker 0 discovered and ApiVersions in flight on it", |r| {
+            fetched_node_ids(&manager) == vec![0] && in_flight(r, "0") == 1
+        })
+        .await;
+        assert_eq!(fetched_node_ids(&manager), vec![0], "the bootstrap metadata call completed");
+
+        // Then broker 0: listTopics completes the handshake, then sends its
+        // Metadata request.
+        respond(&mut runnable, "0", 2, ApiKeys::API_VERSIONS, api_versions());
+        step_until(&mut runnable, "listTopics' Metadata request in flight on broker 0", |r| {
+            handshaken_with_one_in_flight(r, "0")
+        })
+        .await;
+        respond(
+            &mut runnable,
+            "0",
+            3,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        let names = result.names();
+        step_until(&mut runnable, "listTopics completed", |_| names.is_done()).await;
+        let names = names.get().await.expect("listTopics succeeds");
+        assert!(names.is_empty());
     }
 
     // --- shutdown ------------------------------------------------------------
