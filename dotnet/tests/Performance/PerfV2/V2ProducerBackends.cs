@@ -26,17 +26,20 @@ namespace Confluent.Kafka.Performance.V2;
 // the redundant using would trip IDE0005 under EnforceCodeStyleInBuild.
 
 /// <summary>
-/// Adapts ckd's <see cref="IProducer{TKey, TValue}"/> to the sync (serial-blocking)
-/// <see cref="IProducerBackend"/> — the .NET analog of Python's <c>CompatibleProducer</c>. ckd has no
-/// blocking produce, so this mirrors the CompatibleProducer shape: fire-and-forget
-/// <c>Produce(topic, message, deliveryHandler)</c> plus a background <c>Poll</c> thread that serves the
-/// delivery callbacks, and each <see cref="Send"/> blocks on the per-send delivery
-/// <see cref="TaskCompletionSource{TResult}"/> so it presents the serial-blocking backend shape the shared
-/// engine's <c>RunSync</c> path expects. Bytes flow over ckd's built-in <c>Serializers.ByteArray</c>
-/// (ckd auto-selects it for <c>&lt;byte[], byte[]&gt;</c>).
+/// Adapts ckd's <see cref="IProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>: a
+/// line-for-line port of Python's <c>CompatibleProducer</c>. Neither ckd nor confluent-kafka-python has a sync
+/// producer, so "V2 sync" means ckd's fire-and-forget <c>Produce(topic, message, deliveryHandler)</c>, with a
+/// background <c>Poll</c> thread serving the delivery reports, and each send's delivery waited in send order
+/// by the shared engine's recorder (<see cref="PerfSendHandle.Get"/>), as Python's <c>main</c> waits the
+/// <c>Future</c> that <c>CompatibleProducer.send</c> returns. Bytes flow over ckd's built-in
+/// <c>Serializers.ByteArray</c> (ckd auto-selects it for <c>&lt;byte[], byte[]&gt;</c>).
 /// </summary>
 internal sealed class V2SyncProducerBackend : IProducerBackend
 {
+    // fut.result(): blocks the engine's recorder thread until the delivery report resolves the future.
+    private static readonly Func<object, PerfRecordMetadata> s_get = static state =>
+        ((TaskCompletionSource<PerfRecordMetadata>)state).Task.GetAwaiter().GetResult();
+
     private readonly IProducer<byte[], byte[]> _producer;
     private readonly Thread _pollThread;
     private volatile bool _closed;
@@ -51,38 +54,42 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
         _pollThread.Start();
     }
 
-    public PerfRecordMetadata Send(string topic, byte[]? key, byte[]? value)
+    public PerfSendHandle Send(string topic, byte[]? key, byte[]? value)
     {
-        // RunContinuationsAsynchronously: the delivery callback fires on the poll thread; completing the
-        // TCS there must not run a continuation on that thread. GetResult below just parks the caller.
-        var tcs = new TaskCompletionSource<PerfRecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // fut = Future(). RunContinuationsAsynchronously: the delivery report fires on the poll thread, and
+        // completing the TCS there must not run a continuation on that thread. The handle's Get() parks
+        // the recorder thread in a synchronous wait, which is released either way.
+        var fut = new TaskCompletionSource<PerfRecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // def delivery_report(err, msg): set_exception on an error, set_result otherwise.
+        Action<DeliveryReport<byte[], byte[]>> deliveryReport = report =>
+        {
+            if (report.Error.IsError)
+            {
+                fut.TrySetException(new KafkaException(report.Error));
+            }
+            else
+            {
+                fut.TrySetResult(new PerfRecordMetadata(
+                    report.Topic, report.Partition.Value, report.Offset.Value, report.Message.Timestamp.UnixTimestampMs));
+            }
+        };
 
         // ckd's Message.Key/Value are byte[] (not nullable-annotated) but accept null at runtime (a null
         // key = no key, a null value = tombstone), so the null-forgiving operator passes the value through
         // while suppressing CS8601 — the correct interop idiom for ckd's un-annotated surface.
         var message = new Message<byte[], byte[]> { Key = key!, Value = value! };
 
-        // Retry on a full local queue, mirroring CompatibleProducer.send's "while not terminating:
-        // ... except BufferError: sleep-and-retry" — checking the termination signal on every attempt so
-        // a shutdown during a sustained QUEUE_FULL condition (e.g. an unreachable broker) doesn't spin
-        // forever, and so the process actually exits promptly on Ctrl+C/SIGTERM.
+        // while not terminating: produce(...); break / except BufferError: time.sleep(0.001). ckd reports
+        // Python's BufferError as a QUEUE_FULL ProduceException. The termination check on every attempt
+        // keeps a shutdown during a sustained QUEUE_FULL condition (e.g. an unreachable broker) from
+        // spinning forever, so the process exits promptly on Ctrl+C/SIGTERM.
         bool produced = false;
         while (!PerfSignals.Terminating)
         {
             try
             {
-                _producer.Produce(topic, message, report =>
-                {
-                    if (report.Error.IsError)
-                    {
-                        tcs.TrySetException(new KafkaException(report.Error));
-                    }
-                    else
-                    {
-                        tcs.TrySetResult(new PerfRecordMetadata(
-                            report.Topic, report.Partition.Value, report.Offset.Value, report.Message.Timestamp.UnixTimestampMs));
-                    }
-                });
+                _producer.Produce(topic, message, deliveryReport);
                 produced = true;
                 break;
             }
@@ -95,21 +102,20 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
         if (!produced)
         {
             // Bailed out on termination before Produce ever accepted the record. Python leaves the
-            // Future unresolved here (a latent hang if anything ever awaits it); cancel instead so the
-            // blocking wait below returns promptly rather than hanging the shutdown path.
-            tcs.TrySetCanceled();
+            // Future unresolved here (a latent hang for the recorder that waits it); cancel instead so the
+            // recorder's wait returns promptly rather than hanging the shutdown path.
+            fut.TrySetCanceled();
         }
 
-        // Serial blocking: wait for the delivery report before returning (the shared RunSync engine
-        // measures this blocking duration; a delivery failure surfaces as the awaited exception, which
-        // the engine logs-and-continues exactly like the v3 sync path).
-        return tcs.Task.GetAwaiter().GetResult();
+        // return fut
+        return new PerfSendHandle(s_get, fut);
     }
 
     public void Close()
     {
-        // Flush any residual (sync sends already blocked to ack, so normally nothing is pending), then
-        // stop and join the poll thread (CompatibleProducer.close: closed=True; thread.join()).
+        // CompatibleProducer.close does not flush; this keeps a flush for any residual (the engine's recorder
+        // has already waited every send's delivery, so normally nothing is pending). Then stop and join the
+        // poll thread (closed=True; thread.join()).
         _producer.Flush(TimeSpan.FromSeconds(30));
         _closed = true;
         if (_pollThread.IsAlive)
@@ -150,7 +156,7 @@ internal sealed class V2SyncProducerBackend : IProducerBackend
 /// Adapts ckd's <see cref="IProducer{TKey, TValue}"/> to the async (pipelined)
 /// <see cref="IAsyncProducerBackend"/>. ckd has <b>no</b> AIO-style async producer (Python's async v2 wraps
 /// <c>confluent_kafka.aio.AIOProducer</c>); the async v2 backend therefore <b>wraps <c>ProduceAsync</c></b>
-/// (documented deviation — PLAN §1.2 / D5), which returns a <see cref="Task"/> the shared engine's recorder
+/// (documented deviation — M13/P1 PLAN §1.2), which returns a <see cref="Task"/> the shared engine's recorder
 /// awaits. ckd serves <c>ProduceAsync</c> delivery reports on its own internal poll, so no background poll
 /// thread is needed on this path (unlike the sync <see cref="V2SyncProducerBackend"/>).
 /// </summary>

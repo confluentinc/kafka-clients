@@ -19,14 +19,21 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync (serial-blocking)
-/// <see cref="IProducerBackend"/>: <see cref="Send"/> serializes, sends, and blocks in the returned
-/// <see cref="KafkaFuture{T}"/>'s <c>Get()</c> until acknowledged, returning the record metadata (Java
-/// <c>send(record).get()</c>). Bytes go over <c>&lt;byte[], byte[]&gt;</c> +
-/// <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
+/// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>:
+/// <see cref="Send"/> serializes and sends, returning once the producer has accepted the record (Java
+/// <c>send(record)</c>) with the <see cref="KafkaFuture{T}"/> wrapped in a <see cref="PerfSendHandle"/>, whose
+/// <c>Get()</c> the engine's recorder calls (Java <c>future.get()</c>). Bytes go over
+/// <c>&lt;byte[], byte[]&gt;</c> + <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
 /// </summary>
 internal sealed class V3SyncProducerBackend : IProducerBackend
 {
+    // Static, so a send allocates no closure; the KafkaFuture rides in the handle's state.
+    private static readonly Func<object, PerfRecordMetadata> s_get = static state =>
+    {
+        RecordMetadata meta = ((KafkaFuture<RecordMetadata>)state).Get();
+        return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
+    };
+
     private readonly KafkaProducer<byte[], byte[]> _producer;
 
     internal V3SyncProducerBackend(IReadOnlyDictionary<string, string> config)
@@ -34,11 +41,8 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
         _producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
     }
 
-    public PerfRecordMetadata Send(string topic, byte[]? key, byte[]? value)
-    {
-        RecordMetadata meta = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)).Get();
-        return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
-    }
+    public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
+        new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)));
 
     public void Close() => _producer.Close();
 

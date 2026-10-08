@@ -102,7 +102,7 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>Whether to validate each returned <see cref="PerfRecordMetadata"/> (<c>DO_VERIFY</c>, default true).</summary>
     public bool DoVerify { get; private set; }
 
-    /// <summary>Whether to drive the async (pipelined) path instead of the sync (serial-blocking) path (<c>ASYNC</c>, default false).</summary>
+    /// <summary>Whether to drive the async path (Python <c>async_main</c>) instead of the sync path (Python <c>main</c>) (<c>ASYNC</c>, default false).</summary>
     public bool Async { get; private set; }
 
     /// <summary>

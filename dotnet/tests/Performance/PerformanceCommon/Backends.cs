@@ -69,18 +69,57 @@ public readonly struct PolledRecord
     public int NBytes { get; }
 }
 
-// The producer backend is split into a sync and an async interface because the .NET sync
-// IProducer.Send returns RecordMetadata directly (a serial blocking measurement) while the async
-// IAsyncProducer.Send is two-stage (pipelined): it returns a ValueTask that completes when the record is
-// accepted (where Java's send() returns), holding the delivery task — the key .NET-specific deviation from
-// Python, which pipelines both (PLAN §5.1 / D5). Each per-client exe implements the one it drives for a
-// given ASYNC mode; a single unified interface would force every backend to implement the unused shape.
+/// <summary>
+/// The handle a sync producer backend's <see cref="IProducerBackend.Send"/> returns for one record: Python's
+/// <c>concurrent.futures.Future</c> from <c>producer.send(record)</c>, Java's <c>Future&lt;RecordMetadata&gt;</c>.
+/// <see cref="Get"/> blocks until the record is acknowledged and returns its metadata, or rethrows its failure
+/// (<c>future.result()</c> / <c>future.get()</c>). Client-free like <see cref="PerfRecordMetadata"/>: a backend
+/// passes its client's future as the state, with a function that waits it.
+/// </summary>
+public readonly struct PerfSendHandle
+{
+    private readonly Func<object, PerfRecordMetadata>? _get;
+    private readonly object? _state;
 
-/// <summary>The synchronous (serial-blocking) producer backend — <see cref="Send"/> blocks and returns metadata.</summary>
+    /// <summary>Wraps a client's future: <see cref="Get"/> returns <c>get(state)</c>.</summary>
+    /// <param name="get">
+    /// Blocks until <paramref name="state"/> completes, then returns its metadata or throws its failure. Pass a
+    /// static (non-capturing) function, so that a send allocates no closure for it.
+    /// </param>
+    /// <param name="state">The client's future, handed back to <paramref name="get"/>.</param>
+    public PerfSendHandle(Func<object, PerfRecordMetadata> get, object state)
+    {
+        _get = get ?? throw new ArgumentNullException(nameof(get));
+        _state = state ?? throw new ArgumentNullException(nameof(state));
+    }
+
+    /// <summary>Blocks until the record is acknowledged and returns its metadata; a delivery failure is rethrown.</summary>
+    /// <exception cref="InvalidOperationException">The handle is <c>default</c>, so there is no send to wait for.</exception>
+    public PerfRecordMetadata Get() =>
+        _get is null
+            ? throw new InvalidOperationException("default(PerfSendHandle) has no send to wait for.")
+            : _get(_state!);
+}
+
+// The producer backend is split into a sync and an async interface, one per Python loop. The sync one
+// (Python main) returns a PerfSendHandle once the client has accepted the record, and the engine's recorder
+// thread waits it later. The async one (Python async_main) is two-stage: a ValueTask that completes when the
+// record is accepted (where Java's send() returns), holding the delivery task. Each per-client exe
+// implements the one it drives for a given ASYNC mode; a single unified interface would force every backend
+// to implement the unused shape.
+
+/// <summary>
+/// The synchronous producer backend — <see cref="Send"/> returns once the client has accepted the record, with
+/// a <see cref="PerfSendHandle"/> to its delivery.
+/// </summary>
 public interface IProducerBackend : IDisposable
 {
-    /// <summary>Serializes then blocks until the record is acknowledged, returning its metadata (Java <c>send(record).get()</c>).</summary>
-    PerfRecordMetadata Send(string topic, byte[]? key, byte[]? value);
+    /// <summary>
+    /// Serializes and sends the record, returning once the client has accepted it (Java <c>send(record)</c>,
+    /// Python <c>producer.send(record)</c>), with the handle whose <see cref="PerfSendHandle.Get"/> waits for
+    /// its delivery (Java <c>future.get()</c>). A send that fails before it is accepted throws.
+    /// </summary>
+    PerfSendHandle Send(string topic, byte[]? key, byte[]? value);
 
     /// <summary>Flushes and closes the producer, surfacing a close failure.</summary>
     void Close();

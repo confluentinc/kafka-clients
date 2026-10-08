@@ -13,8 +13,10 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -51,19 +53,28 @@ public sealed class ProducerBenchmarkResult
 /// <see cref="IAsyncProducerBackend"/> so it runs identically over any client.
 /// </summary>
 /// <remarks>
-/// <b>The key .NET deviation (PLAN §5.1 / D5).</b> The sync path is a <b>serial blocking</b> measurement
-/// (<c>startMs = now; meta = Send(record); latencyMs = now - startMs; record</c>) — there is no future to
-/// pipeline, so no bounded queue and no recorder task (and never a fake <c>Task.Run</c> pipeline, which
-/// would measure threadpool overhead). The async path <b>is</b> pipelined: the send loop pushes each
-/// <see cref="Task"/> onto a bounded <see cref="Channel"/> (a blocking write is the backpressure) and a
-/// separate recorder task awaits each in order. Both share the verify + metrics + summary code so the two
-/// paths report identically.
+/// Both paths pipeline, as Python's do. The sync path sends on the calling thread and puts each send's
+/// <see cref="PerfSendHandle"/> on a bounded <see cref="BlockingCollection{T}"/> (a blocking <c>Add</c> is the
+/// backpressure); a recorder thread waits the handles in send order. The async path pushes each delivery
+/// <see cref="Task"/> onto a bounded <see cref="Channel"/> (a blocking write is the backpressure), and a
+/// recorder task awaits them in order. Both share the verify + metrics + summary code so the two paths report
+/// identically.
 /// </remarks>
 public static class ProducerBenchmark
 {
+    // The getter of a send that threw before the client accepted it: Get() rethrows the original failure.
+    private static readonly Func<object, PerfRecordMetadata> s_rethrowSendFailure = static state =>
+    {
+        ((ExceptionDispatchInfo)state).Throw();
+        return default;
+    };
+
     /// <summary>
-    /// Runs the <b>sync (serial-blocking)</b> producer benchmark (Python <c>main</c>). Warmup sends are
-    /// awaited inline and never recorded; the measured loop blocks on each send and records it in place.
+    /// Runs the sync producer benchmark, a port of Python's <c>main</c>. Warmup sends are waited inline and
+    /// never recorded. In the measured loop each send returns a <see cref="PerfSendHandle"/>, which goes onto a
+    /// queue bounded at 2 GiB of messages; a recorder thread waits the handles in send order and records each
+    /// one, a failed one included (Python's <c>record_completed_calls</c>). When the loop ends, the recorder
+    /// drains the queue and is joined before the summary.
     /// </summary>
     public static ProducerBenchmarkResult RunSync(
         IProducerBackend backend,
@@ -75,7 +86,7 @@ public static class ProducerBenchmark
         var stats = new RunStats(config);
         long warmupSent = 0;
 
-        // Warmup — inline, never fed to the recorder/histogram (PLAN §5.1).
+        // Warmup — each send waited inline, then a 0.1 s sleep; never fed to the recorder/histogram (Python).
         if (config.WarmupSeconds > 0)
         {
             Console.WriteLine($"Warming up for {config.WarmupSeconds} seconds ...");
@@ -86,7 +97,7 @@ public static class ProducerBenchmark
                 PerfMessage message = messages[i % messages.Length];
                 try
                 {
-                    PerfRecordMetadata meta = backend.Send(config.TopicName, message.Key, message.Value);
+                    PerfRecordMetadata meta = backend.Send(config.TopicName, message.Key, message.Value).Get();
                     Verify(meta, config);
                     warmupSent++;
                 }
@@ -101,6 +112,25 @@ public static class ProducerBenchmark
             }
         }
 
+        // max 2 GiB of in-flight messages in the queue (bounded → backpressure), matching Python.
+        int capacity = (int)Math.Min(int.MaxValue, (2L * 1024 * 1024 * 1024) / Math.Max(1, config.MessageSize));
+        using var produceCalls = new BlockingCollection<(PerfSendHandle Handle, long StartMs)>(capacity);
+        var recorder = new Thread(() =>
+        {
+            // Python waits each queued call in order with get(timeout=1) until main clears its loop flag, then
+            // drains the rest with get_nowait(). CompleteAdding below is that flag; the consuming enumerable
+            // drains the queue and ends once it is empty, with no idle get(timeout=1) at the end.
+            foreach ((PerfSendHandle handle, long startMs) in produceCalls.GetConsumingEnumerable())
+            {
+                RecordCompletedCall(stats, metrics, config, handle, startMs);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "perf-producer-recorder",
+        };
+        recorder.Start();
+
         long beforeMs = Metrics.NowMs();
         long firstTicks = Stopwatch.GetTimestamp();
         long nextCheckTicks = firstTicks + RateLimitSliceTicks(config);
@@ -108,36 +138,52 @@ public static class ProducerBenchmark
         Console.WriteLine($"Starting measured interval at {beforeMs} ms: {DateTime.UtcNow:o}");
 
         long messagesSent = 0;
-        while (ContinueSending(config, messagesSent, cancellationToken))
+        try
         {
-            PerfMessage message = messages[messagesSent % messages.Length];
-            long startMs = Metrics.NowMs();
-            try
+            while (ContinueSending(config, messagesSent, cancellationToken))
             {
-                PerfRecordMetadata meta = backend.Send(config.TopicName, message.Key, message.Value);
-                long latencyMs = Metrics.NowMs() - startMs;
-                RecordCompleted(stats, metrics, config, meta, latencyMs);
-            }
-            catch (Exception ex)
-            {
-                // Mirror producer_performance_test.py:632-648 (record_completed_calls): a failed sync
-                // send is logged and the run CONTINUES — it does not abort. The record still counts as
-                // completed with recorded latency, but is NOT verified; leaving it unverified lets the
-                // Verified != Completed branch in FinishAndSummarize suppress the summary as Python does.
-                // This also matches the async recorder (RunAsync), which already catches-and-continues.
-                Console.WriteLine($"Produce call resulted in exception: {ex.Message}");
-                long latencyMs = Metrics.NowMs() - startMs;
-                RecordFailed(stats, metrics, config, latencyMs);
-            }
+                PerfMessage message = messages[messagesSent % messages.Length];
+                long startMs = Metrics.NowMs();
+                PerfSendHandle handle;
+                try
+                {
+                    handle = backend.Send(config.TopicName, message.Key, message.Value);
+                }
+                catch (Exception ex)
+                {
+                    // A send that fails before the client accepts it (Java's send() throwing): queue its
+                    // failure so the recorder counts it, in order, like a failed delivery — as RunAsync does.
+                    // Python's loop only swallows the RuntimeError a send raises once its signal handler has
+                    // closed the producer; .NET's signal handling cancels the token instead.
+                    handle = new PerfSendHandle(s_rethrowSendFailure, ExceptionDispatchInfo.Capture(ex));
+                }
 
-            messagesSent++;
+                try
+                {
+                    produceCalls.Add((handle, startMs), cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Ctrl-C while the queue is full: stop sending, as Python's loop does on `terminating`.
+                    // The handle in hand is not counted, like RunAsync's canceled channel write.
+                    break;
+                }
 
-            ApplyRateLimit(config, messagesSent, ref nextCheckTicks, cancellationToken);
-            if (messagesSent % 10000 == 0 && DurationExceeded(config, firstTicks))
-            {
-                Console.WriteLine($"Test duration reached, {ElapsedSeconds(firstTicks):F2} seconds. Interrupting...\n");
-                break;
+                messagesSent++;
+
+                ApplyRateLimit(config, messagesSent, ref nextCheckTicks, cancellationToken);
+                if (messagesSent % 10000 == 0 && DurationExceeded(config, firstTicks))
+                {
+                    Console.WriteLine($"Test duration reached, {ElapsedSeconds(firstTicks):F2} seconds. Interrupting...\n");
+                    break;
+                }
             }
+        }
+        finally
+        {
+            // Python: t, record_completed_calls_loop = record_completed_calls_loop, None; t.join()
+            produceCalls.CompleteAdding();
+            recorder.Join();
         }
 
         long afterMs = Metrics.NowMs();
@@ -159,8 +205,9 @@ public static class ProducerBenchmark
     /// thing Ctrl-C is for — "stop, but tell me what you measured" — was the one thing it did not do. Both
     /// guarded regions therefore catch <see cref="OperationCanceledException"/> and fall through to
     /// teardown, mirroring Python's <c>except CancelledError</c> in <c>async_main</c>. The SYNC sibling
-    /// needs none of this: its <c>SleepSeconds</c> uses <c>token.WaitHandle.WaitOne</c>, which returns
-    /// rather than throwing.
+    /// has one token-wired wait, its queue's <c>Add</c>, which it catches before falling through to its own
+    /// drain and join; its <c>SleepSeconds</c> uses <c>token.WaitHandle.WaitOne</c>, which returns rather
+    /// than throwing.
     /// </remarks>
     public static async Task<ProducerBenchmarkResult> RunAsync(
         IAsyncProducerBackend backend,
@@ -341,6 +388,25 @@ public static class ProducerBenchmark
         }
 
         return config.NumMessages <= 0 || messagesSent < config.NumMessages;
+    }
+
+    // Python record_completed_calls: wait the call and verify it, then count it as completed with its latency.
+    // A failed call is logged and counted but left unverified, and the run continues.
+    private static void RecordCompletedCall(RunStats stats, Metrics metrics, ProducerBenchmarkConfig config, PerfSendHandle handle, long startMs)
+    {
+        PerfRecordMetadata meta;
+        try
+        {
+            meta = handle.Get();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Produce call resulted in exception: {ex.Message}");
+            RecordFailed(stats, metrics, config, Metrics.NowMs() - startMs);
+            return;
+        }
+
+        RecordCompleted(stats, metrics, config, meta, Metrics.NowMs() - startMs);
     }
 
     private static void RecordCompleted(RunStats stats, Metrics metrics, ProducerBenchmarkConfig config, PerfRecordMetadata meta, long latencyMs)

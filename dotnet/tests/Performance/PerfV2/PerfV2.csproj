@@ -39,10 +39,10 @@
         CA1031 — the mode entry points catch System.Exception broadly on purpose (a faithful port of the
                  Python perf tests' try/except Exception around close/verify, which logs and continues);
                  same relaxation as PerfV3 / PerformanceCommon.
-        CA1849 — inside the sync (serial-blocking) producer backend we intentionally block a delivery
-                 TaskCompletionSource on the caller thread (the ckd sync path has no blocking produce;
-                 CompatibleProducer's future is awaited synchronously to present the sync backend shape).
-                 The analyzer would prefer an async call, but the sync backend is sync by contract (D5).
+        CA1849 — the sync producer backend's send handle intentionally blocks on a delivery
+                 TaskCompletionSource, on the engine's recorder thread (the ckd sync path has no blocking
+                 produce; CompatibleProducer's future is waited synchronously, as Python's fut.result()).
+                 The analyzer would prefer an async call, but the sync backend is sync by contract.
     -->
     <NoWarn>$(NoWarn);CA1031;CA1849</NoWarn>
   </PropertyGroup>
