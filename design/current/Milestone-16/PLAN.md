@@ -1073,6 +1073,19 @@ Phase 3 completion notes (agent 93):
   Rust already rejects a negative size with different text, `default_record.rs`); the broker-side
   `maxRecordBodySize` iterators stay out of scope. Reclassified from Broker/O by the Manager after the
   Phase 1 review (COMMENTS.91 Q2).
+  - **After merging master's `a4b3311e` (#205, decode & decompression DoS; agent 93):** master already
+    rejects a negative body size in both `DefaultRecord::read_from_buffer` and `read_from_stream` (the text
+    is still "Invalid record size: expected non-negative size but got N", not Java's "Invalid record size: N
+    is negative."). On the stream path, `read_from_stream` no longer sizes its buffer from the declared size:
+    it reads through `take(size)` and fails with Java's end-of-payload text, so the OOM that motivated
+    Java's upper bound is already closed. Phase 10 still owes three things. First, Java's negative-size
+    message text. Second, the explicit upper-bound check before the read, "Invalid record size: N exceeds
+    the configured maximum record size of M." with `M = Records.SOFT_MAX_ARRAY_LENGTH`
+    (`Integer.MAX_VALUE - 8`, `Records.java:62`); that is the client default, and Rust has no such constant
+    yet. Third, the tests for both, from the consumer-relevant cases in `DefaultRecordTest`. Rust has no
+    `readPartiallyFrom`, no `skipKeyValueIterator` / `streamingIterator(…, maxRecordBodySize)` overloads and
+    no legacy deep-decode (`legacy_record.rs` holds only constants), so the `AbstractLegacyRecordBatch` and
+    iterator parts of b69c07c816 have no Rust counterpart and stay out of scope.
 - Test-only commits:
   - a5137f7c38, 624ca392ef, 7c010c7583, 1a46339e90, 16e976ac8e, 159d696005, c75e10d229 (KafkaConsumerTest
     hunks);
@@ -1331,3 +1344,35 @@ Phase → P/T commit counts (sum 68): P0 2 (plus the spec-only syncs), P1 7, P2 
 P7+P8 1 (+1 trunk commit for D3), P9 6, P10 18, P11 2, P12 4. (b69c07c816 moved from Broker/O to Consumer/P for Phase 10 after the
 Phase 1 review; 28de22de34 moved from Phase 9 to Phase 3, which needed it for KAFKA-21010 and the
 bootstrap-window spin.)
+
+### Merges into milestone-16-ak-4.4 (agent 93)
+
+- **`73badfd9`: `origin/master` merged in.** Master was 1 commit ahead: `a4b3311e`, "Fix untrusted broker
+  input - decode & decompression DoS (#205)". There were no textual conflicts. Three files were changed on
+  both sides since the merge base `7ccc9ffb`, and each was checked by hand:
+  - `common/network/selector.rs`: master's `InvalidReceiveError` routing (`channel_error_log`, WARN
+    "Unexpected error …") and Phase 3's fired-queue drain at the top of every poll iteration (`a269808f`)
+    sit in disjoint hunks. Both are kept.
+  - `default_record.rs`: the milestone only changed the `ByteUtils` import path. Master's bounded
+    `take(size)` stream read is kept.
+  - `produce_request.rs`: Phase 1's bounded generated-reader tests and master's `validate_records` rewrite
+    over `ByteBufferLogInputStream` are independent. Both are kept.
+  - The milestone has not touched `completed_fetch.rs` or the other record files, so master's changes
+    applied as they are.
+  - The b69c07c816 split (what master covers and what Phase 10 still owes) is recorded under Phase 10.
+- **`bdaf958a`: `milestone-16-admin` merged in (Phase 12, `852f5063`, forked at `ed2e3ce3`).** There were no
+  conflicts. The only file both sides changed is this PLAN, in different sections. Phase 3 did not touch
+  `kafka_admin_client.rs`, `call.rs` or `admin_client_runnable.rs`. Phase 12's open questions (the
+  close grace period and `unregisterBroker`) stay open.
+- **Gates after both merges.**
+  - `cargo build` is green, and `cargo xtask format-check` is clean.
+  - `cargo test`: 4443 passed, 0 failed, 10 ignored (lib 4394 / 3).
+  - `cargo xtask lint --keep-going`: lint-custom shows exactly the 15 §5.1 rows, the same set as Phase 3
+    (Phase 5 2, Phases 7/8 2, Phase 9 1, Phase 11 10). Clippy, doc-hygiene and module-path are clean.
+- **Broker tests**, on the default broker under `lockf … m16-broker.lock`:
+  - the lib suite, `--lib -- integration_tests::`: 32/32;
+  - `--test integration -- plaintext_consumer consumer_test base_consumer_test bootstrap_resolution_test
+    consumer_topic_creation_test consumer_bounce_test`: 106 passed / 2 ignored;
+  - `-- admin`: 82/82.
+  - Everything passed on the first run.
+- `make verify` was skipped (no cmake). `git status --ignored` shows no new untracked or ignored files.
