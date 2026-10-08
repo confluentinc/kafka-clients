@@ -92,7 +92,7 @@
 //! [`ConsumerNetworkThread::maybe_fail_on_metadata_error_uncompleted`]
 //! which mirrors Java's `maybeFailOnMetadataError(uncompletedEvents)`:
 //! query the delegate for a pending metadata error and, if present,
-//! call `fail_with_timeout(err)` on every notifiable handle that is not
+//! call `complete_with_error(err)` on every notifiable handle that is not
 //! yet done. The per-event arm inside
 //! [`ConsumerNetworkThread::process_application_events`] (Java step 1's
 //! `maybeFailOnMetadataError(List.of(event))` arm) covers "immediately
@@ -687,10 +687,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     ///     (`getAndClearMetadataError`). Java has the same "optimisation"
     ///     guard.
     ///   - If a metadata error IS present, call
-    ///     `fail_with_timeout(err)` on every live handle. Java calls
+    ///     `complete_with_error(err)` on every live handle. Java calls
     ///     `e.onMetadataError(metadataError.get())` which for these
     ///     four variants resolves to `handle.completeExceptionally(...)`
-    ///     — exactly what `fail_with_timeout` does.
+    ///     — exactly what `complete_with_error` does.
     ///
     /// Called by `run_once` after the reap step, passing the iteration's
     /// delegate guard (Phase 27 Fix #1: `run_once` holds a single guard
@@ -719,12 +719,12 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // Java: `e.onMetadataError(metadataError.get())` resolves
             // to `handle.completeExceptionally(metadataError)` for each
             // of the four notifiable+completable variants. Our erased
-            // handle's `fail_with_timeout(err)` calls
+            // handle's `complete_with_error(err)` calls
             // `tx.send(Err(err))` on the inner oneshot — identical
             // semantics. The method is misnamed in Rust for historical
             // reasons (it was originally only used by the reaper); the
             // generic implementation accepts any `Error`.
-            handle.fail_with_timeout(err.clone());
+            handle.complete_with_error(err.clone());
         }
         // The handles will be pruned on the next iteration's
         // `retain(!is_done)` pass.
@@ -806,12 +806,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // 1. Register with the reaper if completable. The Java
             // `CompletableEvent` interface check is replaced by the
             // `erased_handle()` accessor on [`ApplicationEvent`].
-            if let Some(erased) = env.event.erased_handle() {
+            let completable = env.event.erased_handle();
+            if let Some(erased) = &completable {
                 let mut reaper = match self.application_event_reaper.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
-                reaper.add(erased);
+                reaper.add(Arc::clone(erased));
             }
 
             // 1b. Track notifiable+completable events in the parallel
@@ -851,12 +852,29 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 continue;
             }
 
-            // 3. Normal dispatch. Java wraps in a `try { ... } catch
-            // (Throwable t) { log.warn(...) }`; Rust's processor is
-            // already infallible by signature (`fn process(&mut self,
-            // event)`) — any panic would unwind the bg task. The
-            // surrounding tokio::spawn entry point owns the catch.
-            self.application_event_processor.process(env.event);
+            // 3. Normal dispatch, under Java's `try { ... } catch (Throwable
+            // t)`. Rust's processor is infallible by signature (`fn
+            // process(&mut self, event)`): it completes each event's handle
+            // itself, so what Java's catch-all guards against, a throw out of
+            // `process`, is a panic here. KAFKA-18812: log it at ERROR and
+            // complete the event's future with the failure, rather than
+            // leaving the caller to time out on the reaper.
+            //
+            // `AssertUnwindSafe` because `&mut self.application_event_processor`
+            // is not `UnwindSafe`. What a caught unwind leaves behind is what
+            // Java's thread holds after its own catch (the `Sender` and
+            // `NetworkClient::complete_responses` use the same idiom).
+            let event = env.event;
+            let processor = &mut self.application_event_processor;
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || processor.process(event)))
+            {
+                let message = Self::panic_message(payload.as_ref());
+                log::error!("Error processing event {message}");
+                if let Some(erased) = completable {
+                    erased.complete_with_error(crate::common::Error::kafka_message(message));
+                }
+            }
         }
         // Java CNT:273 — record the total processing time for the batch.
         if let Some(metrics) = &metrics {
@@ -864,6 +882,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
+    }
+
+    /// The text of a caught panic, standing in for Java's `t.getMessage()`.
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else {
+            "unknown panic".to_string()
+        }
     }
 
     /// Test-only helper that pushes an erased handle directly onto
@@ -1823,6 +1852,51 @@ mod tests {
         );
     }
 
+    /// Translated from `ConsumerNetworkThreadTest.testProcessEventFailureCompletesFutureExceptionally`
+    /// (KAFKA-18812): when processing an event fails, its future is completed
+    /// with the failure instead of being left for the reaper to time out.
+    ///
+    /// Java stubs `process` to throw a `RuntimeException`; the Rust processor
+    /// cannot return an error, so the `fail_process_for_test` seam makes it
+    /// panic, and the loop's catch completes the event with a bare Kafka error
+    /// carrying the failure's message (Java's `ConsumerUtils.getResult` wraps
+    /// the cause in a `KafkaException`).
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testProcessEventFailureCompletesFutureExceptionally"
+    )]
+    async fn test_process_event_failure_completes_future_exceptionally() {
+        let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+        thread.application_event_processor.fail_process_for_test = Some("Simulated processing failure".to_string());
+
+        let now_ms = time.milliseconds();
+        let (handle, mut rx, _erased) = CompletableEvent::make_completable_event::<()>(now_ms + 1_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::PausePartitions { handle, partitions: std::collections::HashSet::new() },
+            enqueued_ms: now_ms,
+        })
+        .expect("bg receiver alive");
+
+        thread.run_once().await;
+
+        let result = rx
+            .try_recv()
+            .expect("Event future should be completed after processing failure");
+        let err = result.expect_err("Event future should be completed exceptionally");
+        assert!(matches!(err, Error::KafkaError(_)), "a bare KafkaException: {err:?}");
+        assert_eq!("Simulated processing failure", err.message());
+        // The loop survives the failure: a later event is still processed.
+        thread.application_event_processor.fail_process_for_test = None;
+        let (handle, mut rx, _erased) = CompletableEvent::make_completable_event::<()>(now_ms + 1_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::PausePartitions { handle, partitions: std::collections::HashSet::new() },
+            enqueued_ms: now_ms,
+        })
+        .expect("bg receiver alive");
+        thread.run_once().await;
+        rx.try_recv().expect("processed").expect("succeeds");
+    }
+
     /// Java `testRunOnceInvokesReaper`. Verifies `runOnce` invokes
     /// the reaper. Mockito: `verify(applicationEventReaper).reap(any(Long.class))`.
     /// Rust observes via a same-instant-deadline tracked event whose
@@ -2057,7 +2131,7 @@ mod tests {
     ///   3. `run_once`'s Phase-7 arm calls
     ///      `maybe_fail_on_metadata_error_uncompleted`, which observes
     ///      the live notifiable handle, consumes the delegate error,
-    ///      and `fail_with_timeout`s the inner oneshot.
+    ///      and `complete_with_error`s the inner oneshot.
     ///   4. The app-side receiver sees the error variant intact (no
     ///      `Timeout` wrap).
     ///

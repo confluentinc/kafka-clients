@@ -120,6 +120,13 @@ pub(crate) struct ApplicationEventProcessor {
     /// current time as a `current_time_ms` / `now_ms` argument, so the
     /// processor reads it here from the same clock and passes it in.
     time: Arc<dyn Time>,
+    /// Test seam standing in for Java's
+    /// `doThrow(processingError).when(applicationEventProcessor).process(any())`
+    /// (`ConsumerNetworkThreadTest.testProcessEventFailureCompletesFutureExceptionally`):
+    /// when set, [`EventProcessor::process`] panics with this message, the Rust
+    /// analog of an unchecked throw out of `process`.
+    #[cfg(test)]
+    pub(crate) fail_process_for_test: Option<String>,
 }
 
 impl ApplicationEventProcessor {
@@ -150,6 +157,8 @@ impl ApplicationEventProcessor {
             application_event_reaper,
             metadata_version_snapshot,
             time,
+            #[cfg(test)]
+            fail_process_for_test: None,
         }
     }
 
@@ -1464,6 +1473,10 @@ fn is_ignorable_async_poll_error(err: &Error) -> bool {
 
 impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
     fn process(&mut self, event: ApplicationEvent) {
+        #[cfg(test)]
+        if let Some(message) = &self.fail_process_for_test {
+            std::panic::panic_any(message.clone());
+        }
         match event {
             // ───── Synchronous arms (this commit, 4/N) ─────
             ApplicationEvent::AssignmentChange { handle, current_time_ms, partitions } => {
