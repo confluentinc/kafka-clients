@@ -1693,6 +1693,43 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     assert str(err.value) == CLOSED
 
 
+def test_an_async_completion_after_its_loop_closed_is_dropped(
+        caplog: pytest.LogCaptureFixture) -> None:
+    # The callback runs on the event loop (CLAUDE.md, Python Binding
+    # Conventions, Threads and callbacks), and a future only its own loop can
+    # complete: a record that completes after its loop closed is dropped with a
+    # warning, its callback not run on the completion thread, its future no
+    # longer tracked, so a flush() and close() from a fresh loop return. The
+    # send fails on its metadata wait after max.block.ms, long after the loop
+    # closed.
+    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 1000})
+    ran: list[Exception | None] = []
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.run_until_complete(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+    finally:
+        loop.close()
+    assert future in p._futures  # noqa: SLF001
+    deadline = time.monotonic() + 30
+    while future in p._futures and time.monotonic() < deadline:  # noqa: SLF001
+        time.sleep(0.05)
+    assert future not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.done()
+    assert [r.getMessage() for r in caplog.records if r.name == "confluent_kafka.producer"] == [
+        f"The completion of a record sent to topic-partition '{TOPIC}--1' was dropped: its "
+        "event loop had closed, so its callback did not run and its future does not complete"]
+
+    async def flush_and_close() -> None:
+        await asyncio.wait_for(p.flush(), 30)
+        await asyncio.wait_for(p.close(), 30)
+
+    asyncio.run(flush_and_close())
+    assert p._closed  # noqa: SLF001
+
+
 async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
     # Its entry point has an _async form, so begin_transaction() is a
     # coroutine (Class family). Critic 75 N1: a record still waiting for its

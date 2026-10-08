@@ -30,6 +30,7 @@ Every waiting call awaits an ``asyncio.Future`` completed through
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
@@ -70,6 +71,8 @@ __all__ = ["AsyncProducer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
+
+_LOG = logging.getLogger("confluent_kafka.producer")
 
 # A completion the C poll thread buffered for the event loop:
 # (future, callback, topic, partition, metadata handle, error handle).
@@ -155,7 +158,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         without blocking the loop; it raises what :meth:`Producer.send` raises. The returned
         ``asyncio.Future`` resolves with the record's metadata. The
         ``callback`` runs on the event loop, before the future completes, and
-        must not block it."""
+        must not block it. A record that completes after its event loop has
+        closed is dropped with a warning on the ``confluent_kafka.producer``
+        logger: its callback does not run and its future does not complete."""
         if callback is UNSET:
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
@@ -182,8 +187,16 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                         rethrown = completion_to_python(result, error, topic, partition)[1]
                         return
             if loop.is_closed():
-                metadata, exception = completion_to_python(result, error, topic, partition)
-                invoke_callback(self, callback, metadata, exception)
+                # No loop can run the callback (it runs on the event loop) or
+                # complete the future any more: the completion is dropped, its
+                # handles freed, and the future untracked, so a later flush()
+                # does not wait for it.
+                metadata, _ = completion_to_python(result, error, topic, partition)
+                self._futures.discard(future)
+                _LOG.warning("The completion of a record sent to topic-partition '%s' was "
+                             "dropped: its event loop had closed, so its callback did not "
+                             "run and its future does not complete",
+                             f"{metadata.topic()}-{metadata.partition()}")
                 return
             with self._pending_lock:
                 pending = self._pending.get(loop)
