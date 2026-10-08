@@ -1,0 +1,21 @@
+# Soak-run artifacts. These are produced ON the soak box and are never committed.
+
+# Written by build.sh; read by the client at startup (run.sh points at it).
+build-manifest.json
+
+# The operator's real AWS resource identifiers (create-ec2.env.example is the
+# committed template). This file names a real account's network/IAM structure
+# and must never land in a public repo.
+create-ec2.env
+
+# The operator's filled-in client config (ccloud.config.example is the template).
+# It carries an API key and secret. The committed *.example templates are kept.
+ccloud.config
+*.config
+!*.config.example
+
+# Supervisor + client output.
+*.log
+*.log.prev.bz2
+*.jsonl
+*.FAILED

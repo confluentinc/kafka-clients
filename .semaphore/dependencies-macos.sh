@@ -57,6 +57,18 @@ if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
   command -v pkg-config >/dev/null || brew install pkgconf
 fi
 
+# MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
+# native .NET gRPC server (make build-grpc-native-dotnet) runs Grpc.Tools'
+# protoc, and Grpc.Tools ships no macOS arm64 protoc, so on this arm64 agent it
+# runs the macosx_x64 one under Rosetta 2. The check runs an x86_64 slice of
+# /usr/bin/true and skips the install when that already works. Only the job that
+# needs Rosetta sets this variable.
+if [ "${MACOS_ENSURE_ROSETTA:-}" = "true" ]; then
+  if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+    sudo softwareupdate --install-rosetta --agree-to-license
+  fi
+fi
+
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
 # setup above always runs). Intended for blocks whose tests need no container;
 # no block currently sets it.

@@ -26,9 +26,10 @@
 //! [`BackendMode`] selects how a backend runs, via `MULTILANG_BACKEND_MODE`:
 //!
 //! - **`container`** (default on Linux) — a Docker container attached to the
-//!   broker's network, exposing a fixed internal port (50051 python / 50052 c)
-//!   that testcontainers maps to a **random** host port. The server reaches the
-//!   broker through its CONTAINER-family listener.
+//!   broker's network, exposing a fixed internal port (50051 python / 50052 c /
+//!   50053 dotnet and dotnet_async — separate containers) that testcontainers
+//!   maps to a **random** host port. The server reaches the broker through its
+//!   CONTAINER-family listener.
 //! - **`native`** (default on all other platforms, e.g. macOS) — the same gRPC
 //!   server run as a child process on the host, bound to an ephemeral port on
 //!   `127.0.0.1` that it reports on startup. The server connects to the broker
@@ -108,6 +109,15 @@ pub enum BackendKind {
     /// Distinct image from [`BackendKind::Python`]; see `Dockerfile.grpc.async`.
     PythonAsync,
     C,
+    /// The .NET binding's synchronous backend (consumer M8/P1, producer M12/P1, admin
+    /// M15/P12). The image serves `ConsumerService`, `ProducerService` and
+    /// `AdminService` (see `dotnet/Dockerfile.grpc`).
+    Dotnet,
+    /// The .NET binding's asynchronous `AsyncKafkaConsumer` backend (M8/P2). Distinct
+    /// image from [`BackendKind::Dotnet`] (see `dotnet/Dockerfile.grpc.async`),
+    /// which bakes `CONSUMER_FLAVOR=async`. Serves `ConsumerService` and, since the producer
+    /// M12/P1 work, `ProducerService`; there is no async admin surface, so no `AdminService`.
+    DotnetAsync,
 }
 
 impl BackendKind {
@@ -116,6 +126,8 @@ impl BackendKind {
             BackendKind::Python => "confluent-kafka-rust/python-grpc-server",
             BackendKind::PythonAsync => "confluent-kafka-rust/python-async-grpc-server",
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
+            BackendKind::Dotnet => "confluent-kafka-rust/dotnet-grpc-server",
+            BackendKind::DotnetAsync => "confluent-kafka-rust/dotnet-async-grpc-server",
         }
     }
 
@@ -128,6 +140,10 @@ impl BackendKind {
             BackendKind::Python => 50051,
             BackendKind::PythonAsync => 50051,
             BackendKind::C => 50052,
+            BackendKind::Dotnet => 50053,
+            // Mirror Python: the async .NET server binds the same 50053 as the sync one —
+            // they run in separate containers, so the internal ports don't collide.
+            BackendKind::DotnetAsync => 50053,
         }
     }
 
@@ -136,6 +152,8 @@ impl BackendKind {
             BackendKind::Python => "python",
             BackendKind::PythonAsync => "python_async",
             BackendKind::C => "c",
+            BackendKind::Dotnet => "dotnet",
+            BackendKind::DotnetAsync => "dotnet_async",
         }
     }
 
@@ -146,6 +164,13 @@ impl BackendKind {
     /// (`MULTILANG_PYTHON` overrides it); the generated gRPC stubs live under
     /// `target/grpc-native/python` and are put on `PYTHONPATH`. C runs the
     /// server binary built by CMake (`MULTILANG_C_GRPC_SERVER` overrides it).
+    /// .NET runs the server assembly with the `dotnet` host resolved through
+    /// `PATH` (`MULTILANG_DOTNET` overrides it); the assembly is the net10.0
+    /// build under `target/grpc-native/dotnet`, with the native library beside
+    /// it (`MULTILANG_DOTNET_GRPC_SERVER` overrides it). Both .NET kinds run the
+    /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
+    /// or async servicers, so a value inherited from the test process cannot
+    /// change the flavor.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -176,6 +201,22 @@ impl BackendKind {
                     .unwrap_or_else(|| root.join("target/grpc-native/c/kafka_grpc_server"));
                 require_native_artifact(self, &server, "build-grpc-native-c");
                 (Command::new(server), "build-grpc-native-c")
+            },
+            BackendKind::Dotnet | BackendKind::DotnetAsync => {
+                let dotnet = std::env::var_os("MULTILANG_DOTNET")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("dotnet"));
+                let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
+                require_native_artifact(self, &server, "build-grpc-native-dotnet");
+                let flavor = match self {
+                    BackendKind::DotnetAsync => "async",
+                    _ => "sync",
+                };
+                let mut command = Command::new(dotnet);
+                command.arg(server).env("CONSUMER_FLAVOR", flavor);
+                (command, "build-grpc-native-dotnet")
             },
         }
     }
