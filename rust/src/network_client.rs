@@ -1238,7 +1238,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_flight_requests
                 .increment_throttle_time(node_id, throttle_time_ms as i64);
             self.connection_states.throttle(node_id, now + throttle_time_ms as i64);
-            kafka_trace!(
+            // `log.warn` since KAFKA-19117 (525b278288, `NetworkClient.java:1076`).
+            kafka_warn!(
                 self.log_context,
                 "Connection to node {} is throttled for {} ms until timestamp {}",
                 node_id,
