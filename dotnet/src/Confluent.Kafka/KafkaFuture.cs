@@ -28,8 +28,9 @@ namespace Confluent.Kafka;
 /// <remarks>
 /// <list type="bullet">
 /// <item><b>Send does not wait for delivery.</b> <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue})"/>
-/// returns once the core has accepted the record (it blocks only while <c>buffer.memory</c> is full, up to
-/// <c>max.block.ms</c> — Java's <c>send</c> blocking). The key and value buffers are reusable on return.</item>
+/// returns once the core has accepted the record (it blocks only while the core waits for metadata or for
+/// <c>buffer.memory</c>, up to <c>max.block.ms</c> — Java's <c>send</c> blocking). The key and value buffers
+/// are reusable on return.</item>
 /// <item><b>Get blocks the calling thread</b> on a managed latch — not a <c>Task</c>, so this is not
 /// sync-over-async. Call it any number of times from any number of threads; every call returns the
 /// same <typeparamref name="T"/> or rethrows the same exception.</item>
