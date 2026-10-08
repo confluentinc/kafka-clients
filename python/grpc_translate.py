@@ -90,7 +90,7 @@ def _kafka_error_to_proto(err):
     proto KafkaError.
 
     `code` is the only discriminator the proto carries, and that is enough:
-    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    it is the FFI error code (kafka_common_ErrorCode_e), which is injective
     over the client's error classes, so the Rust client derives the class from
     it. This is what retired `_guess_variant`, which substring-matched the
     message text to recover a class the code could not carry back when several

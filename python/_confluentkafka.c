@@ -1438,11 +1438,11 @@ static int error_is_fatal(const kafka_common_Error_t* e) {
     if (kafka_common_Error_is_authentication_error(e)) return 1;
     if (kafka_common_Error_is_authorization_error(e)) return 1;
     switch (kafka_common_Error_code(e)) {
-        case kafka_common_ErrorCode_MISMATCHED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_SECURITY_DISABLED:
-        case kafka_common_ErrorCode_UNSUPPORTED_VERSION:
-        case kafka_common_ErrorCode_UNSUPPORTED_ENDPOINT_TYPE:
-        case kafka_common_ErrorCode_UNSUPPORTED_FOR_MESSAGE_FORMAT:
+        case kafka_common_ErrorCode_e_MISMATCHED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_e_SECURITY_DISABLED:
+        case kafka_common_ErrorCode_e_UNSUPPORTED_VERSION:
+        case kafka_common_ErrorCode_e_UNSUPPORTED_ENDPOINT_TYPE:
+        case kafka_common_ErrorCode_e_UNSUPPORTED_FOR_MESSAGE_FORMAT:
             return 1;
         default:
             return 0;
@@ -2042,11 +2042,6 @@ static PyObject* topic_partition_list_to_py(kafka_common_TopicPartitionList_t* l
 // mirrors a Java listener throwing out of onPartitionsRevoked/Assigned/Lost:
 // the rebalance (and the poll that drove it) fails with that message.
 
-// Error code used for a Python listener exception. UnknownServerError (-1) is
-// the closest analogue to Java wrapping an arbitrary listener throwable, and is
-// what the FFI also reports for a rejected reentrant call.
-#define PY_LISTENER_ERROR_CODE (-1)
-
 // Convert the currently set Python exception into an error handle, clearing the
 // indicator (it must be clean before returning into Rust). The GIL must be held.
 static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
@@ -2055,8 +2050,10 @@ static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
     PyErr_NormalizeException(&type, &value, &tb);
     PyObject* text = value ? PyObject_Str(value) : NULL;
     const char* msg = text ? PyUnicode_AsUTF8(text) : NULL;
-    kafka_common_Error_t* err =
-        kafka_common_Error_new(PY_LISTENER_ERROR_CODE, msg ? msg : fallback);
+    // The bare KafkaException, which is what Java wraps an arbitrary listener
+    // throwable in; its code is UnknownServerError (-1), the same the FFI
+    // reports for a rejected reentrant call.
+    kafka_common_Error_t* err = kafka_common_Error_kafka_message(msg ? msg : fallback);
     Py_XDECREF(text);
     Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
     PyErr_Clear();  // defensive: PyObject_Str / NormalizeException may re-set it

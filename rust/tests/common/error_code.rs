@@ -14,7 +14,7 @@
 
 //! Error-code constants -- GENERATED, DO NOT EDIT.
 //!
-//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! Generated from `kafka_common_ErrorCode_e` in `src/ffi/common.rs` by
 //! `cargo xtask generate-error-codes`, and checked for staleness by
 //! `cargo xtask check-generated`.
 //!

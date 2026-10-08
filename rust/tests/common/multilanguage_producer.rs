@@ -427,7 +427,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
     // `code` is the sole discriminator. It is the FFI error code
-    // (`kafka_common_ErrorCode_t`), which is injective over the client's error
+    // (`kafka_common_ErrorCode_e`), which is injective over the client's error
     // classes, so it identifies the class on its own — that is why the proto no
     // longer carries a `variant` field and neither server hand-matches message
     // text any more.

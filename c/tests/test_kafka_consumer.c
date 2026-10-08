@@ -93,7 +93,7 @@ void test_kafka_consumer_classic_protocol_rejected(void) {
     /* Construction must fail: classic protocol is not supported (KIP-848 only). */
     TEST_ASSERT_NULL(consumer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_UNSUPPORTED_VERSION,
                             kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
 }
@@ -144,7 +144,7 @@ void test_kafka_consumer_wakeup_before_poll(void) {
        against the unreachable broker. */
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
                             kafka_common_Error_code(poll_err));
     kafka_common_Error_destroy(poll_err);
 
@@ -192,7 +192,7 @@ void test_kafka_consumer_wakeup_from_other_thread(void) {
        error is exactly Wakeup -- not a timeout or a connection failure. */
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
                             kafka_common_Error_code(poll_err));
     kafka_common_Error_destroy(poll_err);
 

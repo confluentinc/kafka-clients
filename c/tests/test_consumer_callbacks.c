@@ -379,10 +379,10 @@ static void test_commit_returns_only_after_callback_returns(void) {
 // ---------------------------------------------------------------------------
 
 /* `LocalConcurrentModificationError` has a code of its own: every error class is
- * now injective over `kafka_common_ErrorCode_t`, so a client-side class no longer
+ * now injective over `kafka_common_ErrorCode_e`, so a client-side class no longer
  * collapses onto UnknownServerError (-1) the way it once did. A handle op must
  * NEVER produce it. */
-#define CONCURRENT_MODIFICATION_CODE (kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION)
+#define CONCURRENT_MODIFICATION_CODE (kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION)
 
 /* Substring of the core's `unsupported_version` message for a handle obtained
  * from a MockConsumer (`ConsumerHandle::async_state`). */
@@ -768,7 +768,7 @@ static kafka_common_Error_t *on_assigned(kafka_common_TopicPartitionList_t *part
     if (r->assigned_fails) {
         /* The C equivalent of the Java listener throwing: ownership of the
          * handle transfers to the client, which turns it back into an `Err`. */
-        return kafka_common_Error_new(-1, LISTENER_ERROR_MESSAGE);
+        return kafka_common_Error_kafka_message(LISTENER_ERROR_MESSAGE);
     }
     return NULL;
 }

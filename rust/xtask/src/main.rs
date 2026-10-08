@@ -148,10 +148,10 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 }
 
 // ---------------------------------------------------------------------------
-// Error-code constants generated from `kafka_common_ErrorCode_t`
+// Error-code constants generated from `kafka_common_ErrorCode_e`
 // ---------------------------------------------------------------------------
 //
-// `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
+// `src/ffi/common.rs`'s `kafka_common_ErrorCode_e` is the one place the error
 // codes are declared. C sees them through the cbindgen-generated header, so it
 // needs nothing here. `tests/common/error_code.rs` cannot include that header
 // and needs a copy of the values, and copies are what drift: the multilanguage
@@ -170,20 +170,20 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
 const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
 
-/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
+/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_e`.
 fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
     let source = fs::read_to_string(ERROR_CODE_SOURCE)?;
     let body = source
-        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .split_once("pub enum kafka_common_ErrorCode_e {")
         .map(|(_, rest)| rest)
-        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e not found"))?;
     // The enum is the only item declared before the next top-level `}`.
     let body = body.split_once("\n}").map(|(body, _)| body).unwrap_or(body);
 
     let mut codes = Vec::new();
     for line in body.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") else {
+        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_e_") else {
             continue;
         };
         let Some((name, value)) = rest.split_once(" = ") else {
@@ -193,7 +193,7 @@ fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
         codes.push((name.to_string(), value));
     }
     if codes.is_empty() {
-        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e has no enumerators");
     }
     Ok(codes)
 }
@@ -217,7 +217,7 @@ fn error_codes_rust(codes: &[(String, i32)], classes: &[(String, String)]) -> an
 
 //! Error-code constants -- GENERATED, DO NOT EDIT.
 //!
-//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! Generated from `kafka_common_ErrorCode_e` in `src/ffi/common.rs` by
 //! `cargo xtask generate-error-codes`, and checked for staleness by
 //! `cargo xtask check-generated`.
 //!
@@ -313,7 +313,7 @@ const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
 /// `Errors::error_with_message` that yields an error.
 ///
 /// Each arm is `Self::<Variant> => Some(<expr>)`; the enumerator name is the
-/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_t`
+/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_e`
 /// spells Java's `Errors` constants. An arm naming no enumerator is an error, so
 /// the two tables cannot drift apart silently.
 fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, String)>> {
@@ -365,7 +365,7 @@ fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, S
         };
         let name = screaming_snake(&variant);
         if !known.contains(name.as_str()) {
-            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_{name}` enumerator");
+            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_e_{name}` enumerator");
         }
         classes.push((name, inner.to_token_stream().to_string()));
     }

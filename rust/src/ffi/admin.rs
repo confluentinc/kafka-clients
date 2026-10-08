@@ -861,8 +861,7 @@ fn to_cstring(s: &str) -> CString {
 /// hand out a borrowed `*const kafka_common_Error_t` without a separate
 /// heap allocation per key.
 fn error_inner(error: Error) -> ErrorInner {
-    let message_cstring = CString::new(error.message()).unwrap_or_default();
-    ErrorInner { error, message_cstring }
+    ErrorInner::new(error)
 }
 
 /// Returns a borrowed error pointer for `slot`, or null when the key succeeded.

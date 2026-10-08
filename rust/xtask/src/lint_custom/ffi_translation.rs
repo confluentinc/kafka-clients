@@ -96,7 +96,9 @@
 //! its own"); `Dyn<Trait>` maps onto `Trait`; the package-less `rust-only`
 //! helpers (`kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`,
 //! [`C_ONLY_FREE_FUNCTIONS`]) stand for JDK types and are accepted with any
-//! functions under their prefix; a trait method with `where Self: Sized`
+//! functions under their prefix; the numeric error code ([`C_ONLY_ERROR_CODE`])
+//! is the C caller's discriminator and has no Rust item behind it; a trait
+//! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
 //! associated consts expect nothing (cbindgen exports no constants).
 
@@ -128,6 +130,13 @@ const NO_C_TYPE: &[&str] = &["KafkaError"];
 /// Package-less free helpers the FFI may export besides the `kafka_<Type>_t`
 /// containers: the deallocator of an owned string (CLAUDE.md §4 rule 6).
 const C_ONLY_FREE_FUNCTIONS: &[&str] = &["kafka_string_destroy"];
+
+/// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
+/// caller classifies an error "beyond its numeric code" through the
+/// predicates, so the numeric code itself — `kafka_common_Error_code` and the
+/// `kafka_common_ErrorCode_e` enum naming every class — is part of the
+/// contract. Rust needs neither: it matches the `Error` variant.
+const C_ONLY_ERROR_CODE: &[&str] = &["kafka_common_ErrorCode_e", "kafka_common_Error_code"];
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
@@ -948,6 +957,12 @@ impl FfiTranslation {
                 // Rust name, whatever the exception's package (CLAUDE.md §4).
                 return format!("kafka_common_{}", class.rust_name());
             }
+            if class.path.first().is_some_and(|outer| outer.ends_with("Exception")) {
+                // A class nested in an exception (`RecordDeserializationException
+                // .DeserializationExceptionOrigin`) hangs off the payload's
+                // prefix, each segment under its Rust name (§4 rule 7).
+                return format!("kafka_common_{}", class.rust_path().join("_"));
+            }
             return format!("kafka_{}_{}", class.module.join("_"), class.path.join("_"));
         }
         // A Rust-only type: the package module it is defined under, less the
@@ -1397,9 +1412,18 @@ impl FfiTranslation {
             if !handles.contains(p.prefix.as_str()) || payload == "Error" {
                 continue;
             }
+            // `kafka_common_Error_<class>` without the `Error` suffix
+            // (`kafka_common_Error_resource_not_found`, CLAUDE.md §4) — unless
+            // the `Error` constructor of that class already owns the name
+            // (`kafka_common_Error_topic_authorization` builds one), in which
+            // case the view keeps the suffix.
             let base = payload.strip_suffix("Error").filter(|b| !b.is_empty()).unwrap_or(payload);
+            let mut view = format!("kafka_common_Error_{}", java::snake_case(base));
+            if out.items.contains_key(&view) {
+                view = format!("kafka_common_Error_{}", java::snake_case(payload));
+            }
             out.add(
-                format!("kafka_common_Error_{}", java::snake_case(base)),
+                view,
                 Shape::Fn(Sig {
                     params: vec![Param::new("error", format!("*const {ERROR_HANDLE}"))],
                     ret: Some(format!("*const {}_t", p.prefix)),
@@ -1905,6 +1929,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
     let is_c_only = |name: &str| {
         c_only.iter().any(|p| name == p.as_str() || name.starts_with(&format!("{p}_")))
             || C_ONLY_FREE_FUNCTIONS.contains(&name)
+            || C_ONLY_ERROR_CODE.contains(&name)
     };
 
     for (name, exp) in expected {
@@ -2188,6 +2213,11 @@ mod tests {
                 class("common", &["TopicPartition"]),
                 class("common", &["Cluster"]),
                 class("common.errors", &["TopicAuthorizationException"]),
+                class("common.errors", &["ResourceNotFoundException"]),
+                class(
+                    "common.errors",
+                    &["RecordDeserializationException", "DeserializationExceptionOrigin"],
+                ),
                 class("common.serialization", &["Serializer"]),
                 class("common.serialization", &["StringSerializer"]),
             ],
@@ -3011,6 +3041,14 @@ mod tests {
         );
         assert_eq!(
             rule.prefix_of(
+                &attrs("org.apache.kafka.common.errors.RecordDeserializationException$DeserializationExceptionOrigin"),
+                &module("common::errors"),
+                "DeserializationErrorOrigin"
+            ),
+            "kafka_common_RecordDeserializationError_DeserializationErrorOrigin"
+        );
+        assert_eq!(
+            rule.prefix_of(
                 &attrs("rust-only"),
                 &module("consumer::internals::async_kafka_consumer"),
                 "ConsumerHandle"
@@ -3020,6 +3058,69 @@ mod tests {
         assert_eq!(
             rule.prefix_of(&attrs("rust-only"), &module("common::serialization::foo"), "Foo"),
             "kafka_common_serialization_Foo"
+        );
+    }
+
+    #[test]
+    fn test_payload_view_keeps_the_error_suffix_when_the_constructor_owns_the_name() {
+        let rust = r#"
+            pub mod common {
+                pub mod error {
+                    pub enum Error {
+                        TopicAuthorization(TopicAuthorizationError),
+                        ResourceNotFound(ResourceNotFoundError),
+                    }
+                    impl Error {
+                        pub fn topic_authorization(topics: HashSet<String>) -> Self { todo!() }
+                    }
+                    #[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException")]
+                    pub struct TopicAuthorizationError;
+                    impl TopicAuthorizationError {
+                        pub fn unauthorized_topics(&self) -> &HashSet<String> { todo!() }
+                    }
+                    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException")]
+                    pub struct ResourceNotFoundError;
+                    impl ResourceNotFoundError {
+                        pub fn resource(&self) -> &str { todo!() }
+                    }
+                }
+                pub use error::{Error, ResourceNotFoundError, TopicAuthorizationError};
+            }
+        "#;
+        let findings = run("view-collision", rust, "");
+        assert_eq!(
+            detail(&findings, "missing kafka_common_Error_topic_authorization"),
+            "expected `fn(topics: *const kafka_List_t) -> *mut kafka_common_Error_t`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_Error_topic_authorization_error"),
+            "expected `fn(error: *const kafka_common_Error_t) -> *const kafka_common_TopicAuthorizationError_t`"
+        );
+        // No constructor of that name: the view drops the suffix.
+        assert_eq!(
+            detail(&findings, "missing kafka_common_Error_resource_not_found"),
+            "expected `fn(error: *const kafka_common_Error_t) -> *const kafka_common_ResourceNotFoundError_t`"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|(k, _)| k == "missing kafka_common_Error_resource_not_found_error"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn test_the_numeric_error_code_is_accepted_without_a_rust_item() {
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _private: [u8; 0] }
+            #[repr(C)] pub enum kafka_common_ErrorCode_e { kafka_common_ErrorCode_e_NONE = 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_e { kafka_common_ErrorCode_e::kafka_common_ErrorCode_e_NONE }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_codes(error: *const kafka_common_Error_t) -> i32 { 0 }
+        "#;
+        let findings = run("error-code", "", ffi);
+        assert_eq!(
+            keys(&findings),
+            ["unexpected kafka_common_Error_codes", "unexpected kafka_common_Error_t"]
         );
     }
 }

@@ -301,7 +301,7 @@ namespace {
 // class Java would throw.
 KafkaError make_synthetic_error(
     const std::string& message,
-    kafka_common_ErrorCode_t code = kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE) {
+    kafka_common_ErrorCode_e code = kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE) {
   KafkaError err;
   err.set_code(code);
   err.set_message("c server: " + message);
@@ -1820,7 +1820,7 @@ class AdminServiceImpl final : public AdminService::Service {
         // message is synthesised here.
         *resp->mutable_error() = make_synthetic_error(
             "MockAdminClient_new returned null for num_brokers " + std::to_string(num_brokers),
-            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+            kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
     } else {
@@ -2764,7 +2764,7 @@ class AdminServiceImpl final : public AdminService::Service {
             "OffsetSpec for " + spec.partition().topic() + "-" +
                 std::to_string(spec.partition().partition()) + " has no usable kind (" +
                 std::to_string(spec.spec().kind()) + ")",
-            kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+            kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
         return grpc::Status::OK;
       }
       is_timestamp[values.size()] = spec_is_timestamp;
@@ -3458,7 +3458,7 @@ class AdminServiceImpl final : public AdminService::Service {
           if (!c.has_match_name()) {
             *resp->mutable_error() = make_synthetic_error(
                 "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name",
-                kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+                kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
             return grpc::Status::OK;
           }
           match_type = 0;  // DescribeClientQuotasRequest.MATCH_TYPE_EXACT
@@ -3476,7 +3476,7 @@ class AdminServiceImpl final : public AdminService::Service {
           *resp->mutable_error() = make_synthetic_error(
               "ClientQuotaFilterComponent has no match_kind (got " +
                   std::to_string(static_cast<int>(c.match_kind())) + ")",
-              kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+              kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
           return grpc::Status::OK;
       }
       match_types.push_back(match_type);
@@ -4129,7 +4129,7 @@ class AdminServiceImpl final : public AdminService::Service {
     if (!req->has_topic_partition()) {
       *resp->mutable_error() = make_synthetic_error(
           "abort_transaction requires a topic_partition",
-          kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT);
+          kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT);
       return grpc::Status::OK;
     }
     const std::string topic = req->topic_partition().topic();

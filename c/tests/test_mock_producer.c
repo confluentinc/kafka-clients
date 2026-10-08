@@ -338,7 +338,7 @@ void test_send_batch_partial_failure(void) {
        INVALID_REQUEST rather than a JDK-derived argument error. */
     TEST_ASSERT_NULL(futures[1]);
     TEST_ASSERT_NOT_NULL(errors[1]);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_REQUEST,
                             kafka_common_Error_code(errors[1]));
 
     /* Index 2: success */
@@ -369,7 +369,7 @@ void test_close_then_send(void) {
     /* `MockProducer::send` on a closed producer returns
        `Error::local_illegal_state("MockProducer is already closed.")`. */
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE,
                             kafka_common_Error_code(err));
     TEST_ASSERT_NULL(future);
 
@@ -532,7 +532,7 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(future);
 
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE,
                             kafka_common_Error_code(err));
 
     const char *msg = kafka_common_Error_message(err);
@@ -545,7 +545,7 @@ void test_error_inspection(void) {
      *
      * The producer was closed above, so `send` returns
      * `Error::local_illegal_state("MockProducer is already closed.")`, whose
-     * code is asserted above as `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`.
+     * code is asserted above as `kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE`.
      * That class is outside the `KafkaException` tree —
      * `java.lang.IllegalStateException` is a sibling, not a subclass — so
      * every hierarchy predicate answers false, including `is_kafka_error`. Code and
@@ -658,7 +658,7 @@ void test_error_payload_topic_authorization(void) {
     /* 29 = TOPIC_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 29, NULL, &future);
 
-    const kafka_common_TopicAuthorizationError_t *handle = kafka_common_Error_topic_authorization(err);
+    const kafka_common_TopicAuthorizationError_t *handle = kafka_common_Error_topic_authorization_error(err);
     TEST_ASSERT_NOT_NULL(handle);
     kafka_consumer_StringList_t *topics = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
     TEST_ASSERT_NOT_NULL(topics);
@@ -666,7 +666,7 @@ void test_error_payload_topic_authorization(void) {
     kafka_consumer_StringList_destroy(topics);
 
     /* Wrong-variant extraction returns null. */
-    TEST_ASSERT_NULL(kafka_common_Error_group_authorization(err));
+    TEST_ASSERT_NULL(kafka_common_Error_group_authorization_error(err));
 
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_RecordMetadata_destroy(future);
@@ -679,14 +679,14 @@ void test_error_payload_group_authorization(void) {
     /* 30 = GROUP_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 30, NULL, &future);
 
-    const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization(err);
+    const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization_error(err);
     TEST_ASSERT_NOT_NULL(handle);
     char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
     TEST_ASSERT_NOT_NULL(group_id);
     TEST_ASSERT_EQUAL_STRING("", group_id);
     kafka_consumer_string_destroy(group_id);
 
-    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
+    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization_error(err));
 
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_RecordMetadata_destroy(future);
@@ -706,7 +706,7 @@ void test_error_payload_invalid_topic(void) {
     TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
     kafka_consumer_StringList_destroy(topics);
 
-    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
+    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization_error(err));
 
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_RecordMetadata_destroy(future);
@@ -754,11 +754,11 @@ void test_error_payload_throttling_quota_exceeded(void) {
     /* 89 = THROTTLING_QUOTA_EXCEEDED */
     kafka_common_Error_t *err = trigger_error(producer, 89, NULL, &future);
 
-    const kafka_common_ThrottlingQuotaExceededError_t *handle = kafka_common_Error_throttling_quota_exceeded(err);
+    const kafka_common_ThrottlingQuotaExceededError_t *handle = kafka_common_Error_throttling_quota_exceeded_error(err);
     TEST_ASSERT_NOT_NULL(handle);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(handle));
 
-    TEST_ASSERT_NULL(kafka_common_Error_record_too_large(err));
+    TEST_ASSERT_NULL(kafka_common_Error_record_too_large_error(err));
 
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_RecordMetadata_destroy(future);
@@ -771,13 +771,13 @@ void test_error_payload_record_too_large(void) {
     /* 10 = MESSAGE_TOO_LARGE */
     kafka_common_Error_t *err = trigger_error(producer, 10, NULL, &future);
 
-    const kafka_common_RecordTooLargeError_t *handle = kafka_common_Error_record_too_large(err);
+    const kafka_common_RecordTooLargeError_t *handle = kafka_common_Error_record_too_large_error(err);
     TEST_ASSERT_NOT_NULL(handle);
     /* Java's `recordTooLargePartitions` defaults to `null`, not an empty map —
      * the accessor must return NULL, not an empty `LongOffsetMap`. */
     TEST_ASSERT_NULL(kafka_common_RecordTooLargeError_record_too_large_partitions(handle));
 
-    TEST_ASSERT_NULL(kafka_common_Error_throttling_quota_exceeded(err));
+    TEST_ASSERT_NULL(kafka_common_Error_throttling_quota_exceeded_error(err));
 
     kafka_common_Error_destroy(err);
     kafka_common_KafkaFuture_RecordMetadata_destroy(future);
@@ -918,7 +918,7 @@ void test_send_async_validation_error(void) {
         value, (int32_t)sizeof(value) - 1,
         on_record, &result, &err);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_INVALID_REQUEST,
                             kafka_common_Error_code(err));
 
     /* Give any (erroneously dispatched) callback a chance to fire, then assert

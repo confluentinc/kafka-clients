@@ -2995,7 +2995,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
 /// # Return value
 ///
 /// Return `NULL` for success. Returning a non-null error handle (built with
-/// [`kafka_common_Error_new`]) is the C equivalent of the Java listener
+/// one of the `kafka_common_Error_<constructor>` functions, such as
+/// [`kafka_common_Error_kafka_message`](crate::ffi::common::kafka_common_Error_kafka_message))
+/// is the C equivalent of the Java listener
 /// throwing: **ownership of that handle transfers to the client**, which converts
 /// it back into the `Result::Err` the core sees, so the error propagates out of
 /// the operation that triggered the rebalance. Do not destroy a handle you

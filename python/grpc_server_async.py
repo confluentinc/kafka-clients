@@ -55,7 +55,7 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
-# Error codes generated from kafka_common_ErrorCode_t
+# Error codes generated from kafka_common_ErrorCode_e
 # (python tools/generate_error_code.py). Private plumbing: the servicers stamp the
 # real code on errors of their own making, so the Rust client can tell those
 # apart from an error the client actually reported.

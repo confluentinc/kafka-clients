@@ -179,7 +179,19 @@ impl JavaClass {
     /// by its top-level package (`consumer.OffsetOutOfRangeException` ->
     /// `ConsumerOffsetOutOfRangeError`).
     pub fn rust_name(&self) -> String {
-        let name = self.name();
+        self.rust_name_of(self.name())
+    }
+
+    /// The Rust names of every class on `path`, outermost first — the
+    /// top-level class as [`rust_name`](Self::rust_name) would name it, each
+    /// nested class by its translated words
+    /// (`["RecordDeserializationError", "DeserializationErrorOrigin"]`).
+    pub fn rust_path(&self) -> Vec<String> {
+        self.path.iter().map(|name| self.rust_name_of(name)).collect()
+    }
+
+    /// [`rust_name`](Self::rust_name) for `name`, one of the classes on `path`.
+    fn rust_name_of(&self, name: &str) -> String {
         let translated = translate_camel_words(name);
         if !name.ends_with("Exception") {
             return translated;

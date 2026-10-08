@@ -234,7 +234,7 @@ static void test_mock_consumer_concurrency_guard(void) {
     // LocalConcurrentModification.
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
     TEST_ASSERT_TRUE(second.had_error);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION, second.error_code);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_CONCURRENT_MODIFICATION, second.error_code);
 
     // The first eventually completes successfully (empty batch).
     TEST_ASSERT_TRUE(wait_for(&first.fired, 1));
@@ -287,7 +287,7 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
         kafka_consumer_ConsumerRecords_destroy(recs);
     } else {
         TEST_ASSERT_NOT_NULL(poll_err);
-        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_WAKEUP,
                                 kafka_common_Error_code(poll_err));
         kafka_common_Error_destroy(poll_err);
     }
@@ -311,7 +311,7 @@ static void test_mock_consumer_add_record_unassigned_errors(void) {
     kafka_common_Error_t *err =
         kafka_consumer_MockConsumer_add_record(c, "test", 0, 0, NULL, -1, NULL, -1);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_STATE,
                             kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
 
@@ -323,7 +323,7 @@ static void test_mock_consumer_add_record_unassigned_errors(void) {
     kafka_common_Error_t *pos_err =
         kafka_consumer_Consumer_position(c, "test", 0, &pos);
     TEST_ASSERT_NOT_NULL(pos_err);
-    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_e_LOCAL_ILLEGAL_ARGUMENT,
                             kafka_common_Error_code(pos_err));
     kafka_common_Error_destroy(pos_err);
 
