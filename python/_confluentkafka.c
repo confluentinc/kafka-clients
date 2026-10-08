@@ -2374,7 +2374,11 @@ static PyObject* py_Consumer_KafkaConsumer_new_typed(PyObject* self, PyObject* a
         kafka_consumer_ConsumerProperties_put(props, k, v);
     }
     kafka_common_Error_t* err = NULL;
-    kafka_consumer_Consumer_t* c = kafka_consumer_KafkaConsumer_new(props, &err);
+    kafka_consumer_Consumer_t* c;
+    // Construction resolves the bootstrap addresses (DNS): release the GIL.
+    Py_BEGIN_ALLOW_THREADS
+    c = kafka_consumer_KafkaConsumer_new(props, &err);
+    Py_END_ALLOW_THREADS
     kafka_consumer_ConsumerProperties_destroy(props);
     return Py_BuildValue("KK",
         (unsigned long long)(uintptr_t)c,

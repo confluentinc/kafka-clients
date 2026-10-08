@@ -16,7 +16,8 @@
 broker, in Java order, with Java's messages; and the binding's own contracts that
 need no broker — the commit callback on the caller's thread (C47), the lifetime of
 the native handle across a racing ``close()``, the deserializers' configuration
-route and their close, the negative timeouts. Where Java drives a ``MockClient``
+route and their close, the negative timeouts, the GIL released while the
+constructor resolves the bootstrap hosts. Where Java drives a ``MockClient``
 only to make an operation time out, an unreachable bootstrap address and a short
 ``default.api.timeout.ms`` stand for it. ``test/integration/test_kafka_consumer_broker.py``
 runs, against a broker, the cases Java scripts through a ``MockClient``.
@@ -125,13 +126,16 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import sys
 import threading
 import time
+import uuid
 import warnings
 import weakref
 from datetime import timedelta
 from typing import Any
 
+import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import (
@@ -571,6 +575,68 @@ def test_invalid_group_metadata() -> None:
     with pytest.raises(IllegalStateError) as e:
         consumer.group_metadata()
     assert str(e.value) == CLOSED
+
+
+# ---------------------------------------------------------------------------
+# Construction releases the GIL
+# ---------------------------------------------------------------------------
+def test_construction_releases_the_gil_while_it_resolves_the_bootstrap_hosts(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The core resolves the bootstrap hosts while it builds the consumer
+    # (ClientUtils.parseAndValidateAddresses), a blocking name-service call, so
+    # the C extension releases the GIL around the native constructor. Nothing
+    # observes the GIL directly: a second thread records when it runs, and the
+    # native constructor alone is timed, as the Python code around it hands the
+    # GIL over anyway. With the GIL held throughout the call, that thread could
+    # run only within a switch interval (1 ms here) of either end of it, never
+    # in its middle. A fresh host name defeats a resolver's negative cache.
+    # Best effort: a resolver that answers in under 20 ms leaves no middle to
+    # observe, and the test skips.
+    margin = 0.005
+    window: dict[str, float] = {}
+    native_new = _lib.Consumer_KafkaConsumer_new_typed
+
+    def timed_new(native: dict[str, str]) -> Any:
+        window["start"] = time.perf_counter()
+        try:
+            return native_new(native)
+        finally:
+            window["end"] = time.perf_counter()
+
+    monkeypatch.setattr(_lib, "Consumer_KafkaConsumer_new_typed", timed_new)
+    ran: list[float] = []
+    stop = threading.Event()
+
+    def other_thread() -> None:
+        last = 0.0
+        while not stop.is_set():
+            now = time.perf_counter()
+            if now - last >= 0.0005:
+                ran.append(now)
+                last = now
+
+    host = f"{uuid.uuid4().hex}.invalid:9092"
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)
+    worker = threading.Thread(target=other_thread)
+    worker.start()
+    try:
+        with pytest.raises(KafkaError) as e:
+            KafkaConsumer(configs=configs(**{
+                "bootstrap.servers": host,
+                "client.dns.lookup": "resolve_canonical_bootstrap_servers_only"}))
+    finally:
+        stop.set()
+        worker.join(WAIT)
+        sys.setswitchinterval(interval)
+    assert str(e.value) == "Failed to construct kafka consumer"
+    assert str(e.value.__cause__) == f"Unknown host in bootstrap.servers: {host}"
+    start, end = window["start"] + margin, window["end"] - margin
+    if end - start < 2 * margin:
+        pytest.skip(f"the resolver answered in {(window['end'] - window['start']) * 1000:.1f} "
+                    "ms, too fast to observe the GIL released")
+    assert any(start < at < end for at in ran), (
+        "no other thread ran in the middle of the native constructor: it holds the GIL")
 
 
 # ---------------------------------------------------------------------------
