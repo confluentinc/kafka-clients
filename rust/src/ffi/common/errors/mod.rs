@@ -42,11 +42,14 @@ pub(crate) mod consumer_retriable_commit_failed_error;
 pub(crate) mod duplicate_resource_error;
 pub(crate) mod group_authorization_error;
 pub(crate) mod invalid_topic_error;
+pub(crate) mod quota_violation_error;
+pub(crate) mod record_deserialization_error;
 pub(crate) mod record_too_large_error;
 pub(crate) mod resource_not_found_error;
 pub(crate) mod throttling_quota_exceeded_error;
 pub(crate) mod topic_authorization_error;
 
+use std::any::Any;
 use std::ffi::{CString, c_char};
 use std::fmt;
 use std::ptr;
@@ -79,13 +82,25 @@ pub(crate) struct Payload<T> {
     message_c: CString,
     text_c: Option<CString>,
     source: OnceLock<Option<Box<ErrorInner>>>,
+    /// The borrowed handles a class's structured getters return (a
+    /// `TopicPartition`, a `MetricName`, the record headers), built on first
+    /// request by [`Payload::views`] and owned here so they live as long as
+    /// the payload. One slot: a class has one set of views.
+    views: OnceLock<Box<dyn Any + Send + Sync>>,
 }
 
 impl<T: PayloadClass> Payload<T> {
     pub(crate) fn new(value: T) -> Self {
         let message_c = owned_c_string(value.message());
         let text_c = value.text().map(owned_c_string);
-        Self { value, message_c, text_c, source: OnceLock::new() }
+        Self { value, message_c, text_c, source: OnceLock::new(), views: OnceLock::new() }
+    }
+
+    /// The class's cached views, built from the value by `build` on the first
+    /// call. Every caller of one payload class must ask for the same `V`.
+    pub(crate) fn views<V: Send + Sync + 'static>(&self, build: impl FnOnce(&T) -> V) -> &V {
+        let views = self.views.get_or_init(|| Box::new(build(&self.value)));
+        views.downcast_ref::<V>().expect("one payload class caches one kind of views")
     }
 
     /// Hands `value` to C as an owned handle of opaque type `P`.
@@ -100,6 +115,31 @@ impl<T: PayloadClass> Payload<T> {
     /// `handle` must be a view or owned handle of this payload class.
     pub(crate) unsafe fn from_ptr<'a, P>(handle: *const P) -> &'a Self {
         unsafe { &*(handle as *const Self) }
+    }
+
+    /// The payload behind an owned handle of opaque type `P`, mutably.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be an owned handle not yet destroyed, never a view
+    /// borrowed from a `kafka_common_Error_t`, and no reference obtained
+    /// through [`Payload::from_ptr`] on it may be live.
+    pub(crate) unsafe fn from_ptr_mut<'a, P>(handle: *mut P) -> &'a mut Self {
+        unsafe { &mut *(handle as *mut Self) }
+    }
+
+    /// Replaces the value in place, as a Rust `with_*` builder step does on
+    /// an owned handle: the message and text strings are rebuilt and the
+    /// cached cause dropped, so strings and cause previously borrowed from
+    /// the handle are invalidated. The structured views are kept, so the
+    /// replacement must leave the fields they derive from unchanged (the one
+    /// caller, `with_source`, changes only the cause).
+    pub(crate) fn replace_value(&mut self, replace: impl FnOnce(T) -> T) {
+        let value = replace(self.value.clone());
+        self.message_c = owned_c_string(value.message());
+        self.text_c = value.text().map(owned_c_string);
+        self.source = OnceLock::new();
+        self.value = value;
     }
 
     /// Frees an owned handle of opaque type `P`; null is a no-op.

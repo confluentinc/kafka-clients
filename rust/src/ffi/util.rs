@@ -132,8 +132,6 @@ pub struct kafka_Bytes_t {
     pub len: i32,
 }
 
-// wired by the NULL-serde record key/value path (Phase 2, producer)
-#[cfg_attr(not(test), expect(dead_code))]
 impl kafka_Bytes_t {
     /// The Java `null` array.
     pub(crate) const NULL: Self = Self { data: ptr::null(), len: 0 };
@@ -426,8 +424,6 @@ pub(crate) fn box_map(
 /// Hands string-keyed `entries` to C as an owned map: the keys become owned
 /// `char *`, compared by content in `kafka_Map_get`, and `value_destroy`
 /// frees each value.
-// wired by the string-keyed result maps of the admin RPCs (Phase 4)
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn box_string_keyed_map<I, S>(entries: I, value_destroy: Option<ElementDestroy>) -> *mut kafka_Map_t
 where
     I: IntoIterator<Item = (S, *mut c_void)>,
@@ -438,6 +434,38 @@ where
         .map(|(k, v)| (into_c_string(k.as_ref()) as *mut c_void, v))
         .collect();
     box_map(entries, Some(destroy_string_element), value_destroy, Some(string_key_eq))
+}
+
+/// Hands a Java `Map<String, String>` to C as an owned map of `char *` to
+/// `char *`, in iteration order, `kafka_Map_get` comparing keys by content.
+pub(crate) fn box_string_map<I, K, V>(entries: I) -> *mut kafka_Map_t
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    box_string_keyed_map(
+        entries.into_iter().map(|(k, v)| (k, into_c_string(v.as_ref()) as *mut c_void)),
+        Some(destroy_string_element),
+    )
+}
+
+/// Reads a map of `const char *` keys and values into owned pairs, in entry
+/// order; null reads as empty.
+///
+/// # Safety
+///
+/// `map` must be null or a valid map whose keys and values are
+/// NUL-terminated strings.
+pub(crate) unsafe fn map_strings(map: *const kafka_Map_t) -> Vec<(String, String)> {
+    unsafe { map_entries(map) }
+        .iter()
+        .map(|&(k, v)| {
+            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
+                c_str_to_string(v as *const c_char)
+            })
+        })
+        .collect()
 }
 
 /// Compares two `const char *` keys by content.
