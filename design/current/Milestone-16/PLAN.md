@@ -1527,6 +1527,95 @@ On branch `milestone-16-p9fix`, to be merged back with a merge commit.
 - Tests: the metrics-manager tests, a `KafkaConsumerTest` close-removes-all-sensors assertion, and the
   divide-by-zero test.
 
+Phase 11 completion notes (agent 101):
+
+- **Commits** (on 5ea41a50): 0b46e480 package mirror; 0cf8db98 KAFKA-19542 ledger + base + managers + AKC close;
+  c4d62b62 `testMetricsRemovedOnClose` + lazy heartbeat/commit metrics; c885d2dc KAFKA-20750; 26eebbc3 1a46339e90
+  rename, c39e2af92c note, cite refresh; 41917388 marker fix.
+- **Layout.** Java's `consumer.internals.metrics` package is now the Rust module `consumer::internals::metrics`.
+  The seven classes Rust translates from it moved there with `git mv`: `AsyncConsumerMetrics`,
+  `ConsumerRebalanceMetricsManager`, `HeartbeatMetricsManager`, `KafkaConsumerMetrics`,
+  `OffsetCommitMetricsManager`, `RebalanceCallbackMetricsManager` and `SensorBuilder`. `MetricsLedger` and
+  `AbstractConsumerMetricsManager` are new files there. `check-java-name` requires a marked item to sit in its
+  Java package's module, so moving the alias alone would not have cleared the rows. The 10 §5.1 rows are gone
+  (0b46e480), and the six managers gained class markers, which the lint requires.
+  `FetchMetricsManager` and `FetchMetricsRegistry` stay in `internals`, as in Java.
+- **DoD #7.**
+  - `AbstractConsumerMetricsManager` (a Java abstract class with no abstract methods) is a struct that every
+    manager embeds as `inner`, forwarding `close()` to it. This follows the `AbstractHeartbeatRequestManager`
+    precedent. It is not a trait, because nothing is generic over it.
+  - Java's `RebalanceMetricsManager` stays folded into `ConsumerRebalanceMetricsManager`, the M5 decision.
+  - `MetricsLedger`'s sensor set holds names, not `Sensor` identities. The removals are the same, and the reuse
+    path stays allocation-free. Both sets sit behind a `std::sync::Mutex`, and `close()` drains them outside
+    the locks.
+  - `SensorBuilder` borrows `&MetricsLedger` and lost its recording-level parameter. Java always uses
+    `metrics.sensor(name)`, and every Rust caller passed INFO.
+  - `MetricsLedger::registry()` is a test-only accessor for `FetchMetricsManager::metrics_for_test`.
+- **Behaviour beyond the Java diff.**
+  - The translated `testMetricsRemovedOnClose` showed that Rust built `HeartbeatMetricsManager` and
+    `OffsetCommitMetricsManager` eagerly for every consumer. Java builds them in the
+    `ConsumerHeartbeatRequestManager` constructor (`ConsumerHeartbeatRequestManager.java:72`) and the
+    `CommitRequestManager` constructor (`CommitRequestManager.java:172`). They are now built where their request
+    manager is.
+  - `ConsumerRebalanceListenerInvoker` holds the manager as `Arc`, so the consumer can close it.
+- **Same as Java, noted for review.** Java's `AsyncKafkaConsumer.close()` closes only the kafka-consumer,
+  async-consumer, fetch and rebalance-callback managers (`AsyncKafkaConsumer.java:1674-1677`). The heartbeat,
+  offset-commit and consumer-rebalance managers are never closed, so with a `group.id` their metrics outlive
+  `close()` in both clients. Java's test has no `group.id`. Their Rust `close()` is
+  `expect(dead_code)` outside tests.
+- **Tests.**
+  - `AbstractConsumerMetricsManagerTest.testCleanup` is a shared helper called from five manager test modules.
+    Java's `OffsetCommitMetricsManagerTest` and `RebalanceCallbackMetricsManagerTest` overrides build a
+    `HeartbeatMetricsManager`; they are translated as written, and a Rust-only test checks the real class.
+  - Four `MetricsLedger` contract tests, and a `FetchMetricsManager` close test covering the fetch-path sensors
+    and the replica gauges.
+  - `KafkaConsumerTest.testMetricsRemovedOnClose`, CONSUMER arm, in `tests/consumer`, with Java's messages.
+  - `testPollIdleRatioZero` at the `KafkaConsumerMetrics` level. It fails with NaN without the guard.
+- **N/A or skipped, with reasons.**
+  - c39e2af92c: Rust never had `ConsumerMetrics`. `FetchMetricsRegistry.main` is a docs generator over
+    `Metrics.toHtmlTable`, which Rust lacks, so it is not translated (noted at `get_all_templates`).
+  - Share halves (§20): `KafkaShareConsumerMetrics`, `ShareRebalanceMetricsManager`, `ShareFetchMetricsManager`,
+    `ShareConsumerImpl`, `ShareConsumerImplTest`, `ShareRebalanceMetricsManagerTest` and
+    `KafkaShareConsumerMetricsTest`.
+  - Classic (§20): `AbstractCoordinator`, `ConsumerCoordinator`, `ClassicKafkaConsumer`, and the CLASSIC arm of
+    `testMetricsRemovedOnClose` and `testPollIdleRatioZero`.
+  - 1a46339e90: only the skip-list rename (`testUnsubscribingNonExistingMetricsDoesntCauseError`, still a
+    KIP-714 skip). The other two hunks are classic-only, as Phase 10 recorded.
+- **DoD #10.**
+  - Per-record allocations are unchanged.
+  - The §27 budget went from 338 to 363 / 100 records, and the Bytes zero-copy budget from 138 to 163 / 100.
+    Re-run at 200 and 400 records, the budget test gives 563 and 963, a slope of 2.0 per record. The +25 is
+    one-time: the ledger records names when a topic or partition sensor is first created.
+  - The M8 guard stays at 2 / 200, and `handle_fetch_success` at 64 / 8.
+  - The reuse path (`get_sensor`) is one uncontended lock and a lookup, with no allocation.
+- **Gates (HEAD 41917388):**
+  - `cargo xtask format-check` is clean.
+  - `cargo test`: lib 4469 / 3 ignored, consumer 43, then 0, 8, and 5 / 7 ignored.
+  - `cargo xtask lint --keep-going`: exactly the 4 §5.1 rows. Clippy, doc-hygiene and module-path are clean.
+- **Broker runs** (Phase 10's module list, plus `--lib integration_tests::`):
+  - 4.2.0: 109 / 0 failed / 0 ignored, and lib 35 / 35.
+  - `4.4.0-rc4`: 109 / 0 / 0, and lib 35 / 35.
+- **`make -k verify`:** fails only in `build-c` (`cmake: command not found`, an environment issue) and in `lint`
+  (the 4 rows). `test-rust-all-features`: lib 4719 / 3 ignored, consumer 43, integration 311 / 0 failed,
+  8, and 5 / 7 ignored. Python: 371 passed / 2 skipped, 156, 29 + 29. `git status --ignored` shows no new
+  files.
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Min |
+  |---|---|---|---|
+  | Reading (plan, rules, Java diffs, Rust counterparts) | 16:52 | 17:00 | 8 |
+  | Package mirror + §5.1 rows | 17:00 | 17:02 | 2 |
+  | Ledger, base, managers, AKC close, tests | 17:02 | 17:11 | 9 |
+  | Close test + lazy heartbeat/commit metrics | 17:11 | 17:13 | 2 |
+  | KAFKA-20750 + teeth check | 17:13 | 17:14 | 1 |
+  | Rename, c39e2af92c note, cite refresh | 17:14 | 17:15 | 1 |
+  | DoD #10 alloc runs (100/200/400) | 17:15 | 17:17 | 2 |
+  | format-check + lint + marker fix | 17:17 | 17:21 | 4 |
+  | Full `cargo test` | 17:21 | 17:22 | 1 |
+  | Broker runs (4.2.0, 4.4.0-rc4) | 17:22 | 17:26 | 4 |
+  | `make -k verify` | 17:26 | 17:35 | 9 |
+  | Notes | 17:35 | 17:38 | 3 |
+
 ### Phase 12 — Admin (agent 102)
 
 - KAFKA-20395 (c274a7348f): `unregister_controller` / `unregister_controller_with_options`
