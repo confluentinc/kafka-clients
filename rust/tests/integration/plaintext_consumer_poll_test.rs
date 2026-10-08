@@ -154,6 +154,7 @@ use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
+use crate::common::test_utils::wait_for_partition_leaders;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -178,16 +179,15 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// group.initial.rebalance.delay.ms           = 10
 /// ```
 ///
-/// Additionally, `num.partitions=2` is set so auto-created topics get
-/// 2 partitions — matching Java's `@BeforeEach`
-/// `cluster.createTopic(topic, 2, BROKER_COUNT)`.
+/// Additionally, `num.partitions=2` is set so topics Java auto-creates by
+/// producing (e.g. `otherTopic`) get 2 partitions. The suite's `@BeforeEach`
+/// topic is created explicitly by [`create_test_topic`].
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     // The canonical helper supplies the shared KIP-848 broker tuning,
     // including the fast heartbeat knobs (per Java `@ClusterConfigProperty`
     // on `PlaintextConsumerPollTest.java:78-80`) that let the
     // `max.poll.interval.ms` tests observe the broker-side fence within
-    // their wall-clock budgets. Java parity: `@BeforeEach` auto-creates
-    // 2-partition topics.
+    // their wall-clock budgets.
     kip848_3_broker(2)
 }
 
@@ -313,9 +313,17 @@ async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records:
 /// fields; Rust uses `AtomicUsize` because the listener may be invoked
 /// across rebalance events from the bg task into the user task via
 /// the §31 oneshot handshake.
+///
+/// `calls_to_assigned_non_empty` has no Java counterpart: it counts only the
+/// `on_partitions_assigned` invocations that carried at least one partition,
+/// so a test can tell a real (re)assignment apart from the empty callback a
+/// reconciliation against a not-yet-resolved topic id produces (see
+/// [`await_partition_assigned`]). Only [`TestConsumerReassignmentListener`]
+/// maintains it.
 #[derive(Clone)]
 struct RebalanceCounters {
     calls_to_assigned: Arc<AtomicUsize>,
+    calls_to_assigned_non_empty: Arc<AtomicUsize>,
     calls_to_revoked: Arc<AtomicUsize>,
 }
 
@@ -323,12 +331,17 @@ impl RebalanceCounters {
     fn new() -> Self {
         Self {
             calls_to_assigned: Arc::new(AtomicUsize::new(0)),
+            calls_to_assigned_non_empty: Arc::new(AtomicUsize::new(0)),
             calls_to_revoked: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn calls_to_assigned(&self) -> usize {
         self.calls_to_assigned.load(Ordering::SeqCst)
+    }
+
+    fn calls_to_assigned_non_empty(&self) -> usize {
+        self.calls_to_assigned_non_empty.load(Ordering::SeqCst)
     }
 
     fn calls_to_revoked(&self) -> usize {
@@ -356,8 +369,11 @@ impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
+        if !partitions.is_empty() {
+            self.counters.calls_to_assigned_non_empty.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -427,6 +443,21 @@ async fn await_partition_assigned(
             "Timed out waiting for {partition} to be assigned (current assignment: {assignment:?})"
         );
         let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+    }
+}
+
+/// Drives `poll(100ms)` until every partition in `partitions` is in the
+/// consumer's assignment — i.e. the FULL assignment has been applied on the
+/// application task, not merely the first (possibly empty) callback observed.
+/// See [`await_partition_assigned`] for why the first callback can be empty.
+async fn await_full_assignment(
+    consumer: &mut BytesConsumer,
+    partitions: &[TopicPartition],
+    deadline_duration: Duration,
+) {
+    let deadline = Instant::now() + deadline_duration;
+    for partition in partitions {
+        await_partition_assigned(consumer, partition, deadline.saturating_duration_since(Instant::now())).await;
     }
 }
 
@@ -570,19 +601,12 @@ async fn await_non_empty_records_count(
     poll_timeout: Duration,
     deadline_duration: Duration,
 ) -> usize {
-    // Skip records produced by `ensure_topic_with_2_partitions` (the
-    // "__provisioner__" key/value pair written per partition to force
-    // broker-side topic auto-create). Java has admin-client-based topic
-    // create; Rust does not. Without this filter, `auto.offset.reset=earliest`
-    // would count the provisioner alongside the real records (Issue 11
-    // in COMMENTS.DONE.1.md).
     let deadline = Instant::now() + deadline_duration;
     while Instant::now() < deadline {
         let records = consumer.poll(poll_timeout).await.expect("poll should succeed");
         let count = records
             .into_iter()
             .filter(|r| r.topic() == partition.topic() && r.partition() == partition.partition())
-            .filter(|r| r.key().map(|k| k.as_slice()) != Some(b"__provisioner__".as_slice()))
             .count();
         if count > 0 {
             return count;
@@ -669,6 +693,7 @@ async fn test_async_consumer_max_poll_records() {
 
     let max_poll_records: usize = 100;
     let num_records: usize = 5000;
+    create_test_topic(&ctx, &topic, 2).await;
     let starting_timestamp = current_time_ms();
     send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
 
@@ -711,11 +736,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_max_poll_interval_ms");
 
-    // Provision the topic via produce (the test does not need records
-    // to be consumed — only assignment).
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    create_test_topic(&ctx, &topic, 2).await;
 
     // Java's test uses max.poll.interval.ms=1000 (sleeps 3s). The
     // Rust translation runs against a 3-broker testcontainers cluster
@@ -740,12 +761,29 @@ async fn test_async_consumer_max_poll_interval_ms() {
         .await
         .expect("subscribe_with_topics_listener should succeed");
 
+    let all_partitions = [
+        TopicPartition::new(topic.clone(), 0),
+        TopicPartition::new(topic.clone(), 1),
+    ];
+
     // Rebalance to get the initial assignment.
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
-    assert_eq!(
-        counters.calls_to_assigned(),
-        1,
-        "callsToAssigned should be 1 after initial rebalance"
+    //
+    // Deliberate departure from Java's `awaitRebalance` + `assertEquals(1,
+    // callsToAssigned)`: the first `on_partitions_assigned` can be EMPTY when
+    // the coordinator's assignment names a topic id this consumer's metadata
+    // has not resolved yet (`AbstractMembershipManager.java:830-840`; see
+    // `await_partition_assigned`). Returning on that callback leaves the real
+    // assignment to be reconciled on the background task during the sleep
+    // below and applied only on the next `poll` — after the poll timer has
+    // expired and the member has left — which yields 3 assigned / 0 revoked
+    // depending on timing. So wait for the FULL assignment to be applied and
+    // take the count of partition-carrying callbacks as the baseline (1, or 2
+    // if the assignment was split across target epochs).
+    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
+    let assigned_baseline = counters.calls_to_assigned_non_empty();
+    assert!(
+        assigned_baseline >= 1,
+        "at least one partition-carrying on_partitions_assigned should have fired"
     );
     assert_eq!(
         counters.calls_to_revoked(),
@@ -759,11 +797,36 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // wall-clock to compensate for broker latency on testcontainers.
     tokio::time::sleep(Duration::from_secs(7)).await;
 
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(90)).await;
+    // Java: `awaitRebalance` then `assertEquals(2, callsToAssigned)` /
+    // `assertEquals(1, callsToRevoked)` — exactly one fence-and-rejoin.
+    // Counted over partition-carrying callbacks only: the rejoin reconcile
+    // runs against a `NONE` current assignment and, for the same
+    // unresolved-id / split-epoch reasons as above, may fire an extra EMPTY
+    // `on_partitions_assigned` that is not a second rebalance. Wait until the
+    // revocation has fired AND the full assignment is back via a new
+    // partition-carrying callback.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let assignment = consumer.assignment();
+        if counters.calls_to_revoked() >= 1
+            && counters.calls_to_assigned_non_empty() > assigned_baseline
+            && all_partitions.iter().all(|tp| assignment.contains(tp))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for fence-and-rejoin (revoked={}, non-empty assigned={}, \
+             baseline={assigned_baseline}, assignment={assignment:?})",
+            counters.calls_to_revoked(),
+            counters.calls_to_assigned_non_empty()
+        );
+        let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+    }
     assert_eq!(
-        counters.calls_to_assigned(),
-        2,
-        "callsToAssigned should be 2 after the second rebalance"
+        counters.calls_to_assigned_non_empty(),
+        assigned_baseline + 1,
+        "exactly one partition-carrying on_partitions_assigned should follow the fence"
     );
     assert_eq!(
         counters.calls_to_revoked(),
@@ -892,8 +955,8 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // Create the topics EMPTY, via the admin client — the same thing Java's
     // `cluster.createTopic(...)` does.
     //
-    // This test must NOT use `ensure_topic_with_2_partitions`, which provisions
-    // a topic by *producing* a `__provisioner__` record to each partition. With
+    // This test must NOT provision the topic by *producing* a `__provisioner__`
+    // record to each partition (broker auto-create). With
     // `auto.offset.reset=earliest` the consumer then starts at offset 0 and, if
     // it manages to fetch before the revocation fires, consumes that record and
     // `position(tp)` returns 1 instead of 0 — an intermittent failure
@@ -901,8 +964,11 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // committedPosition.get())` holds only because the partition is genuinely
     // empty, and the comment in the callback says exactly that: "no records have
     // been consumed".
+    // `topic` comes from the suite's `@BeforeEach` (2 partitions, RF
+    // `BROKER_COUNT`); Java auto-creates `otherTopic` by producing, which the
+    // Rust test replaces with an admin create for the reason above.
+    create_test_topic(&ctx, &topic, 2).await;
     let admin = admin_for(&ctx);
-    create_topic(admin.as_ref(), &topic, 2, 1).await;
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
@@ -1091,8 +1157,8 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     // and does not return until the partition metadata has propagated to
     // every broker.
     //
-    // This test must NOT use `ensure_topic_with_2_partitions`, which
-    // provisions by *producing* a `__provisioner__` record per partition.
+    // This test must NOT provision the topic by *producing* a
+    // `__provisioner__` record per partition (broker auto-create).
     // That triggers broker-side auto-create, which returns when the produce
     // is acked while the group coordinator's metadata image is still
     // converging — so the coordinator's first computed assignment can cover
@@ -1100,9 +1166,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     // a second `on_partitions_assigned`. Java never races that, because the
     // admin create commits through the controller before anything subscribes.
     // Java also produces no records in this test at all.
-    let admin = admin_for(&ctx);
-    create_topic(admin.as_ref(), &topic, 2, 3).await;
-    admin.close_with_timeout(Duration::from_secs(5)).await;
+    create_test_topic(&ctx, &topic, 2).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
@@ -1146,9 +1210,7 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_max_poll_interval_shorter");
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    create_test_topic(&ctx, &topic, 2).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "1000")]),
@@ -1166,8 +1228,26 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
         .expect("subscribe_with_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
-    await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
+    //
+    // Deliberate departure from Java's `awaitRebalance`: the first
+    // `on_partitions_assigned` can be EMPTY when the coordinator's assignment
+    // names a topic id this consumer's metadata has not resolved yet
+    // (`AbstractMembershipManager.java:830-840`; see
+    // `await_partition_assigned`). Taking the baseline on that callback lets
+    // the real assignment land during the polls below and bump
+    // `callsToAssigned` although no rebalance happened. So wait for the FULL
+    // assignment to be applied before taking the baseline.
+    let all_partitions = [
+        TopicPartition::new(topic.clone(), 0),
+        TopicPartition::new(topic.clone(), 1),
+    ];
+    await_full_assignment(consumer.as_mut(), &all_partitions, Duration::from_secs(60)).await;
     let calls_to_assigned_after_first_rebalance = counters.calls_to_assigned();
+    assert_eq!(
+        counters.calls_to_revoked(),
+        0,
+        "callsToRevoked should be 0 after initial rebalance"
+    );
 
     // Java: `consumer.poll(Duration.ofMillis(2000))` once, then two
     // short polls of 500ms. The bg task runs continuously during the
@@ -1181,6 +1261,11 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
         counters.calls_to_assigned(),
         calls_to_assigned_after_first_rebalance,
         "callsToAssigned should not advance: no rebalance during long-but-respected poll"
+    );
+    assert_eq!(
+        counters.calls_to_revoked(),
+        0,
+        "callsToRevoked should not advance: no rebalance during long-but-respected poll"
     );
 
     consumer.close().await.expect("consumer close should succeed");
@@ -1200,6 +1285,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     let group_id = ctx.group_id("g_poll_zero_timeout");
     let tp = TopicPartition::new(topic.clone(), 0);
 
+    create_test_topic(&ctx, &topic, 2).await;
     let num_messages: usize = 100;
     send_records_bytes(&ctx, &tp, num_messages, current_time_ms()).await;
 
@@ -1253,10 +1339,8 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// we drive `poll(Duration::ZERO)` in a loop and check for the error)
 /// eventually surfaces `NoOffsetForPartition`.
 ///
-/// The Rust error variant flattens through `Error::LocalIllegalState`
-/// per Phase-1 design (see `src/consumer/errors.rs:237-265`); we
-/// assert against the canonical message substring "Undefined offset
-/// with no reset policy", as the pilot assign test does.
+/// Asserts the typed `Error::ConsumerNoOffsetForPartition` variant with
+/// its exact message and partition set.
 ///
 /// Translation deviation: Java uses `poll(Duration.ZERO)` in a tight
 /// loop (`waitForPollThrowException`). Calling `poll(Duration::ZERO)`
@@ -1274,10 +1358,7 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     let group_id = ctx.group_id("g_no_offset_poll_zero");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    // Ensure the topic exists so `assign(tp)` resolves a real partition.
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    create_test_topic(&ctx, &topic, 2).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
@@ -1293,27 +1374,34 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     // uses `poll(Duration.ZERO)` (Java `TestUtils.waitForCondition`
     // default 15s). The Rust translation uses a small non-zero
     // timeout per poll (see translation-deviation rustdoc above).
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut saw_no_offset = false;
+    //
+    // `waitForPollThrowException` (ClientsTestUtils.java:348-360) runs under
+    // `TestUtils.waitForCondition`'s default 15s and returns `false` — i.e.
+    // keeps polling — on an exception that is not a
+    // `NoOffsetForPartitionException`, so a non-matching error is recorded
+    // and retried rather than failing immediately.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut no_offset_err = None;
+    let mut last_other_err = None;
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(50)).await {
             Ok(_) => continue,
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("Undefined offset with no reset policy") {
-                    saw_no_offset = true;
-                    break;
-                }
-                // Re-surface any other error class — Java fails on
-                // anything other than `NoOffsetForPartitionException`.
-                panic!("expected NoOffsetForPartition error, got: {msg}");
+            Err(Error::ConsumerNoOffsetForPartition(e)) => {
+                no_offset_err = Some(e);
+                break;
             },
+            Err(other) => last_other_err = Some(other),
         }
     }
-    assert!(
-        saw_no_offset,
-        "expected poll() to surface NoOffsetForPartition within 60s deadline"
+    let e = no_offset_err
+        .unwrap_or_else(|| panic!("Continuous poll not fail (last non-matching error: {last_other_err:?})"));
+    // Raised by `SubscriptionState.resetInitializingPositions`
+    // (SubscriptionState.java:882) through the `Collection` constructor.
+    assert_eq!(
+        e.message(),
+        format!("Undefined offset with no reset policy for partitions: [{tp}]")
     );
+    assert_eq!(e.partitions(), &std::collections::HashSet::from([tp.clone()]));
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -1370,9 +1458,11 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
     let rebalance_timeout = Duration::from_millis(1000);
 
+    create_test_topic(&ctx, &topic, 2).await;
+    // Java: `cluster.createTopic(otherTopic, 1, (short) BROKER_COUNT)`
+    // (`PlaintextConsumerPollTest.java:546`).
+    create_test_topic(&ctx, &other_topic, 1).await;
     let producer = build_producer_bytes(&ctx);
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &other_topic).await;
     // Java sends `numMessages` to BOTH topics. We follow the same
     // ordering: `otherTopic` first, then `topic`.
     let num_messages: usize = 10;
@@ -1462,6 +1552,25 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
+/// Java `PlaintextConsumerPollTest.BROKER_COUNT` (`PlaintextConsumerPollTest.java:85`).
+const BROKER_COUNT: i16 = 3;
+
+/// Translates the suite's `@BeforeEach` topic setup
+/// (`PlaintextConsumerPollTest.java:97-100`):
+/// `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`.
+///
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests, before the test produces.
+/// Auto-creating the topic by producing instead races leader election on the
+/// 3-broker cluster: `NOT_LEADER_OR_FOLLOWER` retries reorder the
+/// non-idempotent sends, breaking the tests' offset/timestamp assertions.
+async fn create_test_topic(ctx: &TestContext, topic: &str, num_partitions: i32) {
+    let admin = admin_for(ctx);
+    create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
 /// Builds an admin client for topic provisioning. Mirrors the per-file
 /// `admin_for` helper the `admin_*` integration tests use.
 fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
@@ -1474,31 +1583,6 @@ fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
     ctx.apply_security(&mut props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     AdminClient::create(config).expect("admin client")
-}
-
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.
-///
-/// Forces broker auto-create by producing one no-op record per partition;
-/// with `num.partitions=2` on the broker, the first produce auto-creates the
-/// topic with two partitions. Subsequent calls are idempotent (a no-op record
-/// is just appended).
-async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    for partition in 0..2 {
-        let record = ProducerRecord::with_partition_key(
-            topic.to_string(),
-            Some(partition),
-            Some(b"__provisioner__".to_vec()),
-            Some(b"__provisioner__".to_vec()),
-        )
-        .expect("ProducerRecord::with_partition_key should succeed");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
-            .await
-            .expect("provisioner send should succeed");
-        fut.get_with_timeout(Duration::from_secs(30))
-            .await
-            .expect("provisioner send should ack");
-    }
-    producer.flush().await.expect("producer.flush should succeed");
 }
 
 // ── Local utilities ────────────────────────────────────────────────────

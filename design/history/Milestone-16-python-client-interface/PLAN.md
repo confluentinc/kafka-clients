@@ -1,4 +1,4 @@
-# Milestone 15 — Python client interface design: producer and consumer
+# Milestone 16 — Python client interface design: producer and consumer
 
 The `confluent_kafka` Python client for the producer and consumer families
 (`bindings/python/`), generated from rules rather than written by hand. PR #187.

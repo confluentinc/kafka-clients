@@ -40,24 +40,86 @@ pub struct ClusterConfig {
     ///
     /// `BTreeMap` is used instead of `HashMap` so that `Hash` is deterministic.
     pub server_properties: BTreeMap<String, String>,
+    /// KRaft topology — Java `ClusterConfig.clusterTypes()` / `@ClusterTest(types = ...)`.
+    ///
+    /// Defaults to [`Type::CoKraft`] (every node is a combined broker+controller),
+    /// the topology every pooled suite was written against. Java's
+    /// `@ClusterTest` default runs *both* types; here a config names exactly one.
+    pub cluster_type: Type,
+    /// Number of dedicated controller nodes — Java `@ClusterTest(controllers = ...)`.
+    ///
+    /// Only meaningful for [`Type::Kraft`]; defaults to 1 as in Java
+    /// (`ClusterConfig.defaultBuilder().setControllers(1)`). Ignored for
+    /// [`Type::CoKraft`], where every node is a voter (the pre-existing harness
+    /// shape; Java would make only the first `controllers` nodes combined).
+    pub controllers: u16,
+    /// Whether this test gets its **own** cluster instead of a pooled one.
+    ///
+    /// Java's `ClusterTestExtensions` starts a fresh cluster per test invocation;
+    /// the Rust harness pools clusters by config for speed (see
+    /// [`super::cluster_pool`]). A test that stops brokers must not share its
+    /// cluster, so it sets this flag: [`super::test_context::TestContext`] then
+    /// starts a private cluster and removes its containers when the context is
+    /// dropped, including on panic.
+    pub dedicated: bool,
+}
+
+/// The type of cluster requested — Java `org.apache.kafka.common.test.api.Type`.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub enum Type {
+    /// Java `Type.KRAFT`: dedicated controller node(s) (`process.roles=controller`)
+    /// plus broker-only nodes (`process.roles=broker`). Stopping a broker never
+    /// affects the KRaft quorum. Node ids follow Java's `TestKitNodes`: brokers
+    /// from `BROKER_ID_OFFSET` (0), controllers from `CONTROLLER_ID_OFFSET` (3000).
+    Kraft,
+    /// Java `Type.CO_KRAFT`: every node runs `process.roles=broker,controller`.
+    /// Node ids are 1-based (a pre-existing harness choice kept so pooled suites
+    /// are unaffected; Java numbers combined nodes from 0).
+    CoKraft,
 }
 
 impl ClusterConfig {
     /// Multi-broker cluster with no extra properties.
     pub fn with_brokers(brokers: u16) -> Self {
-        Self { brokers, server_properties: BTreeMap::new() }
+        Self { brokers, ..Self::default() }
     }
 
     /// Single broker with custom server properties.
     pub fn with_properties(props: BTreeMap<String, String>) -> Self {
-        Self { brokers: 1, server_properties: props }
+        Self { server_properties: props, ..Self::default() }
+    }
+
+    /// A dedicated (non-pooled) [`Type::Kraft`] cluster with `brokers` broker
+    /// nodes and `controllers` controller nodes — the shape Java's
+    /// `@ClusterTest(types = {Type.KRAFT}, brokers = N, controllers = M)` builds.
+    /// Required by the broker-lifecycle API (`shutdown_broker` / `start_broker`).
+    pub fn kraft_dedicated(brokers: u16, controllers: u16) -> Self {
+        Self {
+            brokers,
+            cluster_type: Type::Kraft,
+            controllers,
+            dedicated: true,
+            ..Self::default()
+        }
+    }
+
+    /// Returns this config with `props` as its server properties.
+    pub fn set_server_properties(mut self, props: BTreeMap<String, String>) -> Self {
+        self.server_properties = props;
+        self
     }
 }
 
 impl Default for ClusterConfig {
     /// Default single-broker cluster with no extra properties.
     fn default() -> Self {
-        Self { brokers: 1, server_properties: BTreeMap::new() }
+        Self {
+            brokers: 1,
+            server_properties: BTreeMap::new(),
+            cluster_type: Type::CoKraft,
+            controllers: 1,
+            dedicated: false,
+        }
     }
 }
 
@@ -148,6 +210,21 @@ pub fn authorizer_deny_reachable_single_broker() -> ClusterConfig {
     // Any principal that is not the one the test client authenticates as.
     props.insert("KAFKA_SUPER_USERS".to_string(), "User:nobody".to_string());
     props.insert("KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND".to_string(), "true".to_string());
+    ClusterConfig::with_properties(props)
+}
+
+/// A single-broker cluster whose transaction-state log is replicated with a
+/// factor of 1, so the transaction coordinator is usable on one node (the
+/// defaults require three replicas).
+///
+/// Shared by the admin transaction RPC tests and the single-broker producer
+/// transaction translations (`ProducerIntegrationTest`,
+/// `TransactionsWithMaxInFlightOneTest`), which all key transaction state on
+/// per-test transactional ids and so can share one pooled container.
+pub fn txn_single_broker() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string());
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string());
     ClusterConfig::with_properties(props)
 }
 

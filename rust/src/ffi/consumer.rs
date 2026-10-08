@@ -71,8 +71,9 @@ use crate::consumer::{
 
 use super::common::{
     self, CallbackTarget, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    dispatch_and_wait, enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
+    dispatch_and_wait, enqueue_or_run_inline, init_default_logger, kafka_common_Error_t, spawn_callback_task,
 };
+use super::ffi_guard;
 
 // The byte-array consumer is monomorphized over refcounted `bytes::Bytes` keys
 // and values, so each record's key/value is a zero-copy slice of the owning
@@ -200,6 +201,13 @@ struct FfiConsumerHandle {
 // cross-thread access is sound. `UnsafeCell` is needed to hand out `&mut` from
 // a shared `&FfiConsumerHandle`.
 unsafe impl Send for FfiConsumerHandle {}
+// SAFETY: `Sync` is what lets several C threads hold a `&FfiConsumerHandle` at
+// once. The only non-`Sync` field is the `UnsafeCell`, and every access to
+// `*consumer.get()` goes through `consumer_mut` / `mock_mut`, whose contract
+// requires the single-owner guard taken by `acquire()`, so two live references
+// never reach the cell at the same time; the remaining fields (`AtomicU64`, the
+// runtime and its handle, the `Mutex`, the channel sender, `ConsumerHandle`) are
+// `Sync` on their own.
 unsafe impl Sync for FfiConsumerHandle {}
 
 /// Builds a [`FfiConsumerHandle`] around a [`ConsumerKind`], spawning the
@@ -239,6 +247,14 @@ fn build_consumer_handle(
 ///
 /// `consumer` must be non-null and created by a consumer constructor.
 unsafe fn handle_ref(consumer: *const kafka_consumer_Consumer_t) -> &'static FfiConsumerHandle {
+    // SAFETY: Per this function's `# Safety`, `consumer` is non-null and was produced by
+    // `Box::into_raw` in `build_consumer_handle` (the only constructor of
+    // `FfiConsumerHandle`). The allocation is leaked and freed only by
+    // `kafka_consumer_Consumer_destroy`, so the `&'static` is valid for as long as the C
+    // caller keeps the handle alive, which every caller's `# Safety` requires for the
+    // duration of its use. Sharing the reference across threads is sound via the `unsafe
+    // impl Sync`; exclusive access to the inner consumer is enforced separately by
+    // `acquire`.
     unsafe { &*(consumer as *const FfiConsumerHandle) }
 }
 
@@ -259,6 +275,11 @@ unsafe fn handle_ref(consumer: *const kafka_consumer_Consumer_t) -> &'static Ffi
 pub(crate) unsafe fn clone_core_handle(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> (ConsumerHandle, tokio::runtime::Handle) {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's own `# Safety` requires of `consumer`. The reference is used only to
+    // clone `consumer_handle` and `runtime_handle`, both `&self` reads of fields fixed at
+    // construction, and it does not outlive this call, during which the C caller keeps the
+    // handle alive; deliberately no guard is taken, as the rustdoc explains.
     let h = unsafe { handle_ref(consumer) };
     (h.consumer_handle.clone(), h.runtime_handle.clone())
 }
@@ -301,6 +322,11 @@ pub struct kafka_consumer_ConsumerRecord_t {
 ///
 /// `props` must be a valid handle from a `ConsumerProperties` constructor.
 unsafe fn properties_ref(props: *const kafka_consumer_ConsumerProperties_t) -> &'static HashMap<String, String> {
+    // SAFETY: Per this function's `# Safety`, `props` is a valid handle from a
+    // `ConsumerProperties` constructor, i.e. a `HashMap<String, String>` leaked via
+    // `Box::into_raw` in `kafka_consumer_ConsumerProperties_new` or `_from_configs`; it
+    // stays allocated until `kafka_consumer_ConsumerProperties_destroy`, and callers use
+    // the returned reference only for the duration of their own synchronous call.
     unsafe { &*(props as *const HashMap<String, String>) }
 }
 
@@ -310,6 +336,13 @@ unsafe fn properties_ref(props: *const kafka_consumer_ConsumerProperties_t) -> &
 ///
 /// `props` must be a valid handle from a `ConsumerProperties` constructor.
 unsafe fn properties_mut(props: *mut kafka_consumer_ConsumerProperties_t) -> &'static mut HashMap<String, String> {
+    // SAFETY: Same provenance as `properties_ref`: per this function's `# Safety`, `props`
+    // is a live `HashMap<String, String>` from `Box::into_raw` in a `ConsumerProperties`
+    // constructor, alive until `kafka_consumer_ConsumerProperties_destroy`. The `&mut` is
+    // used only within the caller's synchronous call
+    // (`kafka_consumer_ConsumerProperties_put`); its exclusivity relies on the C caller not
+    // operating on the same properties handle from another thread at the same time, which
+    // no guard enforces and the contract states only as "a valid handle".
     unsafe { &mut *(props as *mut HashMap<String, String>) }
 }
 
@@ -319,6 +352,7 @@ unsafe fn properties_mut(props: *mut kafka_consumer_ConsumerProperties_t) -> &'s
 ///
 /// A non-null opaque properties handle. The caller must free it with
 /// [`kafka_consumer_ConsumerProperties_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerProperties_new() -> *mut kafka_consumer_ConsumerProperties_t {
     let map: HashMap<String, String> = HashMap::new();
@@ -340,6 +374,7 @@ pub extern "C" fn kafka_consumer_ConsumerProperties_new() -> *mut kafka_consumer
 ///
 /// `configs` must be NULL or point to a NULL-terminated array of valid,
 /// null-terminated C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_from_configs(
     configs: *const *const c_char,
@@ -350,15 +385,32 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_from_configs(
     let mut map: HashMap<String, String> = HashMap::new();
     let mut i = 0usize;
     loop {
+        // SAFETY: `configs` is non-null (checked above) and, per this function's `#
+        // Safety`, points to a NULL-terminated array of C-string pointers, so element `i`
+        // is readable: `i` advances by two and the loop exits at the first NULL key, so
+        // every index read so far lies at or before the terminator.
         let key_ptr = unsafe { *configs.add(i) };
         if key_ptr.is_null() {
             break;
         }
+        // SAFETY: The key at index `i` was non-null (a NULL key breaks out of the loop
+        // before this read), so per the `# Safety` contract the NULL terminator has not
+        // been reached yet and index `i + 1` is within the array: at worst it is the
+        // terminator itself, which is read and then rejected (returning NULL) rather than
+        // dereferenced.
         let val_ptr = unsafe { *configs.add(i + 1) };
         if val_ptr.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `key_ptr` is non-null (a NULL key breaks out of the loop before this
+        // point) and, per the `# Safety` contract, every non-NULL entry of `configs` is a
+        // valid NUL-terminated C string that stays alive for the call; the bytes are copied
+        // into an owned `String` immediately.
         let key = unsafe { CStr::from_ptr(key_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `val_ptr` is non-null (a NULL value returns NULL from the function before
+        // this point) and, per the `# Safety` contract, a valid NUL-terminated C string
+        // alive for the duration of the call; it is copied into an owned `String`
+        // immediately.
         let val = unsafe { CStr::from_ptr(val_ptr) }.to_string_lossy().to_string();
         map.insert(key, val);
         i += 2;
@@ -372,6 +424,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_from_configs(
 /// # Safety
 ///
 /// `props` must be a valid handle; `key` and `value` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_put(
     props: *mut kafka_consumer_ConsumerProperties_t,
@@ -381,8 +434,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_put(
     if props.is_null() || key.is_null() || value.is_null() {
         return;
     }
+    // SAFETY: `props` is non-null (checked above together with `key` and `value`) and, per
+    // this function's `# Safety`, a valid properties handle, which is what `properties_mut`
+    // requires. The `&mut HashMap` is used only within this synchronous call; its
+    // exclusivity relies on the C caller not using the same properties handle concurrently,
+    // which no guard enforces (the contract says only "a valid handle").
     let map = unsafe { properties_mut(props) };
+    // SAFETY: `key` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid NUL-terminated C string for the duration of the call; it is copied into an
+    // owned `String` immediately.
     let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    // SAFETY: `value` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid NUL-terminated C string for the duration of the call; it is copied into an
+    // owned `String` immediately.
     let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
     map.insert(k, v);
 }
@@ -393,9 +457,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_put(
 ///
 /// `props` must be null or a valid handle from a `ConsumerProperties`
 /// constructor. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_destroy(props: *mut kafka_consumer_ConsumerProperties_t) {
     if !props.is_null() {
+        // SAFETY: `props` is non-null (checked above) and, per this function's `# Safety`,
+        // a handle produced by `Box::into_raw` of a `Box<HashMap<String, String>>` in
+        // `kafka_consumer_ConsumerProperties_new` or `_from_configs`; the contract declares
+        // the pointer invalid after this call, so this is the single, final use.
+        // `kafka_consumer_KafkaConsumer_new` only borrows the properties (the caller
+        // retains ownership), so no other path frees them.
         unsafe {
             drop(Box::from_raw(props as *mut HashMap<String, String>));
         }
@@ -426,6 +497,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_destroy(props: *mut k
 /// # Safety
 ///
 /// `props` must be a valid, non-null properties handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     props: *const kafka_consumer_ConsumerProperties_t,
@@ -434,15 +506,26 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     init_default_logger();
     if props.is_null() {
         if !out_error.is_null() {
+            // SAFETY: `out_error` is non-null (checked above); per the parameter docs it is
+            // either null or a slot for one error handle, and exactly one freshly boxed
+            // handle from `box_error` is written, whose ownership passes to the caller.
             unsafe { *out_error = box_error(Error::local_illegal_argument("properties handle must not be null")) };
         }
         return std::ptr::null_mut();
     }
+    // SAFETY: `props` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid properties handle, which is what `properties_ref` requires; the borrowed map is
+    // read only while building `ConsumerConfig` within this call, during which the caller
+    // retains ownership of the handle.
     let map = unsafe { properties_ref(props) };
     let config = match crate::consumer::ConsumerConfig::new(map) {
         Ok(c) => c,
         Err(e) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above); per the parameter docs
+                // it points to a slot for one error handle, and exactly one freshly boxed
+                // `box_error(e)` handle is written for the caller to free with
+                // `kafka_common_Error_destroy`.
                 unsafe { *out_error = box_error(e) };
             }
             return std::ptr::null_mut();
@@ -458,6 +541,10 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         Ok(GroupProtocol::Consumer) => {},
         Ok(GroupProtocol::Classic) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above); per the parameter docs
+                // it points to a slot for one error handle, and exactly one freshly boxed
+                // handle is written for the caller to free with
+                // `kafka_common_Error_destroy`.
                 unsafe {
                     *out_error = box_error(Error::unsupported_version(
                         "Classic group protocol is not yet supported in this client; \
@@ -469,6 +556,10 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         },
         Err(e) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above); per the parameter docs
+                // it points to a slot for one error handle, and exactly one freshly boxed
+                // `box_error(e)` handle is written for the caller to free with
+                // `kafka_common_Error_destroy`.
                 unsafe { *out_error = box_error(e) };
             }
             return std::ptr::null_mut();
@@ -481,6 +572,10 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
             Ok(c) => c,
             Err(e) => {
                 if !out_error.is_null() {
+                    // SAFETY: `out_error` is non-null (checked above); per the parameter
+                    // docs it points to a slot for one error handle, and exactly one
+                    // freshly boxed `box_error(e)` handle is written for the caller to free
+                    // with `kafka_common_Error_destroy`.
                     unsafe { *out_error = box_error(e) };
                 }
                 return std::ptr::null_mut();
@@ -489,6 +584,9 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
 
     let consumer_handle = consumer.handle();
     if !out_error.is_null() {
+        // SAFETY: `out_error` is non-null (checked above); per the documented contract
+        // `*out_error` is set to null on success, so exactly one null pointer is written
+        // through the caller-provided, writable slot.
         unsafe { *out_error = std::ptr::null_mut() };
     }
     build_consumer_handle(ConsumerKind::Async(Box::new(consumer)), consumer_handle, false)
@@ -510,6 +608,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
 /// # Safety
 ///
 /// `auto_offset_reset` must be null or a valid, null-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     auto_offset_reset: *const c_char,
@@ -518,6 +617,9 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     let strategy = if auto_offset_reset.is_null() {
         AutoOffsetResetStrategy::LATEST
     } else {
+        // SAFETY: `auto_offset_reset` is non-null (checked above) and, per this function's
+        // `# Safety`, a valid NUL-terminated C string for the duration of the call; it is
+        // copied into an owned `String` immediately.
         let s = unsafe { CStr::from_ptr(auto_offset_reset) }.to_string_lossy().to_string();
         AutoOffsetResetStrategy::from_string(&s).unwrap_or(AutoOffsetResetStrategy::LATEST)
     };
@@ -542,18 +644,35 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 /// # Safety
 ///
 /// `consumer` must be null or a valid handle from a consumer constructor.
-/// After this call the pointer is invalid.
+/// After this call the pointer is invalid. No `_async` operation on the handle
+/// may still be in flight: its awaiter task and completion job use the handle
+/// until the callback has fired, and this function does not wait for them, so
+/// it must only be called once every pending callback has been delivered.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_consumer_Consumer_t) {
     if consumer.is_null() {
         return;
     }
+    // SAFETY: `consumer` is non-null (checked above) and, per this function's `# Safety`, a
+    // handle created by `Box::into_raw` in `build_consumer_handle` (the only producer of
+    // `kafka_consumer_Consumer_t`) that becomes invalid after this call, so reclaiming the
+    // `Box` is the single, final use. The `&'static FfiConsumerHandle` references captured
+    // by async-variant tasks (`poll_async`, `async_void_op`, `async_value_op`) are kept
+    // from outliving this free only by the documented precondition that no operation is in
+    // flight when `destroy` runs (the guard is deliberately not acquired, mirroring Java):
+    // a task touches its `hs` for the last time in the completion job's `release`, before
+    // the C callback fires. `runtime.shutdown_background()` does not wait for running
+    // tasks, so that ordering is a contractual guarantee from the C caller, not one this
+    // function enforces.
     let handle = unsafe { Box::from_raw(consumer as *mut FfiConsumerHandle) };
     let FfiConsumerHandle { consumer, runtime, completion_tx, dispatcher, .. } = *handle;
 
-    // 1. Shut down the runtime first. This cancels any in-flight async-variant
-    //    future that borrows `*consumer.get()`, so the consumer is no longer
-    //    aliased when we drop it next.
+    // 1. Shut down the runtime first. `shutdown_background` drops every
+    //    async-variant awaiter that is not being polled at this instant and does
+    //    not wait for one that is, which is why the `# Safety` contract requires
+    //    that no `_async` operation is still in flight: an awaiter borrows
+    //    `*consumer.get()`, which is dropped next.
     runtime.shutdown_background();
     // 2. Drop the consumer; its own `Drop` joins the internal bg task.
     drop(consumer);
@@ -573,11 +692,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_co
 /// # Safety
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_consumer_Consumer_t) {
     if consumer.is_null() {
         return;
     }
+    // SAFETY: `consumer` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid handle from a consumer constructor, which is what `handle_ref` requires. The
+    // reference is used only to call `consumer_handle.wakeup()` (`&self`) within this call;
+    // bypassing the access guard is the documented purpose of the core `ConsumerHandle`,
+    // whose methods all take `&self`.
     let handle = unsafe { handle_ref(consumer) };
     handle.consumer_handle.wakeup();
 }
@@ -604,31 +729,52 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_c
 /// # Safety
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
     out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_ConsumerRecords_t {
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor;
+    // this function's `# Safety` requires exactly that of `consumer` (there is no null
+    // check, so a null handle is a contract violation by the C caller). The reference is
+    // used only for the duration of this synchronous call, during which the caller keeps
+    // the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         if !out_error.is_null() {
+            // SAFETY: `out_error` is non-null (checked above); per the parameter docs it is
+            // null or a slot for one error handle, and exactly one freshly boxed
+            // `box_error(e)` handle, owned by the caller, is written.
             unsafe { *out_error = box_error(e) };
         }
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
+    // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut dyn Consumer` is exclusive for the whole `block_on(poll)` window per the
+    // `UnsafeCell` + `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl
+    // Send/Sync`. `block_on` drives the future to completion before `_g` drops, so no
+    // borrow outlives the guard.
     let result = h.runtime.block_on(unsafe { consumer_mut(h).poll(timeout) });
     match result {
         Ok(records) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above); per the documented
+                // contract `*out_error` is set to null on success, so exactly one null
+                // pointer is written through the caller's writable slot.
                 unsafe { *out_error = std::ptr::null_mut() };
             }
             box_records(records)
         },
         Err(e) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above); per the parameter docs
+                // it is null or a slot for one error handle, and exactly one freshly boxed
+                // `box_error(e)` handle, owned by the caller, is written.
                 unsafe { *out_error = box_error(e) };
             }
             std::ptr::null_mut()
@@ -656,6 +802,17 @@ pub type kafka_consumer_Consumer_poll_callback_t =
 /// # Safety
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -663,11 +820,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
     callback: kafka_consumer_Consumer_poll_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor,
+    // which this function's `# Safety` requires of `consumer` (no null check here). `h` is
+    // used only on the submitting thread within this call, for `acquire`, cloning
+    // `completion_tx` and spawning on `runtime_handle`.
     let h = unsafe { handle_ref(consumer) };
     let target = PollCallbackTarget { callback, user_data };
     if let Err(e) = acquire(h) {
         // Rejected: deliver the error through the callback inline. The guard
         // was not taken, so nothing to release.
+        // SAFETY: `callback` was supplied by the C caller along with `user_data`; this is
+        // the documented inline rejection path ("If the guard cannot be acquired, the
+        // callback fires inline with the error"), fired exactly once on the calling thread
+        // with a null records pointer and a fresh `box_error(e)` handle whose ownership
+        // passes to the callback per the `kafka_consumer_Consumer_poll_callback_t` docs.
+        // The guard was not taken, so no release is owed, and the function returns without
+        // spawning, so the completion path cannot fire a second time.
         unsafe { (target.callback)(std::ptr::null_mut(), box_error(e), target.user_data) };
         return;
     }
@@ -676,9 +844,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
     // Capture the `&'static FfiConsumerHandle` (Send+Sync via the unsafe impls),
     // NOT a bare `*mut` (raw pointers are !Send and would make the future
     // !Send). The handle is leaked, so the borrow is effectively `'static`.
+    // SAFETY: `handle_ref`'s precondition holds exactly as for `h`: per this function's `#
+    // Safety`, `consumer` is a non-null handle from a consumer constructor, leaked by
+    // `build_consumer_handle` and freed only by `kafka_consumer_Consumer_destroy`, so the
+    // `&'static` is sound while the handle lives. `hs` escapes into the spawned task and
+    // the `PollCompletion` job, and is last touched by `release(self.handle)` inside
+    // `PollCompletion::fire`, which runs before the C callback. Its keep-alive is not
+    // mechanical (`destroy` registers no task to join and `shutdown_background` does not
+    // wait): it is the documented `destroy` precondition that the caller must not destroy
+    // the consumer while an operation is in flight, i.e. before its completion callback has
+    // fired.
     let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
+        // SAFETY: `consumer_mut` requires the guard: `acquire(h)` on the calling thread
+        // succeeded (the `Err` path fired the callback inline and returned without
+        // spawning), and with no `ReleaseGuard` on this path the guard is held for the
+        // whole submit->callback window; it is released only by `release(self.handle)` in
+        // `PollCompletion::fire` on the dispatcher thread, after `poll().await` has
+        // returned and the `&mut dyn Consumer` borrow has ended. `hs` is the leaked handle
+        // whose lifetime is covered by the `destroy` in-flight precondition.
         let result = unsafe { consumer_mut(hs).poll(timeout).await };
         // No `.await` after building the raw handles below.
         let (records, error) = match result {
@@ -686,6 +871,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
             Err(e) => (std::ptr::null_mut(), box_error(e)),
         };
         let completion = PollCompletion { target, records, error, handle: hs };
+        // SAFETY: `PollCompletion::fire` requires exactly one call on the dispatcher
+        // thread: the `FnOnce` job consumes `completion` and is boxed once, and
+        // `enqueue_or_run_inline` either hands it to the single per-handle dispatcher
+        // thread or, only if that thread has already exited (the task's `tx` clone keeps
+        // the channel itself open), runs it inline exactly once on this tokio worker, the
+        // post-teardown fallback documented in `common.rs`. The raw pointers are owned
+        // handles moved to the dispatcher thread; the C user is responsible for the
+        // thread-safety of `user_data`.
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
         enqueue_or_run_inline(&tx, job);
     });
@@ -719,6 +912,17 @@ impl PollCompletion {
         // another thread). The callback only reads the already-built result
         // handles; it does not touch the consumer.
         release(self.handle);
+        // SAFETY: `self.target.callback` was supplied by the C caller along with
+        // `user_data`; this is the single completion invocation for the poll (the inline
+        // rejection path returns without spawning). `self.records` and `self.error` were
+        // freshly built by `box_records` / `box_error` on the task, exactly one of them is
+        // non-null, and ownership transfers to the callee per the
+        // `kafka_consumer_Consumer_poll_callback_t` docs. It fires on the dispatcher thread
+        // (or inline on a tokio worker in `enqueue_or_run_inline`'s post-teardown fallback)
+        // after `release(self.handle)`, and only reads the already-built result handles,
+        // never the consumer. The C user is responsible for the thread-safety of
+        // `user_data`, which stays valid until this callback fires per the async-op
+        // contract.
         unsafe { (self.target.callback)(self.records, self.error, self.target.user_data) };
     }
 }
@@ -745,6 +949,12 @@ unsafe impl Send for PollCallbackTarget {}
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[expect(clippy::mut_from_ref)]
 unsafe fn consumer_mut(h: &FfiConsumerHandle) -> &mut dyn Consumer<Bytes, Bytes> {
+    // SAFETY: Interior-mutability hand-out: per this function's `# Safety` the caller holds
+    // the access guard, and `acquire()` guarantees at most one thread/future accesses
+    // `*consumer.get()` at any instant (the invariant documented on the `unsafe impl
+    // Send/Sync` for `FfiConsumerHandle`), so producing a `&mut ConsumerKind` from the
+    // shared `&FfiConsumerHandle` creates no aliasing `&mut`; `UnsafeCell::get` yields a
+    // valid, aligned pointer to the live field.
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Async(c) => c.as_mut(),
         ConsumerKind::Mock(c) => c.as_mut(),
@@ -787,6 +997,10 @@ fn box_records(records: ConsumerRecords<Bytes, Bytes>) -> *mut kafka_consumer_Co
 ///
 /// `records` must be a valid handle from [`box_records`].
 unsafe fn records_ref(records: *const kafka_consumer_ConsumerRecords_t) -> &'static ConsumerRecordsInner {
+    // SAFETY: Per this function's `# Safety`, `records` is a handle from `box_records`,
+    // i.e. a `ConsumerRecordsInner` leaked via `Box::into_raw`; it stays allocated until
+    // `kafka_consumer_ConsumerRecords_destroy`, and every caller uses the reference only
+    // within its own synchronous call, during which the C caller keeps the batch alive.
     unsafe { &*(records as *const ConsumerRecordsInner) }
 }
 
@@ -795,11 +1009,15 @@ unsafe fn records_ref(records: *const kafka_consumer_ConsumerRecords_t) -> &'sta
 /// # Safety
 ///
 /// `records` must be a valid records handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(records: *const kafka_consumer_ConsumerRecords_t) -> i32 {
     if records.is_null() {
         return 0;
     }
+    // SAFETY: `records` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid records handle, i.e. one produced by `box_records` as `records_ref` requires;
+    // the reference is used only to read `flat.len()` within this call.
     unsafe { records_ref(records) }.flat.len() as i32
 }
 
@@ -808,6 +1026,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(records: *const ka
 /// # Safety
 ///
 /// `records` must be a valid records handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(
     records: *const kafka_consumer_ConsumerRecords_t,
@@ -815,6 +1034,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(
     if records.is_null() {
         return true;
     }
+    // SAFETY: `records` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid records handle produced by `box_records`, as `records_ref` requires; the
+    // reference is used only to read `flat.is_empty()` within this call.
     unsafe { records_ref(records) }.flat.is_empty()
 }
 
@@ -824,6 +1046,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(
 /// # Safety
 ///
 /// `records` must be a valid records handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_get(
     records: *const kafka_consumer_ConsumerRecords_t,
@@ -832,6 +1055,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_get(
     if records.is_null() || index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `records` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid records handle produced by `box_records`, as `records_ref` requires. `index` is
+    // non-negative (checked above) and bounds-checked by `get`; the returned record pointer
+    // borrows into `inner.records`, which is boxed and never moved, so it stays valid until
+    // the batch is destroyed, exactly as documented.
     let inner = unsafe { records_ref(records) };
     match inner.flat.get(index as usize) {
         Some(&ptr) => ptr as *const kafka_consumer_ConsumerRecord_t,
@@ -853,10 +1081,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_get(
 /// # Safety
 ///
 /// `records` must be a valid records handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
     records: *const kafka_consumer_ConsumerRecords_t,
 ) -> *mut kafka_consumer_OffsetMap_t {
+    // SAFETY: `records_ref` requires a handle from `box_records`, which is what this
+    // function's `# Safety` requires of `records` ("a valid records handle"); the borrow
+    // ends within this call, the offsets being cloned into a new map the caller owns.
     box_offset_map(unsafe { records_ref(records) }.records.next_offsets().clone())
 }
 
@@ -866,9 +1098,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
 ///
 /// `records` must be null or a valid records handle. After this call the
 /// pointer (and any record pointers obtained from it) are invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_destroy(records: *mut kafka_consumer_ConsumerRecords_t) {
     if !records.is_null() {
+        // SAFETY: `records` is non-null (checked above) and, per this function's `#
+        // Safety`, a handle produced by `Box::into_raw` in `box_records` that becomes
+        // invalid, together with every record pointer borrowed from it, after this call;
+        // those borrowed record pointers are the only other references into the allocation,
+        // so reclaiming the `Box` here is the single, final use.
         unsafe {
             drop(Box::from_raw(records as *mut ConsumerRecordsInner));
         }
@@ -882,6 +1120,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_destroy(records: *mut ka
 /// `record` must be a valid record pointer obtained from
 /// [`kafka_consumer_ConsumerRecords_get`].
 unsafe fn record_ref(record: *const kafka_consumer_ConsumerRecord_t) -> &'static ConsumerRecord<Bytes, Bytes> {
+    // SAFETY: Per this function's `# Safety`, `record` was obtained from
+    // `kafka_consumer_ConsumerRecords_get`, i.e. it is an entry of
+    // `ConsumerRecordsInner::flat` pointing into the boxed, never-moved `records` batch; it
+    // stays valid until `kafka_consumer_ConsumerRecords_destroy`, which the C caller must
+    // not call while still using the record, and every getter uses the reference only
+    // within its own call.
     unsafe { &*(record as *const ConsumerRecord<Bytes, Bytes>) }
 }
 
@@ -890,10 +1134,16 @@ unsafe fn record_ref(record: *const kafka_consumer_ConsumerRecord_t) -> &'static
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check, so null is a contract violation). The
+    // borrow lasts only for this call, during which the owning batch is kept alive by the C
+    // caller.
     unsafe { record_ref(record) }.partition()
 }
 
@@ -902,8 +1152,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(record: *const kafka_consumer_ConsumerRecord_t) -> i64 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to read
+    // `offset()` within this call, during which the owning batch is kept alive by the C
+    // caller.
     unsafe { record_ref(record) }.offset()
 }
 
@@ -913,10 +1169,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(record: *const kaf
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i64 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to read
+    // `timestamp()` within this call, during which the owning batch is kept alive by the C
+    // caller.
     unsafe { record_ref(record) }.timestamp()
 }
 
@@ -927,14 +1189,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
 ) -> *const c_char {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check). The returned topic pointer borrows into the batch, which
+    // stays alive until the C caller destroys the records handle, as the rustdoc documents.
     let rec = unsafe { record_ref(record) };
     let topic = rec.topic();
     if !out_len.is_null() {
+        // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+        // Safety`, a valid pointer; exactly one `i32` (the topic byte length) is written.
         unsafe { *out_len = topic.len() as i32 };
     }
     topic.as_ptr() as *const c_char
@@ -947,21 +1216,32 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
 ) -> *const u8 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check). The returned key pointer borrows into the batch (zero-copy)
+    // and stays valid until the records handle is destroyed, as documented.
     let rec = unsafe { record_ref(record) };
     match rec.key() {
         Some(k) => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (the key byte length) is
+                // written.
                 unsafe { *out_len = k.len() as i32 };
             }
             k.as_ptr()
         },
         None => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (`-1`, the documented
+                // absent-key marker) is written.
                 unsafe { *out_len = -1 };
             }
             std::ptr::null()
@@ -976,21 +1256,32 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
 ) -> *const u8 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check). The returned value pointer borrows into the batch
+    // (zero-copy) and stays valid until the records handle is destroyed, as documented.
     let rec = unsafe { record_ref(record) };
     match rec.value() {
         Some(v) => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (the value byte length) is
+                // written.
                 unsafe { *out_len = v.len() as i32 };
             }
             v.as_ptr()
         },
         None => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (`-1`, the documented
+                // absent-value marker) is written.
                 unsafe { *out_len = -1 };
             }
             std::ptr::null()
@@ -1004,10 +1295,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to read
+    // `timestamp_type()` within this call, during which the owning batch is kept alive by
+    // the C caller.
     unsafe { record_ref(record) }.timestamp_type().id()
 }
 
@@ -1016,10 +1313,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to read
+    // `serialized_key_size()` within this call, during which the owning batch is kept alive
+    // by the C caller.
     unsafe { record_ref(record) }.serialized_key_size()
 }
 
@@ -1028,10 +1331,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to read
+    // `serialized_value_size()` within this call, during which the owning batch is kept
+    // alive by the C caller.
     unsafe { record_ref(record) }.serialized_value_size()
 }
 
@@ -1042,14 +1351,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_epoch` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check); the borrow is used only to read `leader_epoch()` within
+    // this call, during which the owning batch is kept alive by the C caller.
     match unsafe { record_ref(record) }.leader_epoch() {
         Some(epoch) => {
             if !out_epoch.is_null() {
+                // SAFETY: `out_epoch` is non-null (checked above) and, per this function's
+                // `# Safety`, a valid pointer; exactly one `i32` is written, and only on
+                // the `Some` path, leaving `*out_epoch` untouched otherwise as documented.
                 unsafe { *out_epoch = epoch };
             }
             true
@@ -1065,14 +1382,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_count` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_count: *mut i32,
 ) -> bool {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check); the borrow is used only to read `delivery_count()` within
+    // this call, during which the owning batch is kept alive by the C caller.
     match unsafe { record_ref(record) }.delivery_count() {
         Some(count) => {
             if !out_count.is_null() {
+                // SAFETY: `out_count` is non-null (checked above) and, per this function's
+                // `# Safety`, a valid pointer; exactly one `i32` is written, and only when
+                // a delivery count is present.
                 unsafe { *out_count = count as i32 };
             }
             true
@@ -1086,10 +1411,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
 /// # Safety
 ///
 /// `record` must be a valid record pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_count(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`; this function's `# Safety` requires `record` to
+    // be such a valid record pointer (no null check). The borrow is used only to count
+    // `headers()` within this call, during which the owning batch is kept alive by the C
+    // caller.
     unsafe { record_ref(record) }.headers().into_iter().count() as i32
 }
 
@@ -1110,23 +1441,35 @@ fn header_at(rec: &ConsumerRecord<Bytes, Bytes>, index: i32) -> Option<&RecordHe
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_len` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_key(
     record: *const kafka_consumer_ConsumerRecord_t,
     index: i32,
     out_len: *mut i32,
 ) -> *const c_char {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check). The returned header-key pointer borrows into the record and
+    // therefore into the batch, valid until the records handle is destroyed, as documented;
+    // `index` is range-checked by `header_at`.
     let rec = unsafe { record_ref(record) };
     match header_at(rec, index) {
         Some(header) => {
             let key = header.key();
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (the header key byte length)
+                // is written.
                 unsafe { *out_len = key.len() as i32 };
             }
             key.as_ptr() as *const c_char
         },
         None => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (`-1`, the documented
+                // out-of-range marker) is written.
                 unsafe { *out_len = -1 };
             }
             std::ptr::null()
@@ -1141,22 +1484,34 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_key(
 /// # Safety
 ///
 /// `record` must be a valid record pointer; `out_len` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
     record: *const kafka_consumer_ConsumerRecord_t,
     index: i32,
     out_len: *mut i32,
 ) -> *const u8 {
+    // SAFETY: `record_ref` requires a pointer obtained from
+    // `kafka_consumer_ConsumerRecords_get`, which this function's `# Safety` requires of
+    // `record` (no null check). The returned header-value pointer borrows into the record
+    // and therefore into the batch (zero-copy), valid until the records handle is
+    // destroyed, as documented; `index` is range-checked by `header_at`.
     let rec = unsafe { record_ref(record) };
     match header_at(rec, index).and_then(|h| h.value()) {
         Some(value) => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (the header value byte
+                // length) is written.
                 unsafe { *out_len = value.len() as i32 };
             }
             value.as_ptr()
         },
         None => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (`-1`, the documented
+                // out-of-range / null-value marker) is written.
                 unsafe { *out_len = -1 };
             }
             std::ptr::null()
@@ -1182,6 +1537,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[expect(clippy::mut_from_ref)]
 unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, Error> {
+    // SAFETY: Interior-mutability hand-out with the same invariant as `consumer_mut`: per
+    // this function's `# Safety` the caller holds the access guard, and `acquire()`
+    // guarantees at most one thread/future accesses `*consumer.get()` at any instant
+    // (documented on the `unsafe impl Send/Sync` for `FfiConsumerHandle`), so the `&mut
+    // ConsumerKind` produced from `UnsafeCell::get` is unaliased; the `Async` arm hands out
+    // nothing and returns an error instead.
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Mock(c) => Ok(c.as_mut()),
         ConsumerKind::Async(_) => Err(Error::local_illegal_state("operation is only supported on a MockConsumer")),
@@ -1199,6 +1560,7 @@ unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Byt
 ///
 /// `topics` must point to `count` valid C strings; `partitions` to `count`
 /// `i32` values. `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1206,6 +1568,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` must be a valid
+    // handle"; no null check here). The reference is used only within this synchronous
+    // call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1214,11 +1580,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     let n = count.max(0) as usize;
     let mut tps = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: Per this function's `# Safety`, `topics` points to `count` valid C-string
+        // pointers; the loop bound is `n = count.max(0)`, so a negative `count` reads
+        // nothing and every index `i < n` is within the promised entries.
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `i`-th entry of `topics`, which per this function's `#
+        // Safety` is a valid NUL-terminated C string for the duration of the call (a NULL
+        // entry is not tolerated by the contract and is not checked here); the bytes are
+        // copied into an owned `String` immediately.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: Per this function's `# Safety`, `partitions` points to `count` `i32`
+        // values and `i < count.max(0)`, so the read is within bounds; a negative `count`
+        // yields no reads.
         let partition = unsafe { *partitions.add(i) };
         tps.push(crate::common::TopicPartition::new(topic, partition));
     }
+    // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early with the error boxed) and `_g: ReleaseGuard` holds it until this
+    // function returns, so the `&mut dyn Consumer` is exclusive for the `block_on(assign)`
+    // window and the borrow ends before `_g` drops, per the `UnsafeCell` + `acquire`
+    // invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     match h.runtime.block_on(unsafe { consumer_mut(h).assign(tps) }) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
@@ -1235,8 +1616,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
 ///
 /// # Safety
 ///
-/// `topic` must be a valid C string; `key`/`value` valid for `key_len`/
-/// `value_len` bytes (or null if the length is negative).
+/// `consumer` must be a valid handle; `topic` must be a valid C string;
+/// `key`/`value` valid for `key_len`/`value_len` bytes (or null if the length is
+/// negative).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1248,15 +1631,28 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     value: *const u8,
     value_len: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor.
+    // This function's `# Safety` does not state that requirement for `consumer` (it covers
+    // only `topic`, `key` and `value`), so the block relies on the caller passing a live
+    // mock-consumer handle, as every sibling `kafka_consumer_MockConsumer_*` driver
+    // documents for its own `consumer` parameter; the reference is used only within this
+    // synchronous call.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call (no null check; null is a contract violation); it is
+    // copied into an owned `String` immediately.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let key_vec: Option<Bytes> = if key_len < 0 || key.is_null() {
         None
     } else {
+        // SAFETY: On this branch `key_len >= 0` and `key` is non-null (both checked above),
+        // and per this function's `# Safety` `key` is valid for `key_len` bytes; the slice
+        // is copied into an owned `Bytes` before the call returns, so it never outlives the
+        // caller's buffer.
         Some(Bytes::copy_from_slice(unsafe {
             std::slice::from_raw_parts(key, key_len as usize)
         }))
@@ -1264,10 +1660,18 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     let value_vec: Option<Bytes> = if value_len < 0 || value.is_null() {
         None
     } else {
+        // SAFETY: On this branch `value_len >= 0` and `value` is non-null (both checked
+        // above), and per this function's `# Safety` `value` is valid for `value_len`
+        // bytes; the slice is copied into an owned `Bytes` before the call returns, so it
+        // never outlives the caller's buffer.
         Some(Bytes::copy_from_slice(unsafe {
             std::slice::from_raw_parts(value, value_len as usize)
         }))
     };
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the remainder of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1288,6 +1692,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
 /// # Safety
 ///
 /// `topic` must be a valid C string; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1295,12 +1700,23 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
     partition: i32,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` a valid handle"; no
+    // null check here). The reference is used only within this synchronous call, during
+    // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1321,6 +1737,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
 /// # Safety
 ///
 /// `topic` must be a valid C string; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1328,12 +1745,23 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
     partition: i32,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` a valid handle"; no
+    // null check here). The reference is used only within this synchronous call, during
+    // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1355,6 +1783,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
 /// # Safety
 ///
 /// `topic` / `leader_host` must be valid C strings; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1364,13 +1793,27 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     leader_host: *const c_char,
     leader_port: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` a valid handle"; no
+    // null check here). The reference is used only within this synchronous call, during
+    // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: Per this function's `# Safety`, `leader_host` is a valid NUL-terminated C
+    // string for the duration of the call (no null check); it is copied into an owned
+    // `String` immediately.
     let host = unsafe { CStr::from_ptr(leader_host) }.to_string_lossy().to_string();
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1398,6 +1841,8 @@ unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Erro
     let message = if message.is_null() {
         String::new()
     } else {
+        // SAFETY: `message` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid C string; it is copied into an owned `String` immediately.
         unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned()
     };
     common::error_for_code(code, message)
@@ -1421,6 +1866,7 @@ unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Erro
 /// # Safety
 ///
 /// `message` must be null or a valid C string; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1428,11 +1874,19 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     code: i32,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` a valid handle"; no
+    // null check here). The reference is used only within this synchronous call, during
+    // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1440,6 +1894,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     let error = if clear {
         None
     } else {
+        // SAFETY: `error_from_code_and_message` requires `message` to be null or a valid C
+        // string, exactly what this function's `# Safety` requires of it.
         Some(unsafe { error_from_code_and_message(code, message) })
     };
     mock.set_poll_error(error);
@@ -1460,6 +1916,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 /// # Safety
 ///
 /// `message` must be null or a valid C string; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1467,11 +1924,19 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     code: i32,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1479,6 +1944,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     let error = if clear {
         None
     } else {
+        // SAFETY: `error_from_code_and_message` requires `message` to be null or a valid C
+        // string, exactly what this function's `# Safety` requires of it.
         Some(unsafe { error_from_code_and_message(code, message) })
     };
     mock.set_offsets_error(error);
@@ -1491,6 +1958,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
 /// # Safety
 ///
 /// `topic` must be a valid C string; `consumer` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1498,12 +1966,23 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
     partition: i32,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1520,16 +1999,25 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
     consumer: *const kafka_consumer_Consumer_t,
     max_poll_records: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1545,15 +2033,24 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1568,15 +2065,24 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> bool {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return false;
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     match unsafe { mock_mut(h) } {
         Ok(mock) => mock.should_rebalance(),
         Err(_) => false,
@@ -1589,15 +2095,24 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
 ) {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return;
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     if let Ok(mock) = unsafe { mock_mut(h) } {
         mock.reset_should_rebalance();
     }
@@ -1609,13 +2124,22 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(consumer: *const kafka_consumer_Consumer_t) -> bool {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return false;
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     match unsafe { mock_mut(h) } {
         Ok(mock) => mock.closed(),
         Err(_) => false,
@@ -1629,15 +2153,24 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(consumer: *const kaf
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> i64 {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, during which the C caller keeps the handle
+    // alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return -1;
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (a failure
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, so the
+    // `&mut MockConsumer` is exclusive for the rest of this synchronous call, per the
+    // `acquire` invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     match unsafe { mock_mut(h) } {
         Ok(mock) => mock.last_poll_timeout().map(|d| d.as_millis() as i64).unwrap_or(-1),
         Err(_) => -1,
@@ -1670,6 +2203,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
 ///
 /// `topics` must point to `count` valid C strings and `partitions` to `count`
 /// `i32` values; `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1677,12 +2211,28 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` ("`consumer` must be a valid
+    // handle"; no null check here). The reference is used only within this synchronous
+    // call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, and tolerates a non-positive `count` (empty
+    // result); this function's `# Safety` promises exactly those two arrays for the
+    // duration of the call. NULL entries are not tolerated by either contract and are not
+    // checked.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `mock_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns, covering
+    // the `block_on(mock.rebalance(..))` window as well. The listener callbacks that
+    // `rebalance` invokes run inline on this thread while the guard is held, and any
+    // re-entrant call on the same handle is rejected by the non-reentrant guard with
+    // `LocalConcurrentModification` rather than aliasing this `&mut`, per the `acquire`
+    // invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -1709,6 +2259,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` valid
 /// entries; `callback` a valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1718,16 +2277,38 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, and tolerates a non-positive `count`; this
+    // function's `# Safety` promises `count` valid entries in both arrays. Everything is
+    // copied into an owned `Vec` before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor,
+    // which this function's `# Safety` requires of `consumer` (no null check here). `h` is
+    // used only on the submitting thread within this call, for `acquire`, cloning
+    // `completion_tx` and spawning on `runtime_handle`.
     let h = unsafe { handle_ref(consumer) };
     let target = OperationCallbackTarget { callback, user_data };
     if let Err(e) = acquire(h) {
+        // SAFETY: `callback` was supplied by the C caller along with `user_data` (this
+        // function's `# Safety` requires a valid function pointer); this is the inline
+        // rejection path, fired exactly once on the calling thread with a fresh `box_error(e)`
+        // handle the callback owns. The guard was not taken, so no release is owed, and the
+        // function returns without spawning, so the completion path cannot fire a second time.
         unsafe { (target.callback)(box_error(e), target.user_data) };
         return;
     }
     let tx = h.completion_tx.clone();
+    // SAFETY: `handle_ref`'s precondition holds exactly as for `h`: per this function's `#
+    // Safety`, `consumer` is a valid handle from a consumer constructor, leaked by
+    // `build_consumer_handle` and freed only by `kafka_consumer_Consumer_destroy`, so the
+    // `&'static` is sound while the handle lives. `hs` escapes into the spawned task and
+    // the completion job (as `release_handle`), where it is last touched by
+    // `release(release_handle)` before `op.fire()`. Its keep-alive is not mechanical
+    // (`destroy` registers no task to join and `shutdown_background` does not wait): it is
+    // the documented `destroy` precondition that the caller must not destroy the consumer
+    // while an operation is in flight, i.e. before its completion callback has fired.
     let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         // SAFETY: the guard is held for the whole submit->callback window.
         let result = match unsafe { mock_mut(hs) } {
@@ -1742,6 +2323,11 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
         let release_handle = hs;
         let job: CompletionJob = Box::new(move || {
             release(release_handle);
+            // SAFETY: `OperationCompletion::fire` requires exactly one call on the dispatcher
+            // thread: `op` is moved into this `FnOnce` job, which `enqueue_or_run_inline` runs
+            // exactly once (on the dispatcher thread, or inline once it has exited), after
+            // `release` has given back the access guard. `error` is null or a fresh `box_error`
+            // handle the callback owns.
             unsafe { op.fire() };
         });
         enqueue_or_run_inline(&tx, job);
@@ -1908,10 +2494,16 @@ pub struct kafka_consumer_PendingCallback_t {
 /// the queue while it waits for any `_async` operation, not only after
 /// subscribing with a listener.
 ///
+/// A caught panic is only logged. The new registration is dropped without being
+/// stored, so `notify` is not registered, any earlier registration stays in
+/// place, and `user_data_destroy` fires exactly once, before this function
+/// returns.
+///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `notify` a valid function pointer;
 /// `user_data`/`user_data_destroy` follow the [`CallbackTarget`] contract.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1921,6 +2513,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
     // emits a nullable C function pointer rather than a literal `Option<...>`.
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 ) {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, to store the registration in the handle's
+    // `pending_callback_notify` slot, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     let registration =
         Arc::new(PendingCallbackNotify { notify, target: CallbackTarget { user_data, destroy: user_data_destroy } });
@@ -1945,6 +2541,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings;
 /// `callback` a valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listener_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1953,9 +2558,29 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listene
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). `h` is used
+    // only within this call, to build the listener from the handle's shared pending queue
+    // and notify slot (`Arc` clones) and its `completion_tx`.
     let h = unsafe { handle_ref(consumer) };
+    // SAFETY: `make_caller_thread_listener` requires a valid, live consumer handle: `h` is
+    // the handle obtained above, which the C caller keeps alive for this call, and the
+    // listener keeps only `Arc` clones and a sender, never the handle itself.
     let listener = unsafe { make_caller_thread_listener(h) };
+    // SAFETY: `read_topics` requires `topics` to point to `count` valid C strings, exactly
+    // what this function's `# Safety` promises; it reads `count.max(0)` entries and copies
+    // them into owned `String`s.
     let topic_vec = unsafe { read_topics(topics, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `topic_vec` and the `Arc<dyn ConsumerRebalanceListener>`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` and this function's `# Safety` requires it to be a valid function
+    // pointer; the helper fires it inline on this thread with a fresh `box_error` handle if
+    // the guard is rejected, and otherwise exactly once from the dispatcher thread after
+    // `release`, with null or a fresh error handle the callback owns. Under the one-shot
+    // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
+    // single completion, and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_topics_listener(topic_vec, listener)
@@ -1979,6 +2604,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listene
 ///
 /// `consumer` must be a valid handle; `pattern` a valid C string; `callback` a
 /// valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_caller_thread_listener_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -1986,10 +2620,30 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_caller_thread
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). `h` is used
+    // only within this call, to build the listener from the handle's shared pending queue
+    // and notify slot (`Arc` clones) and its `completion_tx`.
     let h = unsafe { handle_ref(consumer) };
+    // SAFETY: `make_caller_thread_listener` requires a valid, live consumer handle: `h` is
+    // the handle obtained above, which the C caller keeps alive for this call, and the
+    // listener keeps only `Arc` clones and a sender, never the handle itself.
     let listener = unsafe { make_caller_thread_listener(h) };
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
     let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `subscription_pattern` and the `Arc<dyn ConsumerRebalanceListener>`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` and this function's `# Safety` requires it to be a valid function
+    // pointer; the helper fires it inline on this thread with a fresh `box_error` handle if
+    // the guard is rejected, and otherwise exactly once from the dispatcher thread after
+    // `release`, with null or a fresh error handle the callback owns. Under the one-shot
+    // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
+    // single completion, and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern_listener(subscription_pattern, listener)
@@ -2019,10 +2673,15 @@ unsafe fn make_caller_thread_listener(h: &FfiConsumerHandle) -> Arc<dyn Consumer
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_next_pending_callback(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_PendingCallback_t {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check here). The reference
+    // is used only within this synchronous call, to pop the handle's pending queue, during
+    // which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     let popped = h.pending_rebalance_callbacks.lock().unwrap().pop_front();
     match popped {
@@ -2042,10 +2701,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_next_pending_callback(
 ///
 /// `pending` must be a valid, not-yet-acked handle from
 /// [`kafka_consumer_Consumer_next_pending_callback`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_PendingCallback_method(
     pending: *const kafka_consumer_PendingCallback_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `pending` is a valid, not-yet-acked handle
+    // from `kafka_consumer_Consumer_next_pending_callback`, i.e. the `Box::into_raw` of a
+    // `PendingRebalanceCallback` that only `kafka_consumer_Consumer_ack_pending_callback`
+    // frees; the shared borrow is used only to read `method` within this call.
     let pending = unsafe { &*(pending as *const PendingRebalanceCallback) };
     pending.method
 }
@@ -2056,10 +2720,16 @@ pub unsafe extern "C" fn kafka_consumer_PendingCallback_method(
 /// # Safety
 ///
 /// `pending` must be a valid, not-yet-acked handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_PendingCallback_partitions(
     pending: *const kafka_consumer_PendingCallback_t,
 ) -> *mut kafka_common_TopicPartitionList_t {
+    // SAFETY: Per this function's `# Safety`, `pending` is a valid, not-yet-acked handle
+    // from `kafka_consumer_Consumer_next_pending_callback`, i.e. the `Box::into_raw` of a
+    // `PendingRebalanceCallback` that only `kafka_consumer_Consumer_ack_pending_callback`
+    // frees; the shared borrow is used only to clone `partitions` into a new list the
+    // caller owns.
     let pending = unsafe { &*(pending as *const PendingRebalanceCallback) };
     box_topic_partition_list(pending.partitions.clone())
 }
@@ -2080,12 +2750,20 @@ pub unsafe extern "C" fn kafka_consumer_PendingCallback_partitions(
 /// `pending` must be a valid handle from
 /// [`kafka_consumer_Consumer_next_pending_callback`]; `error` null or a handle
 /// owned by the caller (consumed here). After this call `pending` is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_ack_pending_callback(
     pending: *mut kafka_consumer_PendingCallback_t,
     error: *mut kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `pending` is a valid handle from
+    // `kafka_consumer_Consumer_next_pending_callback`, i.e. the `Box::into_raw` of a
+    // `PendingRebalanceCallback`, and is invalid after this call, so reclaiming the `Box`
+    // here is its single, final use.
     let mut pending = unsafe { Box::from_raw(pending as *mut PendingRebalanceCallback) };
+    // SAFETY: `common::take_error` requires `error` to be null or a handle created by
+    // `box_error` and not yet destroyed; this function's `# Safety` requires `error` to be
+    // null or a handle owned by the caller, consumed here exactly once.
     let error = unsafe { common::take_error(error) };
     let result = match pending.job.take() {
         Some(job) => {
@@ -2120,8 +2798,19 @@ pub(crate) unsafe fn read_topic_partitions(
     let n = count.max(0) as usize;
     let mut tps = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: Per this function's `# Safety`, `topics` points to `count` valid C-string
+        // pointers; the loop bound is `n = count.max(0)`, so each index `i < n` is within
+        // the promised entries and a non-positive `count` reads nothing, as the contract
+        // documents.
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `i`-th entry of `topics`, which per this function's `#
+        // Safety` is a valid NUL-terminated C string for the duration of the call (a NULL
+        // entry is a contract violation and is deliberately not checked here); the bytes
+        // are copied into an owned `String` immediately.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: Per this function's `# Safety`, `partitions` points to `count` `i32`
+        // values and `i < count.max(0)`, so the read is within bounds; a non-positive
+        // `count` yields no reads.
         let partition = unsafe { *partitions.add(i) };
         tps.push(TopicPartition::new(topic, partition));
     }
@@ -2137,7 +2826,14 @@ unsafe fn read_topics(topics: *const *const c_char, count: i32) -> Vec<String> {
     let n = count.max(0) as usize;
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: Per this function's `# Safety`, `topics` points to `count` valid C-string
+        // pointers; the loop bound is `n = count.max(0)`, so each index `i < n` is within
+        // the promised entries and a non-positive `count` reads nothing.
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `i`-th entry of `topics`, which per this function's `#
+        // Safety` is a valid NUL-terminated C string for the duration of the call (NULL
+        // entries are not tolerated by the contract and are not checked); it is copied into
+        // an owned `String` immediately.
         out.push(unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string());
     }
     out
@@ -2169,8 +2865,18 @@ struct TopicPartitionInner {
 /// # Safety
 ///
 /// `tp` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_topic(tp: *const kafka_common_TopicPartition_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `tp` is a valid topic-partition handle:
+    // either an owned `TopicPartitionInner` leaked by `Box::into_raw` in
+    // `box_topic_partition`, or a borrowed entry of a map/list handle's
+    // `Vec<TopicPartitionInner>` as returned by `kafka_consumer_OffsetMap_get_key`,
+    // `kafka_consumer_OffsetAndTimestampMap_get_key`,
+    // `kafka_consumer_LongOffsetMap_get_key` or `kafka_common_TopicPartitionList_get`,
+    // valid until its owner is destroyed. No null check; the borrow lasts only for this
+    // call, and the returned `topic_c` pointer is owned by the handle and valid as long as
+    // it is, as documented.
     let inner = unsafe { &*(tp as *const TopicPartitionInner) };
     inner.topic_c.as_ptr()
 }
@@ -2180,8 +2886,14 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_topic(tp: *const kafka_comm
 /// # Safety
 ///
 /// `tp` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_partition(tp: *const kafka_common_TopicPartition_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `tp` is a valid topic-partition handle (an
+    // owned `TopicPartitionInner` from `box_topic_partition`, or a borrowed `Vec` entry
+    // handed out by a map/list `get_key` / `get` getter, valid until its owner is
+    // destroyed); no null check, and the borrow is used only to read `partition()` within
+    // this call.
     let inner = unsafe { &*(tp as *const TopicPartitionInner) };
     inner.tp.partition()
 }
@@ -2191,9 +2903,19 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_partition(tp: *const kafka_
 /// # Safety
 ///
 /// `tp` must be null or a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_destroy(tp: *mut kafka_common_TopicPartition_t) {
     if !tp.is_null() {
+        // SAFETY: `tp` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid topic-partition handle that must not be used after this call. Reclaiming
+        // the `Box` is sound for the owned handles produced by `Box::into_raw` in
+        // `box_topic_partition` (reached via
+        // `kafka_common_RecordDeserializationError_partition`, whose docs direct the caller
+        // to this destroy), which makes this the single, final use. The borrowed `*const`
+        // keys handed out by the map/list getters are `Vec` entries freed with their owner
+        // and must never be passed here; the contract's "valid topic-partition handle"
+        // wording leaves that distinction implicit.
         unsafe { drop(Box::from_raw(tp as *mut TopicPartitionInner)) };
     }
 }
@@ -2226,10 +2948,17 @@ struct OffsetAndMetadataInner {
 /// # Safety
 ///
 /// `oam` must be a valid offset-and-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `oam` is a valid offset-and-metadata handle;
+    // the only producer of such a pointer is `kafka_consumer_OffsetMap_get_value`, which
+    // returns a borrowed `*const OffsetAndMetadataInner` into the owning
+    // `OffsetMapInner::values` built in `box_offset_map`, valid until that map is
+    // destroyed. No null check; the borrow is used only to read `offset()` within this
+    // call.
     let inner = unsafe { &*(oam as *const OffsetAndMetadataInner) };
     inner.oam.offset()
 }
@@ -2240,10 +2969,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
 /// # Safety
 ///
 /// `oam` must be a valid offset-and-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `oam` is a valid offset-and-metadata handle,
+    // i.e. a borrowed `*const OffsetAndMetadataInner` from
+    // `kafka_consumer_OffsetMap_get_value` into the owning map's `values` vec (built in
+    // `box_offset_map`), valid until that map is destroyed. No null check; the returned
+    // `metadata_c` pointer is owned by that entry and stays valid as long as the owning map
+    // does, as documented.
     let inner = unsafe { &*(oam as *const OffsetAndMetadataInner) };
     inner.metadata_c.as_ptr()
 }
@@ -2253,15 +2989,24 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
 /// # Safety
 ///
 /// `oam` must be a valid handle; `out_epoch` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: Per this function's `# Safety`, `oam` is a valid offset-and-metadata handle,
+    // i.e. a borrowed `*const OffsetAndMetadataInner` from
+    // `kafka_consumer_OffsetMap_get_value` into the owning map's `values` vec, valid until
+    // that map is destroyed. No null check; the borrow is used only to read
+    // `leader_epoch()` within this call.
     let inner = unsafe { &*(oam as *const OffsetAndMetadataInner) };
     match inner.oam.leader_epoch() {
         Some(epoch) => {
             if !out_epoch.is_null() {
+                // SAFETY: `out_epoch` is non-null (checked above) and, per this function's
+                // `# Safety`, a valid pointer; exactly one `i32` is written, and only on
+                // the `Some` path.
                 unsafe { *out_epoch = epoch };
             }
             true
@@ -2274,10 +3019,22 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
 ///
 /// # Safety
 ///
-/// `oam` must be null or a valid offset-and-metadata handle.
+/// `oam` must be null or an owned offset-and-metadata handle. The pointers
+/// [`kafka_consumer_OffsetMap_get_value`] returns are borrowed from the map and
+/// must not be passed here.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_destroy(oam: *mut kafka_consumer_OffsetAndMetadata_t) {
     if !oam.is_null() {
+        // SAFETY: `oam` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid handle that becomes invalid after this call, which would make this the
+        // single, final use. However, no FFI function produces an owned (`Box::into_raw`)
+        // `kafka_consumer_OffsetAndMetadata_t`: `OffsetAndMetadataInner` is constructed
+        // only inside `box_offset_map`, and the only pointer of this type a C caller can
+        // obtain is the borrowed `*const` entry from `kafka_consumer_OffsetMap_get_value`,
+        // which is freed with its map and must not be reclaimed by `Box::from_raw`.
+        // Soundness therefore relies on no caller ever holding a pointer that may
+        // legitimately be passed here.
         unsafe { drop(Box::from_raw(oam as *mut OffsetAndMetadataInner)) };
     }
 }
@@ -2293,10 +3050,17 @@ pub struct kafka_consumer_OffsetAndTimestamp_t {
 /// # Safety
 ///
 /// `oat` must be a valid offset-and-timestamp handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `oat` is a valid offset-and-timestamp handle;
+    // the only producer of such a pointer is
+    // `kafka_consumer_OffsetAndTimestampMap_get_value`, which returns a borrowed `*const
+    // OffsetAndTimestamp` into the owning map's `values` vec built in
+    // `box_offset_and_timestamp_map`, valid until that map is destroyed. No null check; the
+    // borrow is used only to read `offset()` within this call.
     unsafe { &*(oat as *const OffsetAndTimestamp) }.offset()
 }
 
@@ -2305,10 +3069,16 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 /// # Safety
 ///
 /// `oat` must be a valid offset-and-timestamp handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `oat` is a valid offset-and-timestamp handle,
+    // i.e. a borrowed `*const OffsetAndTimestamp` from
+    // `kafka_consumer_OffsetAndTimestampMap_get_value` into the owning map's `values` vec,
+    // valid until that map is destroyed. No null check; the borrow is used only to read
+    // `timestamp()` within this call.
     unsafe { &*(oat as *const OffsetAndTimestamp) }.timestamp()
 }
 
@@ -2317,14 +3087,23 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 /// # Safety
 ///
 /// `oat` must be a valid handle; `out_epoch` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: Per this function's `# Safety`, `oat` is a valid offset-and-timestamp handle,
+    // i.e. a borrowed `*const OffsetAndTimestamp` from
+    // `kafka_consumer_OffsetAndTimestampMap_get_value` into the owning map's `values` vec,
+    // valid until that map is destroyed. No null check; the borrow is used only to read
+    // `leader_epoch()` within this call.
     match unsafe { &*(oat as *const OffsetAndTimestamp) }.leader_epoch() {
         Some(epoch) => {
             if !out_epoch.is_null() {
+                // SAFETY: `out_epoch` is non-null (checked above) and, per this function's
+                // `# Safety`, a valid pointer; exactly one `i32` is written, and only on
+                // the `Some` path.
                 unsafe { *out_epoch = epoch };
             }
             true
@@ -2337,10 +3116,21 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
 ///
 /// # Safety
 ///
-/// `oat` must be null or a valid offset-and-timestamp handle.
+/// `oat` must be null or an owned offset-and-timestamp handle. The pointers
+/// [`kafka_consumer_OffsetAndTimestampMap_get_value`] returns are borrowed from
+/// the map and must not be passed here.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_destroy(oat: *mut kafka_consumer_OffsetAndTimestamp_t) {
     if !oat.is_null() {
+        // SAFETY: `oat` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid handle that becomes invalid after this call, which would make this the
+        // single, final use. However, no FFI function produces an owned (`Box::into_raw`)
+        // `kafka_consumer_OffsetAndTimestamp_t`: the only pointer of this type a C caller
+        // can obtain is the borrowed `*const OffsetAndTimestamp` entry from
+        // `kafka_consumer_OffsetAndTimestampMap_get_value`, which lives in the owning map's
+        // `values` vec and must not be reclaimed by `Box::from_raw`. Soundness therefore
+        // relies on no caller ever holding a pointer that may legitimately be passed here.
         unsafe { drop(Box::from_raw(oat as *mut OffsetAndTimestamp)) };
     }
 }
@@ -2384,10 +3174,17 @@ fn box_group_metadata(meta: Arc<dyn ConsumerGroupMetadata>) -> *mut kafka_consum
 /// # Safety
 ///
 /// `meta` must be a valid group-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid group-metadata handle, i.e.
+    // a `ConsumerGroupMetadataInner` leaked via `Box::into_raw` in `box_group_metadata`
+    // (reached only through `kafka_consumer_Consumer_group_metadata`) and alive until
+    // `kafka_consumer_ConsumerGroupMetadata_destroy`; no null check. The returned
+    // `group_id_c` pointer is owned by the handle and valid as long as it is, as
+    // documented.
     unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.group_id_c.as_ptr()
 }
 
@@ -2396,10 +3193,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
 /// # Safety
 ///
 /// `meta` must be a valid group-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid group-metadata handle from
+    // `box_group_metadata` (`Box::into_raw`), alive until
+    // `kafka_consumer_ConsumerGroupMetadata_destroy`; no null check, and the borrow is used
+    // only to read `generation_id()` within this call.
     unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.meta.generation_id()
 }
 
@@ -2408,10 +3210,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
 /// # Safety
 ///
 /// `meta` must be a valid group-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid group-metadata handle from
+    // `box_group_metadata` (`Box::into_raw`), alive until
+    // `kafka_consumer_ConsumerGroupMetadata_destroy`; no null check. The returned
+    // `member_id_c` pointer is owned by the handle and valid as long as it is, as
+    // documented.
     unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.member_id_c.as_ptr()
 }
 
@@ -2421,10 +3229,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
 /// # Safety
 ///
 /// `meta` must be a valid group-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid group-metadata handle from
+    // `box_group_metadata` (`Box::into_raw`), alive until
+    // `kafka_consumer_ConsumerGroupMetadata_destroy`; no null check. The returned
+    // `group_instance_id_c` pointer (or null when absent) is owned by the handle and valid
+    // as long as it is, as documented.
     match &unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.group_instance_id_c {
         Some(c) => c.as_ptr(),
         None => std::ptr::null(),
@@ -2444,6 +3258,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
 pub(crate) unsafe fn group_metadata_ref(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> &'static Arc<dyn ConsumerGroupMetadata> {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid group-metadata handle from
+    // `box_group_metadata` (`Box::into_raw`), alive until
+    // `kafka_consumer_ConsumerGroupMetadata_destroy`. The `&'static Arc` is handed to the
+    // producer FFI, which either dereferences it within its own synchronous call or
+    // `Arc::clone`s it for its async path, so nothing holds the reference itself beyond the
+    // call during which the C caller keeps the metadata handle alive.
     &unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.meta
 }
 
@@ -2452,11 +3272,18 @@ pub(crate) unsafe fn group_metadata_ref(
 /// # Safety
 ///
 /// `meta` must be null or a valid group-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_destroy(
     meta: *mut kafka_consumer_ConsumerGroupMetadata_t,
 ) {
     if !meta.is_null() {
+        // SAFETY: `meta` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_group_metadata` (the only producer of
+        // `kafka_consumer_ConsumerGroupMetadata_t`, via
+        // `kafka_consumer_Consumer_group_metadata`) that becomes invalid after this call,
+        // so reclaiming the `Box` is the single, final use; the inner `Arc<dyn
+        // ConsumerGroupMetadata>` is dropped with it.
         unsafe { drop(Box::from_raw(meta as *mut ConsumerGroupMetadataInner)) };
     }
 }
@@ -2472,8 +3299,15 @@ pub struct kafka_common_Node_t {
 /// # Safety
 ///
 /// `node` must be a valid node handle obtained from a `PartitionInfo` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_id(node: *const kafka_common_Node_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle obtained from a
+    // `PartitionInfo` getter, i.e. a borrowed `*const Node` pointing into the
+    // `PartitionInfo` owned by a `PartitionInfoInner` (its leader, replicas, in-sync or
+    // offline replicas), valid until the owning partition-info list or map is destroyed,
+    // which the C caller must not do while using the node. No null check; the borrow is
+    // used only to read `id()` within this call.
     unsafe { &*(node as *const Node) }.id()
 }
 
@@ -2483,10 +3317,18 @@ pub unsafe extern "C" fn kafka_common_Node_id(node: *const kafka_common_Node_t) 
 /// # Safety
 ///
 /// `node` must be a valid node handle; `out_len` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_host(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle, i.e. a
+    // borrowed `*const Node` from a `PartitionInfo` getter pointing into a
+    // `PartitionInfoInner`-owned `PartitionInfo`, valid until the owning list or map is
+    // destroyed. No null check; the returned host pointer borrows into that same
+    // `PartitionInfo`, as documented.
     let host = unsafe { &*(node as *const Node) }.host();
     if !out_len.is_null() {
+        // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+        // Safety`, a valid pointer; exactly one `i32` (the host byte length) is written.
         unsafe { *out_len = host.len() as i32 };
     }
     host.as_ptr() as *const c_char
@@ -2497,8 +3339,13 @@ pub unsafe extern "C" fn kafka_common_Node_host(node: *const kafka_common_Node_t
 /// # Safety
 ///
 /// `node` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_port(node: *const kafka_common_Node_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle, i.e. a
+    // borrowed `*const Node` from a `PartitionInfo` getter pointing into a
+    // `PartitionInfoInner`-owned `PartitionInfo`, valid until the owning list or map is
+    // destroyed. No null check; the borrow is used only to read `port()` within this call.
     unsafe { &*(node as *const Node) }.port()
 }
 
@@ -2507,17 +3354,29 @@ pub unsafe extern "C" fn kafka_common_Node_port(node: *const kafka_common_Node_t
 /// # Safety
 ///
 /// `node` must be a valid node handle; `out_len` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `node` is a valid node handle, i.e. a
+    // borrowed `*const Node` from a `PartitionInfo` getter pointing into a
+    // `PartitionInfoInner`-owned `PartitionInfo`, valid until the owning list or map is
+    // destroyed. No null check; the returned rack pointer borrows into that same
+    // `PartitionInfo`.
     match unsafe { &*(node as *const Node) }.rack() {
         Some(rack) => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (the rack byte length) is
+                // written.
                 unsafe { *out_len = rack.len() as i32 };
             }
             rack.as_ptr() as *const c_char
         },
         None => {
             if !out_len.is_null() {
+                // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+                // Safety`, a valid pointer; exactly one `i32` (`-1`, the documented no-rack
+                // marker) is written.
                 unsafe { *out_len = -1 };
             }
             std::ptr::null()
@@ -2543,8 +3402,16 @@ struct PartitionInfoInner {
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(info: *const kafka_common_PartitionInfo_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle.
+    // `PartitionInfoInner` is constructed only inside `box_partition_info_list` and
+    // `box_topic_partition_info_map`, and the only way C obtains such a pointer is the
+    // borrowed `*const` entry from `kafka_common_PartitionInfoList_get`, valid until the
+    // owning list (or the map owning that list) is destroyed. No null check; the returned
+    // `topic_c` pointer is owned by that entry and valid as long as its owner is, as
+    // documented.
     unsafe { &*(info as *const PartitionInfoInner) }.topic_c.as_ptr()
 }
 
@@ -2553,8 +3420,14 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(info: *const kafka_com
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(info: *const kafka_common_PartitionInfo_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec (built in `box_partition_info_list` /
+    // `box_topic_partition_info_map`), valid until its owner is destroyed. No null check;
+    // the borrow is used only to read `partition()` within this call.
     unsafe { &*(info as *const PartitionInfoInner) }.info.partition()
 }
 
@@ -2564,10 +3437,16 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(info: *const kafka
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
     info: *const kafka_common_PartitionInfo_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; the returned leader `Node` pointer borrows into `info`'s owned `PartitionInfo`
+    // and is valid until the owner is destroyed, as documented.
     match unsafe { &*(info as *const PartitionInfoInner) }.info.leader() {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
         None => std::ptr::null(),
@@ -2579,8 +3458,13 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_replica_count(info: *const kafka_common_PartitionInfo_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; the borrow is used only to read `replicas().len()` within this call.
     unsafe { &*(info as *const PartitionInfoInner) }.info.replicas().len() as i32
 }
 
@@ -2589,11 +3473,18 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_replica_count(info: *const k
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_replica(
     info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; `index` is range-checked by `node_at`, and the returned `Node` pointer borrows
+    // into `info`'s owned `PartitionInfo`, valid until the owner is destroyed, as
+    // documented.
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.replicas(), index)
 }
 
@@ -2602,10 +3493,15 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_replica(
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica_count(
     info: *const kafka_common_PartitionInfo_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; the borrow is used only to read `in_sync_replicas().len()` within this call.
     unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas().len() as i32
 }
 
@@ -2615,11 +3511,18 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica_count(
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica(
     info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; `index` is range-checked by `node_at`, and the returned `Node` pointer borrows
+    // into `info`'s owned `PartitionInfo`, valid until the owner is destroyed, as
+    // documented.
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas(), index)
 }
 
@@ -2628,10 +3531,15 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica(
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica_count(
     info: *const kafka_common_PartitionInfo_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; the borrow is used only to read `offline_replicas().len()` within this call.
     unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas().len() as i32
 }
 
@@ -2641,11 +3549,18 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica_count(
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica(
     info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle, i.e.
+    // a borrowed `*const PartitionInfoInner` from `kafka_common_PartitionInfoList_get` into
+    // a `PartitionInfoListInner::items` vec, valid until its owner is destroyed. No null
+    // check; `index` is range-checked by `node_at`, and the returned `Node` pointer borrows
+    // into `info`'s owned `PartitionInfo`, valid until the owner is destroyed, as
+    // documented.
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas(), index)
 }
 
@@ -2665,10 +3580,23 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 ///
 /// # Safety
 ///
-/// `info` must be null or a valid partition-info handle.
+/// `info` must be null or an owned partition-info handle. The pointers
+/// [`kafka_common_PartitionInfoList_get`] returns are borrowed from the list and
+/// must not be passed here.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_destroy(info: *mut kafka_common_PartitionInfo_t) {
     if !info.is_null() {
+        // SAFETY: `info` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid handle that becomes invalid after this call, which would make this the
+        // single, final use. However, no FFI function produces an owned (`Box::into_raw`)
+        // `kafka_common_PartitionInfo_t`: `PartitionInfoInner` values live only inside
+        // `PartitionInfoListInner::items` (built in `box_partition_info_list` /
+        // `box_topic_partition_info_map`), and the only pointer of this type a C caller can
+        // obtain is the borrowed `*const` from `kafka_common_PartitionInfoList_get`, which
+        // is freed with its list and must not be reclaimed by `Box::from_raw`. Soundness
+        // therefore relies on no caller ever holding a pointer that may legitimately be
+        // passed here.
         unsafe { drop(Box::from_raw(info as *mut PartitionInfoInner)) };
     }
 }
@@ -2712,8 +3640,13 @@ pub(crate) fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) ->
 /// # Safety
 ///
 /// `map` must be a valid offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetMap_count(map: *const kafka_consumer_OffsetMap_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-map handle, i.e. an
+    // `OffsetMapInner` leaked via `Box::into_raw` in `box_offset_map` and alive until
+    // `kafka_consumer_OffsetMap_destroy`; no null check, and the borrow is used only to
+    // read `keys.len()` within this call.
     unsafe { &*(map as *const OffsetMapInner) }.keys.len() as i32
 }
 
@@ -2723,6 +3656,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_count(map: *const kafka_consum
 /// # Safety
 ///
 /// `map` must be a valid offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_key(
     map: *const kafka_consumer_OffsetMap_t,
@@ -2731,6 +3665,11 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_key(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-map handle, i.e. an
+    // `OffsetMapInner` leaked via `Box::into_raw` in `box_offset_map`, alive until
+    // `kafka_consumer_OffsetMap_destroy`; no null check. `index` is non-negative (checked
+    // above) and bounds-checked by `get`; the returned key pointer borrows into `keys` and
+    // is valid until the map is destroyed, as documented.
     match unsafe { &*(map as *const OffsetMapInner) }.keys.get(index as usize) {
         Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
@@ -2743,6 +3682,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_key(
 /// # Safety
 ///
 /// `map` must be a valid offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_value(
     map: *const kafka_consumer_OffsetMap_t,
@@ -2751,6 +3691,11 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-map handle, i.e. an
+    // `OffsetMapInner` leaked via `Box::into_raw` in `box_offset_map`, alive until
+    // `kafka_consumer_OffsetMap_destroy`; no null check. `index` is non-negative (checked
+    // above) and bounds-checked by `get`; the returned value pointer borrows into `values`
+    // and is valid until the map is destroyed, as documented.
     match unsafe { &*(map as *const OffsetMapInner) }.values.get(index as usize) {
         Some(v) => v as *const OffsetAndMetadataInner as *const kafka_consumer_OffsetAndMetadata_t,
         None => std::ptr::null(),
@@ -2762,9 +3707,15 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_value(
 /// # Safety
 ///
 /// `map` must be null or a valid offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetMap_destroy(map: *mut kafka_consumer_OffsetMap_t) {
     if !map.is_null() {
+        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_offset_map` that becomes invalid after
+        // this call, so reclaiming the `Box` is the single, final use; the borrowed
+        // key/value sub-handles handed out by the getters die with it, which is their
+        // documented borrowed-until-destroyed contract.
         unsafe { drop(Box::from_raw(map as *mut OffsetMapInner)) };
     }
 }
@@ -2799,10 +3750,16 @@ pub(crate) fn box_offset_and_timestamp_map(
 /// # Safety
 ///
 /// `map` must be a valid offset-and-timestamp-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_count(
     map: *const kafka_consumer_OffsetAndTimestampMap_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-and-timestamp-map
+    // handle, i.e. an `OffsetAndTimestampMapInner` leaked via `Box::into_raw` in
+    // `box_offset_and_timestamp_map` and alive until
+    // `kafka_consumer_OffsetAndTimestampMap_destroy`; no null check, and the borrow is used
+    // only to read `keys.len()` within this call.
     unsafe { &*(map as *const OffsetAndTimestampMapInner) }.keys.len() as i32
 }
 
@@ -2812,6 +3769,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_count(
 /// # Safety
 ///
 /// `map` must be a valid offset-and-timestamp-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_key(
     map: *const kafka_consumer_OffsetAndTimestampMap_t,
@@ -2820,6 +3778,12 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_key(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-and-timestamp-map
+    // handle, i.e. an `OffsetAndTimestampMapInner` leaked via `Box::into_raw` in
+    // `box_offset_and_timestamp_map`, alive until
+    // `kafka_consumer_OffsetAndTimestampMap_destroy`; no null check. `index` is
+    // non-negative (checked above) and bounds-checked by `get`; the returned key pointer
+    // borrows into `keys` and is valid until the map is destroyed, as documented.
     match unsafe { &*(map as *const OffsetAndTimestampMapInner) }.keys.get(index as usize) {
         Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
@@ -2832,6 +3796,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_key(
 /// # Safety
 ///
 /// `map` must be a valid offset-and-timestamp-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_value(
     map: *const kafka_consumer_OffsetAndTimestampMap_t,
@@ -2840,6 +3805,12 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid offset-and-timestamp-map
+    // handle, i.e. an `OffsetAndTimestampMapInner` leaked via `Box::into_raw` in
+    // `box_offset_and_timestamp_map`, alive until
+    // `kafka_consumer_OffsetAndTimestampMap_destroy`; no null check. `index` is
+    // non-negative (checked above) and bounds-checked by `get`; the returned value pointer
+    // borrows into `values` and is valid until the map is destroyed, as documented.
     match unsafe { &*(map as *const OffsetAndTimestampMapInner) }
         .values
         .get(index as usize)
@@ -2854,11 +3825,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_value(
 /// # Safety
 ///
 /// `map` must be null or a valid offset-and-timestamp-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_destroy(
     map: *mut kafka_consumer_OffsetAndTimestampMap_t,
 ) {
     if !map.is_null() {
+        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_offset_and_timestamp_map` that becomes
+        // invalid after this call, so reclaiming the `Box` is the single, final use; the
+        // borrowed key/value sub-handles handed out by the getters die with it, per their
+        // documented borrowed-until-destroyed contract.
         unsafe { drop(Box::from_raw(map as *mut OffsetAndTimestampMapInner)) };
     }
 }
@@ -2891,8 +3868,13 @@ pub(crate) fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kaf
 /// # Safety
 ///
 /// `map` must be a valid long-offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_count(map: *const kafka_consumer_LongOffsetMap_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `map` is a valid long-offset-map handle, i.e.
+    // a `LongOffsetMapInner` leaked via `Box::into_raw` in `box_long_offset_map` and alive
+    // until `kafka_consumer_LongOffsetMap_destroy`; no null check, and the borrow is used
+    // only to read `keys.len()` within this call.
     unsafe { &*(map as *const LongOffsetMapInner) }.keys.len() as i32
 }
 
@@ -2902,6 +3884,7 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_count(map: *const kafka_co
 /// # Safety
 ///
 /// `map` must be a valid long-offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_key(
     map: *const kafka_consumer_LongOffsetMap_t,
@@ -2910,6 +3893,11 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_key(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid long-offset-map handle, i.e.
+    // a `LongOffsetMapInner` leaked via `Box::into_raw` in `box_long_offset_map`, alive
+    // until `kafka_consumer_LongOffsetMap_destroy`; no null check. `index` is non-negative
+    // (checked above) and bounds-checked by `get`; the returned key pointer borrows into
+    // `keys` and is valid until the map is destroyed, as documented.
     match unsafe { &*(map as *const LongOffsetMapInner) }.keys.get(index as usize) {
         Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
@@ -2921,6 +3909,7 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_key(
 /// # Safety
 ///
 /// `map` must be a valid long-offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_value(
     map: *const kafka_consumer_LongOffsetMap_t,
@@ -2929,6 +3918,11 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_value(
     if index < 0 {
         return -1;
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid long-offset-map handle, i.e.
+    // a `LongOffsetMapInner` leaked via `Box::into_raw` in `box_long_offset_map`, alive
+    // until `kafka_consumer_LongOffsetMap_destroy`; no null check. `index` is non-negative
+    // (checked above) and bounds-checked by `get`; the `i64` is copied out, so nothing
+    // borrowed escapes the call.
     match unsafe { &*(map as *const LongOffsetMapInner) }.values.get(index as usize) {
         Some(&offset) => offset,
         None => -1,
@@ -2940,9 +3934,15 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_value(
 /// # Safety
 ///
 /// `map` must be null or a valid long-offset-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_destroy(map: *mut kafka_consumer_LongOffsetMap_t) {
     if !map.is_null() {
+        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_long_offset_map` that becomes invalid
+        // after this call, so reclaiming the `Box` is the single, final use; the borrowed
+        // key sub-handles handed out by `get_key` die with it, per their documented
+        // borrowed-until-destroyed contract.
         unsafe { drop(Box::from_raw(map as *mut LongOffsetMapInner)) };
     }
 }
@@ -2973,8 +3973,16 @@ pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_c
 /// # Safety
 ///
 /// `list` must be a valid partition-info-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfoList_count(list: *const kafka_common_PartitionInfoList_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `list` is a valid partition-info-list handle:
+    // either a `PartitionInfoListInner` leaked via `Box::into_raw` in
+    // `box_partition_info_list`, alive until `kafka_common_PartitionInfoList_destroy`, or
+    // the borrowed entry of a `TopicPartitionInfoMapInner::lists` vec returned by
+    // `kafka_common_TopicPartitionInfoMap_get_partitions`, alive until that map is
+    // destroyed. No null check; the borrow is used only to read `items.len()` within this
+    // call.
     unsafe { &*(list as *const PartitionInfoListInner) }.items.len() as i32
 }
 
@@ -2983,6 +3991,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfoList_count(list: *const kafka
 /// # Safety
 ///
 /// `list` must be a valid partition-info-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfoList_get(
     list: *const kafka_common_PartitionInfoList_t,
@@ -2991,6 +4000,12 @@ pub unsafe extern "C" fn kafka_common_PartitionInfoList_get(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `list` is a valid partition-info-list handle
+    // (an owned `PartitionInfoListInner` from `box_partition_info_list`, or the borrowed
+    // `lists` entry handed out by `kafka_common_TopicPartitionInfoMap_get_partitions`),
+    // alive until its owner is destroyed. No null check; `index` is non-negative (checked
+    // above) and bounds-checked by `get`, and the returned partition-info pointer borrows
+    // into `items`, valid until the owner is destroyed, as documented.
     match unsafe { &*(list as *const PartitionInfoListInner) }.items.get(index as usize) {
         Some(i) => i as *const PartitionInfoInner as *const kafka_common_PartitionInfo_t,
         None => std::ptr::null(),
@@ -3002,9 +4017,18 @@ pub unsafe extern "C" fn kafka_common_PartitionInfoList_get(
 /// # Safety
 ///
 /// `list` must be null or a valid partition-info-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfoList_destroy(list: *mut kafka_common_PartitionInfoList_t) {
     if !list.is_null() {
+        // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid partition-info-list handle that must not be used after this call.
+        // Reclaiming the `Box` is sound for the owned lists produced by `Box::into_raw` in
+        // `box_partition_info_list` (`partitions_for`), which makes this the single, final
+        // use. The borrowed `*const PartitionInfoListInner` handed out by
+        // `kafka_common_TopicPartitionInfoMap_get_partitions` is a `Vec` entry owned by the
+        // map and must never be passed here; the contract's "valid partition-info-list
+        // handle" wording leaves that distinction implicit.
         unsafe { drop(Box::from_raw(list as *mut PartitionInfoListInner)) };
     }
 }
@@ -3046,8 +4070,14 @@ fn box_metric_map(metrics: HashMap<crate::common::MetricName, Arc<KafkaMetric>>)
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_count(map: *const kafka_consumer_MetricMap_t) -> i32 {
+    // SAFETY: `crate::ffi::common::metric_map_count` requires a valid metric-map backing
+    // pointer; per this function's `# Safety`, `map` is a valid metric-map handle, i.e. the
+    // `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map` and alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; the helper borrows it only for
+    // this call.
     unsafe { crate::ffi::common::metric_map_count(map as *const MetricMapInner) }
 }
 
@@ -3057,11 +4087,18 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_count(map: *const kafka_consum
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_name(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_name` requires a valid metric-map backing
+    // pointer; per this function's `# Safety`, `map` is a valid metric-map handle, i.e. the
+    // `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the returned string borrows into the snapshot, valid until the map is
+    // destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_name(map as *const MetricMapInner, index) }
 }
 
@@ -3070,11 +4107,18 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_name(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_group(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_group` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the returned string borrows into the snapshot, valid until the map is
+    // destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_group(map as *const MetricMapInner, index) }
 }
 
@@ -3084,11 +4128,18 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_group(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_description(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_description` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the returned string borrows into the snapshot, valid until the map is
+    // destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_description(map as *const MetricMapInner, index) }
 }
 
@@ -3097,11 +4148,17 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_description(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_count(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `crate::ffi::common::metric_map_get_tag_count` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper (returning `-1` when out of range).
     unsafe { crate::ffi::common::metric_map_get_tag_count(map as *const MetricMapInner, index) }
 }
 
@@ -3111,12 +4168,19 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_count(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_key(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
     tag_index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_tag_key` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` and `tag_index` are
+    // range-checked by the helper, and the returned string borrows into the snapshot, valid
+    // until the map is destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_tag_key(map as *const MetricMapInner, index, tag_index) }
 }
 
@@ -3126,12 +4190,19 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_key(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_value(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
     tag_index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_tag_value` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` and `tag_index` are
+    // range-checked by the helper, and the returned string borrows into the snapshot, valid
+    // until the map is destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_tag_value(map as *const MetricMapInner, index, tag_index) }
 }
 
@@ -3142,11 +4213,17 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_value(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_kind(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `crate::ffi::common::metric_map_get_value_kind` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the value is copied out.
     unsafe { crate::ffi::common::metric_map_get_value_kind(map as *const MetricMapInner, index) }
 }
 
@@ -3156,11 +4233,17 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_kind(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_double(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> f64 {
+    // SAFETY: `crate::ffi::common::metric_map_get_value_double` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the value is copied out.
     unsafe { crate::ffi::common::metric_map_get_value_double(map as *const MetricMapInner, index) }
 }
 
@@ -3170,11 +4253,18 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_double(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_string(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `crate::ffi::common::metric_map_get_value_string` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the returned string borrows into the snapshot, valid until the map is
+    // destroyed, as documented.
     unsafe { crate::ffi::common::metric_map_get_value_string(map as *const MetricMapInner, index) }
 }
 
@@ -3184,11 +4274,17 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_string(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_long(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `crate::ffi::common::metric_map_get_value_long` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the value is copied out.
     unsafe { crate::ffi::common::metric_map_get_value_long(map as *const MetricMapInner, index) }
 }
 
@@ -3198,11 +4294,17 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_long(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_int(
     map: *const kafka_consumer_MetricMap_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `crate::ffi::common::metric_map_get_value_int` requires a valid metric-map
+    // backing pointer; per this function's `# Safety`, `map` is a valid metric-map handle,
+    // i.e. the `MetricMapInner` leaked via `Box::into_raw` in `box_metric_map`, alive until
+    // `kafka_consumer_MetricMap_destroy`. No null check; `index` is range-checked by the
+    // helper, and the value is copied out.
     unsafe { crate::ffi::common::metric_map_get_value_int(map as *const MetricMapInner, index) }
 }
 
@@ -3211,8 +4313,14 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_int(
 /// # Safety
 ///
 /// `map` must be null or a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MetricMap_destroy(map: *mut kafka_consumer_MetricMap_t) {
+    // SAFETY: `crate::ffi::common::metric_map_destroy` is documented safe with null (a
+    // no-op) and otherwise requires a valid metric-map backing pointer; per this function's
+    // `# Safety`, `map` is null or a handle produced by `Box::into_raw` in `box_metric_map`
+    // that becomes invalid after this call, so the helper's `Box::from_raw` is the single,
+    // final use, and the strings it handed out borrowed die with it as documented.
     unsafe { crate::ffi::common::metric_map_destroy(map as *mut MetricMapInner) };
 }
 
@@ -3250,10 +4358,16 @@ fn box_topic_partition_info_map(map: HashMap<String, Vec<PartitionInfo>>) -> *mu
 /// # Safety
 ///
 /// `map` must be a valid topic-partition-info-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_count(
     map: *const kafka_common_TopicPartitionInfoMap_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `map` is a valid topic-partition-info-map
+    // handle, i.e. a `TopicPartitionInfoMapInner` leaked via `Box::into_raw` in
+    // `box_topic_partition_info_map` and alive until
+    // `kafka_common_TopicPartitionInfoMap_destroy`; no null check, and the borrow is used
+    // only to read `topics.len()` within this call.
     unsafe { &*(map as *const TopicPartitionInfoMapInner) }.topics.len() as i32
 }
 
@@ -3263,6 +4377,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_count(
 /// # Safety
 ///
 /// `map` must be a valid topic-partition-info-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_topic(
     map: *const kafka_common_TopicPartitionInfoMap_t,
@@ -3271,6 +4386,12 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_topic(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid topic-partition-info-map
+    // handle, i.e. a `TopicPartitionInfoMapInner` leaked via `Box::into_raw` in
+    // `box_topic_partition_info_map`, alive until
+    // `kafka_common_TopicPartitionInfoMap_destroy`; no null check. `index` is non-negative
+    // (checked above) and bounds-checked by `get`; the returned C string is owned by the
+    // map and valid until it is destroyed, as documented.
     match unsafe { &*(map as *const TopicPartitionInfoMapInner) }
         .topics
         .get(index as usize)
@@ -3286,6 +4407,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_topic(
 /// # Safety
 ///
 /// `map` must be a valid topic-partition-info-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_partitions(
     map: *const kafka_common_TopicPartitionInfoMap_t,
@@ -3294,6 +4416,13 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_partitions(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `map` is a valid topic-partition-info-map
+    // handle, i.e. a `TopicPartitionInfoMapInner` leaked via `Box::into_raw` in
+    // `box_topic_partition_info_map`, alive until
+    // `kafka_common_TopicPartitionInfoMap_destroy`; no null check. `index` is non-negative
+    // (checked above) and bounds-checked by `get`; the returned list pointer borrows into
+    // `lists` and is valid until the map is destroyed, as documented, and is meant to be
+    // read through the `PartitionInfoList` getters, not destroyed.
     match unsafe { &*(map as *const TopicPartitionInfoMapInner) }
         .lists
         .get(index as usize)
@@ -3308,9 +4437,15 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_partitions(
 /// # Safety
 ///
 /// `map` must be null or a valid topic-partition-info-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_destroy(map: *mut kafka_common_TopicPartitionInfoMap_t) {
     if !map.is_null() {
+        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_topic_partition_info_map` that becomes
+        // invalid after this call, so reclaiming the `Box` is the single, final use; the
+        // borrowed topic strings and list sub-handles handed out by the getters die with
+        // it, per their documented borrowed-until-destroyed contract.
         unsafe { drop(Box::from_raw(map as *mut TopicPartitionInfoMapInner)) };
     }
 }
@@ -3343,8 +4478,13 @@ pub(crate) fn box_topic_partition_list(
 /// # Safety
 ///
 /// `list` must be a valid topic-partition-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionList_count(list: *const kafka_common_TopicPartitionList_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `list` is a valid topic-partition-list
+    // handle, i.e. a `TopicPartitionListInner` leaked via `Box::into_raw` in
+    // `box_topic_partition_list` and alive until `kafka_common_TopicPartitionList_destroy`;
+    // no null check, and the borrow is used only to read `items.len()` within this call.
     unsafe { &*(list as *const TopicPartitionListInner) }.items.len() as i32
 }
 
@@ -3353,6 +4493,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionList_count(list: *const kafk
 /// # Safety
 ///
 /// `list` must be a valid topic-partition-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionList_get(
     list: *const kafka_common_TopicPartitionList_t,
@@ -3361,6 +4502,12 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionList_get(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `list` is a valid topic-partition-list
+    // handle, i.e. a `TopicPartitionListInner` leaked via `Box::into_raw` in
+    // `box_topic_partition_list`, alive until `kafka_common_TopicPartitionList_destroy`; no
+    // null check. `index` is non-negative (checked above) and bounds-checked by `get`; the
+    // returned topic-partition pointer borrows into `items` and is valid until the list is
+    // destroyed, as documented.
     match unsafe { &*(list as *const TopicPartitionListInner) }.items.get(index as usize) {
         Some(i) => i as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
@@ -3372,9 +4519,15 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionList_get(
 /// # Safety
 ///
 /// `list` must be null or a valid topic-partition-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionList_destroy(list: *mut kafka_common_TopicPartitionList_t) {
     if !list.is_null() {
+        // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_topic_partition_list` that becomes
+        // invalid after this call, so reclaiming the `Box` is the single, final use; the
+        // borrowed topic-partition sub-handles handed out by `get` die with it, per their
+        // documented borrowed-until-destroyed contract.
         unsafe { drop(Box::from_raw(list as *mut TopicPartitionListInner)) };
     }
 }
@@ -3402,8 +4555,13 @@ pub(crate) fn box_string_list(strings: impl IntoIterator<Item = String>) -> *mut
 /// # Safety
 ///
 /// `list` must be a valid string-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_StringList_count(list: *const kafka_consumer_StringList_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `list` is a valid string-list handle, i.e. a
+    // `StringListInner` leaked via `Box::into_raw` in `box_string_list` and alive until
+    // `kafka_consumer_StringList_destroy`; no null check, and the borrow is used only to
+    // read `items.len()` within this call.
     unsafe { &*(list as *const StringListInner) }.items.len() as i32
 }
 
@@ -3413,6 +4571,7 @@ pub unsafe extern "C" fn kafka_consumer_StringList_count(list: *const kafka_cons
 /// # Safety
 ///
 /// `list` must be a valid string-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_StringList_get(
     list: *const kafka_consumer_StringList_t,
@@ -3421,6 +4580,11 @@ pub unsafe extern "C" fn kafka_consumer_StringList_get(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: Per this function's `# Safety`, `list` is a valid string-list handle, i.e. a
+    // `StringListInner` leaked via `Box::into_raw` in `box_string_list`, alive until
+    // `kafka_consumer_StringList_destroy`; no null check. `index` is non-negative (checked
+    // above) and bounds-checked by `get`; the returned C string is owned by the list and
+    // valid until it is destroyed, as documented.
     match unsafe { &*(list as *const StringListInner) }.items.get(index as usize) {
         Some(s) => s.as_ptr(),
         None => std::ptr::null(),
@@ -3432,9 +4596,15 @@ pub unsafe extern "C" fn kafka_consumer_StringList_get(
 /// # Safety
 ///
 /// `list` must be null or a valid string-list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_StringList_destroy(list: *mut kafka_consumer_StringList_t) {
     if !list.is_null() {
+        // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a
+        // handle produced by `Box::into_raw` in `box_string_list` that becomes invalid
+        // after this call, so reclaiming the `Box` is the single, final use; the C strings
+        // handed out by `get` die with it, per their documented owned-by-the-handle
+        // contract.
         unsafe { drop(Box::from_raw(list as *mut StringListInner)) };
     }
 }
@@ -3445,9 +4615,15 @@ pub unsafe extern "C" fn kafka_consumer_StringList_destroy(list: *mut kafka_cons
 /// # Safety
 ///
 /// `s` must be null or a string returned by such a getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_string_destroy(s: *mut c_char) {
     if !s.is_null() {
+        // SAFETY: `s` is non-null (checked above) and, per this function's `# Safety`, a
+        // string returned by an owned-string consumer getter, i.e. produced by
+        // `CString::into_raw` (as in `kafka_consumer_Consumer_client_id`); the documented
+        // contract makes this the single, final use, and `CString::from_raw` reclaims
+        // exactly the allocation `into_raw` leaked.
         unsafe { drop(std::ffi::CString::from_raw(s)) };
     }
 }
@@ -3479,11 +4655,20 @@ where
         &'a mut dyn Consumer<Bytes, Bytes>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>>,
 {
+    // SAFETY: `handle_ref` requires a non-null handle created by a consumer constructor,
+    // which this function's `# Safety` requires of `consumer` (no null check); `h` is used
+    // only within this synchronous call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard: `acquire(h)` succeeded (an `Err`
+    // returned early) and `_g: ReleaseGuard` holds it until this function returns. The
+    // higher-ranked bound on `F` ties the returned future to the `&mut dyn Consumer`
+    // borrow, and `block_on(fut)` drives it to completion before `_g` drops, so the
+    // exclusive access ends inside the guarded window, per the `UnsafeCell` + `acquire`
+    // invariant documented on `FfiConsumerHandle`'s `unsafe impl Send/Sync`.
     let fut = op(unsafe { consumer_mut(h) });
     match h.runtime.block_on(fut) {
         Ok(()) => std::ptr::null_mut(),
@@ -3494,6 +4679,10 @@ where
 /// Owned arguments captured at async-submit time, moved into the spawned task.
 /// `op` must capture only `Send` data (already-marshaled owned values), never
 /// raw C pointers.
+///
+/// If the access guard is already held, the callback fires inline on the calling
+/// thread with the rejection error; otherwise it fires from the dispatcher thread
+/// once the op completes.
 ///
 /// # Safety
 ///
@@ -3508,15 +4697,35 @@ unsafe fn async_void_op<F, Fut>(
     F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send,
 {
+    // SAFETY: `handle_ref` requires a non-null handle from a consumer constructor, which
+    // this function's `# Safety` requires of `consumer` (no null check); `h` is used only
+    // on the submitting thread within this call, for `acquire`, cloning `completion_tx` and
+    // spawning on `runtime_handle`.
     let h = unsafe { handle_ref(consumer) };
     let target = OperationCallbackTarget { callback, user_data };
     if let Err(e) = acquire(h) {
+        // SAFETY: `callback` was supplied by the C caller along with `user_data` (carried
+        // in `OperationCallbackTarget`); on this rejection path the guard was not taken and
+        // nothing is spawned, so this is the single invocation, fired inline on the calling
+        // thread with a fresh `box_error(e)` handle the callback owns, matching the
+        // `OperationCallbackFn` contract (a non-null `error` means failure). Unlike the
+        // success path it does not go through the dispatcher thread; the C user is
+        // responsible for the thread-safety of `user_data`.
         unsafe { (target.callback)(box_error(e), target.user_data) };
         return;
     }
     let tx = h.completion_tx.clone();
+    // SAFETY: `handle_ref`'s precondition holds exactly as for `h`: per this function's `#
+    // Safety`, `consumer` is a valid handle from a consumer constructor, leaked by
+    // `build_consumer_handle` and freed only by `kafka_consumer_Consumer_destroy`, so the
+    // `&'static` is sound while the handle lives. `hs` escapes into the spawned task and
+    // the completion job (as `release_handle`), where it is last touched by
+    // `release(release_handle)` before `op.fire()`. Its keep-alive is not mechanical
+    // (`destroy` registers no task to join and `shutdown_background` does not wait): it is
+    // the documented `destroy` precondition that the caller must not destroy the consumer
+    // while an operation is in flight, i.e. before its completion callback has fired.
     let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         // SAFETY: the guard is held for the whole submit->callback window.
         let consumer = unsafe { consumer_mut(hs) };
@@ -3532,6 +4741,16 @@ unsafe fn async_void_op<F, Fut>(
             // the consumer is no longer borrowed. This avoids a release-vs-next-op
             // race when the callback resumes embedder work on another thread.
             release(release_handle);
+            // SAFETY: `OperationCompletion::fire` requires exactly one call on the
+            // dispatcher thread: the `FnOnce` job consumes `op`, is boxed once, and
+            // `enqueue_or_run_inline` hands it to the single per-handle dispatcher thread
+            // or, only if that thread has already exited (the task's `tx` clone keeps the
+            // channel itself open), runs it inline exactly once on this tokio worker, the
+            // post-teardown fallback documented in `common.rs`. `callback` and `user_data`
+            // were supplied together by the C caller; `error` is a fresh `box_error` handle
+            // (or null for success) whose ownership transfers to the callee; the raw
+            // pointers are owned handles moved to the dispatcher thread, and the C user is
+            // responsible for the thread-safety of `user_data`.
             unsafe { op.fire() };
         });
         enqueue_or_run_inline(&tx, job);
@@ -3581,6 +4800,11 @@ unsafe fn async_value_op<T, Fut, F, C>(
     F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
     C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this helper's `# Safety`, `consumer` is a valid handle from a consumer
+    // constructor, i.e. the `Box::into_raw` of `build_consumer_handle`. `h` is used only on
+    // the calling thread, to try `acquire(h)`, clone `completion_tx` and reach
+    // `runtime_handle`, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         // Rejected: fire the callback inline with the error; guard not taken.
@@ -3588,10 +4812,28 @@ unsafe fn async_value_op<T, Fut, F, C>(
         return;
     }
     let tx = h.completion_tx.clone();
+    // SAFETY: Same precondition as `h` above: per this helper's `# Safety`, `consumer` is a
+    // valid handle from a consumer constructor, so `handle_ref` yields a reference to the
+    // leaked `FfiConsumerHandle`. `hs` escapes into the spawned task and the completion
+    // job, where it is used only for `consumer_mut(hs)` and `release(hs)`; both uses finish
+    // before `complete` fires the C callback, and `acquire(h)` succeeded above, so the
+    // guard is held for the whole submit->callback window. The allocation outliving that
+    // window is not enforced by a join: it relies on `kafka_consumer_Consumer_destroy`'s
+    // documented precondition that destroying a consumer with an operation in flight is a C
+    // lifetime violation (CLAUDE.md FFI §4), so a caller that destroys only after the
+    // callback has fired never races this reference.
     let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
     let ud = SendUserData(user_data);
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let ud = ud;
+        // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)`
+        // succeeded above (the rejection path returned early) and the guard is released
+        // only by `release(hs)` in the completion job, after this future has completed, so
+        // the guard is held for the whole submit->callback window and the `&mut` handed out
+        // is exclusive per the single-owner `acquire()` design documented at the `SAFETY`
+        // comment on `FfiConsumerHandle`'s `unsafe impl Send`. `hs` is the `&'static
+        // FfiConsumerHandle` from `handle_ref(consumer)`, kept alive by the destroy
+        // precondition noted there.
         let result = op(unsafe { consumer_mut(hs) }).await;
         let job: CompletionJob = Box::new(move || {
             // Release BEFORE firing the callback: the awaited op is complete, so
@@ -3612,17 +4854,31 @@ unsafe fn async_value_op<T, Fut, F, C>(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topics` requires `topics` to point to `count` valid C strings, exactly
+    // what this function's `# Safety` promises; it reads `count.max(0)` entries, so a
+    // non-positive `count` reads nothing, and it tolerates no NULL array or entry (the
+    // contract requires valid strings whenever `count > 0`). The strings are copied into
+    // owned `String`s before anything else runs.
     let topic_vec = unsafe { read_topics(topics, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `topic_vec`, no
+    // raw C pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_with_topics(topic_vec))) }
 }
 
-/// Completion callback for void-returning async consumer ops.
+/// Completion callback for void-returning async consumer ops. Receives null on
+/// success or an error handle the callback owns (free it with
+/// [`kafka_common_Error_destroy`]), followed by the `user_data` passed to the
+/// entry point.
 pub type kafka_consumer_Consumer_op_callback_t = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut c_void);
 
 /// Subscribes to a list of topics (async). See [`kafka_consumer_Consumer_subscribe`].
@@ -3632,6 +4888,17 @@ pub type kafka_consumer_Consumer_op_callback_t = unsafe extern "C" fn(*mut kafka
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -3640,7 +4907,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topics` requires `topics` to point to `count` valid C strings, exactly
+    // what this function's `# Safety` promises; it reads `count.max(0)` entries, so a
+    // non-positive `count` reads nothing, and it tolerates no NULL array or entry (the
+    // contract requires valid strings whenever `count > 0`). The strings are copied into
+    // owned `String`s before anything else runs.
     let topic_vec = unsafe { read_topics(topics, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `topic_vec` and holds no raw C pointers. `callback` was supplied by the C caller
+    // along with `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md
+    // FFI §4 forbids checking required parameters); the helper fires it inline on this
+    // thread with a fresh `box_error` handle if the guard is rejected, and otherwise
+    // exactly once from the dispatcher thread after `release`, with null or a fresh error
+    // handle the callback owns. Under the one-shot `OperationCallbackTarget` convention the
+    // C caller keeps `user_data` valid across that single completion, and must not destroy
+    // the consumer while the op is in flight (`kafka_consumer_Consumer_destroy`'s
+    // documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.subscribe_with_topics(topic_vec)) };
 }
 
@@ -3827,6 +5110,13 @@ impl FfiRebalanceListener {
             // `user_data`; `list` is freshly allocated and handed over, and any
             // returned error handle is owned by us from here on.
             let error = unsafe { callback(list, user_data.into_ptr()) };
+            // SAFETY: `take_error` requires null or a handle created by `box_error`, and
+            // consumes it. `error` is the listener callback's return value, which the
+            // `kafka_consumer_ConsumerRebalanceListener_on_partitions_*_callback_t`
+            // contract requires to be `NULL` or an error handle built with
+            // `kafka_common_Error_new` (a `box_error` allocation) whose ownership transfers
+            // to the client ("Do not destroy a handle you return"); it is consumed exactly
+            // once here and never touched again.
             unsafe { common::take_error(error) }
         })
         .await;
@@ -3912,6 +5202,7 @@ fn new_rebalance_listener_inner(
 /// The callback pointers must remain valid for the lifetime of the listener, and
 /// `user_data` until `user_data_destroy` fires (or, with no hook, until the
 /// listener is released).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
     on_partitions_revoked: kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t,
@@ -3947,11 +5238,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
 /// `listener` must be null or a listener handle from
 /// [`kafka_consumer_ConsumerRebalanceListener_new`] that was not passed to a
 /// subscribe call. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_destroy(
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
 ) {
     if !listener.is_null() {
+        // SAFETY: `listener` is non-null (checked above) and, per this function's `#
+        // Safety`, a handle from `kafka_consumer_ConsumerRebalanceListener_new`, the
+        // `Box::into_raw` of a `RebalanceListenerInner`, that was never passed to a
+        // subscribe call, so it has not already been consumed by `take_rebalance_listener`.
+        // This is therefore the single, final use; the contract declares the pointer
+        // invalid afterwards, and dropping the inner `CallbackTarget` fires
+        // `user_data_destroy` exactly once.
         unsafe { drop(Box::from_raw(listener as *mut RebalanceListenerInner)) };
     }
 }
@@ -3968,6 +5267,14 @@ unsafe fn take_rebalance_listener(
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
 ) -> Arc<dyn ConsumerRebalanceListener> {
     let RebalanceListenerInner { on_revoked, on_assigned, on_lost, target } =
+        // SAFETY: Per this function's `# Safety`, `listener` is a non-null handle from
+        // `kafka_consumer_ConsumerRebalanceListener_new` (the `Box::into_raw` of a
+        // `RebalanceListenerInner`) that has not been consumed or destroyed, so reclaiming
+        // the box here is the single, final use of the pointer; the subscribe entry points
+        // consume the handle unconditionally and document that destroying it afterwards is
+        // a double free, and the contract declares the pointer invalid after this call. The
+        // fields move into the `Arc<FfiRebalanceListener>`, including the `CallbackTarget`
+        // that keeps owning `user_data`.
         *unsafe { Box::from_raw(listener as *mut RebalanceListenerInner) };
     Arc::new(FfiRebalanceListener { on_revoked, on_assigned, on_lost, target, completion_tx })
 }
@@ -4011,6 +5318,7 @@ unsafe fn take_rebalance_listener(
 /// `consumer` must be a valid handle; `topics` must point to `count` valid C
 /// strings; `listener` must be a non-null, not-yet-consumed handle from
 /// [`kafka_consumer_ConsumerRebalanceListener_new`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4018,12 +5326,34 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
     count: i32,
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only to clone `completion_tx`
+    // within this synchronous call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     // Take ownership of the listener BEFORE anything that can fail, so every
     // early return (incl. `sync_void_op` dropping the closure on guard
     // rejection) releases it and fires the destroy hook.
+    // SAFETY: `take_rebalance_listener` requires a non-null, not-yet-consumed handle from
+    // `kafka_consumer_ConsumerRebalanceListener_new`, exactly what this function's `#
+    // Safety` promises for `listener`; it is consumed here once, before anything can fail,
+    // so every return path (including `sync_void_op` dropping the closure on guard
+    // rejection) releases the resulting `Arc` as the documented unconditional ownership
+    // transfer requires, and the C caller must not reuse or destroy the pointer afterwards.
     let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
+    // SAFETY: `read_topics` requires `topics` to point to `count` valid C strings, exactly
+    // what this function's `# Safety` promises; it reads `count.max(0)` entries, so a
+    // non-positive `count` reads nothing, and it tolerates no NULL array or entry (the
+    // contract requires valid strings whenever `count > 0`). The strings are copied into
+    // owned `String`s before anything else runs.
     let topic_vec = unsafe { read_topics(topics, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only owned values (`topic_vec`
+    // and the `Arc<dyn ConsumerRebalanceListener>` already taken from the C handle), no raw
+    // C pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle, dropping the closure and thereby the
+    // listener) and holds it via `ReleaseGuard` while `block_on` drives the op on this
+    // calling thread.
     unsafe {
         sync_void_op(consumer, move |c| {
             Box::pin(c.subscribe_with_topics_listener(topic_vec, listener))
@@ -4045,6 +5375,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
 /// strings; `listener` must be a non-null, not-yet-consumed handle from
 /// [`kafka_consumer_ConsumerRebalanceListener_new`]; `callback` must be a valid
 /// function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4054,9 +5393,35 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only to clone `completion_tx`
+    // within this synchronous call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
+    // SAFETY: `take_rebalance_listener` requires a non-null, not-yet-consumed handle from
+    // `kafka_consumer_ConsumerRebalanceListener_new`, exactly what this function's `#
+    // Safety` promises for `listener`; it is consumed here once, before anything can fail,
+    // so every path (including `async_void_op` dropping the closure on guard rejection)
+    // releases the resulting `Arc` as the documented unconditional ownership transfer
+    // requires, and the C caller must not reuse or destroy the pointer afterwards.
     let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
+    // SAFETY: `read_topics` requires `topics` to point to `count` valid C strings, exactly
+    // what this function's `# Safety` promises; it reads `count.max(0)` entries, so a
+    // non-positive `count` reads nothing, and it tolerates no NULL array or entry (the
+    // contract requires valid strings whenever `count > 0`). The strings are copied into
+    // owned `String`s before anything else runs.
     let topic_vec = unsafe { read_topics(topics, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `topic_vec` and the `Arc<dyn ConsumerRebalanceListener>`, no raw C pointers.
+    // `callback` was supplied by the C caller along with `user_data` and this function's `#
+    // Safety` requires it to be a valid function pointer; the helper fires it inline on
+    // this thread with a fresh `box_error` handle if the guard is rejected, and otherwise
+    // exactly once from the dispatcher thread after `release`, with null or a fresh error
+    // handle the callback owns. Under the one-shot `OperationCallbackTarget` convention the
+    // C caller keeps `user_data` valid across that single completion, and must not destroy
+    // the consumer while the op is in flight (`kafka_consumer_Consumer_destroy`'s
+    // documented precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_topics_listener(topic_vec, listener)
@@ -4078,6 +5443,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
 ///
 /// `consumer` must be a valid handle; `pattern` a valid C string; `callback` a
 /// valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4085,8 +5459,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
     let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `subscription_pattern`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` and this function's `# Safety` requires it to be a valid function
+    // pointer; the helper fires it inline on this thread with a fresh `box_error` handle if
+    // the guard is rejected, and otherwise exactly once from the dispatcher thread after
+    // `release`, with null or a fresh error handle the callback owns. Under the one-shot
+    // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
+    // single completion, and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern(subscription_pattern)
@@ -4107,6 +5494,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_async(
 ///
 /// `consumer` must be a valid handle; `pattern` a valid C string; `listener` a
 /// non-null, not-yet-consumed handle; `callback` a valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_with_listener_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4115,10 +5511,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_with_listener
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only to clone `completion_tx`
+    // within this synchronous call, during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
+    // SAFETY: `take_rebalance_listener` requires a non-null, not-yet-consumed handle from
+    // `kafka_consumer_ConsumerRebalanceListener_new`, exactly what this function's `#
+    // Safety` promises for `listener`; it is consumed here once, before anything can fail,
+    // so every path (including `async_void_op` dropping the closure on guard rejection)
+    // releases the resulting `Arc` as the documented unconditional ownership transfer
+    // requires, and the C caller must not reuse or destroy the pointer afterwards.
     let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid NUL-terminated C string
+    // for the duration of the call (no null check); it is copied into an owned `String`
+    // immediately.
     let pattern_str = unsafe { CStr::from_ptr(pattern) }.to_string_lossy().to_string();
     let subscription_pattern = SubscriptionPattern::new(pattern_str);
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `subscription_pattern` and the `Arc<dyn ConsumerRebalanceListener>`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` and this function's `# Safety` requires it to be a valid function
+    // pointer; the helper fires it inline on this thread with a fresh `box_error` handle if
+    // the guard is rejected, and otherwise exactly once from the dispatcher thread after
+    // `release`, with null or a fresh error handle the callback owns. Under the one-shot
+    // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
+    // single completion, and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
             c.subscribe_with_pattern_listener(subscription_pattern, listener)
@@ -4133,10 +5552,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_pattern_with_listener
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures nothing, and the helper acquires
+    // the access guard (or returns a `LocalConcurrentModification` error handle) and holds
+    // it via `ReleaseGuard` while `block_on` drives `unsubscribe` on this calling thread.
     unsafe { sync_void_op(consumer, |c| Box::pin(c.unsubscribe())) }
 }
 
@@ -4147,12 +5571,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_async(
     consumer: *const kafka_consumer_Consumer_t,
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send` data: the closure captures nothing.
+    // `callback` was supplied by the C caller along with `user_data` (a pair this
+    // function's `# Safety` leaves implicit; CLAUDE.md FFI §4 forbids checking required
+    // parameters); the helper fires it inline on this thread with a fresh `box_error`
+    // handle if the guard is rejected, and otherwise exactly once from the dispatcher
+    // thread after `release`, with null or a fresh error handle the callback owns. Under
+    // the one-shot `OperationCallbackTarget` convention the C caller keeps `user_data`
+    // valid across that single completion, and must not destroy the consumer while the op
+    // is in flight (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, |c| c.unsubscribe()) };
 }
 
@@ -4166,6 +5611,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_async(
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings,
 /// `partitions` `count` `i32` values.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4175,7 +5631,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, exactly what this function's `# Safety`
+    // promises; it reads `count.max(0)` entries, so a non-positive `count` yields an empty
+    // vec, and it tolerates no NULL array or entry (the contract requires valid entries
+    // whenever `count > 0`). Everything is copied into owned `TopicPartition`s before
+    // anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tps` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters); the helper fires it inline on this thread with
+    // a fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.assign(tps)) };
 }
 
@@ -4186,6 +5659,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4193,8 +5667,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
     partition: i32,
     offset: i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tp` and the
+    // `offset` value, no raw C pointers, and the helper acquires the access guard (or
+    // returns a `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard`
+    // while `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_offset(tp, offset))) }
 }
 
@@ -4205,6 +5688,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4214,8 +5708,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tp` and the `offset` value, no raw C pointers. `callback` was supplied by the C
+    // caller along with `user_data` (a pair this function's `# Safety` leaves implicit;
+    // CLAUDE.md FFI §4 forbids checking required parameters); the helper fires it inline on
+    // this thread with a fresh `box_error` handle if the guard is rejected, and otherwise
+    // exactly once from the dispatcher thread after `release`, with null or a fresh error
+    // handle the callback owns. Under the one-shot `OperationCallbackTarget` convention the
+    // C caller keeps `user_data` valid across that single completion, and must not destroy
+    // the consumer while the op is in flight (`kafka_consumer_Consumer_destroy`'s
+    // documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_offset(tp, offset)) };
 }
 
@@ -4228,6 +5737,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4237,11 +5747,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     leader_epoch: i32,
     metadata: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
     let metadata_str = if metadata.is_null() {
         String::new()
     } else {
+        // SAFETY: `metadata` is non-null (checked above) and, per this function's `#
+        // Safety`, null or a valid NUL-terminated C string; the bytes are copied into an
+        // owned `String` immediately so the borrow does not outlive this statement.
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
@@ -4249,6 +5766,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tp` and `oam`,
+    // no raw C pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_offset_and_metadata(tp, oam))) }
 }
 
@@ -4260,6 +5782,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
 /// # Safety
 ///
 /// As for [`kafka_consumer_Consumer_seek_with_offset_and_metadata`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4269,6 +5792,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     leader_epoch: i32,
     metadata: *const c_char,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: This function's `# Safety` is that of `kafka_consumer_Consumer_seek_with_offset_and_metadata`,
+    // and every argument is forwarded to it unchanged.
     unsafe {
         kafka_consumer_Consumer_seek_with_offset_and_metadata(
             consumer,
@@ -4292,6 +5817,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4303,11 +5839,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_a
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
     let metadata_str = if metadata.is_null() {
         String::new()
     } else {
+        // SAFETY: `metadata` is non-null (checked above) and, per this function's `#
+        // Safety`, null or a valid NUL-terminated C string; the bytes are copied into an
+        // owned `String` immediately so the borrow does not outlive this statement.
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
@@ -4315,10 +5858,30 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_a
         Ok(o) => o,
         Err(e) => {
             // Marshaling failed: fire inline with the error (no guard taken).
+            // SAFETY: `callback` was supplied by the C caller along with `user_data` (a
+            // pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4 forbids
+            // checking required parameters). This is the documented marshaling-failure
+            // path: the pair fires synchronously on the calling thread before any guard is
+            // taken, so `user_data` is still valid under the one-shot convention, and
+            // `box_error(e)` is a fresh handle the callback owns. The function returns
+            // right after, `async_void_op` is never reached and the `ffi_guard` fires only
+            // on a panic, so this is the single invocation.
             unsafe { callback(box_error(e), user_data) };
             return;
         },
     };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tp` and `oam`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters) and has not fired yet on this path (the
+    // marshaling-failure branch returned); the helper fires it inline on this thread with a
+    // fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_offset_and_metadata(tp, oam)) };
 }
 
@@ -4331,6 +5894,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_a
 /// # Safety
 ///
 /// As for [`kafka_consumer_Consumer_seek_with_offset_and_metadata_async`].
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The body
+    // only calls `kafka_consumer_Consumer_seek_with_offset_and_metadata_async`, whose own guard catches every panic
+    // inside it and reports it through `callback` there, so this closure runs only for a
+    // panic before that call, when `callback` has not been handed on: a single invocation.
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4342,6 +5914,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: This function's `# Safety` is that of `kafka_consumer_Consumer_seek_with_offset_and_metadata_async`,
+    // and every argument is forwarded to it unchanged.
     unsafe {
         kafka_consumer_Consumer_seek_with_offset_and_metadata_async(
             consumer,
@@ -4361,6 +5935,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4368,7 +5943,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tps`, no raw C
+    // pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.seek_to_beginning(&tps).await })) }
 }
 
@@ -4379,6 +5965,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4388,7 +5985,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tps` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters); the helper fires it inline on this thread with
+    // a fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| async move {
             c.seek_to_beginning(&tps).await
@@ -4401,6 +6015,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4408,7 +6023,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tps`, no raw C
+    // pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.seek_to_end(&tps).await })) }
 }
 
@@ -4419,6 +6045,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4428,7 +6065,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tps` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters); the helper fires it inline on this thread with
+    // a fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| async move { c.seek_to_end(&tps).await }) };
 }
 
@@ -4439,6 +6093,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4446,7 +6101,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tps`, no raw C
+    // pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.pause(&tps).await })) }
 }
 
@@ -4457,6 +6123,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4466,7 +6143,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tps` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters); the helper fires it inline on this thread with
+    // a fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| async move { c.pause(&tps).await }) };
 }
 
@@ -4475,6 +6169,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4482,7 +6177,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     partitions: *const i32,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `tps`, no raw C
+    // pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.resume(&tps).await })) }
 }
 
@@ -4493,6 +6199,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4502,7 +6219,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `tps` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters); the helper fires it inline on this thread with
+    // a fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| async move { c.resume(&tps).await }) };
 }
 
@@ -4514,10 +6248,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures nothing, and the helper acquires
+    // the access guard (or returns a `LocalConcurrentModification` error handle) and holds
+    // it via `ReleaseGuard` while `block_on` drives `commit_sync` on this calling thread.
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_sync())) }
 }
 
@@ -4530,12 +6269,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
     consumer: *const kafka_consumer_Consumer_t,
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send` data: the closure captures nothing.
+    // `callback` was supplied by the C caller along with `user_data` (a pair this
+    // function's `# Safety` leaves implicit; CLAUDE.md FFI §4 forbids checking required
+    // parameters); the helper fires it inline on this thread with a fresh `box_error`
+    // handle if the guard is rejected, and otherwise exactly once from the dispatcher
+    // thread after `release`, with null or a fresh error handle the callback owns. Under
+    // the one-shot `OperationCallbackTarget` convention the C caller keeps `user_data`
+    // valid across that single completion, and must not destroy the consumer while the op
+    // is in flight (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, |c| c.commit_sync()) };
 }
 
@@ -4550,7 +6310,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
 ///
 /// # Safety
 ///
-/// All non-null arrays must have `count` valid entries.
+/// `topics` must point to `count` valid C strings and `partitions` / `offsets` to
+/// `count` values; `leader_epochs` must be null or have `count` entries;
+/// `metadata` must be null or have `count` entries, each null or a valid C string.
 pub(crate) unsafe fn read_offset_map(
     topics: *const *const c_char,
     partitions: *const i32,
@@ -4562,23 +6324,56 @@ pub(crate) unsafe fn read_offset_map(
     let n = count.max(0) as usize;
     let mut map = HashMap::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `i < n` where `n = count.max(0)`, so a non-positive `count` reads
+        // nothing, and every caller's `# Safety`
+        // (`kafka_consumer_Consumer_commit_sync_offsets` and siblings: "arrays `count`
+        // valid entries", with only `metadata` documented as nullable) gives `topics`
+        // `count` readable `*const c_char` entries, so this one-pointer read is in bounds.
+        // `topics` itself is not null-checked; this helper's own `# Safety` ("all non-null
+        // arrays") does not require it non-null, only the entry points' contracts do.
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `topics[i]` entry just read, which the callers' `#
+        // Safety` contracts require to be a valid NUL-terminated C string (this helper
+        // reads `(topic, partition, offset, leader_epoch, metadata)` tuples and documents
+        // only `metadata` as nullable, whole-array or per entry); there is no per-entry
+        // null check for topics, and the bytes are copied into an owned `String`
+        // immediately.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `i < n = count.max(0)` and, per the `# Safety` of this helper and of its
+        // callers ("arrays `count` valid entries"), `partitions` has `count` valid `i32`
+        // entries, so one `i32` is read in bounds. `partitions` is not null-checked; the
+        // entry points' contracts require it non-null whenever `count > 0`.
         let partition = unsafe { *partitions.add(i) };
+        // SAFETY: `i < n = count.max(0)` and, per the `# Safety` of this helper and of its
+        // callers ("arrays `count` valid entries"), `offsets` has `count` valid `i64`
+        // entries, so one `i64` is read in bounds. `offsets` is not null-checked; the entry
+        // points' contracts require it non-null whenever `count > 0`.
         let offset = unsafe { *offsets.add(i) };
         let epoch = if leader_epochs.is_null() {
             None
         } else {
+            // SAFETY: `leader_epochs` is non-null (checked above; the null case yields
+            // `None`) and, per this helper's `# Safety`, a non-null array has `count` valid
+            // entries; `i < n = count.max(0)`, so one `i32` is read in bounds.
             let e = unsafe { *leader_epochs.add(i) };
             if e < 0 { None } else { Some(e) }
         };
         let meta = if metadata.is_null() {
             String::new()
         } else {
+            // SAFETY: `metadata` is non-null (checked above; the null case yields an empty
+            // string) and, per this helper's `# Safety` and the callers' docs ("`metadata`
+            // may be null (whole array or individual entries)"), a non-null array has
+            // `count` valid `*const c_char` entries; `i < n = count.max(0)`, so one pointer
+            // is read in bounds.
             let m = unsafe { *metadata.add(i) };
             if m.is_null() {
                 String::new()
             } else {
+                // SAFETY: `m` is the `metadata[i]` entry just read and is non-null (checked
+                // above; a NULL entry yields an empty string); per the callers' contracts a
+                // non-null entry is a valid NUL-terminated C string, and the bytes are
+                // copied into an owned `String` immediately.
                 unsafe { CStr::from_ptr(m) }.to_string_lossy().to_string()
             }
         };
@@ -4596,6 +6391,7 @@ pub(crate) unsafe fn read_offset_map(
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4606,10 +6402,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     metadata: *const *const c_char,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_offset_map` requires every non-null array to have `count` valid
+    // entries; this function's `# Safety` promises "arrays `count` valid entries", and its
+    // docs allow only `metadata` to be null (whole array or per entry) and `leader_epoch <
+    // 0` for no epoch, which is exactly what the helper tolerates. It reads `count.max(0)`
+    // entries, so a non-positive `count` reads nothing; everything is copied into an owned
+    // map, and a semantic failure (e.g. a negative offset) surfaces as `Err` and is
+    // returned as an error handle.
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `map`, no raw C
+    // pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_sync_with_offsets(map))) }
 }
 
@@ -4621,6 +6429,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
 /// # Safety
 ///
 /// As for [`kafka_consumer_Consumer_commit_sync_with_offsets`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4631,6 +6440,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
     metadata: *const *const c_char,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: This function's `# Safety` is that of `kafka_consumer_Consumer_commit_sync_with_offsets`,
+    // and every argument is forwarded to it unchanged.
     unsafe {
         kafka_consumer_Consumer_commit_sync_with_offsets(
             consumer,
@@ -4653,6 +6464,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
 /// # Safety
 ///
 /// As for [`kafka_consumer_Consumer_commit_sync_with_offsets_async`].
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The body
+    // only calls `kafka_consumer_Consumer_commit_sync_with_offsets_async`, whose own guard catches every panic
+    // inside it and reports it through `callback` there, so this closure runs only for a
+    // panic before that call, when `callback` has not been handed on: a single invocation.
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4665,6 +6485,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: This function's `# Safety` is that of `kafka_consumer_Consumer_commit_sync_with_offsets_async`,
+    // and every argument is forwarded to it unchanged.
     unsafe {
         kafka_consumer_Consumer_commit_sync_with_offsets_async(
             consumer,
@@ -4690,6 +6512,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4702,14 +6535,41 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_async(
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_offset_map` requires every non-null array to have `count` valid
+    // entries; this function's `# Safety` promises "arrays `count` valid entries", and its
+    // docs allow only `metadata` to be null (whole array or per entry) and `leader_epoch <
+    // 0` for no epoch, which is exactly what the helper tolerates. It reads `count.max(0)`
+    // entries, so a non-positive `count` reads nothing; everything is copied into an owned
+    // map, and a semantic failure surfaces as `Err`, handled on the marshaling-failure path
+    // below.
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => {
             // Marshaling failed: fire inline with the error (no guard taken).
+            // SAFETY: `callback` was supplied by the C caller along with `user_data` (a
+            // pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4 forbids
+            // checking required parameters). This is the documented marshaling-failure
+            // path: the pair fires synchronously on the calling thread before any guard is
+            // taken, so `user_data` is still valid under the one-shot convention, and
+            // `box_error(e)` is a fresh handle the callback owns. The function returns
+            // right after, `async_void_op` is never reached and the `ffi_guard` fires only
+            // on a panic, so this is the single invocation.
             unsafe { callback(box_error(e), user_data) };
             return;
         },
     };
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `map` and holds no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` (a pair this function's `# Safety` leaves implicit; CLAUDE.md FFI §4
+    // forbids checking required parameters) and has not fired yet on this path (the
+    // marshaling-failure branch returned); the helper fires it inline on this thread with a
+    // fresh `box_error` handle if the guard is rejected, and otherwise exactly once from
+    // the dispatcher thread after `release`, with null or a fresh error handle the callback
+    // owns. Under the one-shot `OperationCallbackTarget` convention the C caller keeps
+    // `user_data` valid across that single completion, and must not destroy the consumer
+    // while the op is in flight (`kafka_consumer_Consumer_destroy`'s documented
+    // precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.commit_sync_with_offsets(map)) };
 }
 
@@ -4730,10 +6590,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures nothing, and the helper acquires
+    // the access guard (or returns a `LocalConcurrentModification` error handle) and holds
+    // it via `ReleaseGuard` while `block_on` drives `commit_async` on this calling thread.
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_async())) }
 }
 
@@ -4912,6 +6777,18 @@ fn make_commit_callback(
 /// Like [`kafka_consumer_Consumer_commit_async`] this call is synchronous and
 /// returns as soon as the commit has been initiated (null on success, a non-null
 /// error handle on failure).
+/// A caught panic returns a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error
+/// handle, and the guard itself never invokes `callback`. Against a real broker
+/// the callback is handed off when the consumer spawns the task that waits for
+/// the commit's result. A panic before that drops the registration during the
+/// unwind: `callback` never fires, and `user_data_destroy` fires exactly once,
+/// before this function returns. A panic raised after the task is queued, even
+/// inside the spawn, does not cancel it: `callback` can still fire later with
+/// the commit's outcome, although this call returned an error, and
+/// `user_data_destroy` still fires exactly once, after `callback` if it fires.
+/// On a return that reports a panic, do not release `user_data` yourself:
+/// `user_data_destroy` releases it, or, with no destroy hook, `callback` does
+/// if it fires.
 ///
 /// While a caller-thread listener is registered
 /// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
@@ -4966,6 +6843,7 @@ fn make_commit_callback(
 /// `consumer` must be a valid handle; `callback` must be a valid function
 /// pointer and `user_data` must stay valid until `user_data_destroy` fires (or,
 /// with no destroy hook, until the callback has run).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     consumer: *const kafka_consumer_Consumer_t,
@@ -4973,8 +6851,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     user_data: *mut c_void,
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. The `&'static` escapes into the commit
+    // callback (`FfiOffsetCommitCallback::handle`), which reads it only inside
+    // `on_complete`; that field's docs give why it does not outlive the handle.
     let h = unsafe { handle_ref(consumer) };
     let cb = make_commit_callback(callback, user_data, user_data_destroy, h);
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only `cb`, an `Arc<dyn
+    // OffsetCommitCallback>` whose `user_data` is owned by a `CallbackTarget`
+    // (`Send`/`Sync` by its own documented contract) rather than a bare raw pointer, and
+    // the helper acquires the access guard (or returns a `LocalConcurrentModification`
+    // error handle, dropping `cb` and thereby firing `user_data_destroy`) and holds it via
+    // `ReleaseGuard` while `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_callback(cb))) }
 }
 
@@ -4991,6 +6881,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// offsets fail to marshal (e.g. a negative offset) this returns the error
 /// **without registering the callback** — the callback never fires, but
 /// `user_data_destroy` still does.
+/// A caught panic returns a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error
+/// handle, and the guard itself never invokes `callback`. Against a real broker
+/// the callback is handed off when the consumer spawns the task that waits for
+/// the commit's result. A panic before that drops the registration during the
+/// unwind: `callback` never fires, and `user_data_destroy` fires exactly once,
+/// before this function returns. A panic raised after the task is queued, even
+/// inside the spawn, does not cancel it: `callback` can still fire later with
+/// the commit's outcome, although this call returned an error, and
+/// `user_data_destroy` still fires exactly once, after `callback` if it fires.
+/// On a return that reports a panic, do not release `user_data` yourself:
+/// `user_data_destroy` releases it, or, with no destroy hook, `callback` does
+/// if it fires.
 ///
 /// While a caller-thread listener is registered
 /// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
@@ -5006,6 +6908,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// `consumer` must be a valid handle; the arrays must have `count` valid
 /// entries; see [`kafka_consumer_Consumer_commit_async_with_callback`] for the
 /// `callback` / `user_data` requirements.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callback(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5019,14 +6922,32 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
     user_data: *mut c_void,
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. The `&'static` escapes into the commit
+    // callback (`FfiOffsetCommitCallback::handle`), which reads it only inside
+    // `on_complete`; that field's docs give why it does not outlive the handle.
     let h = unsafe { handle_ref(consumer) };
     // Build the adapter (which takes ownership of `user_data`) BEFORE anything
     // that can fail, so every early return drops it and fires the destroy hook.
     let cb = make_commit_callback(callback, user_data, user_data_destroy, h);
+    // SAFETY: `read_offset_map` requires every non-null array to have `count` valid
+    // entries; this function's `# Safety` promises the arrays have `count` valid entries,
+    // and its docs allow only `metadata` to be null (whole array or per entry) and
+    // `leader_epoch < 0` for no epoch, which is exactly what the helper tolerates. It reads
+    // `count.max(0)` entries, so a non-positive `count` reads nothing; everything is copied
+    // into an owned map, and an `Err` is returned as an error handle, dropping the
+    // already-built `cb` so `user_data_destroy` still fires as documented.
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `map` and `cb`
+    // (whose `user_data` is owned by a `CallbackTarget`, not a bare raw pointer), and the
+    // helper acquires the access guard (or returns a `LocalConcurrentModification` error
+    // handle, dropping `cb` and thereby firing `user_data_destroy`) and holds it via
+    // `ReleaseGuard` while `block_on` drives the op on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_offsets_callback(map, cb))) }
 }
 
@@ -5038,6 +6959,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
 /// # Safety
 ///
 /// `consumer` a valid handle; `reason` null or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5046,8 +6968,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     let reason_str = if reason.is_null() {
         None
     } else {
+        // SAFETY: `reason` is non-null (checked above) and, per this function's `# Safety`,
+        // null or a valid NUL-terminated C string; the bytes are copied into an owned
+        // `String` immediately so the borrow does not outlive this statement.
         Some(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string())
     };
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `reason_str`, no
+    // raw C pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives the op on this calling thread.
     unsafe {
         sync_void_op(consumer, move |c| {
             Box::pin(async move {
@@ -5069,10 +6999,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures nothing, and the helper acquires
+    // the access guard (or returns a `LocalConcurrentModification` error handle) and holds
+    // it via `ReleaseGuard` while `block_on` drives `close` on this calling thread.
     unsafe { sync_void_op(consumer, |c| Box::pin(c.close())) }
 }
 
@@ -5083,12 +7018,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_async(
     consumer: *const kafka_consumer_Consumer_t,
     callback: kafka_consumer_Consumer_op_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send` data: the closure captures nothing.
+    // `callback` was supplied by the C caller along with `user_data` (a pair this
+    // function's `# Safety` leaves implicit; CLAUDE.md FFI §4 forbids checking required
+    // parameters); the helper fires it inline on this thread with a fresh `box_error`
+    // handle if the guard is rejected, and otherwise exactly once from the dispatcher
+    // thread after `release`, with null or a fresh error handle the callback owns. Under
+    // the one-shot `OperationCallbackTarget` convention the C caller keeps `user_data`
+    // valid across that single completion, and must not destroy the consumer while the op
+    // is in flight (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, |c| c.close()) };
 }
 
@@ -5124,6 +7080,7 @@ fn close_options_from_args(timeout_ms: i64, operation_code: i32) -> CloseOptions
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5131,6 +7088,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option(
     operation_code: i32,
 ) -> *mut kafka_common_Error_t {
     let options = close_options_from_args(timeout_ms, operation_code);
+    // SAFETY: `sync_void_op` requires `consumer` to be a valid handle, which this
+    // function's `# Safety` promises; the closure captures only the owned `options`, no raw
+    // C pointers, and the helper acquires the access guard (or returns a
+    // `LocalConcurrentModification` error handle) and holds it via `ReleaseGuard` while
+    // `block_on` drives `close_with_options` on this calling thread.
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
 }
 
@@ -5142,6 +7104,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option(
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `callback` a valid function pointer.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5151,6 +7122,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option_async(
     user_data: *mut c_void,
 ) {
     let options = close_options_from_args(timeout_ms, operation_code);
+    // SAFETY: `async_void_op` requires `consumer` to be a valid handle (this function's `#
+    // Safety`) and an `op` capturing only `Send`, already-marshaled data: the closure owns
+    // `options`, no raw C pointers. `callback` was supplied by the C caller along with
+    // `user_data` and this function's `# Safety` requires it to be a valid function
+    // pointer; the helper fires it inline on this thread with a fresh `box_error` handle if
+    // the guard is rejected, and otherwise exactly once from the dispatcher thread after
+    // `release`, with null or a fresh error handle the callback owns. Under the one-shot
+    // `OperationCallbackTarget` convention the C caller keeps `user_data` valid across that
+    // single completion, and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.close_with_options(options)) };
 }
 
@@ -5165,6 +7146,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_option_async(
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_position` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5172,16 +7154,34 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     partition: i32,
     out_position: *mut i64,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).position(&tp) }) {
         Ok(pos) => {
             if !out_position.is_null() {
+                // SAFETY: `out_position` is non-null (checked above) and, per this
+                // function's `# Safety`, valid, i.e. writable for one `i64`; exactly one
+                // element is written.
                 unsafe { *out_position = pos };
             }
             std::ptr::null_mut()
@@ -5206,6 +7206,17 @@ pub type kafka_consumer_Consumer_position_callback_t =
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(0, box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5214,8 +7225,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_async(
     callback: kafka_consumer_Consumer_position_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `tp`. The block also encloses the `complete` closure's call of `callback`, which the
+    // C caller supplied along with `user_data` (a pair this function's `# Safety` leaves
+    // implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on the
+    // dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `pos` is a
+    // plain value, and `err` is null or a fresh `box_error` handle the callback owns per
+    // `kafka_consumer_Consumer_position_callback_t`. The C caller keeps `user_data` valid
+    // across that single completion (one-shot `OperationCallbackTarget` convention) and
+    // must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5241,6 +7268,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_async(
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5249,15 +7277,36 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetMap_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before the op runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).committed(&tps) }) {
         Ok(map) => {
             if !out_map.is_null() {
+                // SAFETY: `out_map` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_consumer_OffsetMap_t` whose ownership
+                // passes to the caller (free with `kafka_consumer_OffsetMap_destroy`).
                 unsafe { *out_map = box_offset_map(map) };
             }
             std::ptr::null_mut()
@@ -5281,6 +7330,17 @@ pub type kafka_consumer_Consumer_committed_callback_t =
 /// # Safety
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5290,7 +7350,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_async(
     callback: kafka_consumer_Consumer_committed_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` valid entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `tps`. The block also encloses the `complete` closure's call of `callback`, which the
+    // C caller supplied along with `user_data` (a pair this function's `# Safety` leaves
+    // implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on the
+    // dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `map` is a
+    // fresh `box_offset_map` handle or null and `err` is null or a fresh `box_error`
+    // handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_committed_callback_t`. The C caller keeps `user_data` valid
+    // across that single completion (one-shot `OperationCallbackTarget` convention) and
+    // must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5315,6 +7394,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_async(
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries; `out_map` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5324,6 +7404,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetAndTimestampMap_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -5332,15 +7417,40 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     let n = count.max(0) as usize;
     let mut req = HashMap::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `i < n = count.max(0)`, so a non-positive `count` reads nothing, and per
+        // this function's `# Safety` the arrays have `count` valid entries, so this
+        // one-pointer read from `topics` is in bounds; `topics` is not null-checked, which
+        // the contract does not require (it must be non-null whenever `count > 0`).
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `topics[i]` entry just read, a valid NUL-terminated C
+        // string per this function's `# Safety` ("arrays `count` valid entries"); there is
+        // no per-entry null tolerance, and the bytes are copied into an owned `String`
+        // immediately.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `i < n = count.max(0)` and per this function's `# Safety` `partitions`
+        // has `count` valid `i32` entries, so one `i32` is read in bounds; `partitions` is
+        // not null-checked, which the contract does not require.
         let partition = unsafe { *partitions.add(i) };
+        // SAFETY: `i < n = count.max(0)` and per this function's `# Safety` `timestamps`
+        // has `count` valid `i64` entries, so one `i64` is read in bounds; `timestamps` is
+        // not null-checked, which the contract does not require.
         let timestamp = unsafe { *timestamps.add(i) };
         req.insert(TopicPartition::new(topic, partition), timestamp);
     }
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).offsets_for_times(req) }) {
         Ok(map) => {
             if !out_map.is_null() {
+                // SAFETY: `out_map` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_consumer_OffsetAndTimestampMap_t`
+                // whose ownership passes to the caller (free with
+                // `kafka_consumer_OffsetAndTimestampMap_destroy`).
                 unsafe { *out_map = box_offset_and_timestamp_map(map) };
             }
             std::ptr::null_mut()
@@ -5364,9 +7474,23 @@ pub(crate) unsafe fn read_timestamps_to_search(
     let n = count.max(0) as usize;
     let mut req = HashMap::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `i < n = count.max(0)`, so a non-positive `count` reads nothing, and per
+        // this helper's `# Safety` all arrays have `count` valid entries, so this
+        // one-pointer read from `topics` is in bounds; `topics` is not null-checked, which
+        // the contract does not require (it must be non-null whenever `count > 0`).
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `topic_ptr` is the `topics[i]` entry just read, a valid NUL-terminated C
+        // string per this helper's `# Safety` ("all arrays must have `count` valid
+        // entries"); there is no per-entry null tolerance, and the bytes are copied into an
+        // owned `String` immediately.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `i < n = count.max(0)` and per this helper's `# Safety` `partitions` has
+        // `count` valid `i32` entries, so one `i32` is read in bounds; `partitions` is not
+        // null-checked, which the contract does not require.
         let partition = unsafe { *partitions.add(i) };
+        // SAFETY: `i < n = count.max(0)` and per this helper's `# Safety` `timestamps` has
+        // `count` valid `i64` entries, so one `i64` is read in bounds; `timestamps` is not
+        // null-checked, which the contract does not require.
         let timestamp = unsafe { *timestamps.add(i) };
         req.insert(TopicPartition::new(topic, partition), timestamp);
     }
@@ -5389,6 +7513,17 @@ pub type kafka_consumer_Consumer_offsets_for_times_callback_t =
 /// # Safety
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5399,7 +7534,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_async(
     callback: kafka_consumer_Consumer_offsets_for_times_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_timestamps_to_search` requires all three arrays to have `count` valid
+    // entries, which this function's `# Safety` promises ("arrays `count` valid entries");
+    // it reads `count.max(0)` entries, so a non-positive `count` reads nothing, and it
+    // tolerates no NULL array or entry (the contract requires valid entries whenever `count
+    // > 0`). Everything is copied into an owned `HashMap` before anything else runs.
     let req = unsafe { read_timestamps_to_search(topics, partitions, timestamps, count) };
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `req`. The block also encloses the `complete` closure's call of `callback`, which the
+    // C caller supplied along with `user_data` (a pair this function's `# Safety` leaves
+    // implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on the
+    // dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `map` is a
+    // fresh `box_offset_and_timestamp_map` handle or null and `err` is null or a fresh
+    // `box_error` handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_offsets_for_times_callback_t`. The C caller keeps
+    // `user_data` valid across that single completion (one-shot `OperationCallbackTarget`
+    // convention) and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5423,6 +7576,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_async(
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5431,15 +7585,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before the op runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).beginning_offsets(&tps) }) {
         Ok(map) => {
             if !out_map.is_null() {
+                // SAFETY: `out_map` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_consumer_LongOffsetMap_t` whose
+                // ownership passes to the caller (free with
+                // `kafka_consumer_LongOffsetMap_destroy`).
                 unsafe { *out_map = box_long_offset_map(map) };
             }
             std::ptr::null_mut()
@@ -5464,6 +7640,17 @@ pub type kafka_consumer_Consumer_long_offsets_callback_t =
 /// # Safety
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5473,7 +7660,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_async(
     callback: kafka_consumer_Consumer_long_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` valid entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `tps`. The block also encloses the `complete` closure's call of `callback`, which the
+    // C caller supplied along with `user_data` (a pair this function's `# Safety` leaves
+    // implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on the
+    // dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `map` is a
+    // fresh `box_long_offset_map` handle or null and `err` is null or a fresh `box_error`
+    // handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_long_offsets_callback_t`. The C caller keeps `user_data`
+    // valid across that single completion (one-shot `OperationCallbackTarget` convention)
+    // and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5497,6 +7703,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_async(
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5505,15 +7712,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before the op runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).end_offsets(&tps) }) {
         Ok(map) => {
             if !out_map.is_null() {
+                // SAFETY: `out_map` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_consumer_LongOffsetMap_t` whose
+                // ownership passes to the caller (free with
+                // `kafka_consumer_LongOffsetMap_destroy`).
                 unsafe { *out_map = box_long_offset_map(map) };
             }
             std::ptr::null_mut()
@@ -5530,6 +7759,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
 /// # Safety
 ///
 /// `consumer` a valid handle; `topics`/`partitions` `count` valid entries.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5539,7 +7779,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
     callback: kafka_consumer_Consumer_long_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` to point to `count` valid C strings
+    // and `partitions` to `count` `i32` values, which this function's `# Safety` promises
+    // (`topics`/`partitions` `count` valid entries); it reads `count.max(0)` entries, so a
+    // non-positive `count` yields an empty vec, and it tolerates no NULL array or entry
+    // (the contract requires valid entries whenever `count > 0`). Everything is copied into
+    // owned `TopicPartition`s before anything else runs.
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `tps`. The block also encloses the `complete` closure's call of `callback`, which the
+    // C caller supplied along with `user_data` (a pair this function's `# Safety` leaves
+    // implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on the
+    // dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `map` is a
+    // fresh `box_long_offset_map` handle or null and `err` is null or a fresh `box_error`
+    // handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_long_offsets_callback_t`. The C caller keeps `user_data`
+    // valid across that single completion (one-shot `OperationCallbackTarget` convention)
+    // and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5562,21 +7821,42 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_list` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
     out_list: *mut *mut kafka_common_PartitionInfoList_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).partitions_for(&topic_str) }) {
         Ok(infos) => {
             if !out_list.is_null() {
+                // SAFETY: `out_list` is non-null (checked above) and, per this function's
+                // `# Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_common_PartitionInfoList_t` whose
+                // ownership passes to the caller (free with
+                // `kafka_common_PartitionInfoList_destroy`).
                 unsafe { *out_list = box_partition_info_list(infos) };
             }
             std::ptr::null_mut()
@@ -5600,6 +7880,17 @@ pub type kafka_consumer_Consumer_partitions_for_callback_t =
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5607,7 +7898,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
     callback: kafka_consumer_Consumer_partitions_for_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures only the owned
+    // `topic_str`. The block also encloses the `complete` closure's call of `callback`,
+    // which the C caller supplied along with `user_data` (a pair this function's `# Safety`
+    // leaves implicit; CLAUDE.md FFI §4 forbids checking required parameters): it runs on
+    // the dispatcher thread after `release` (or inline on this thread if the guard is
+    // rejected), exactly once; `ud` is the caller's own `user_data` handed back, `list` is
+    // a fresh `box_partition_info_list` handle or null and `err` is null or a fresh
+    // `box_error` handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_partitions_for_callback_t`. The C caller keeps `user_data`
+    // valid across that single completion (one-shot `OperationCallbackTarget` convention)
+    // and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5630,19 +7938,36 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
 /// # Safety
 ///
 /// `consumer` a valid handle; `out_map` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     consumer: *const kafka_consumer_Consumer_t,
     out_map: *mut *mut kafka_common_TopicPartitionInfoMap_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard`, `block_on` and `consumer_mut`),
+    // during which the C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned an error handle) and `_g: ReleaseGuard` holds the
+    // guard until this function returns, after `block_on` has driven the returned future to
+    // completion, so the `&mut` is exclusive at this instant per the single-owner
+    // `acquire()` design documented at the `SAFETY` comment on `FfiConsumerHandle`'s
+    // `unsafe impl Send`.
     match h.runtime.block_on(unsafe { consumer_mut(h).list_topics() }) {
         Ok(map) => {
             if !out_map.is_null() {
+                // SAFETY: `out_map` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one pointer; exactly one element is
+                // written, a freshly allocated `kafka_common_TopicPartitionInfoMap_t` whose
+                // ownership passes to the caller (free with
+                // `kafka_common_TopicPartitionInfoMap_destroy`).
                 unsafe { *out_map = box_topic_partition_info_map(map) };
             }
             std::ptr::null_mut()
@@ -5667,12 +7992,36 @@ pub type kafka_consumer_Consumer_list_topics_callback_t =
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+/// `callback` must be a valid function pointer and `user_data` must stay valid
+/// until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
     consumer: *const kafka_consumer_Consumer_t,
     callback: kafka_consumer_Consumer_list_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `async_value_op` requires `consumer` to be a valid handle from a consumer
+    // constructor, which this function's `# Safety` promises; `op` captures nothing. The
+    // block also encloses the `complete` closure's call of `callback`, which the C caller
+    // supplied along with `user_data` (a pair this function's `# Safety` leaves implicit;
+    // CLAUDE.md FFI §4 forbids checking required parameters): it runs on the dispatcher
+    // thread after `release` (or inline on this thread if the guard is rejected), exactly
+    // once; `ud` is the caller's own `user_data` handed back, `map` is a fresh
+    // `box_topic_partition_info_map` handle or null and `err` is null or a fresh
+    // `box_error` handle, the callback owning whichever is non-null per
+    // `kafka_consumer_Consumer_list_topics_callback_t`. The C caller keeps `user_data`
+    // valid across that single completion (one-shot `OperationCallbackTarget` convention)
+    // and must not destroy the consumer while the op is in flight
+    // (`kafka_consumer_Consumer_destroy`'s documented precondition).
     unsafe {
         async_value_op(
             consumer,
@@ -5700,15 +8049,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_TopicPartitionList_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `assignment()`
+    // call in this statement, so the access is exclusive per the single-owner `acquire()`
+    // design documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl
+    // Send`.
     let set = unsafe { consumer_mut(h) }.assignment();
     box_topic_partition_list(set)
 }
@@ -5724,15 +8085,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_MetricMap_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `metrics()` call
+    // in this statement, so the access is exclusive per the single-owner `acquire()` design
+    // documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl Send`.
     let metrics = unsafe { consumer_mut(h) }.metrics();
     box_metric_map(metrics)
 }
@@ -5743,15 +8115,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_StringList_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `subscription()`
+    // call in this statement, so the access is exclusive per the single-owner `acquire()`
+    // design documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl
+    // Send`.
     let set = unsafe { consumer_mut(h) }.subscription();
     box_string_list(set)
 }
@@ -5763,15 +8147,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_TopicPartitionList_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `paused()` call in
+    // this statement, so the access is exclusive per the single-owner `acquire()` design
+    // documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl Send`.
     let set = unsafe { consumer_mut(h) }.paused();
     box_topic_partition_list(set)
 }
@@ -5783,15 +8178,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `group_metadata()`
+    // call in this statement, so the access is exclusive per the single-owner `acquire()`
+    // design documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl
+    // Send`.
     let meta = unsafe { consumer_mut(h) }.group_metadata();
     box_group_metadata(meta)
 }
@@ -5802,13 +8209,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(consumer: *const kafka_consumer_Consumer_t) -> *mut c_char {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned null) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `client_id()` call
+    // in this statement, whose result is copied into an owned `String`, so the access is
+    // exclusive per the single-owner `acquire()` design documented at the `SAFETY` comment
+    // on `FfiConsumerHandle`'s `unsafe impl Send`.
     let id = unsafe { consumer_mut(h) }.client_id().to_string();
     match std::ffi::CString::new(id) {
         Ok(c) => c.into_raw(),
@@ -5823,6 +8242,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(consumer: *const kafk
 /// # Safety
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_lag` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     consumer: *const kafka_consumer_Consumer_t,
@@ -5830,16 +8250,34 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     partition: i32,
     out_lag: *mut i64,
 ) -> bool {
+    // SAFETY: `handle_ref` requires a non-null pointer created by a consumer constructor;
+    // per this function's `# Safety`, `consumer` is a valid handle, i.e. the
+    // `Box::into_raw` of `build_consumer_handle`. `h` is used only for the duration of this
+    // synchronous call (`acquire`, the `ReleaseGuard` and `consumer_mut`), during which the
+    // C caller keeps the handle alive.
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return false;
     }
     let _g = ReleaseGuard(h);
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated C string
+    // for the duration of the call; it is not null-checked, which the contract does not
+    // require, and the bytes are copied into an owned `String` immediately so the borrow
+    // does not outlive this statement.
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
+    // SAFETY: `consumer_mut` requires the access guard to be held: `acquire(h)` succeeded
+    // above (the `Err` path returned `false`) and `_g: ReleaseGuard` holds the guard until
+    // this function returns; the `&mut` is used only for the synchronous `current_lag(&tp)`
+    // call in this statement, so the access is exclusive per the single-owner `acquire()`
+    // design documented at the `SAFETY` comment on `FfiConsumerHandle`'s `unsafe impl
+    // Send`.
     match unsafe { consumer_mut(h) }.current_lag(&tp) {
         Some(lag) => {
             if !out_lag.is_null() {
+                // SAFETY: `out_lag` is non-null (checked above) and, per this function's `#
+                // Safety`, valid, i.e. writable for one `i64`; exactly one element is
+                // written.
                 unsafe { *out_lag = lag };
             }
             true
@@ -5858,6 +8296,8 @@ mod tests {
     use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider};
     use crate::common::utils::SystemTime;
     use crate::consumer::ConsumerGroupMetadataImpl;
+    use crate::ffi::common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE;
+    use crate::ffi::common::{kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_message};
     use std::collections::BTreeMap;
 
     fn metric(name: &str, tags: &[(&str, &str)], provider: MetricValueProvider) -> (MetricName, Arc<KafkaMetric>) {
@@ -5882,14 +8322,38 @@ mod tests {
             ),
         ));
         assert!(!meta.is_null());
+        // SAFETY: Test: `meta` is the non-null (asserted) handle `box_group_metadata`
+        // returned above, satisfying `kafka_consumer_ConsumerGroupMetadata_group_id`'s `#
+        // Safety` ("a valid group-metadata handle"); the returned pointer is the
+        // handle-owned NUL-terminated `group_id_c`, valid until
+        // `kafka_consumer_ConsumerGroupMetadata_destroy(meta)` at the end of the test, and
+        // it is only read before that.
         let read_group = unsafe { CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_group_id(meta)) };
         assert_eq!(read_group.to_str().unwrap(), "my-group");
+        // SAFETY: Test: `meta` is the live non-null handle built by `box_group_metadata`
+        // above, as `kafka_consumer_ConsumerGroupMetadata_generation_id`'s `# Safety`
+        // requires; it is destroyed only at the end of the test.
         assert_eq!(unsafe { kafka_consumer_ConsumerGroupMetadata_generation_id(meta) }, 42);
+        // SAFETY: Test: `meta` is the live non-null handle built by `box_group_metadata`
+        // above, satisfying the accessor's `# Safety`; the returned pointer is the
+        // handle-owned NUL-terminated `member_id_c`, valid until the destroy call at the
+        // end of the test, and it is only read before that.
         let read_member = unsafe { CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_member_id(meta)) };
         assert_eq!(read_member.to_str().unwrap(), "member-7");
+        // SAFETY: Test: `meta` is the live non-null handle built by `box_group_metadata`
+        // above, as `kafka_consumer_ConsumerGroupMetadata_group_instance_id`'s `# Safety`
+        // requires; the accessor returns the handle-owned instance-id string or null, and
+        // the handle is destroyed only at the end of the test.
         let read_instance = unsafe { kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta) };
         assert!(!read_instance.is_null());
+        // SAFETY: Test: `read_instance` is non-null (asserted above) and points at the
+        // handle-owned NUL-terminated `group_instance_id_c` of `meta`, valid until
+        // `kafka_consumer_ConsumerGroupMetadata_destroy(meta)` on the next line; it is only
+        // read here.
         assert_eq!(unsafe { CStr::from_ptr(read_instance) }.to_str().unwrap(), "static-3");
+        // SAFETY: Test: `meta` is the handle `box_group_metadata` created above and this is
+        // its single destroy, after the last accessor read, satisfying `# Safety` ("null or
+        // a valid group-metadata handle"); the pointer is not used afterwards.
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
     }
 
@@ -5900,10 +8364,25 @@ mod tests {
     fn group_metadata_handle_absent_instance_id_is_null() {
         let meta = box_group_metadata(Arc::new(ConsumerGroupMetadataImpl::new("g")));
         assert!(!meta.is_null());
+        // SAFETY: Test: `meta` is the non-null (asserted) handle `box_group_metadata`
+        // returned above, satisfying `kafka_consumer_ConsumerGroupMetadata_member_id`'s `#
+        // Safety`; the returned pointer is the handle-owned NUL-terminated `member_id_c`
+        // (the empty string here), valid until the destroy call at the end of the test, and
+        // it is only read before that.
         let read_member = unsafe { CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_member_id(meta)) };
         assert_eq!(read_member.to_str().unwrap(), "");
+        // SAFETY: Test: `meta` is the live non-null handle built by `box_group_metadata`
+        // above, as `kafka_consumer_ConsumerGroupMetadata_generation_id`'s `# Safety`
+        // requires; it is destroyed only at the end of the test.
         assert_eq!(unsafe { kafka_consumer_ConsumerGroupMetadata_generation_id(meta) }, -1);
+        // SAFETY: Test: `meta` is the live non-null handle built by `box_group_metadata`
+        // above, as `kafka_consumer_ConsumerGroupMetadata_group_instance_id`'s `# Safety`
+        // requires; the metadata has no instance id, so the documented null return is what
+        // is asserted, and the handle is destroyed only on the next line.
         assert!(unsafe { kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta) }.is_null());
+        // SAFETY: Test: `meta` is the handle `box_group_metadata` created above and this is
+        // its single destroy, after the last accessor read, satisfying `# Safety` ("null or
+        // a valid group-metadata handle"); the pointer is not used afterwards.
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
     }
 
@@ -5913,7 +8392,15 @@ mod tests {
     fn group_metadata_handle_shares_the_consumer_arc() {
         let shared: Arc<dyn ConsumerGroupMetadata> = Arc::new(ConsumerGroupMetadataImpl::new("g"));
         let meta = box_group_metadata(Arc::clone(&shared));
+        // SAFETY: Test: `group_metadata_ref` requires a valid group-metadata handle; `meta`
+        // was built by `box_group_metadata(Arc::clone(&shared))` just above and is
+        // destroyed only on the next line, after `Arc::ptr_eq` has finished with the
+        // returned reference, so the `&'static Arc` is not held past this expression.
         assert!(Arc::ptr_eq(unsafe { group_metadata_ref(meta) }, &shared));
+        // SAFETY: Test: `meta` is the handle `box_group_metadata` created above and this is
+        // its single destroy, after `group_metadata_ref`'s borrow ended, satisfying `#
+        // Safety` ("null or a valid group-metadata handle"); dropping it releases the
+        // handle's `Arc` clone, which the following strong-count assertion checks.
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
         assert_eq!(Arc::strong_count(&shared), 1);
     }
@@ -5945,21 +8432,38 @@ mod tests {
             ),
         ]);
         let records = box_records(ConsumerRecords::with_next_offsets(by_partition, next));
+        // SAFETY: Test: `records` is the live handle `box_records` returned above, which is the
+        // accessor's `# Safety`; the map it returns is a fresh handle destroyed at the end.
         let map = unsafe { kafka_consumer_ConsumerRecords_next_offsets(records) };
+        // SAFETY: Test: `records` is the live handle from `box_records`, not used after this
+        // single destroy; the map read below is a copy that outlives it.
         unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
         assert!(!map.is_null());
+        // SAFETY: Test: `map` is the fresh, not yet destroyed handle the accessor returned
+        // (asserted non-null).
         assert_eq!(unsafe { kafka_consumer_OffsetMap_count(map) }, 2);
         let mut entries = Vec::new();
         for i in 0..2 {
+            // SAFETY: Test: `map` is the live map, and `i < 2`, its asserted count.
             let key = unsafe { kafka_consumer_OffsetMap_get_key(map, i) };
+            // SAFETY: Test: `map` is the live map, and `i < 2`, its asserted count.
             let value = unsafe { kafka_consumer_OffsetMap_get_value(map, i) };
+            // SAFETY: Test: `key` is a borrowed entry of the live `map`; the topic pointer it
+            // returns is a valid C string until the map's destroy below, and is copied out first.
             let topic = unsafe { CStr::from_ptr(kafka_common_TopicPartition_topic(key)) };
             let mut epoch = -1;
+            // SAFETY: Test: `value` is a borrowed entry of the live `map`, and `epoch` a local slot.
             let has_epoch = unsafe { kafka_consumer_OffsetAndMetadata_leader_epoch(value, &mut epoch) };
+            // SAFETY: Test: `value` is a borrowed entry of the live `map`; the metadata pointer it
+            // returns is a valid C string until the map's destroy below, and is copied out first.
             let metadata = unsafe { CStr::from_ptr(kafka_consumer_OffsetAndMetadata_metadata(value)) };
             entries.push((
                 topic.to_str().unwrap().to_string(),
+                // SAFETY: Test: `key` is a borrowed entry of the live `map` (`i < count`), used before
+                // the map's destroy below.
                 unsafe { kafka_common_TopicPartition_partition(key) },
+                // SAFETY: Test: `value` is a borrowed entry of the live `map` (`i < count`), used
+                // before the map's destroy below.
                 unsafe { kafka_consumer_OffsetAndMetadata_offset(value) },
                 has_epoch.then_some(epoch),
                 metadata.to_str().unwrap().to_string(),
@@ -5973,6 +8477,8 @@ mod tests {
                 ("t".to_string(), 1, 9, None, String::new())
             ]
         );
+        // SAFETY: Test: `map` is the fresh handle the accessor returned; every borrowed entry
+        // was copied out above, and this single destroy is its final use.
         unsafe { kafka_consumer_OffsetMap_destroy(map) };
     }
 
@@ -6002,46 +8508,116 @@ mod tests {
         }
 
         let map = box_metric_map(metrics);
+        // SAFETY: Test: `map` is the handle `box_metric_map(metrics)` returned above,
+        // satisfying `kafka_consumer_MetricMap_count`'s `# Safety` ("a valid metric-map
+        // handle"); it is destroyed once, at the end of the test.
         assert_eq!(unsafe { kafka_consumer_MetricMap_count(map) }, 4);
 
         // Entry order follows HashMap iteration, so find each by name.
         let mut seen = 0;
         for i in 0..4 {
+            // SAFETY: Test: `map` is the live metric-map handle built above, satisfying the
+            // accessor's `# Safety`; `i` ranges over `0..4`, the entry count asserted
+            // above, so `kafka_consumer_MetricMap_get_name` returns a non-null handle-owned
+            // NUL-terminated string (null only out of range), valid until
+            // `kafka_consumer_MetricMap_destroy(map)` at the end of the test and copied
+            // into an owned `String` here.
             let name = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_name(map, i)) }
                 .to_str()
                 .unwrap()
                 .to_string();
+            // SAFETY: Test: `map` is the live metric-map handle built above, satisfying
+            // `kafka_consumer_MetricMap_get_value_kind`'s `# Safety`; `i` is within the
+            // asserted entry count, and the handle is destroyed only at the end of the
+            // test.
             let kind = unsafe { kafka_consumer_MetricMap_get_value_kind(map, i) };
             // Group/description are the same for every fixture entry.
+            // SAFETY: Test: `map` is the live metric-map handle built above, satisfying the
+            // accessor's `# Safety`; `i` is within the asserted entry count, so
+            // `kafka_consumer_MetricMap_get_group` returns a non-null handle-owned string,
+            // valid until the destroy at the end of the test and only read here.
             let group = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_group(map, i)) };
             assert_eq!(group.to_str().unwrap(), "grp");
+            // SAFETY: Test: `map` is the live metric-map handle built above, satisfying the
+            // accessor's `# Safety`; `i` is within the asserted entry count, so
+            // `kafka_consumer_MetricMap_get_description` returns a non-null handle-owned
+            // string, valid until the destroy at the end of the test and only read here.
             let desc = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_description(map, i)) };
             assert_eq!(desc.to_str().unwrap(), "desc");
             match name.as_str() {
                 "measurable" => {
                     assert_eq!(kind, crate::ffi::common::METRIC_VALUE_DOUBLE);
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_value_double`'s `# Safety`;
+                    // `i` indexes the "measurable" entry matched by name, and the handle is
+                    // destroyed only at the end of the test.
                     assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_double(map, i) }, 42.5);
                     // Tags are sorted (BTreeMap): client-id then topic.
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_count`'s `# Safety`; `i`
+                    // is within the asserted entry count, and the handle is destroyed only
+                    // at the end of the test.
                     assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, i) }, 2);
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_key`'s `# Safety`; the
+                    // "measurable" entry at `i` has two tags (asserted just above), so tag
+                    // index `0` is in range and the accessor returns a non-null
+                    // handle-owned string, valid until the destroy at the end of the test
+                    // and only read here.
                     let k0 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_key(map, i, 0)) };
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_value`'s `# Safety`; the
+                    // "measurable" entry at `i` has two tags (asserted just above), so tag
+                    // index `0` is in range and the accessor returns a non-null
+                    // handle-owned string, valid until the destroy at the end of the test
+                    // and only read here.
                     let v0 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_value(map, i, 0)) };
                     assert_eq!((k0.to_str().unwrap(), v0.to_str().unwrap()), ("client-id", "c1"));
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_key`'s `# Safety`; the
+                    // "measurable" entry at `i` has two tags (asserted above), so tag index
+                    // `1` is in range and the accessor returns a non-null handle-owned
+                    // string, valid until the destroy at the end of the test and only read
+                    // here.
                     let k1 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_key(map, i, 1)) };
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_value`'s `# Safety`; the
+                    // "measurable" entry at `i` has two tags (asserted above), so tag index
+                    // `1` is in range and the accessor returns a non-null handle-owned
+                    // string, valid until the destroy at the end of the test and only read
+                    // here.
                     let v1 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_value(map, i, 1)) };
                     assert_eq!((k1.to_str().unwrap(), v1.to_str().unwrap()), ("topic", "t"));
                 },
                 "as-string" => {
                     assert_eq!(kind, crate::ffi::common::METRIC_VALUE_STRING);
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_value_string`'s `# Safety`;
+                    // the entry at `i` is the string-valued "as-string" gauge matched by
+                    // name, so the accessor returns a non-null handle-owned string, valid
+                    // until the destroy at the end of the test and only read here.
                     let s = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_value_string(map, i)) };
                     assert_eq!(s.to_str().unwrap(), "hello");
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_tag_count`'s `# Safety`; `i`
+                    // is within the asserted entry count, and the handle is destroyed only
+                    // at the end of the test.
                     assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, i) }, 0);
                 },
                 "as-long" => {
                     assert_eq!(kind, crate::ffi::common::METRIC_VALUE_LONG);
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_value_long`'s `# Safety`;
+                    // `i` indexes the "as-long" entry matched by name, and the handle is
+                    // destroyed only at the end of the test.
                     assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_long(map, i) }, -9_000_000_000);
                 },
                 "as-int" => {
                     assert_eq!(kind, crate::ffi::common::METRIC_VALUE_INT);
+                    // SAFETY: Test: `map` is the live metric-map handle built above,
+                    // satisfying `kafka_consumer_MetricMap_get_value_int`'s `# Safety`; `i`
+                    // indexes the "as-int" entry matched by name, and the handle is
+                    // destroyed only at the end of the test.
                     assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_int(map, i) }, -7);
                 },
                 other => panic!("unexpected metric name {other}"),
@@ -6050,6 +8626,9 @@ mod tests {
         }
         assert_eq!(seen, 4);
 
+        // SAFETY: Test: `map` is the handle `box_metric_map(metrics)` created above and
+        // this is its single destroy, after the last accessor read, satisfying `# Safety`
+        // ("null or a valid metric-map handle"); the pointer is not used afterwards.
         unsafe { kafka_consumer_MetricMap_destroy(map) };
     }
 
@@ -6058,22 +8637,60 @@ mod tests {
     #[test]
     fn metric_map_out_of_range_accessors_are_safe() {
         let map = box_metric_map(HashMap::new());
+        // SAFETY: Test: `map` is the (empty) handle `box_metric_map(HashMap::new())`
+        // returned above, satisfying `kafka_consumer_MetricMap_count`'s `# Safety` ("a
+        // valid metric-map handle"); it is destroyed once, below.
         assert_eq!(unsafe { kafka_consumer_MetricMap_count(map) }, 0);
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `0` is deliberately out of range for an empty
+        // map to exercise the documented null return (`metric_entry` yields `None`).
         assert!(unsafe { kafka_consumer_MetricMap_get_name(map, 0) }.is_null());
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `-1` is deliberately negative to exercise the
+        // documented null return (`metric_entry` rejects negative indices).
         assert!(unsafe { kafka_consumer_MetricMap_get_name(map, -1) }.is_null());
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `5` is deliberately out of range to exercise the
+        // documented null return (`metric_entry` yields `None`).
         assert!(unsafe { kafka_consumer_MetricMap_get_value_string(map, 5) }.is_null());
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `0` is deliberately out of range to exercise the
+        // documented `-1` return for a missing entry.
         assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, 0) }, -1);
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; metric index `0` is deliberately out of range to
+        // exercise the documented null return when either index is invalid.
         assert!(unsafe { kafka_consumer_MetricMap_get_tag_key(map, 0, 0) }.is_null());
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `0` is deliberately out of range to exercise the
+        // documented `0.0` return for a missing entry.
         assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_double(map, 0) }, 0.0);
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `0` is deliberately out of range to exercise the
+        // documented `0` return for a missing entry.
         assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_long(map, 0) }, 0);
+        // SAFETY: Test: `map` is the live empty metric-map handle built above, satisfying
+        // the accessor's `# Safety`; index `0` is deliberately out of range to exercise the
+        // documented `0` return for a missing entry.
         assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_int(map, 0) }, 0);
         // Default kind for an out-of-range index.
         assert_eq!(
+            // SAFETY: Test: `map` is the live empty metric-map handle built above,
+            // satisfying `kafka_consumer_MetricMap_get_value_kind`'s `# Safety`; index `0`
+            // is deliberately out of range to exercise the documented default-kind
+            // (`METRIC_VALUE_DOUBLE`) return for a missing entry.
             unsafe { kafka_consumer_MetricMap_get_value_kind(map, 0) },
             crate::ffi::common::METRIC_VALUE_DOUBLE
         );
+        // SAFETY: Test: `map` is the handle `box_metric_map(HashMap::new())` created above
+        // and this is its single destroy, after the last accessor call, satisfying `#
+        // Safety` ("null or a valid metric-map handle"); the pointer is not used
+        // afterwards.
         unsafe { kafka_consumer_MetricMap_destroy(map) };
         // Destroy is null-safe.
+        // SAFETY: Test: a deliberate NULL is passed to exercise the documented null no-op
+        // path of `kafka_consumer_MetricMap_destroy` ("Safe with null"), which its `#
+        // Safety` permits.
         unsafe { kafka_consumer_MetricMap_destroy(std::ptr::null_mut()) };
     }
 
@@ -6110,46 +8727,111 @@ mod tests {
 
     /// Records the invocation, destroys the delivered list (the callee owns it),
     /// and reports success.
+    ///
+    /// # Safety
+    ///
+    /// Called by the library through the listener callback contract: `partitions` must
+    /// be a fresh list handle the callee owns (it is destroyed here) and `user_data` the
+    /// `&StubCounters` that `stub_listener` registered, alive until the dispatcher is
+    /// joined.
     unsafe extern "C" fn stub_revoked(
         partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
+        // SAFETY: Test stub: `user_data` is the `&StubCounters` that `stub_listener`
+        // registered as the `CallbackTarget`'s `user_data` (with no destroy hook); each
+        // test owns `counters` on its stack frame and joins the dispatcher before it goes
+        // out of scope, so the pointer is live, and the shared reborrow is used only for
+        // atomic updates during this call.
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.revoked_calls.fetch_add(1, Ordering::SeqCst);
         counters
             .last_partition_count
+            // SAFETY: Test stub: `partitions` is the fresh, non-null list
+            // `FfiRebalanceListener::invoke` builds with `box_topic_partition_list` and
+            // hands to the callee, satisfying `kafka_common_TopicPartitionList_count`'s `#
+            // Safety` ("a valid topic-partition-list handle"); it is read before the
+            // destroy call below.
             .store(unsafe { kafka_common_TopicPartitionList_count(partitions) }, Ordering::SeqCst);
+        // SAFETY: Test stub: the callee owns the delivered `partitions` list per the
+        // `kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t`
+        // contract, and this is its single destroy, after the last read;
+        // `kafka_common_TopicPartitionList_destroy`'s `# Safety` accepts a valid list
+        // handle.
         unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
+    /// # Safety
+    ///
+    /// Same requirements as `stub_revoked`: an owned `partitions` list and a live
+    /// `&StubCounters` in `user_data`.
     unsafe extern "C" fn stub_assigned(
         partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
+        // SAFETY: Test stub: `user_data` is the `&StubCounters` that `stub_listener`
+        // registered as the `CallbackTarget`'s `user_data` (with no destroy hook); each
+        // test owns `counters` on its stack frame and joins the dispatcher before it goes
+        // out of scope, so the pointer is live, and the shared reborrow is used only for an
+        // atomic increment during this call.
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.assigned_calls.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: Test stub: the callee owns the delivered `partitions` list (a fresh
+        // `box_topic_partition_list` handle from `FfiRebalanceListener::invoke`) per the
+        // listener callback contract, and this is its single destroy;
+        // `kafka_common_TopicPartitionList_destroy`'s `# Safety` accepts a valid list
+        // handle.
         unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
+    /// # Safety
+    ///
+    /// Same requirements as `stub_revoked`: an owned `partitions` list and a live
+    /// `&StubCounters` in `user_data`.
     unsafe extern "C" fn stub_lost(
         partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
+        // SAFETY: Test stub: `user_data` is the `&StubCounters` that `stub_listener`
+        // registered as the `CallbackTarget`'s `user_data` (with no destroy hook); each
+        // test owns `counters` on its stack frame and joins the dispatcher before it goes
+        // out of scope, so the pointer is live, and the shared reborrow is used only for an
+        // atomic increment during this call.
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.lost_calls.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: Test stub: the callee owns the delivered `partitions` list (a fresh
+        // `box_topic_partition_list` handle from `FfiRebalanceListener::invoke`) per the
+        // listener callback contract, and this is its single destroy;
+        // `kafka_common_TopicPartitionList_destroy`'s `# Safety` accepts a valid list
+        // handle.
         unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
     /// Returns an error handle, mirroring a C listener that "throws".
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as `stub_revoked`: an owned `partitions` list and a live
+    /// `&StubCounters` in `user_data`.
     unsafe extern "C" fn stub_revoked_failing(
         partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
+        // SAFETY: Test stub: `user_data` is the `&StubCounters` that `stub_listener`
+        // registered as the `CallbackTarget`'s `user_data` (with no destroy hook); each
+        // test owns `counters` on its stack frame and joins the dispatcher before it goes
+        // out of scope, so the pointer is live, and the shared reborrow is used only for an
+        // atomic increment during this call.
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.revoked_calls.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: Test stub: the callee owns the delivered `partitions` list (a fresh
+        // `box_topic_partition_list` handle from `FfiRebalanceListener::invoke`) per the
+        // listener callback contract, and this is its single destroy; the error handle
+        // returned next is a fresh `box_error` allocation whose ownership passes to the
+        // client, as the contract requires.
         unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         box_error(Error::local_illegal_state("listener refused the revocation"))
     }
@@ -6253,10 +8935,21 @@ mod tests {
     fn destroying_a_never_subscribed_listener_fires_the_destroy_hook() {
         static DESTROY_CALLS: AtomicI32 = AtomicI32::new(0);
 
+        /// # Safety
+        ///
+        /// `_user_data` is ignored, so the caller has nothing to uphold; the signature is
+        /// `unsafe extern "C"` only to match the `user_data_destroy` hook type.
         unsafe extern "C" fn counting_destroy(_user_data: *mut c_void) {
             DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
         }
 
+        // SAFETY: Test: the arguments satisfy
+        // `kafka_consumer_ConsumerRebalanceListener_new`'s `# Safety`: `stub_revoked` and
+        // `stub_assigned` are `extern "C"` functions of the listener signature, valid for
+        // the whole test; `on_partitions_lost` is deliberately `None` (the documented
+        // nullable hook); `user_data` is a deliberate NULL that nothing dereferences
+        // because the listener is never subscribed or invoked; and `counting_destroy` only
+        // touches a static counter, so it needs no live `user_data`.
         let listener = unsafe {
             kafka_consumer_ConsumerRebalanceListener_new(
                 stub_revoked,
@@ -6269,10 +8962,18 @@ mod tests {
         assert!(!listener.is_null());
         assert_eq!(0, DESTROY_CALLS.load(Ordering::SeqCst));
 
+        // SAFETY: Test: `listener` is the non-null (asserted) handle
+        // `kafka_consumer_ConsumerRebalanceListener_new` returned above and was never
+        // passed to a subscribe call, so this is its single, final use as that function's
+        // `# Safety` requires; dropping it fires `counting_destroy` once, which the next
+        // assertion checks, and the pointer is not used afterwards.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(listener) };
         assert_eq!(1, DESTROY_CALLS.load(Ordering::SeqCst));
 
         // Null is a no-op.
+        // SAFETY: Test: a deliberate NULL is passed to exercise the documented null no-op
+        // path of `kafka_consumer_ConsumerRebalanceListener_destroy` ("Safe with null"),
+        // which its `# Safety` permits.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(std::ptr::null_mut()) };
         assert_eq!(1, DESTROY_CALLS.load(Ordering::SeqCst));
     }
@@ -6283,22 +8984,33 @@ mod tests {
     /// An `earliest` mock consumer assigned to `t-0` with beginning offset 0.
     fn assigned_mock() -> *mut kafka_consumer_Consumer_t {
         let earliest = std::ffi::CString::new("earliest").unwrap();
+        // SAFETY: Test: `earliest` is a live `CString`, a valid C string as the constructor's
+        // `# Safety` requires; the returned handle is owned by the caller of this helper.
         let c = unsafe { kafka_consumer_MockConsumer_new(earliest.as_ptr()) };
         let topic = std::ffi::CString::new("t").unwrap();
         let topics = [topic.as_ptr()];
         let partitions = [0i32];
+        // SAFETY: Test: `c` is the live mock handle created above; `topics` and `partitions`
+        // are one-entry locals whose `topic` `CString` outlives the call.
         assert!(unsafe { kafka_consumer_Consumer_assign(c, topics.as_ptr(), partitions.as_ptr(), 1) }.is_null());
+        // SAFETY: Test: `c` is the live mock handle and `topic` a live `CString`.
         assert!(unsafe { kafka_consumer_MockConsumer_update_beginning_offsets(c, topic.as_ptr(), 0, 0) }.is_null());
         c
     }
 
     fn error_code_and_message(error: *mut kafka_common_Error_t) -> (common::kafka_common_ErrorCode_t, String) {
         assert!(!error.is_null(), "expected an error");
+        // SAFETY: Test: `error` is the non-null (asserted) owned handle the caller passes in,
+        // not yet destroyed.
         let code = unsafe { common::kafka_common_Error_code(error) };
+        // SAFETY: Test: `error` is the live owned handle; its message pointer stays valid until
+        // the destroy below and is copied out first.
         let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
             .to_str()
             .unwrap()
             .to_owned();
+        // SAFETY: Test: `error` is the owned handle the caller passed in, not used after this
+        // single destroy (the message was copied out above).
         unsafe { common::kafka_common_Error_destroy(error) };
         (code, message)
     }
@@ -6306,6 +9018,8 @@ mod tests {
     fn position(c: *mut kafka_consumer_Consumer_t) -> i64 {
         let topic = std::ffi::CString::new("t").unwrap();
         let mut out = -1i64;
+        // SAFETY: Test: `c` is the live consumer handle the caller passes in, `topic` a live
+        // `CString` and `out` a local slot.
         assert!(unsafe { kafka_consumer_Consumer_position(c, topic.as_ptr(), 0, &mut out) }.is_null());
         out
     }
@@ -6318,6 +9032,8 @@ mod tests {
         let topic = std::ffi::CString::new("t").unwrap();
         let meta = std::ffi::CString::new("m").unwrap();
         assert!(
+            // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned; `topic` and `meta` are live
+            // `CString`s.
             unsafe {
                 kafka_consumer_Consumer_seek_with_offset_and_metadata(c, topic.as_ptr(), 0, 7, -1, meta.as_ptr())
             }
@@ -6325,10 +9041,15 @@ mod tests {
         );
         assert_eq!(position(c), 7);
         assert!(
+            // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned, `topic` a live `CString`
+            // and the metadata a deliberate null, which the function allows.
             unsafe { kafka_consumer_Consumer_seek_with_metadata(c, topic.as_ptr(), 0, 9, 3, std::ptr::null()) }
                 .is_null()
         );
         assert_eq!(position(c), 9);
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6343,18 +9064,28 @@ mod tests {
         let committed = |c: *mut kafka_consumer_Consumer_t| -> i64 {
             let mut map: *mut kafka_consumer_OffsetMap_t = std::ptr::null_mut();
             assert!(
+                // SAFETY: Test: `c` is the live mock handle; `topics`/`partitions` are one-entry locals
+                // whose `topic` `CString` outlives the closure, and `map` a local slot.
                 unsafe { kafka_consumer_Consumer_committed(c, topics.as_ptr(), partitions.as_ptr(), 1, &mut map) }
                     .is_null()
             );
+            // SAFETY: Test: `map` is the fresh map `committed` stored (the call succeeded).
             assert_eq!(unsafe { kafka_consumer_OffsetMap_count(map) }, 1);
+            // SAFETY: Test: `map` is the live map and `0 < 1`, its asserted count.
             let oam = unsafe { kafka_consumer_OffsetMap_get_value(map, 0) };
+            // SAFETY: Test: `oam` is a borrowed entry of the live `map`, read before its destroy.
             let offset = unsafe { kafka_consumer_OffsetAndMetadata_offset(oam) };
+            // SAFETY: Test: `map` is the fresh map `committed` stored, not used after this single
+            // destroy (`offset` was copied out above).
             unsafe { kafka_consumer_OffsetMap_destroy(map) };
             offset
         };
         let offsets = [4i64];
         let epochs = [-1i32];
         assert!(
+            // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned; the four arrays are
+            // one-entry locals whose `topic` `CString` outlives the call, and the metadata a
+            // deliberate null, which the function allows.
             unsafe {
                 kafka_consumer_Consumer_commit_sync_with_offsets(
                     c,
@@ -6371,6 +9102,8 @@ mod tests {
         assert_eq!(committed(c), 4);
         let offsets = [6i64];
         assert!(
+            // SAFETY: Test: as above, for the deprecated alias, whose `# Safety` is that of
+            // `kafka_consumer_Consumer_commit_sync_with_offsets`.
             unsafe {
                 kafka_consumer_Consumer_commit_sync_offsets(
                     c,
@@ -6385,6 +9118,9 @@ mod tests {
             .is_null()
         );
         assert_eq!(committed(c), 6);
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6397,17 +9133,28 @@ mod tests {
         let boom = std::ffi::CString::new("boom").unwrap();
         let illegal_state = common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE as i32;
         assert!(
+            // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned and `boom` a live
+            // `CString`.
             unsafe { kafka_consumer_MockConsumer_set_poll_error(c, false, illegal_state, boom.as_ptr()) }.is_null()
         );
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned; the message is a deliberate
+        // null, which the function allows.
         assert!(unsafe { kafka_consumer_MockConsumer_set_poll_error(c, true, 0, std::ptr::null()) }.is_null());
         let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: Test: `c` is the live mock handle and `error` a local slot.
         let records = unsafe { kafka_consumer_Consumer_poll(c, 0, &mut error) };
         assert!(error.is_null(), "the cleared error must not fire");
+        // SAFETY: Test: `records` is null or the fresh handle `poll` returned, which the
+        // function accepts; this single destroy is its final use.
         unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
 
         assert!(
+            // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned and `boom` a live
+            // `CString`.
             unsafe { kafka_consumer_MockConsumer_set_poll_error(c, false, illegal_state, boom.as_ptr()) }.is_null()
         );
+        // SAFETY: Test: `c` is the live mock handle and `error` a local slot (null after the
+        // previous poll).
         let records = unsafe { kafka_consumer_Consumer_poll(c, 0, &mut error) };
         assert!(records.is_null());
         let (code, message) = error_code_and_message(error);
@@ -6416,6 +9163,9 @@ mod tests {
             common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
         );
         assert_eq!(message, "boom");
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6427,13 +9177,24 @@ mod tests {
         let topics = [topic.as_ptr()];
         let partitions = [0i32];
         let boom = std::ffi::CString::new("boom").unwrap();
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned and `boom` a live
+        // `CString`.
         assert!(unsafe { kafka_consumer_MockConsumer_set_offsets_error(c, false, -1, boom.as_ptr()) }.is_null());
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned; the message is a deliberate
+        // null, which the function allows.
         assert!(unsafe { kafka_consumer_MockConsumer_set_offsets_error(c, true, 0, std::ptr::null()) }.is_null());
         let mut map: *mut kafka_consumer_LongOffsetMap_t = std::ptr::null_mut();
         let error =
+            // SAFETY: Test: `c` is the live mock handle; `topics`/`partitions` are one-entry locals
+            // whose `topic` `CString` outlives the call, and `map` a local slot.
             unsafe { kafka_consumer_Consumer_beginning_offsets(c, topics.as_ptr(), partitions.as_ptr(), 1, &mut map) };
         assert!(error.is_null(), "the cleared error must not fire");
+        // SAFETY: Test: `map` is the fresh map `beginning_offsets` stored (the call succeeded),
+        // not used after this single destroy.
         unsafe { kafka_consumer_LongOffsetMap_destroy(map) };
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6446,18 +9207,34 @@ mod tests {
         for (k, v) in [("bootstrap.servers", "localhost:1"), ("group.protocol", "consumer")] {
             let k = std::ffi::CString::new(k).unwrap();
             let v = std::ffi::CString::new(v).unwrap();
+            // SAFETY: Test: `props` is the live handle `kafka_consumer_ConsumerProperties_new`
+            // returned, and `k`/`v` live `CString`s, copied by the call.
             unsafe { kafka_consumer_ConsumerProperties_put(props, k.as_ptr(), v.as_ptr()) };
         }
         let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        // SAFETY: Test: `props` is the live properties handle, which the constructor only reads,
+        // and `error` a local slot.
         let c = unsafe { kafka_consumer_KafkaConsumer_new(props, &mut error) };
+        // SAFETY: Test: `props` is the live properties handle, not used after this single
+        // destroy; the constructor copied what it needs.
         unsafe { kafka_consumer_ConsumerProperties_destroy(props) };
         assert!(error.is_null() && !c.is_null());
+        // SAFETY: Test: `c` is the non-null (asserted) live handle the constructor returned.
         assert!(unsafe { kafka_consumer_Consumer_close_with_option(c, 0, 2) }.is_null());
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
 
+        // SAFETY: Test: a null `auto_offset_reset` is allowed by the constructor's `# Safety`;
+        // the returned handle is destroyed exactly once below.
         let mock = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        // SAFETY: Test: `mock` is the live mock handle created above.
         assert!(unsafe { kafka_consumer_Consumer_close_with_option(mock, -1, 0) }.is_null());
+        // SAFETY: Test: `mock` is the live mock handle, closed but not destroyed.
         assert!(unsafe { kafka_consumer_MockConsumer_closed(mock) });
+        // SAFETY: Test: `mock` is the live handle created above with no `_async` operation in
+        // flight; this single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(mock) };
     }
 
@@ -6472,16 +9249,26 @@ mod tests {
         error: *mut kafka_common_Error_t,
         user_data: *mut c_void,
     ) {
+        // SAFETY: Test callback: `user_data` is the `&CommitCallbackProbe` the test passes with
+        // it, which lives on the test's frame until after the callback has run; the shared
+        // reborrow is used only for its `Mutex` and atomic.
         let probe = unsafe { &*(user_data as *const CommitCallbackProbe) };
         *probe.thread.lock().unwrap() = Some(std::thread::current().id());
         probe.calls.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: Test callback: per `kafka_consumer_Consumer_commit_async_callback_t`, `offsets`
+        // is a fresh map the callee owns; this is its single destroy.
         unsafe { kafka_consumer_OffsetMap_destroy(offsets) };
         if !error.is_null() {
+            // SAFETY: Test callback: `error` is non-null (checked above) and, per the callback
+            // typedef, a fresh handle the callee owns; this is its single destroy.
             unsafe { common::kafka_common_Error_destroy(error) };
         }
     }
 
     unsafe extern "C" fn count_notify(user_data: *mut c_void) {
+        // SAFETY: Test callback: `user_data` is the `&AtomicI32` the test registers with the
+        // notify, alive on its frame until the consumer is destroyed; only an atomic increment
+        // goes through it.
         let count = unsafe { &*(user_data as *const AtomicI32) };
         count.fetch_add(1, Ordering::SeqCst);
     }
@@ -6494,6 +9281,9 @@ mod tests {
     fn commit_callback_inside_a_sync_call_runs_on_the_calling_thread() {
         let c = assigned_mock();
         let notified = AtomicI32::new(0);
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned, `count_notify` a
+        // valid notify, and `user_data` the local `notified`, which outlives the registration
+        // (released when `c` is destroyed below); no destroy hook.
         unsafe {
             kafka_consumer_Consumer_set_pending_callback_notify(
                 c,
@@ -6503,6 +9293,9 @@ mod tests {
             )
         };
         let probe = CommitCallbackProbe { thread: Mutex::new(None), calls: AtomicI32::new(0) };
+        // SAFETY: Test: `c` is the live mock handle, `probe_commit_callback` a valid callback,
+        // and `user_data` the local `probe`, which outlives the callback (the mock runs it
+        // inline, before this call returns); no destroy hook.
         let error = unsafe {
             kafka_consumer_Consumer_commit_async_with_callback(
                 c,
@@ -6515,9 +9308,14 @@ mod tests {
         assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
         assert_eq!(*probe.thread.lock().unwrap(), Some(std::thread::current().id()));
         assert!(
+            // SAFETY: Test: `c` is the live mock handle; the queue is empty, so nothing is handed
+            // out that would need an ack.
             unsafe { kafka_consumer_Consumer_next_pending_callback(c) }.is_null(),
             "nothing is queued"
         );
+        // SAFETY: Test: `c` is the live consumer handle created above with no `_async`
+        // operation in flight, which is `kafka_consumer_Consumer_destroy`'s `# Safety`; this
+        // single destroy is its final use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6529,6 +9327,9 @@ mod tests {
     fn commit_callback_inside_an_async_operation_runs_on_the_acking_thread() {
         let c = assigned_mock();
         let notified = AtomicI32::new(0);
+        // SAFETY: Test: `c` is the live mock handle `assigned_mock` returned, `count_notify` a
+        // valid notify, and `user_data` the local `notified`, which outlives the registration
+        // (released when `c` is destroyed below); no destroy hook.
         unsafe {
             kafka_consumer_Consumer_set_pending_callback_notify(
                 c,
@@ -6538,6 +9339,8 @@ mod tests {
             )
         };
         let probe = CommitCallbackProbe { thread: Mutex::new(None), calls: AtomicI32::new(0) };
+        // SAFETY: Test: `c` is the non-null handle `assigned_mock` built with a consumer
+        // constructor, destroyed only at the end of the test, after its last use of `h`.
         let h = unsafe { handle_ref(c) };
         let callback = make_commit_callback(
             probe_commit_callback,
@@ -6551,19 +9354,28 @@ mod tests {
             .spawn(async move { callback.on_complete(&offsets, None).await });
 
         let pending = loop {
+            // SAFETY: Test: `c` is the live mock handle; a non-null entry is acked below.
             let pending = unsafe { kafka_consumer_Consumer_next_pending_callback(c) };
             if !pending.is_null() {
                 break pending;
             }
             std::thread::sleep(Duration::from_millis(5));
         };
+        // SAFETY: Test: `pending` is the non-null entry just popped, not yet acked.
         assert_eq!(unsafe { kafka_consumer_PendingCallback_method(pending) }, PENDING_METHOD_COMMIT);
+        // SAFETY: Test: `pending` is the non-null entry just popped, not yet acked; the list it
+        // returns is a fresh handle destroyed below.
         let list = unsafe { kafka_consumer_PendingCallback_partitions(pending) };
+        // SAFETY: Test: `list` is the fresh, not yet destroyed list returned above.
         assert_eq!(unsafe { kafka_common_TopicPartitionList_count(list) }, 1);
+        // SAFETY: Test: `list` is the fresh list returned above, not used after this single
+        // destroy.
         unsafe { kafka_common_TopicPartitionList_destroy(list) };
         assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "queued, not run yet");
         assert!(!task.is_finished(), "on_complete waits for the callback");
 
+        // SAFETY: Test: `pending` is the entry popped above, acked exactly once here and not used
+        // afterwards; the error is null, which the function allows.
         unsafe { kafka_consumer_Consumer_ack_pending_callback(pending, std::ptr::null_mut()) };
         assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
         assert_eq!(*probe.thread.lock().unwrap(), Some(std::thread::current().id()));
@@ -6574,6 +9386,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(notified.load(Ordering::SeqCst), 1);
+        // SAFETY: Test: `c` is the live consumer handle; the commit task has finished
+        // (`block_on(task)`), so nothing is in flight, and this single destroy is its final
+        // use.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6581,11 +9396,15 @@ mod tests {
     type NotifyLog = Mutex<Vec<&'static str>>;
 
     unsafe extern "C" fn log_notify(user_data: *mut c_void) {
+        // SAFETY: Test callback: `user_data` is the leaked `&'static NotifyLog` from
+        // `notify_log`, valid for the rest of the process; only its `Mutex` is used.
         let log = unsafe { &*(user_data as *const NotifyLog) };
         log.lock().unwrap().push("notify");
     }
 
     unsafe extern "C" fn log_notify_destroy(user_data: *mut c_void) {
+        // SAFETY: Test callback: `user_data` is the leaked `&'static NotifyLog` from
+        // `notify_log`, valid for the rest of the process; only its `Mutex` is used.
         let log = unsafe { &*(user_data as *const NotifyLog) };
         log.lock().unwrap().push("destroy");
     }
@@ -6624,9 +9443,15 @@ mod tests {
     /// old `user_data` only after that notification has run.
     #[test]
     fn a_replaced_notify_is_released_after_its_queued_notification() {
+        // SAFETY: Test: a null `auto_offset_reset` is allowed by the constructor's `# Safety`;
+        // the returned handle is destroyed exactly once at the end of the test.
         let c = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        // SAFETY: Test: `c` is the non-null handle the consumer constructor returned above,
+        // destroyed only at the end of the test, after its last use of `h`.
         let h = unsafe { handle_ref(c) };
         let (log, log_ptr) = notify_log();
+        // SAFETY: Test: `c` is the live mock handle, `log_notify`/`log_notify_destroy` valid
+        // callbacks, and `log_ptr` the leaked `NotifyLog`, valid for the rest of the process.
         unsafe {
             kafka_consumer_Consumer_set_pending_callback_notify(c, log_notify, log_ptr, Some(log_notify_destroy))
         };
@@ -6639,6 +9464,9 @@ mod tests {
             pending_revoked_entry(),
         );
         let replacement = AtomicI32::new(0);
+        // SAFETY: Test: `c` is the live mock handle, `count_notify` a valid notify, and
+        // `user_data` the local `replacement`, which outlives the registration (released when
+        // `c` is destroyed below); no destroy hook.
         unsafe {
             kafka_consumer_Consumer_set_pending_callback_notify(
                 c,
@@ -6660,6 +9488,8 @@ mod tests {
             0,
             "the queued notification used the old notify"
         );
+        // SAFETY: Test: `c` is the live consumer handle with no `_async` operation in flight;
+        // `h` is not used after this single destroy.
         unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 
@@ -6668,9 +9498,16 @@ mod tests {
     /// after it rather than inside `destroy`.
     #[test]
     fn destroy_releases_the_notify_after_its_queued_notification() {
+        // SAFETY: Test: a null `auto_offset_reset` is allowed by the constructor's `# Safety`;
+        // the returned handle is destroyed exactly once below.
         let c = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        // SAFETY: Test: `c` is the non-null handle the consumer constructor returned above; `h`
+        // is used only before the destroy below.
         let h = unsafe { handle_ref(c) };
         let (log, log_ptr) = notify_log();
+        // SAFETY: Test: `c` is the live mock handle, `log_notify`/`log_notify_destroy` valid
+        // callbacks, and `log_ptr` the leaked `NotifyLog`, valid for the rest of the process,
+        // so the hooks may still run after `c` is destroyed.
         unsafe {
             kafka_consumer_Consumer_set_pending_callback_notify(c, log_notify, log_ptr, Some(log_notify_destroy))
         };
@@ -6682,6 +9519,9 @@ mod tests {
             &h.pending_callback_notify,
             pending_revoked_entry(),
         );
+        // SAFETY: Test: `c` is the live consumer handle with no `_async` operation in flight;
+        // `h` is not used after this single destroy, and the queued notification uses only the
+        // leaked log.
         unsafe { kafka_consumer_Consumer_destroy(c) };
         assert!(
             log.lock().unwrap().is_empty(),
@@ -6691,5 +9531,209 @@ mod tests {
         drop(release);
         wait_for_entries(log, 2);
         assert_eq!(*log.lock().unwrap(), ["notify", "destroy"]);
+    }
+
+    /// Counts a commit callback's invocations and its `user_data_destroy` firings;
+    /// the commit panic tests pass it as `user_data`.
+    #[derive(Default)]
+    struct CommitCallbackCounts {
+        callbacks: AtomicI32,
+        destroys: AtomicI32,
+    }
+
+    /// A commit callback that counts itself in the [`CommitCallbackCounts`] passed
+    /// as `user_data`, freeing whichever handles it is given, as a C caller must.
+    ///
+    /// # Safety
+    ///
+    /// Called by the library through `kafka_consumer_Consumer_commit_async_callback_t`:
+    /// `offsets` and `error` must be null or owned handles (both are destroyed here) and
+    /// `user_data` the `&CommitCallbackCounts` the test passed, alive until the test's
+    /// final assertion.
+    unsafe extern "C" fn count_commit_callback(
+        offsets: *mut kafka_consumer_OffsetMap_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        // SAFETY: Test callback: `user_data` is the `&CommitCallbackCounts` pointer
+        // `assert_commit_panic_is_a_synchronous_failure` passes to the commit entry point;
+        // `counts` lives on that function's frame past the 200 ms grace sleep and the final
+        // assertions, so the pointer is live if this callback ever fires (the test asserts
+        // it does not), and the shared reborrow is used only for an atomic increment.
+        let counts = unsafe { &*(user_data as *const CommitCallbackCounts) };
+        counts.callbacks.fetch_add(1, Ordering::SeqCst);
+        if !offsets.is_null() {
+            // SAFETY: Test callback: `offsets` is non-null (checked above) and, per
+            // `kafka_consumer_Consumer_commit_async_callback_t`, a freshly allocated map
+            // the callee owns; this is its single destroy, satisfying
+            // `kafka_consumer_OffsetMap_destroy`'s `# Safety`.
+            unsafe { kafka_consumer_OffsetMap_destroy(offsets) };
+        }
+        if !error.is_null() {
+            // SAFETY: Test callback: `error` is non-null (checked above) and, per
+            // `kafka_consumer_Consumer_commit_async_callback_t`, a freshly allocated error
+            // handle the callee owns; this is its single destroy, satisfying
+            // `kafka_common_Error_destroy`'s `# Safety`.
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+    }
+
+    /// A `user_data_destroy` hook that counts itself in the
+    /// [`CommitCallbackCounts`] passed as `user_data`.
+    ///
+    /// # Safety
+    ///
+    /// `user_data` must be the `&CommitCallbackCounts` the test registered through
+    /// `make_commit_callback`, alive until the test's final assertion.
+    unsafe extern "C" fn count_commit_destroy(user_data: *mut c_void) {
+        // SAFETY: Test hook: `user_data` is the `&CommitCallbackCounts` the test registered
+        // via `make_commit_callback`; `CallbackTarget::drop` fires this hook exactly once,
+        // during the unwind inside the `commit(...)` call (the entry points document that a
+        // panic before hand-off fires `user_data_destroy` before returning) or at the
+        // latest when `kafka_consumer_Consumer_destroy` drops the consumer, both before
+        // `counts` goes out of scope at the end of
+        // `assert_commit_panic_is_a_synchronous_failure`; the shared reborrow is used only
+        // for an atomic increment.
+        let counts = unsafe { &*(user_data as *const CommitCallbackCounts) };
+        counts.destroys.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Asserts that `commit`, a call to one of the two commit-with-callback entry
+    /// points, reports a caught panic as a synchronous failure. These keep the
+    /// plain guard (§6 note 8), so the panic must come back as a
+    /// `LOCAL_ILLEGAL_STATE` error handle naming `function`, with no callback and
+    /// exactly one `user_data_destroy` (COMMENTS.79.md issue 1).
+    ///
+    /// The panic comes from making the call inside another tokio runtime, which
+    /// the synchronous consumer API does not support: `sync_void_op`'s `block_on`
+    /// panics ("Cannot start a runtime from within a runtime") before it polls the
+    /// commit, and the unwind drops the callback adapter with the unpolled future.
+    /// It is the one synchronous panic these entry points can be driven into
+    /// without a test hook in production code.
+    fn assert_commit_panic_is_a_synchronous_failure(
+        function: &str,
+        commit: impl FnOnce(*const kafka_consumer_Consumer_t, *mut c_void) -> *mut kafka_common_Error_t,
+    ) {
+        // SAFETY: Test: `auto_offset_reset` is a deliberate NULL, which
+        // `kafka_consumer_MockConsumer_new`'s `# Safety` permits ("null or a valid,
+        // null-terminated C string") and documents as defaulting to `latest`; the returned
+        // handle is destroyed once, with `kafka_consumer_Consumer_destroy` below.
+        let consumer = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        let counts = CommitCallbackCounts::default();
+        let user_data = &counts as *const CommitCallbackCounts as *mut c_void;
+        let outer = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let error = outer.block_on(async { commit(consumer, user_data) });
+        drop(outer);
+
+        assert!(!error.is_null(), "a caught panic must return an error handle");
+        assert_eq!(
+            // SAFETY: Test: `error` is the non-null (asserted) handle the commit entry
+            // point returned, satisfying `kafka_common_Error_code`'s `# Safety` ("a valid
+            // handle from a function that returned an error, or null"); it is destroyed
+            // only after the message is copied below.
+            unsafe { kafka_common_Error_code(error) },
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        // SAFETY: Test: `error` is the live non-null error handle returned by the commit
+        // call; `kafka_common_Error_message` returns its handle-owned NUL-terminated
+        // message, valid until `kafka_common_Error_destroy(error)`, and the bytes are
+        // copied into an owned `String` before that call on the next line.
+        let msg = unsafe { CStr::from_ptr(kafka_common_Error_message(error)) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: Test: `error` is the handle returned by the commit call and this is its
+        // single destroy, after its last read, satisfying `kafka_common_Error_destroy`'s `#
+        // Safety`; the pointer is not used afterwards.
+        unsafe { kafka_common_Error_destroy(error) };
+        assert!(
+            msg.starts_with(&format!("Rust panic caught at the FFI boundary in {function}:")),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            msg.contains("Cannot start a runtime from within a runtime"),
+            "unexpected error message: {msg}"
+        );
+
+        // Outside any runtime: dropping the consumer's own runtime inside one
+        // would panic.
+        // SAFETY: Test: `consumer` is the handle `kafka_consumer_MockConsumer_new` returned
+        // above (`# Safety`: null or a valid handle from a consumer constructor) and this
+        // is its single destroy, called outside any tokio runtime (the outer runtime was
+        // dropped) and after the only operation on it has returned, so no op is in flight,
+        // as `kafka_consumer_Consumer_destroy` requires; the pointer is not used
+        // afterwards.
+        unsafe { kafka_consumer_Consumer_destroy(consumer) };
+        // Give a stray completion ample time to reach the detached dispatcher.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            counts.callbacks.load(Ordering::SeqCst),
+            0,
+            "a panic returned as an error handle must not also invoke the callback"
+        );
+        assert_eq!(
+            counts.destroys.load(Ordering::SeqCst),
+            1,
+            "user_data_destroy must fire exactly once"
+        );
+    }
+
+    #[test]
+    fn test_commit_async_with_callback_panic_is_a_synchronous_failure() {
+        assert_commit_panic_is_a_synchronous_failure(
+            "kafka_consumer_Consumer_commit_async_with_callback",
+            // SAFETY: Test: the arguments satisfy
+            // `kafka_consumer_Consumer_commit_async_with_callback`'s `# Safety`: `consumer`
+            // is the mock handle the helper created with `kafka_consumer_MockConsumer_new`,
+            // `count_commit_callback` is a valid `extern "C"` function of the
+            // commit-callback signature, and `user_data` points at the helper's `counts`,
+            // which stays valid until `count_commit_destroy` fires (before the call
+            // returns, per the entry point's documented panic path).
+            |consumer, user_data| unsafe {
+                kafka_consumer_Consumer_commit_async_with_callback(
+                    consumer,
+                    count_commit_callback,
+                    user_data,
+                    Some(count_commit_destroy),
+                )
+            },
+        );
+    }
+
+    /// The offsets marshal successfully, so the panic comes after the only
+    /// synchronous failure the documentation names.
+    #[test]
+    fn test_commit_async_offsets_with_callback_panic_is_a_synchronous_failure() {
+        let topic = std::ffi::CString::new("topic").unwrap();
+        let topics = [topic.as_ptr()];
+        let partitions = [0_i32];
+        let offsets = [5_i64];
+        let leader_epochs = [-1_i32];
+        assert_commit_panic_is_a_synchronous_failure(
+            "kafka_consumer_Consumer_commit_async_offsets_with_callback",
+            // SAFETY: Test: the arguments satisfy
+            // `kafka_consumer_Consumer_commit_async_offsets_with_callback`'s `# Safety`:
+            // `consumer` is the mock handle the helper created with
+            // `kafka_consumer_MockConsumer_new`; `topics`, `partitions`, `offsets` and
+            // `leader_epochs` are stack arrays with one entry each, matching `count = 1`,
+            // and `topic` is an owned `CString` that outlives the call; `metadata` is a
+            // deliberate NULL, which the function documents as allowed for the whole array,
+            // and `leader_epochs[0] = -1` means no epoch; `count_commit_callback` is a
+            // valid `extern "C"` function and `user_data` points at the helper's `counts`,
+            // valid until `count_commit_destroy` fires before the call returns.
+            |consumer, user_data| unsafe {
+                kafka_consumer_Consumer_commit_async_offsets_with_callback(
+                    consumer,
+                    topics.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    leader_epochs.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    count_commit_callback,
+                    user_data,
+                    Some(count_commit_destroy),
+                )
+            },
+        );
     }
 }
