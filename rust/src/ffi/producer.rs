@@ -502,7 +502,7 @@ type BatchCallbackFn = unsafe extern "C" fn(
 ///
 /// It does **not** cover a producer closed mid-send: Java raises a bare
 /// `KafkaException` there (`RecordAccumulator.java:427-428`,
-/// `BufferPool.java:119`/`:157`), which `doSend` rethrows from its
+/// `BufferPool.java:151`/`:246`), which `doSend` rethrows from its
 /// `catch (KafkaException e)` arm without invoking the callback
 /// (`KafkaProducer.java:1073-1077`). The failure is reported by the return
 /// code of the `send` call itself, and this callback never fires.

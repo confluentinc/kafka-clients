@@ -364,7 +364,7 @@ impl BufferPool {
         match alloc_result {
             AllocResult::Immediate(buf) => Ok(buf),
             // Java: `throw new KafkaException("Producer closed while allocating
-            // memory")` (`BufferPool.java:119`) — a BARE `KafkaException`, not an
+            // memory")` (`BufferPool.java:151`) — a BARE `KafkaException`, not an
             // `ApiException`. `Error::with_message(Errors::UnknownServerError, ..)`
             // resolves the code to `UnknownServerException`, which IS an
             // `ApiException`, and `KafkaProducer.doSend` dispatches on exactly that
@@ -389,7 +389,7 @@ impl BufferPool {
         max_block_ms: i64,
         more_memory: &Arc<tokio::sync::Notify>,
     ) -> Result<Vec<u8>, Error> {
-        /// Java's inner `finally` (`BufferPool.java:185-189`), as a `Drop` type:
+        /// Java's inner `finally` (`BufferPool.java:199-203`), as a `Drop` type:
         ///
         /// ```java
         /// } finally {
@@ -399,11 +399,11 @@ impl BufferPool {
         /// }
         /// ```
         ///
-        /// plus the waiter signal from the enclosing `finally` (`:190-197`), which
+        /// plus the waiter signal from the enclosing `finally` (`:205-213`), which
         /// also runs on every exit.
         ///
         /// Java's exits are "got the memory" (where it zeroes `accumulated` first, at
-        /// `:183`, so the credit is a no-op) and "threw". Rust adds a third: the
+        /// `:197-198`, so the credit is a no-op) and "threw". Rust adds a third: the
         /// future being dropped at the wait below, which has no Java analogue because
         /// threads cannot be cancelled (CLAUDE.md §11.6). Without this the waiter's
         /// `Arc<Notify>` stayed in `inner.waiters` forever, and since
@@ -482,15 +482,15 @@ impl BufferPool {
 
             match wake_result {
                 WakeResult::GotBuffer(buf) => {
-                    // Java 172-173 sets `accumulated = size` and then zeroes it at
-                    // `:183`; the buffer came off the free list, so there is nothing
+                    // Java 186-187 sets `accumulated = size` and then zeroes it at
+                    // `:197-198`; the buffer came off the free list, so there is nothing
                     // to credit back either way.
                     guard.accumulated = 0;
                     return Ok(buf);
                 },
                 WakeResult::Ready => {
                     // "Don't reclaim memory on throwable since nothing was thrown"
-                    // (Java 182-183): the reserved bytes leave with the caller.
+                    // (Java 197-198): the reserved bytes leave with the caller.
                     guard.accumulated = 0;
                     return Ok(self.allocate_byte_buffer(size));
                 },
@@ -501,7 +501,7 @@ impl BufferPool {
 
     /// Record the time (in nanoseconds) an appender waited for space
     /// allocation. Translated from Java's `protected void recordWaitTime(long
-    /// timeNs)` (`BufferPool.java:210-212`), which records against the
+    /// timeNs)` (`BufferPool.java:404-407`), which records against the
     /// `bufferpool-wait-time` sensor at the current wall-clock millisecond.
     ///
     /// Java's method is `void` but can throw (its tests inject an
@@ -1448,7 +1448,7 @@ mod tests {
 
         let err = pool.allocate(1, 10).await.expect_err("Allocation should fail after close");
         assert_eq!(err.message(), "Producer closed while allocating memory");
-        // Java throws a BARE `KafkaException` (`BufferPool.java:119`), matching the
+        // Java throws a BARE `KafkaException` (`BufferPool.java:151`), matching the
         // test's `assertThrows(KafkaException.class, ..)`. It is deliberately NOT an
         // `ApiException`: `KafkaProducer.doSend` rethrows the former out of `send()`
         // and turns the latter into a failed future.
@@ -1477,7 +1477,7 @@ mod tests {
                     .await
                     .expect_err("Allocation should fail after close");
                 assert_eq!(err.message(), "Producer closed while allocating memory");
-                // Java `BufferPool.java:157`: a bare `KafkaException`, as asserted by
+                // Java `BufferPool.java:246`: a bare `KafkaException`, as asserted by
                 // `assertThrows(KafkaException.class, ..)` in the Java test.
                 assert!(matches!(err, Error::KafkaError(_)), "expected a bare KafkaError, got {err:?}");
                 assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException");
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     /// A dropped `allocate` future must credit back whatever it had accumulated and
-    /// remove its waiter — Java's inner `finally` (`BufferPool.java:185-189`).
+    /// remove its waiter — Java's inner `finally` (`BufferPool.java:199-203`).
     ///
     /// This exit has no Java analogue (threads cannot be cancelled), so it was
     /// missing entirely. Both `deallocate_with_size` and `signal_next_waiter_if_memory_available`

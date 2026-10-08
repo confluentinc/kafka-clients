@@ -434,9 +434,9 @@ impl MemoryRecordsBuilder {
     /// Close this builder and return the resulting `MemoryRecords`.
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:238-244`), and shares its **idempotence**: Java
+    /// (`MemoryRecordsBuilder.java:246-252`), and shares its **idempotence**: Java
     /// memoises the result in `builtRecords`, `close()` returns early once that field
-    /// is set (`:365-366`), and nothing but `reopenAndRewriteProducerState` ever clears
+    /// is set (`:373-374`), and nothing but `reopenAndRewriteProducerState` ever clears
     /// it. So Java's `build()` may be called any number of times and hands back the
     /// same `MemoryRecords` view every time. Callers depend on that —
     /// `ProducerBatch.records()` (`ProducerBatch.java:483-485`) is `build()`, and it is
@@ -464,13 +464,13 @@ impl MemoryRecordsBuilder {
         //
         // That invariant is worth stating because it is what aligns Rust's
         // [`is_closed`](Self::is_closed) with Java's. Java has no `closed` field: its
-        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:885-887`).
+        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:914-916`).
         // The deleted `take_built_records` broke the correspondence — it left
         // `closed == true` with `built_records == None` — and the `built_size` shadow
         // field existed precisely to paper over the gap in
         // [`estimated_size_in_bytes`](Self::estimated_size_in_bytes). With the
         // correspondence restored, that accessor collapses back to Java's two-arm form
-        // (`:899-901`) as a consequence rather than a coincidence. Raised by Critic 50.
+        // (`:928-930`) as a consequence rather than a coincidence. Raised by Critic 50.
         self.built_records.clone().expect("build() called but no records built")
     }
 
@@ -1712,8 +1712,8 @@ mod tests {
     }
 
     /// `build()` is **idempotent**, matching Java: `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:238-244`) memoises into `builtRecords`, `close()`
-    /// returns early once that field is set (`:365-366`), and nothing but
+    /// (`MemoryRecordsBuilder.java:246-252`) memoises into `builtRecords`, `close()`
+    /// returns early once that field is set (`:373-374`), and nothing but
     /// `reopenAndRewriteProducerState` clears it. Every call therefore yields the same
     /// bytes.
     ///
