@@ -550,9 +550,9 @@ impl ProducerConfig {
         // computed. Clone it up front, before `maybe_override_client_id` runs.
         let mut config = Self { originals: props.clone(), ..Default::default() };
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
-        // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
+        // (`ConfigDef.java:539`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
         if !props.contains_key(Self::BOOTSTRAP_SERVERS_CONFIG) {
             return Err(Error::config_message(format!(
@@ -571,11 +571,11 @@ impl ProducerConfig {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_id = value.trim().to_string();
                 },
                 Self::CLIENT_RACK_CONFIG => {
-                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:731-733`).
                     config.client_rack = value.trim().to_string();
                 },
                 Self::BATCH_SIZE_CONFIG => {
@@ -590,7 +590,7 @@ impl ProducerConfig {
                 Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in(FULL, INCREMENTAL)`
                     // (`ProducerConfig.java:422-428`). `ConfigDef.parseType` trims every
-                    // `Type.STRING` value (`ConfigDef.java:729-731`).
+                    // `Type.STRING` value (`ConfigDef.java:731-733`).
                     let strategy = value.trim();
                     if !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL)
                         && !strategy.eq_ignore_ascii_case(Self::BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL)
@@ -629,10 +629,10 @@ impl ProducerConfig {
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
                     // Java never reaches `CompressionType.forName` for a bad
-                    // property: `ProducerConfig.java:397` declares the key with
+                    // property: `ProducerConfig.java:436` declares the key with
                     // `in(Utils.enumOptions(CompressionType.class))`, so
                     // `ConfigDef.ValidString.ensureValid` rejects it first with a
-                    // `ConfigException` (`ConfigDef.java:1103`). Letting
+                    // `ConfigException` (`ConfigDef.java:1116`). Letting
                     // `for_name`'s `IllegalArgumentException` escape here would put
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
@@ -1337,7 +1337,7 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:376-378`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1725,8 +1725,8 @@ mod tests {
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
-    /// (`ProducerConfig.java:397`), so `ConfigDef.ValidString.ensureValid`
-    /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
+    /// (`ProducerConfig.java:436`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.java:1116`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
         let mut props = base_props();
