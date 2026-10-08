@@ -678,10 +678,13 @@ impl ConsumerMembershipManager {
     /// `revokeAndAssign(...)` chain, but linearised because we have
     /// `async/await` instead of `CompletableFuture::whenComplete`.
     ///
-    /// `can_commit` mirrors Java's parameter: when auto-commit is
-    /// enabled and `can_commit` is `false`, the reconciliation must be
-    /// skipped because there is no safe opportunity to flush in-progress
-    /// offsets before the assignment changes. Java passes `false` from
+    /// `can_commit` mirrors Java's parameter: it controls whether
+    /// reconciliation can proceed when auto-commit is enabled or there are
+    /// partitions to revoke. Auto-commit and partition revocation can only be
+    /// triggered on reconciliations initiated within a call to
+    /// `consumer.poll()`; if `can_commit` is `false` and either condition
+    /// applies, the reconciliation is skipped (KAFKA-20106 / KAFKA-20145
+    /// javadoc, `AbstractMembershipManager.java:868-874`). Java passes `false` from
     /// `AbstractMembershipManager.poll(now)` (the per-iteration
     /// `entries()` walk) and `true` from
     /// `ApplicationEventProcessor.process(AsyncPollEvent)` (the
@@ -694,7 +697,7 @@ impl ConsumerMembershipManager {
     /// `true`).
     ///
     /// Java: `maybeReconcile(boolean canCommit)`
-    /// (`AbstractMembershipManager.java:824`).
+    /// (`AbstractMembershipManager.java:875`).
     pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
         // Phase 41b: if a reconcile rebalance callback is already in
         // flight, drive it non-blockingly instead of starting a new
@@ -744,22 +747,35 @@ impl ConsumerMembershipManager {
         let resolved_assignment = LocalAssignment::new(target_epoch, resolved_partitions.clone())?;
 
         // 4. Short-circuit: if the resolved subset equals the current
-        // assignment's partitions, just bump epoch and ACK.
-        let short_circuit = {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            !guard.current_assignment.is_none() && resolved_assignment.partitions == guard.current_assignment.partitions
-        };
-        if short_circuit {
+        // assignment's partitions, just bump epoch and ACK — once per target
+        // epoch. KAFKA-20145 (`AbstractMembershipManager.java:896-905`): when
+        // the current assignment already carries the target's local epoch,
+        // this partial assignment was acknowledged before, so return without
+        // acknowledging it again. Without the check every reconcile attempt
+        // (the bg loop's `reconcile(now, false)` runs on every iteration)
+        // flipped the member back to ACKNOWLEDGING and sent a redundant
+        // heartbeat while a topic id stayed unresolved.
+        {
             let mut guard = match self.abstract_mm.inner.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.current_assignment = resolved_assignment;
-            guard.transition_to(MemberState::Acknowledging)?;
-            return Ok(());
+            if !guard.current_assignment.is_none()
+                && resolved_assignment.partitions == guard.current_assignment.partitions
+            {
+                if guard.current_assignment.local_epoch == resolved_assignment.local_epoch {
+                    return Ok(());
+                }
+                log::debug!(
+                    "There are unresolved partitions, and the resolvable fragment of the target assignment {:?} is \
+                     equal to the current assignment. Bumping the local epoch of the assignment and acknowledging \
+                     the partially resolved assignment",
+                    resolved_assignment.partitions
+                );
+                guard.current_assignment = resolved_assignment;
+                guard.transition_to(MemberState::Acknowledging)?;
+                return Ok(());
+            }
         }
 
         // 5. Compute `auto_commit_enabled` for the reconciliation gate
@@ -3910,8 +3926,9 @@ mod tests {
     /// `ConsumerMembershipManagerTest#testSameAssignmentReconciledAgainWithMissingTopic`.
     /// One topic resolvable, one permanently missing. The resolvable one
     /// is reconciled+acked; the missing one stays awaiting reconciliation.
-    /// A re-sent assignment with the same resolvable partitions is acked
-    /// again without re-running a full reconcile.
+    /// An extended assignment is received but not reconciled; the original
+    /// assignment re-sent after it is acked again without re-running a full
+    /// reconcile.
     #[tokio::test]
     async fn same_assignment_reconciled_again_with_missing_topic() {
         let (mgr, mut rx) = make(None, None, None);
@@ -3943,12 +3960,24 @@ mod tests {
         // topic2 is awaiting reconciliation.
         assert_eq!(topics_awaiting_reconciliation(&mgr), HashSet::from([topic2]));
 
+        // Receive extended assignment (assignment2: topic1-0,1 + topic2-0) -
+        // assignment received but no reconciliation triggered. Java's step
+        // between the two assignment1s: it bumps the target's local epoch, so
+        // the re-received assignment1 below is a NEW target epoch. Without it
+        // the re-received assignment1 would be the target already acked, which
+        // KAFKA-20145 deliberately does not ack again
+        // (`partial_ack_not_repeated_on_background_reconcile_when_metadata_missing`).
+        receive_assignment_map(&mgr, &[(topic1, vec![0, 1]), (topic2, vec![0])]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+
         // Receive original assignment again -> not a full reconcile, but
         // ack again. topic1 stays assigned, topic2 still awaiting.
         receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
         // No callback emitted on the re-ack (same resolvable partitions).
-        mgr.reconcile(0, true).await.unwrap();
+        // Java reconciles from the background path here (`maybeReconcile(false)`).
+        mgr.reconcile(0, false).await.unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "no callback should fire for the same resolvable assignment",
@@ -4287,6 +4316,63 @@ mod tests {
         assert!(topics_awaiting_reconciliation(&mgr).is_empty());
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert_eq!(subs.assigned_partitions(), HashSet::from([tp("topic1", 0), tp("topic2", 0)]));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testPartialAckNotRepeatedOnBackgroundReconcileWhenMetadataMissing`
+    /// (KAFKA-20145). When the resolvable subset of the target equals the
+    /// current assignment but some topic ids remain unresolved, the partial
+    /// acknowledgement fires exactly once per target epoch, whichever path
+    /// reconciles (`can_commit` false = bg loop, true = `AsyncPollEvent`).
+    #[tokio::test]
+    async fn partial_ack_not_repeated_on_background_reconcile_when_metadata_missing() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        let topic2 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+
+        // `mockMemberSuccessfullyReceivesAndAcksAssignment(topicId1, topic1, [0])`.
+        receive_assignment(&mgr, topic1, vec![0]);
+        let mgr = Arc::new(mgr);
+        reconcile_and_complete_callback(
+            mgr.clone(),
+            &mut rx,
+            true,
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[tp("topic1", 0)],
+        )
+        .await;
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(MemberState::Stable, mgr.state());
+
+        receive_assignment_map(&mgr, &[(topic1, vec![0]), (topic2, vec![0])]);
+
+        // First reconcile from the background task acks the resolvable fragment, no need to wait for
+        // consumer.poll.
+        mgr.reconcile(0, false).await.unwrap();
+        assert_eq!(MemberState::Acknowledging, mgr.state());
+
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(MemberState::Reconciling, mgr.state());
+        assert_eq!(HashSet::from([topic2]), topics_awaiting_reconciliation(&mgr));
+        let acked_local_epoch = mgr.abstract_mm.inner.lock().unwrap().current_assignment.local_epoch;
+
+        // Until a new target arrives or new metadata resolves topicId2, further reconciles from either
+        // path must stay in RECONCILING - no redundant acks.
+        for _ in 0..5 {
+            mgr.reconcile(0, false).await.unwrap();
+            assert_eq!(MemberState::Reconciling, mgr.state());
+            mgr.reconcile(0, true).await.unwrap();
+            assert_eq!(MemberState::Reconciling, mgr.state());
+        }
+        // The value the redundant acks used to change: the local epoch is the
+        // one acknowledged once, and no rebalance callback was enqueued.
+        assert_eq!(
+            acked_local_epoch,
+            mgr.abstract_mm.inner.lock().unwrap().current_assignment.local_epoch
+        );
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
     }
 
     // ---------------------------------------------------------------
