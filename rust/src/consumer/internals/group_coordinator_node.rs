@@ -53,7 +53,14 @@ impl GroupCoordinatorNode {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.GroupCoordinatorNode#GroupCoordinatorNode")]
     pub(crate) fn new(id: i32, host: String, port: i32) -> Result<Node, Error> {
         let id = Self::validate_id(id)?;
-        Ok(Node::with_rack_is_fenced_id_string(id, host, port, None, false, format!("+{id}")))
+        Ok(Node::with_rack_is_fenced_id_string(
+            id,
+            host,
+            port,
+            None,
+            false,
+            format!("+{id}"),
+        ))
     }
 
     /// Translated from `GroupCoordinatorNode.validateId` (`GroupCoordinatorNode.java:36-41`).
