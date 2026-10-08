@@ -140,9 +140,11 @@ impl<'a> SensorBuilder<'a> {
 
     /// Add a [`Meter`] backed by the supplied rate [`SampledStat`] producing the
     /// given rate and total metrics (if newly created). Translates Java's
-    /// `withMeter(SampledStat, MetricNameTemplate, MetricNameTemplate)`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.SensorBuilder#SensorBuilder")]
-    pub(crate) fn with_meter_stat(
+    /// `withMeter(SampledStat, MetricNameTemplate, MetricNameTemplate)`, the
+    /// overload of [`with_meter`](Self::with_meter) that adds `sampledStat`
+    /// (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.SensorBuilder#withMeter")]
+    pub(crate) fn with_meter_with_sampled_stat(
         self,
         sampled_stat: SampledStat,
         rate_name: &MetricNameTemplate,

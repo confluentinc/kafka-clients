@@ -169,7 +169,7 @@ impl FetchMetricsManager {
             Ok(SensorBuilder::new(metrics, "fetch-latency")?
                 .with_avg(&metrics_registry.fetch_latency_avg)?
                 .with_max(&metrics_registry.fetch_latency_max)?
-                .with_meter_stat(
+                .with_meter_with_sampled_stat(
                     WindowedCount::new().into_sampled_stat(),
                     &metrics_registry.fetch_request_rate,
                     &metrics_registry.fetch_request_total,
