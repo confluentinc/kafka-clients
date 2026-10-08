@@ -55,9 +55,9 @@ namespace Confluent.Kafka;
 /// <c>Future</c> and Python's sync <c>send</c> returns a <c>concurrent.futures.Future</c> (M11/P4.2
 /// decision D5).</b> <c>Send</c> serializes the key / value on the caller's thread (a serializer
 /// throw surfaces synchronously as a <see cref="SerializationException"/>), hands the record to the
-/// core, and returns once the core has accepted it. It blocks only while <c>buffer.memory</c> is
-/// full, up to <c>max.block.ms</c> (Java's <c>send</c> blocking), and the key / value buffers are
-/// reusable when it returns. <see cref="KafkaFuture{T}.Get"/> then blocks until the record is
+/// core, and returns once the core has accepted it. It blocks only while the core waits for metadata
+/// or for <c>buffer.memory</c>, up to <c>max.block.ms</c> (Java's <c>send</c> blocking), and the key /
+/// value buffers are reusable when it returns. <see cref="KafkaFuture{T}.Get"/> then blocks until the record is
 /// acknowledged or fails (Java's <c>future.get()</c>), and rethrows a failure unwrapped. This
 /// supersedes M11/P4 decision #1, under which <c>Send</c> blocked and returned the
 /// <see cref="RecordMetadata"/> directly. That decision's premise — a future-returning sync
@@ -161,9 +161,10 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// accepted it (Java <c>Producer.send(record)</c> — M11/P4.2) with a <see cref="KafkaFuture{T}"/>
     /// whose <see cref="KafkaFuture{T}.Get"/> blocks until the cluster acknowledges the record and
     /// returns its <see cref="RecordMetadata"/> (Java <c>future.get()</c>). This call blocks only while
-    /// <c>buffer.memory</c> is full, up to <c>max.block.ms</c>. The key / value are serialized on the
-    /// caller's thread before the send; the serialized bytes are copied into the send buffer during
-    /// the call, so the caller may reuse or mutate them the moment this returns (ffi §A4).
+    /// the core waits for metadata or for <c>buffer.memory</c>, up to <c>max.block.ms</c>. The key /
+    /// value are serialized on the caller's thread before the send; the serialized bytes are copied
+    /// into the send buffer during the call, so the caller may reuse or mutate them the moment this
+    /// returns (ffi §A4).
     /// </summary>
     /// <param name="record">The record to publish.</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get"/> returns the published

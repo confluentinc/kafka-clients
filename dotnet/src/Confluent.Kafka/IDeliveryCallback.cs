@@ -82,9 +82,9 @@ namespace Confluent.Kafka;
 /// <b>Sending again from inside it IS supported</b> — the canonical retry-on-failure shape — because
 /// no managed lock is held while the callback runs, wherever it runs. The reentrant send is accepted
 /// and queued as usual: on the async surface the accumulator drains it, and on the sync surface
-/// <c>Send</c> returns once the core has accepted it (blocking the pump only while
-/// <c>buffer.memory</c> is full, up to <c>max.block.ms</c>). Just do not wait for it there (above).
-/// Both surfaces are covered by a regression test.
+/// <c>Send</c> returns once the core has accepted it (blocking the pump only while the core waits
+/// for metadata or for <c>buffer.memory</c>, up to <c>max.block.ms</c>). Just do not wait for it
+/// there (above). Both surfaces are covered by a regression test.
 /// </para>
 /// <para>
 /// <b>Tearing the producer down from inside it is NOT supported, on either surface</b>: it is
