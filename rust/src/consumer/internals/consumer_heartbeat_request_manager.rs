@@ -511,7 +511,9 @@ impl ConsumerHeartbeatRequestManager {
         let error = response.error();
         if error == Errors::None {
             let new_interval_ms = i64::from(response.data().heartbeat_interval_ms);
-            self.inner.on_successful_response(new_interval_ms, completion_time_ms);
+            let member_id = self.membership_manager.member_id();
+            self.inner
+                .on_successful_response(&member_id, new_interval_ms, completion_time_ms);
             if let Err(e) = self.membership_manager.on_heartbeat_success(response) {
                 log::error!("on_heartbeat_success failed: {}", e);
                 let _ = self
@@ -3253,5 +3255,196 @@ mod tests {
             "the broker's ErrorMessage must survive; the Rust enum's Debug name must not \
              be substituted for it"
         );
+    }
+
+    // ===============================================================
+    // `AbstractHeartbeatRequestManagerTest` (AK 4.4). e7b0cb7908
+    // (KAFKA-18862) moved the tests every heartbeat manager shares into an
+    // abstract base class that each concrete manager's test inherits. The
+    // Rust abstract layer has no response routing of its own (it is a helper
+    // composed by this manager, see the module docs), so the inherited tests
+    // run here, against `ConsumerHeartbeatRequestManager`, exactly as Java
+    // runs them through `ConsumerHeartbeatRequestManagerTest`. The fixture
+    // below mirrors the base class's `@BeforeEach` defaults.
+    // ===============================================================
+
+    /// `AbstractHeartbeatRequestManagerTest.DEFAULT_MEMBER_ID`.
+    const ABSTRACT_DEFAULT_MEMBER_ID: &str = "member-id";
+    /// `AbstractHeartbeatRequestManagerTest.DEFAULT_RETRY_BACKOFF_MS`.
+    const ABSTRACT_DEFAULT_RETRY_BACKOFF_MS: i64 = 80;
+    /// `AbstractHeartbeatRequestManagerTest.DEFAULT_RETRY_BACKOFF_MAX_MS`.
+    const ABSTRACT_DEFAULT_RETRY_BACKOFF_MAX_MS: i64 = 1_000;
+    /// `AbstractHeartbeatRequestManagerTest.DEFAULT_HEARTBEAT_JITTER_MS`.
+    const ABSTRACT_DEFAULT_HEARTBEAT_JITTER_MS: f64 = 0.0;
+
+    /// The `AbstractHeartbeatRequestManagerTest` fixture: a manager whose
+    /// `HeartbeatRequestState` is the base class's spy
+    /// (`new HeartbeatRequestState(logContext, time, DEFAULT_HEARTBEAT_INTERVAL_MS,
+    /// DEFAULT_RETRY_BACKOFF_MS, DEFAULT_RETRY_BACKOFF_MAX_MS, DEFAULT_HEARTBEAT_JITTER_MS)`),
+    /// a known coordinator, and a member parked in STABLE with
+    /// `DEFAULT_MEMBER_ID` / `DEFAULT_MEMBER_EPOCH`. Java mocks the membership
+    /// manager, so its `shouldSkipHeartbeat()` / `shouldHeartbeatNow()` answer
+    /// `false` by default; STABLE is the real state with the same answers. The
+    /// mock clock starts at 0.
+    struct AbstractFixture {
+        mgr: ConsumerHeartbeatRequestManager,
+        mm: Arc<ConsumerMembershipManager>,
+        events: mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+        /// Java's `MockTime`; `sleep` advances it.
+        now: i64,
+    }
+
+    impl AbstractFixture {
+        fn new() -> Self {
+            use crate::consumer::internals::HeartbeatRequestState;
+
+            let (mut mgr, coord, mm, events) = make_with_coord_capturing_events(None);
+            mgr.inner.heartbeat_request_state = HeartbeatRequestState::new(
+                0,
+                DEFAULT_HEARTBEAT_INTERVAL_MS,
+                ABSTRACT_DEFAULT_RETRY_BACKOFF_MS,
+                ABSTRACT_DEFAULT_RETRY_BACKOFF_MAX_MS,
+                ABSTRACT_DEFAULT_HEARTBEAT_JITTER_MS,
+            );
+            set_coordinator(&coord);
+            force_state(&mm, MemberState::Stable);
+            force_member(&mm, ABSTRACT_DEFAULT_MEMBER_ID, DEFAULT_MEMBER_EPOCH);
+            Self { mgr, mm, events, now: 0 }
+        }
+
+        /// Java's `time.sleep(ms)`.
+        fn sleep(&mut self, ms: i64) {
+            self.now += ms;
+        }
+
+        fn poll(&mut self) -> PollResult {
+            self.mgr.poll(self.now)
+        }
+
+        /// Every background event emitted so far.
+        fn drain_events(&mut self) -> Vec<crate::consumer::internals::events::BackgroundEventEnvelope> {
+            let mut events = Vec::new();
+            while let Ok(envelope) = self.events.try_recv() {
+                events.push(envelope);
+            }
+            events
+        }
+
+        /// Java's `request.handler().onComplete(createHeartbeatResponse(request, error,
+        /// heartbeatIntervalMs))`. Java runs the `whenComplete` lambda inside
+        /// `onComplete`; the Rust forwarder is a spawned task, so this waits
+        /// for it to deliver the completion and then drains it at the mock
+        /// time, as Java's handler does at `completionTimeMs()`.
+        async fn complete(&mut self, request: &UnsentRequest, error: Errors, heartbeat_interval_ms: i64) {
+            request
+                .handler()
+                .on_complete(create_heartbeat_response(error, heartbeat_interval_ms, self.now));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.mgr.pending_completions_empty_for_test() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the spawned forwarder did not deliver the heartbeat completion"
+                );
+                tokio::task::yield_now().await;
+            }
+            self.mgr.drain_pending_completions(self.now);
+        }
+    }
+
+    /// `ConsumerHeartbeatRequestManagerTest#createHeartbeatResponse(request, error,
+    /// heartbeatIntervalMs, "stubbed error message")`: `DEFAULT_MEMBER_ID`,
+    /// `DEFAULT_MEMBER_EPOCH`, and the stubbed error message only on an error.
+    /// `now_ms` is Java's `time.milliseconds()`, the response's receive time.
+    fn create_heartbeat_response(error: Errors, heartbeat_interval_ms: i64, now_ms: i64) -> crate::ClientResponse {
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = error.code();
+        data.heartbeat_interval_ms = i32::try_from(heartbeat_interval_ms).expect("interval fits an i32");
+        data.member_id = Some(ABSTRACT_DEFAULT_MEMBER_ID.to_string());
+        data.member_epoch = DEFAULT_MEMBER_EPOCH;
+        if error != Errors::None {
+            data.error_message = Some("stubbed error message".to_string());
+        }
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("client-id")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("header ok");
+        crate::ClientResponse::with_timed_out(
+            header,
+            None,
+            "0",
+            now_ms,
+            now_ms,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(ConsumerGroupHeartbeatResponse::new(
+                data,
+            ))),
+        )
+    }
+
+    /// `AbstractHeartbeatRequestManagerTest#testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged`
+    /// (KAFKA-20761). The base class captures the log with a
+    /// `LogCaptureAppender`; Rust reads the messages the manager recorded at
+    /// the log site (`logged_heartbeat_interval_messages`, the exact strings
+    /// passed to `log::info!`).
+    #[tokio::test]
+    async fn test_logs_heartbeat_interval_received_from_coordinator_only_when_changed() {
+        let mut f = AbstractFixture::new();
+        let changed_interval_ms = DEFAULT_HEARTBEAT_INTERVAL_MS + 500;
+        let count_heartbeat_interval_logs = |f: &AbstractFixture| {
+            f.mgr
+                .inner
+                .logged_heartbeat_interval_messages
+                .iter()
+                .filter(|message| message.contains("received heartbeat interval"))
+                .count()
+        };
+
+        // A successful heartbeat whose interval differs from the current one is applied and logged.
+        f.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let result = f.poll();
+        assert_eq!(1, result.unsent_requests.len());
+        f.complete(&result.unsent_requests[0], Errors::None, changed_interval_ms).await;
+
+        assert_eq!(changed_interval_ms, f.mgr.inner.heartbeat_request_state.heartbeat_interval_ms());
+        assert_eq!(
+            1,
+            count_heartbeat_interval_logs(&f),
+            "The heartbeat interval received from the coordinator should be logged when it changes."
+        );
+        assert_eq!(
+            vec![format!(
+                "Member {ABSTRACT_DEFAULT_MEMBER_ID} received heartbeat interval {changed_interval_ms}ms \
+                 from the group coordinator"
+            )],
+            f.mgr.inner.logged_heartbeat_interval_messages,
+            "The logged message should contain the member id and the received interval."
+        );
+
+        // A subsequent heartbeat carrying the same interval must not be logged again.
+        f.sleep(changed_interval_ms);
+        let result = f.poll();
+        assert_eq!(1, result.unsent_requests.len());
+        f.complete(&result.unsent_requests[0], Errors::None, changed_interval_ms).await;
+
+        assert_eq!(
+            1,
+            count_heartbeat_interval_logs(&f),
+            "An unchanged heartbeat interval must not be logged again."
+        );
+        assert!(f.drain_events().is_empty(), "a successful heartbeat emits no background event");
+        assert_eq!(MemberState::Stable, f.mm.state());
     }
 }

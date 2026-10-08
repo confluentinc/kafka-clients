@@ -127,6 +127,12 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// window has a full `max.poll.interval.ms` budget. See Issue 9 in
     /// `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
     poll_timer_expires_at_ms: i64,
+    /// Every "received heartbeat interval" message [`Self::on_successful_response`]
+    /// logged, in order. The Rust stand-in for the `LogCaptureAppender` in
+    /// `AbstractHeartbeatRequestManagerTest#testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged`:
+    /// it is appended at the log site, with the string that was logged.
+    #[cfg(test)]
+    pub(crate) logged_heartbeat_interval_messages: Vec<String>,
 }
 
 impl AbstractHeartbeatRequestManager {
@@ -219,6 +225,8 @@ impl AbstractHeartbeatRequestManager {
             // `reset_poll_timer` call from the AsyncPoll event
             // arm. See [`Self::poll_timer_expires_at_ms`] doc-comment.
             poll_timer_expires_at_ms: i64::MAX,
+            #[cfg(test)]
+            logged_heartbeat_interval_messages: Vec::new(),
         }
     }
 
@@ -246,6 +254,8 @@ impl AbstractHeartbeatRequestManager {
             // timer is armed by the first `reset_poll_timer` call, not
             // at construction.
             poll_timer_expires_at_ms: i64::MAX,
+            #[cfg(test)]
+            logged_heartbeat_interval_messages: Vec::new(),
         }
     }
 
@@ -457,15 +467,42 @@ impl AbstractHeartbeatRequestManager {
     }
 
     /// Marks the manager as having received a successful heartbeat
-    /// response. Updates the backoff state and the heartbeat interval.
+    /// response. Updates the backoff state and the heartbeat interval,
+    /// logging the interval when it differs from the current one
+    /// (KAFKA-20761).
     ///
     /// Java: `onResponse(R response, long currentTimeMs)` (success
     /// branch only — error responses go through
-    /// [`Self::classify_response_error`]).
-    pub(crate) fn on_successful_response(&mut self, new_heartbeat_interval_ms: i64, current_time_ms: i64) {
+    /// [`Self::classify_response_error`];
+    /// `AbstractHeartbeatRequestManager.java:365-380`). `member_id` is Java's
+    /// `membershipManager().memberId()`: the Rust split keeps the membership
+    /// manager out of this layer, so the caller passes it in (as for
+    /// `classify_response_error`'s `group_id`). The caller then runs
+    /// `membershipManager().onHeartbeatSuccess(response)`, Java's next line.
+    pub(crate) fn on_successful_response(
+        &mut self,
+        member_id: &str,
+        new_heartbeat_interval_ms: i64,
+        current_time_ms: i64,
+    ) {
+        let previous_heartbeat_interval_ms = self.heartbeat_request_state.heartbeat_interval_ms();
+        // The heartbeat interval is a group config owned by the broker, so log it when it changes to give
+        // visibility into the value the coordinator is applying (it is not derivable from client config).
+        if new_heartbeat_interval_ms != previous_heartbeat_interval_ms {
+            let message = Self::heartbeat_interval_received_message(member_id, new_heartbeat_interval_ms);
+            log::info!("{message}");
+            #[cfg(test)]
+            self.logged_heartbeat_interval_messages.push(message);
+        }
         self.heartbeat_request_state
             .update_heartbeat_interval_ms(current_time_ms, new_heartbeat_interval_ms);
         self.heartbeat_request_state.on_successful_attempt(current_time_ms);
+    }
+
+    /// The text of Java's `logger.info("Member {} received heartbeat interval {}ms from the group
+    /// coordinator", ...)` (`AbstractHeartbeatRequestManager.java:372`).
+    fn heartbeat_interval_received_message(member_id: &str, heartbeat_interval_ms: i64) -> String {
+        format!("Member {member_id} received heartbeat interval {heartbeat_interval_ms}ms from the group coordinator")
     }
 
     /// Failure path mirroring Java's `onFailure(Throwable, long)` for
@@ -625,7 +662,7 @@ mod tests {
     #[test]
     fn successful_response_updates_interval() {
         let mut mgr = make_state(0);
-        mgr.on_successful_response(5_000, 0);
+        mgr.on_successful_response("member-id", 5_000, 0);
         assert_eq!(mgr.heartbeat_request_state.heartbeat_interval_ms(), 5_000);
     }
 
