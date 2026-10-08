@@ -958,6 +958,160 @@ Phase 3 completion notes (agent 93):
   ApiVersions v5 encoding test (DoD #3).
 - Runs after Phase 2 (both edit `NetworkClient`).
 
+Phase 4 completion notes (agent 94):
+
+- **Commits** (on `75be908e`): `b0182fa4` ApiVersionsRequest setters + v5 `isValid` pair check; `a5269fa2`
+  `metadata.cluster.check.enable` + the NetworkClient check (fixup `1944ff3b`); `994fe6b5`
+  `GroupCoordinatorNode` + Node's `idString` constructor (fixups `14f4d1bc`, `bea4f64e`); `1744e450` the
+  rebootstrap-pacing test (spin follow-up); `0212ac53` broker integration tests (fixup `01cc8b1f`);
+  `c10d9e80` Java cites to rc4.
+- **ede01b871e.** `CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG` with Java's doc text (as
+  rustdoc, the `CLIENT_DNS_LOOKUP_CONFIG` convention); parsed as `Type.BOOLEAN`, default `true`, by the
+  producer, consumer and admin configs. `AdminClientConfig` carries its own alias constant, as Java does;
+  `ProducerConfig` / `ConsumerConfig` do not, as in Java. **Wired end to end (§2.5):** each client calls
+  `NetworkClient::set_metadata_cluster_check_enable` right after construction, where Java's
+  `ClientUtils.createNetworkClient` passes it (`ClientUtils.java:309`). The setter follows the
+  `set_bootstrap_configuration` precedent (default `false`, which is what Java's test fixtures pass).
+  For the admin client the flag is inert **in Java too**: `AdminMetadataManager`'s updater keeps
+  `MetadataUpdater.clusterId`'s `null` default (and this client also runs the admin `NetworkClient` with
+  strategy `none`); documented on `AdminClientConfig::metadata_cluster_check_enable`.
+- **0ef4a4c80e.**
+  - `ApiVersionsRequest` `Builder::set_cluster_id(Option<&str>)` / `set_node_id`, and the v5
+    both-or-neither check first in `is_valid`.
+  - `MetadataUpdater::cluster_id` (default `None`); the inlined `DefaultMetadataUpdater` path reads the
+    metadata's `ClusterResource`.
+  - `handle_initiate_api_version_requests` sets both when the strategy is not `none`, the check is
+    enabled, the cluster id is known and the id is `>= 0` (7be741d08b's final form, which dropped the
+    `< Integer.MAX_VALUE / 2` exclusion). Java's `Integer.parseInt(node)` would throw on a non-numeric
+    connection id; Rust sends no check for one instead (connection ids are always `Node::id_string`s, so
+    it is unreachable).
+  - `REBOOTSTRAP_REQUIRED` under `rebootstrap`: disconnect every known node and rebootstrap. The body is
+    shared with `handle_rebootstrap` through a private `disconnect_all_and_rebootstrap` helper (Java writes
+    it out twice). As in Java, it closes only `fetchNodes()`; a misrouted *coordinator* connection
+    (`+<id>`) is not among them and is not closed by this branch.
+- **7be741d08b.**
+  - `Node::with_rack_is_fenced_id_string` is the protected constructor, crate-private; the public ones
+    delegate to it.
+  - **Deviation (DoD #7, behaviour-preserving):** `Node`'s `PartialEq` now also compares `id_string`. It
+    stands in for the `getClass()` check in Java's `equals`, so a coordinator node never equals the plain
+    node of the same broker. `Hash` is unchanged, as Java's `hashCode` ignores the class.
+  - `consumer::internals::GroupCoordinatorNode` (crate-private) has no instances. Its `new` validates the id
+    (exact `IllegalArgumentException` message) and returns the `Node` with `idString` `+<id>`, because the
+    Java subclass adds nothing but its constructor. Clippy's `new_ret_no_self` has a targeted `expect` with
+    the reason.
+  - `CoordinatorRequestManager` keeps the real broker id.
+  - **Deviation:** a `NONE` answer with a negative coordinator id fails the attempt with the constructor's
+    error, so it reaches the fatal-error path. In Java the throw inside `whenComplete` is lost and the
+    request stays in flight for good (CLAUDE.md §7).
+- **KAFKA-20393 (123ee9e45d): skipped, not applicable.** The fix and its test
+  (`testStickyNodeDoesNotUseStaleIpOnReconnect`) are entirely in `NetworkClient.TelemetrySender`
+  (KIP-714). The Rust `NetworkClient` has no telemetry sender, because `ClientTelemetryReporter` is not
+  translated (`async_kafka_consumer.rs:51`; `NetworkClientTest.testReconnectAfterAddressChange`'s Rust
+  copy already omits its telemetry assertions for the same reason).
+- **Rebootstrap-spin follow-up (Critic 95): not a Phase 4 defect; already fixed by Phase 3.** The measured
+  run used a consumer bootstrapped to a refused port (`127.0.0.1:1`), group `g`, `poll(500 ms)` in a loop,
+  release build, 10 s, measured with `ps -o time=`:
+  - `dbc609d1` (Phase 2 + merge, the build Critic 95 sampled): 12.4 s CPU in 10 s, 59,314 rebootstraps in
+    12 s;
+  - this branch: 0.01 s CPU, 99 rebootstraps in 10 s, about one connect attempt per second.
+
+  So the spin was the no-coordinator busy loop that Phase 3 removed (KAFKA-21010 / KAFKA-20854), seen
+  through the rebootstrap frames it drove. The remaining ~10/s cadence is Java's.
+  `DefaultMetadataUpdater.maybeUpdate` (`NetworkClient.java:1450-1484`) rebootstraps whenever an update is
+  due and no node is available. It then returns `reconnectBackoffMs` as the poll bound, so it rebootstraps
+  once per poll between the refresh-backoff expiry and the reconnect-backoff expiry. Rust's
+  `default_maybe_update` has the same structure, and `Metadata::rebootstrap` / `time_to_allow_update`
+  match Java's. `test_rebootstrap_with_every_node_unavailable_is_paced_by_the_backoffs` pins the values:
+  one rebootstrap per `maybe_update`, a bound equal to the reconnect backoff (never 0), none inside the
+  refresh backoff after a failed update, and a connect once the reconnect backoff has passed. No production
+  change. Follow-up 2 (an API wait that never times out after the cluster vanishes) was not in scope and
+  was not investigated.
+- **Tests.**
+  - `NetworkClientTest`: `testMetadataClusterCheckFailureCausesRebootstrap` (with
+    `TestMetadataUpdater.rebootstrapCount`), and ede01b871e's v5 header assertions in both
+    unsupported-ApiVersions tests (read from the in-flight request; the MockSelector exposes no send
+    buffers). The rest of the "+164" is fixture plumbing (the extra constructor argument) or KAFKA-20393's
+    telemetry test.
+  - Rust-only `NetworkClient` tests:
+    - the check is sent;
+    - it is omitted when disabled, under `none`, with the cluster id unknown, or for a negative id;
+    - a `+1` coordinator connection sends node id 1;
+    - `REBOOTSTRAP_REQUIRED` under `none` disconnects only that node.
+  - `GroupCoordinatorNodeTest` (both) plus a class-equality test; the `CoordinatorRequestManagerTest`
+    `testSuccessfulResponse` hunk in both Rust copies; a negative-id CRM test; a `Node` test.
+  - Byte-level: a v5 vector built through the new setters (default software name/version, `ClusterId` "c",
+    `NodeId` 7), alongside Phase 0's vectors; `is_valid` pair check in both directions.
+  - Config tests for all three clients, with exact messages.
+  - Teeth checks: disabling the send path or the `REBOOTSTRAP_REQUIRED` branch fails 3 unit tests;
+    disabling the check fails both falsified broker tests on 4.4.
+- **Integration (`rust/src/integration_tests/cluster_check_test.rs`, in-crate because `NetworkClient` and
+  `Metadata` are crate-private).** A `NetworkClient` over metadata seeded from the broker's own `Metadata`
+  response, with the cluster id or the node id falsified. This is the client-side analog of
+  `ClientRebootstrapTest.testRebootstrapOnMetadataClusterCheckFail`, whose swapped-ports restart
+  (`restartBrokersWithSwappedClientListenerPorts`) the Docker harness cannot do. On 4.4 the connection
+  fails and the metadata is back to bootstrap; on 4.2 there is no v5 and no check; matching metadata
+  connects on both. A guard asserts that v5 support follows `INTEGRATION_TEST_BROKER_TAG`.
+- **Recorded skips.**
+  - KAFKA-20393, above.
+  - `AbstractCoordinator` (classic) and the `ConsumerCoordinatorTest` / `AbstractCoordinatorTest` /
+    `KafkaShareConsumerTest` hunks: out of scope (consumer-threading §20).
+  - The `KafkaConsumerTest` hunks (17 `new Node(Integer.MAX_VALUE - id, ..)` → `new GroupCoordinatorNode`)
+    and the `AsyncKafkaConsumerTest` hunk (`testSubscribePatternAgainstBrokerNotSupportingRegex`): fixture
+    constants in MockClient-driven tests that have no Rust translation (the latter is already recorded as
+    skipped in `async_kafka_consumer.rs`).
+  - The `KafkaAdminClientTest` hunk: `prepareResponseFrom` re-binding in `verifyUnreachableBootstrapServer`
+    (`testUnreachableBootstrapServer[NoRebootstrap]`). That test has no Rust counterpart, and it exercises
+    admin rebootstrap, which the Rust admin client does not implement (strategy `none`, Phase 2 notes).
+  - `MockClient.java` (blank-line change), `FetchRequestManagerTest` / `FetcherTest` / `SenderTest` (the
+    extra `false` constructor argument): nothing to translate.
+  - Connect, core, server, tools, trogdor and test-kit hunks: not client code.
+- **Cites (Phase 7 convention).** By content to rc4:
+  - `NetworkClient.java` across `rust/src`, including bare `:608` → `:673` and `:1245` → `:1487`;
+  - `CoordinatorRequestManager.java`, `ConsumerConfig.java`, `AdminClientConfig.java`, and
+    `ClientUtils.java` (`createNetworkClient`, `:306-307`).
+
+  **Deviation:** `ProducerConfig.java`'s older cites in `producer_config.rs` are left to the producer
+  track, which also ports `ProducerConfig` changes (Phases 6 / 8) and edits that file. Refreshing them here
+  would conflict on merge. Only this phase's new cite is at rc4.
+- **DoD #10: N/A.** The check runs once per new connection and the config is read at construction; none
+  of it is per record.
+- **For the Critic.**
+  - The `Node` `PartialEq` change: every equality between a coordinator node and a metadata node now
+    differs, as in Java. Grep showed no such comparison in production code.
+  - The negative-id deviation in CRM.
+  - The admin-inert claim.
+  - The shared `disconnect_all_and_rebootstrap`.
+  - The 4.4 consumer suites now run the check for real: the cluster id is known after the first metadata
+    and the check is on by default. 53 of 53 passed on 4.4, so no false `REBOOTSTRAP_REQUIRED`, including
+    on `+<id>` coordinator connections.
+- **Verification (HEAD `bea4f64e`).**
+  - `cargo build` and `cargo xtask format-check` pass.
+  - `cargo test`: 4460 passed, 0 failed, 10 ignored (lib 4411 / 3 ignored, then 36, 8, and 5 / 7 ignored).
+  - `cargo xtask lint --keep-going`: exactly the 15 §5.1 rows; clippy (both passes), doc-hygiene and
+    module-path are clean.
+  - Broker runs:
+    - `--test integration -- client_rebootstrap_test bootstrap_resolution_test consumer_test
+      base_consumer_test plaintext_consumer_commit_test`: 53 / 53 on 4.2.0 and 53 / 53 on 4.4.0-rc4;
+    - `--lib --features integration-tests integration_tests::cluster_check_test`: 3 / 3 on each tag. The
+      first 4.2.0 attempt hit a container-startup timeout (harness load); the re-run passed.
+  - `make -k verify` (macOS) fails only in `build-c` (`cmake: command not found`, environment) and `lint`
+    (the 15 §5.1 rows). Lib all-features 4661 passed; integration 308 passed, 0 failed, 2 ignored; Python
+    366 passed / 2 skipped; `check-bindings` 29; soak 156.
+- **Timing log** (2026-10-08, IST):
+
+  | Step | Start | End | Minutes |
+  |---|---|---|---|
+  | 0 reading (rules, plan, Java diffs, Rust counterparts, Critic 95 notes) | 13:30 | 13:51 | 21 |
+  | 1 ApiVersionsRequest setters + `isValid` (`b0182fa4`) | 13:51 | 13:52 | 1 |
+  | 2 config + NetworkClient check, with tests and teeth check (`a5269fa2`) | 13:52 | 13:58 | 6 |
+  | 3 `GroupCoordinatorNode`, `Node`, CRM (`994fe6b5`) | 13:58 | 14:02 | 4 |
+  | 4 spin follow-up: repro on HEAD and on `dbc609d1`, pacing test (`1744e450`) | 14:02 | 14:13 | 11 |
+  | 5 broker integration tests, both tags, teeth check (`0212ac53`) | 14:08 | 14:15 | 7 (overlapped 4) |
+  | 6 cites to rc4 (`c10d9e80`) | 14:15 | 14:19 | 4 |
+  | 7 format-check, lint, full `cargo test`, fixups | 14:19 | 14:23 | 4 |
+  | 8 broker suites on 4.2.0 and 4.4.0-rc4 | 14:23 | 14:26 | 3 |
+  | 9 `make -k verify`, notes | 14:26 | 14:38 | 12 |
+
 ### Phase 5 — Producer: KIP-1319 TxnOffsetCommit v6 with topic IDs (agent 95)
 
 - Sync the held-back `TxnOffsetCommit{Request,Response}.json` (§2.2): v6, `GenerationIdOrMemberEpoch`
