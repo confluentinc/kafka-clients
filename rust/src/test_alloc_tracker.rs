@@ -54,6 +54,12 @@ fn record(size: usize) {
 /// thread-local counter on each allocation when tracking is enabled.
 pub(crate) struct TrackingAllocator;
 
+// SAFETY: every method forwards the caller's arguments unchanged to `System`, so the
+// `GlobalAlloc` contract holds exactly as it does for `System` (`alloc` returns a block
+// of the requested layout or null; `dealloc` / `realloc` receive a pointer this
+// allocator returned together with its layout). The only extra work is `record`, which
+// updates `const`-initialised `Cell` thread-locals (the count and the largest size) and
+// performs no allocation of its own.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
