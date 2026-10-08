@@ -47,7 +47,25 @@ impl Node {
     /// Creates a new `Node` with the given rack and fenced status.
     #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String,boolean)")]
     pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
-        Self { id, id_string: id.to_string(), host, port, rack, is_fenced }
+        Self::with_rack_is_fenced_id_string(id, host, port, rack, is_fenced, id.to_string())
+    }
+
+    /// Creates a new `Node` whose [`id_string`](Self::id_string) is given
+    /// explicitly instead of being derived from `id`.
+    ///
+    /// Java's `protected` constructor (`Node.java:54-61`, KAFKA-20246 3/N),
+    /// whose only caller is the consumer's `GroupCoordinatorNode` subclass,
+    /// hence crate-private here.
+    #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String,boolean,String)")]
+    pub(crate) fn with_rack_is_fenced_id_string(
+        id: i32,
+        host: String,
+        port: i32,
+        rack: Option<String>,
+        is_fenced: bool,
+        id_string: String,
+    ) -> Self {
+        Self { id, id_string, host, port, rack, is_fenced }
     }
 
     /// Returns a sentinel node representing no node.
@@ -70,7 +88,7 @@ impl Node {
     }
 
     /// String representation of the node id.
-    /// Typically the integer id is used to serialize over the wire, the string
+    /// Typically, the integer id is used to serialize over the wire, the string
     /// representation is used as an identifier with NetworkClient code.
     #[doc(alias = "org.apache.kafka.common.Node#idString")]
     pub fn id_string(&self) -> &str {
@@ -111,9 +129,17 @@ impl Node {
     }
 }
 
+/// Java's `Node.equals` (`Node.java:147-158`) first requires
+/// `getClass() == obj.getClass()`, so a `GroupCoordinatorNode` never equals a
+/// plain `Node` with the same fields. Rust has no subclass to compare, so
+/// `id_string` stands in for the class: a plain node's is `id.to_string()` and
+/// a group coordinator's is `"+" + id`, so for equal ids the two `id_string`s
+/// are equal exactly when the Java classes are. `Hash` leaves it out, as Java's
+/// `hashCode` leaves the class out; equal values still hash equally.
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id_string == other.id_string
+            && self.id == other.id
             && self.port == other.port
             && self.host == other.host
             && self.rack == other.rack
@@ -207,6 +233,24 @@ mod tests {
         set.insert(Node::new(1, "host".to_string(), 9092));
         set.insert(Node::new(1, "host".to_string(), 9092));
         assert_eq!(set.len(), 1);
+    }
+
+    /// The protected `idString` constructor (7be741d08b) keeps every other
+    /// field, and an explicit `idString` makes the node differ from a plain one
+    /// with the same fields, as Java's class check does.
+    #[test]
+    fn test_node_with_explicit_id_string() {
+        let node = Node::with_rack_is_fenced_id_string(1, "host".to_string(), 9092, None, false, "+1".to_string());
+        assert_eq!(node.id(), 1);
+        assert_eq!(node.id_string(), "+1");
+        assert_eq!(node.host(), "host");
+        assert_eq!(node.port(), 9092);
+        assert_eq!(node.to_string(), "host:9092 (id: +1 rack: None isFenced: false)");
+        assert_ne!(node, Node::new(1, "host".to_string(), 9092));
+        assert_eq!(
+            node,
+            Node::with_rack_is_fenced_id_string(1, "host".to_string(), 9092, None, false, "+1".to_string())
+        );
     }
 
     #[test]

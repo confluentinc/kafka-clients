@@ -5229,6 +5229,25 @@ mod tests {
         }
     }
 
+    /// A group coordinator connection (`GroupCoordinatorNode`, connection id
+    /// `+1`) is checked against the broker's real id 1. 7be741d08b replaced the
+    /// old `Integer.MAX_VALUE - id` coordinator ids, which 0ef4a4c80e had to
+    /// exclude (`nodeId < Integer.MAX_VALUE / 2`), with these ids so that
+    /// coordinator connections are checked too. Rust-only.
+    #[tokio::test]
+    async fn test_api_versions_request_to_group_coordinator_carries_the_broker_id() {
+        let mut client = create_network_client_for_cluster_check(MetadataRecoveryStrategy::Rebootstrap, true, true);
+        let coordinator =
+            crate::consumer::internals::GroupCoordinatorNode::new(1, "localhost".to_string(), 1970).unwrap();
+        assert_eq!("+1", coordinator.id_string());
+        client.ready(&coordinator, 0).await;
+        client.poll(0, 0).await;
+        assert_eq!(
+            (5, Some("kafka-cluster".to_string()), 1),
+            last_sent_api_versions(&client, &coordinator)
+        );
+    }
+
     /// A negative node id is never sent (`nodeId >= 0`,
     /// `NetworkClient.java:1220`), even with the cluster id known: bootstrap
     /// connections use negative ids that name no broker.

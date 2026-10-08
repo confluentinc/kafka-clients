@@ -31,6 +31,7 @@ use crate::common::requests::{
 };
 use crate::common::{Error, Node};
 
+use super::GroupCoordinatorNode;
 use super::RequestManager;
 use super::RequestState;
 use super::{PollResult, UnsentRequest};
@@ -301,11 +302,25 @@ impl CoordinatorRequestManager {
         current_time_ms: i64,
         coordinator: &crate::find_coordinator_response_data::Coordinator,
     ) {
-        // Java: use MAX_VALUE - node.id to allow separate connections for
-        // the coordinator at the network layer.
-        let coordinator_connection_id = i32::MAX - coordinator.node_id;
-        *inner.coordinator.lock().expect("coordinator poisoned") =
-            Some(Node::new(coordinator_connection_id, coordinator.host.clone(), coordinator.port));
+        // `CoordinatorRequestManager.java:184-195` (KAFKA-20246 3/N): the
+        // coordinator keeps the broker's real node id, so the ApiVersions
+        // cluster check (KIP-1242) names the right broker, and gets a `+<id>`
+        // connection id, so the network layer still keeps a connection to it
+        // separate from the regular broker connection.
+        let node = match GroupCoordinatorNode::new(coordinator.node_id, coordinator.host.clone(), coordinator.port) {
+            Ok(node) => node,
+            Err(error) => {
+                // A broker never answers `NONE` with a negative coordinator id.
+                // If one did, Java's constructor would throw inside the
+                // `whenComplete` callback, where the exception is lost: the
+                // request would stay in flight and the coordinator unknown for
+                // good. Failing the attempt with the error instead surfaces it
+                // (CLAUDE.md §7) through the fatal-error path below.
+                Self::on_failed_response_inner(inner, current_time_ms, error);
+                return;
+            },
+        };
+        *inner.coordinator.lock().expect("coordinator poisoned") = Some(node);
         log::info!("Discovered group coordinator (nodeId={})", coordinator.node_id);
         inner
             .request_state
@@ -624,6 +639,29 @@ mod tests {
         assert_eq!(expect_coordinator_found, manager.coordinator().is_some());
     }
 
+    /// A `NONE` answer naming a negative coordinator id cannot become a
+    /// `GroupCoordinatorNode`. Rust fails the attempt with the constructor's
+    /// error, which reaches the fatal-error path; Java's constructor throws
+    /// inside the response callback and the exception is lost (see
+    /// `on_successful_response_inner`). Rust-only.
+    #[tokio::test]
+    async fn test_negative_coordinator_id_fails_the_attempt() {
+        let mut manager = setup_manager();
+        let _ = manager.poll(0);
+        let response = FindCoordinatorResponse::prepare_response(
+            Errors::None,
+            GROUP_ID,
+            &Node::new(-5, "localhost".to_string(), 9092),
+        );
+        manager.on_response(0, &response);
+        assert!(manager.coordinator().is_none());
+        let err = manager.get_and_clear_fatal_error().expect("fatal error recorded");
+        let Error::LocalIllegalArgument(e) = &err else {
+            panic!("expected an illegal-argument error, got {err:?}");
+        };
+        assert_eq!(e.message(), "Node id for group coordinator node cannot be negative");
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testSuccessfulResponse`.
     /// `#[tokio::test]` because `poll()` now spawns a response forwarder
     /// via `tokio::spawn` (Phase 12.5 wiring) — the spawn requires a
@@ -636,7 +674,16 @@ mod tests {
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
 
         let n = manager.coordinator().expect("coordinator present");
-        assert_eq!(i32::MAX - node().id(), n.id());
+        assert_eq!(node().id(), n.id());
+        // Java's `assertInstanceOf(GroupCoordinatorNode.class, ..)`: the node
+        // equals only a `GroupCoordinatorNode` (`Node`'s class-aware equality),
+        // whose connection id is `+<id>`.
+        assert_eq!(
+            GroupCoordinatorNode::new(node().id(), node().host().to_string(), node().port()).unwrap(),
+            n
+        );
+        assert_eq!("+1", n.id_string());
+        assert_eq!(node().id(), n.id_string().parse::<i32>().unwrap());
         assert_eq!(node().host(), n.host());
         assert_eq!(node().port(), n.port());
 
@@ -1053,7 +1100,16 @@ mod tests {
         wait_until(|| manager.coordinator().is_some()).await;
 
         let n = manager.coordinator().expect("coordinator present");
-        assert_eq!(i32::MAX - node().id(), n.id());
+        assert_eq!(node().id(), n.id());
+        // Java's `assertInstanceOf(GroupCoordinatorNode.class, ..)`: the node
+        // equals only a `GroupCoordinatorNode` (`Node`'s class-aware equality),
+        // whose connection id is `+<id>`.
+        assert_eq!(
+            GroupCoordinatorNode::new(node().id(), node().host().to_string(), node().port()).unwrap(),
+            n
+        );
+        assert_eq!("+1", n.id_string());
+        assert_eq!(node().id(), n.id_string().parse::<i32>().unwrap());
         assert_eq!(node().host(), n.host());
         assert_eq!(node().port(), n.port());
     }
