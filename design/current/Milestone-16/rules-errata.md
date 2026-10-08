@@ -411,3 +411,33 @@ Drafted amendment, from Critic 95's review (COMMENTS.95 Q3). For a human to appl
   are now implemented as suggested. The §11 "known cases" addition can cite the enforcement sites
   `TxnOffsetCommitRequest.java:100-118` and `rust/src/common/requests/txn_offset_commit_request.rs`
   `Builder::build_version`.
+
+### Phase 8 (agent 98): `producer-transactions.md` §7 — `ChunkedProducerBatch` is folded into `ProducerBatch` (KIP-1332)
+
+Drafted amendment (PLAN §2.3). For a human to apply; `.claude/rules/` is not edited.
+
+- **What changed.** Java 4.4 adds `ChunkedProducerBatch extends ProducerBatch` (KAFKA-20578) and
+  `ChunkedRecordAccumulator extends RecordAccumulator`. Rust has **no** `ChunkedProducerBatch` type:
+  `rust/src/producer/internals/chunked_producer_batch.rs` declares
+  `pub(crate) type ChunkedProducerBatch = ProducerBatch;` (the alias carries the Java marker) and an
+  `impl` block with the methods Java adds (`new_chunked`, `is_chunked`, `extension_bytes_needed`,
+  `add_buffers`, `stream`). The three overrides (`tryAppend`, `deallocateBuffer`,
+  `deallocateInflightBuffer`) branch on `ProducerBatch::is_chunked()` inside the base methods.
+  `instanceof ChunkedProducerBatch` is `batch.is_chunked()`, which reads the builder's stream kind.
+- **Why the rules should say it.** §7 explains that a `ProducerBatch` has exactly one owner at a time
+  and moves by value between the accumulator deque, the `Sender`'s in-flight map and back. A second
+  batch type would need a trait object or an enum in every one of those owners, and one deque holds
+  both kinds in incremental mode (a split batch stays plain). A Critic comparing class-by-class
+  against Java will otherwise report the missing class, or ask for `Box<dyn ..>` in the deque.
+- **`ChunkedRecordAccumulator` is a real struct, by composition** (`base: Arc<RecordAccumulator>`).
+  The `Sender` keeps `Arc<RecordAccumulator>` (the shared base); only `KafkaProducer::do_send_bytes`
+  dispatches `append` on the strategy (`KafkaProducer::chunked_accumulator`). Java's virtual
+  `tryAppend` / `createProducerBatch` inside `appendNewBatch` are that method's step parameters.
+- **Suggested text** (append to §7's "How to apply"):
+  "KIP-1332's `ChunkedProducerBatch` is not a separate type: it is folded into `ProducerBatch` (one
+  single-or-chunked buffer per batch, `is_chunked()` for `instanceof`), so batches of both kinds share
+  one deque and keep moving by value. A chunked batch returns its memory through its stream
+  (`deallocate_buffer` / `deallocate_inflight_buffer`), never through `take_buffer`."
+- **Suggested anti-patterns:** a `ChunkedProducerBatch` struct or a `Box<dyn ..Batch>` deque element;
+  `take_buffer()` + `deallocate_with_size(.., initial_capacity())` on a batch without checking
+  `is_chunked()` (it would credit a chunk of memory the pool never lent: Critic 97 caution (a)).

@@ -60,7 +60,8 @@ use crate::producer::internals::RecordAccumulator;
 use crate::producer::internals::TransactionManager;
 use crate::producer::internals::buffer_pool::AllocationMode;
 use crate::producer::internals::chunked_producer_batch::ChunkedProducerBatch;
-use crate::producer::internals::record_accumulator::{AppendFailure, AppendGuard, RecordAppendResult, TopicInfo};
+use crate::producer::internals::record_accumulator::{AppendFailure, RecordAppendResult, TopicInfo};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// A [`RecordAccumulator`] variant that backs each batch with fixed-size chunks drawn from a
 /// [`BufferPool`], attaching more chunks on demand as records are appended instead of reserving
@@ -175,7 +176,7 @@ impl ChunkedRecordAccumulator {
     /// # Cancellation (Rust-only)
     ///
     /// Java threads cannot be cancelled, but this future can be dropped at an `.await`
-    /// (CLAUDE.md §11.6). The [`AppendGuard`] holds the new-batch stream and the extension chunks
+    /// (CLAUDE.md §11.6). The [`ChunkedAppendGuard`] holds the new-batch stream and the extension chunks
     /// exactly as Java's `finally` sees them, so dropping the future returns both to the pool and
     /// counts the append out, like any other exit.
     ///
@@ -202,7 +203,7 @@ impl ChunkedRecordAccumulator {
 
         // Java's `appendsInProgress.incrementAndGet()` and the `finally` that returns the
         // `newBatch` stream and the `extensionChunks` and decrements it.
-        let mut guard = AppendGuard::new(&self.chunked_free, &base.appends_in_progress);
+        let mut guard = ChunkedAppendGuard::new(&self.chunked_free, &base.appends_in_progress);
         self.append_inner(
             &topic_arc,
             partition,
@@ -234,7 +235,7 @@ impl ChunkedRecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-        guard: &mut AppendGuard<'_>,
+        guard: &mut ChunkedAppendGuard<'_>,
     ) -> Result<RecordAppendResult, Box<AppendFailure>> {
         let base = &*self.base;
         let mut callback = callback;
@@ -645,7 +646,7 @@ impl ChunkedRecordAccumulator {
         partition: i32,
         now_ms: i64,
     ) -> Result<(RecordAppendResult, Option<Callback>), Box<AppendFailure>> {
-        if self.base.closed.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.base.closed.load(Ordering::Relaxed) {
             return Err(RecordAccumulator::closed_while_send_in_progress(callback));
         }
         // Split batches in an incremental deque are plain ProducerBatch (heap-backed,
@@ -747,6 +748,57 @@ impl ChunkedRecordAccumulator {
         } else {
             self.chunked_free.allocate_chunks(total_size, max_time_to_block_ms).await
         }
+    }
+}
+
+/// The `finally` block of `ChunkedRecordAccumulator.append`, as a `Drop` type:
+///
+/// ```java
+/// } finally {
+///     if (newBatch != null)
+///         newBatch.stream.deallocate();
+///     deallocateExtensionChunks(extensionChunks);
+///     appendsInProgress.decrementAndGet();
+/// }
+/// ```
+///
+/// The same Rust-only reason as the full strategy's `AppendGuard` (DoD #7): an `async fn` can be
+/// dropped at an `.await` (CLAUDE.md §11.6), an exit Java does not have, and straight-line code
+/// cannot cover it. Each field holds the `append` local of the same name: `new_batch` is taken out
+/// when a batch adopts the stream (Java's `newBatch = null`), `extension_chunks` when a batch
+/// adopts the chunks; whatever is still held at exit goes back to the pool. The stream also
+/// refunds itself on drop, but the guard deallocates it explicitly, in Java's order, so the refund
+/// never depends on that.
+///
+/// A separate type rather than two more fields on `AppendGuard`, so the full strategy's
+/// per-append state does not grow for a path it never takes.
+pub(crate) struct ChunkedAppendGuard<'a> {
+    free: &'a BufferPool,
+    appends_in_progress: &'a AtomicI32,
+    pub(crate) new_batch: Option<NewBatchBuffer>,
+    pub(crate) extension_chunks: Option<Vec<Vec<u8>>>,
+}
+
+impl<'a> ChunkedAppendGuard<'a> {
+    /// Counts the append in and arms the cleanup (Java's `appendsInProgress.incrementAndGet()`,
+    /// just before the `try`).
+    pub(crate) fn new(free: &'a BufferPool, appends_in_progress: &'a AtomicI32) -> Self {
+        appends_in_progress.fetch_add(1, Ordering::Relaxed);
+        Self { free, appends_in_progress, new_batch: None, extension_chunks: None }
+    }
+}
+
+impl Drop for ChunkedAppendGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(mut new_batch) = self.new_batch.take() {
+            new_batch.stream.deallocate();
+        }
+        if let Some(chunks) = self.extension_chunks.take() {
+            for chunk in chunks {
+                self.free.deallocate(chunk);
+            }
+        }
+        self.appends_in_progress.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -2350,7 +2402,7 @@ mod tests {
     /// An append that gives up still holding the stream it allocated for a new batch refunds it to
     /// the pool. The stream is allocated on one pass and carried unattached across a partition
     /// switch, so the pass that finds nothing left to spend leaves it for the `finally` (the
-    /// [`AppendGuard`]) to return.
+    /// [`ChunkedAppendGuard`]) to return.
     ///
     /// Translated from `ChunkedRecordAccumulatorTest.testGivingUpRefundsAnUnattachedNewBatchStream`.
     #[tokio::test]
@@ -2537,7 +2589,7 @@ mod tests {
         accum.base().close();
     }
 
-    /// Rust-only (CLAUDE.md §11.6): the guard returns a held new-batch stream and held extension
+    /// Rust-only (CLAUDE.md §11.6): the [`ChunkedAppendGuard`] returns a held new-batch stream and held extension
     /// chunks to the pool however the append exits — including a drop at an `.await`, where no
     /// Java `finally` exists. Drives the guard directly with both slots filled, the state an
     /// append holds between allocating and attaching.
@@ -2549,7 +2601,7 @@ mod tests {
         let pool = fx.pool(total_memory, chunk_size);
         let appends_in_progress = std::sync::atomic::AtomicI32::new(0);
         {
-            let mut guard = AppendGuard::new(&pool, &appends_in_progress);
+            let mut guard = ChunkedAppendGuard::new(&pool, &appends_in_progress);
             let stream_chunks = pool.try_allocate_chunks(2 * chunk_size as i32).unwrap();
             guard.new_batch = Some(NewBatchBuffer {
                 stream: ChunkedByteBufferOutputStream::new(stream_chunks, chunk_size, Some(Arc::clone(&pool))).unwrap(),
@@ -2675,6 +2727,78 @@ mod tests {
             "the refused batches' chunks must go back to the pool"
         );
         accum.base().close();
+    }
+
+    /// Rust-only, DoD #10 / CLAUDE.md §13: once its batch is open, an incremental append that
+    /// needs no extension costs exactly the allocations of a full-strategy append — the strategy
+    /// adds none per record. Measured as a delta, as the producer-level send audits are, so an
+    /// unrelated change to the shared path cannot break it.
+    #[tokio::test]
+    async fn test_steady_state_append_allocations_match_the_full_strategy() {
+        let fx = fixture();
+        let full = RecordAccumulator::new_for_test(
+            1024 * 1024,
+            Compression::none().build(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig::default(),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
+            None,
+        );
+        let chunked = fx.accumulator(1024 * 1024, 16 * 1024, 32 * 1024 * 1024);
+        // A first record large enough that the chunk it is given has room for the measured ones.
+        let opening = [0u8; 8000];
+        let value = [0u8; 100];
+        full.append(TOPIC, PARTITION1, 0, Some(KEY), Some(&opening), &[], None, 0, 0, &fx.cluster)
+            .await
+            .unwrap();
+        chunked
+            .append(TOPIC, PARTITION1, 0, Some(KEY), Some(&opening), &[], None, 0, 0, &fx.cluster)
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            full.append(TOPIC, PARTITION1, 0, Some(KEY), Some(&value), &[], None, 0, 0, &fx.cluster)
+                .await
+                .unwrap();
+            chunked
+                .append(TOPIC, PARTITION1, 0, Some(KEY), Some(&value), &[], None, 0, 0, &fx.cluster)
+                .await
+                .unwrap();
+        }
+
+        let full_count = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            full.append(TOPIC, PARTITION1, 0, Some(KEY), Some(&value), &[], None, 0, 0, &fx.cluster)
+                .await
+                .unwrap();
+            crate::AllocTrackingGuard::count()
+        };
+        let chunked_count = {
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            chunked
+                .append(TOPIC, PARTITION1, 0, Some(KEY), Some(&value), &[], None, 0, 0, &fx.cluster)
+                .await
+                .unwrap();
+            crate::AllocTrackingGuard::count()
+        };
+        assert!(full_count > 0, "the tracker must actually be measuring");
+        assert_eq!(
+            full_count, chunked_count,
+            "the incremental strategy must add no per-record allocation to a steady-state append; got {full_count} \
+             for the full strategy vs {chunked_count} for the incremental one"
+        );
+        assert_eq!(
+            vec![6],
+            record_counts(&chunked),
+            "every measured record must land in the opening batch"
+        );
+
+        full.close();
+        chunked.base().close();
     }
 
     /// Rust-only: the constructor's checks, with Java's messages.

@@ -51,7 +51,6 @@ use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::IncompleteBatches;
 use crate::producer::internals::ProducerBatch;
-use crate::producer::internals::chunked_record_accumulator::NewBatchBuffer;
 use crate::producer::internals::{InFlightBatchPool, TransactionManager};
 
 /// Partitioner configuration for the built-in partitioner.
@@ -380,8 +379,8 @@ impl TopicInfo {
     }
 }
 
-/// The `finally` block of `RecordAccumulator.append` (`RecordAccumulator.java:358-361`) and of
-/// `ChunkedRecordAccumulator.append`, as a `Drop` type.
+/// The `finally` block of `RecordAccumulator.append` (`RecordAccumulator.java:358-361`), as a
+/// `Drop` type.
 ///
 /// Java's `finally` returns the not-yet-consumed buffer to the pool and
 /// decrements `appendsInProgress`, whatever exit `append` takes. A Rust `async fn`
@@ -390,33 +389,27 @@ impl TopicInfo {
 /// it. This is not a new abstraction over Java: it is the only way to express
 /// `finally` across a cancellable await.
 ///
-/// Each field holds the `append` local of the same name, so the same null/non-null
-/// discipline applies:
+/// The `buffer` field holds `append`'s local of the same name, so the same
+/// null/non-null discipline applies: [`append_new_batch`]'s records-builder step takes it
+/// out when a batch adopts the buffer, mirroring Java's `buffer = null`
+/// (`RecordAccumulator.java:352-354`).
 ///
-/// - `buffer` (full strategy): [`append_new_batch`]'s records-builder step takes it out when a
-///   batch adopts the buffer, mirroring Java's `buffer = null` (`RecordAccumulator.java:352-354`).
-/// - `new_batch` and `extension_chunks` (incremental strategy, `ChunkedRecordAccumulator.append`):
-///   the stream allocated for a new batch, and the chunks acquired to extend the open one. Each is
-///   taken out once a batch adopts it, and anything still held at exit is returned to the pool —
-///   Java's `finally { if (newBatch != null) newBatch.stream.deallocate();
-///   deallocateExtensionChunks(extensionChunks); .. }`. The stream also refunds itself on drop, but
-///   the guard deallocates it explicitly, in Java's order, so the refund never depends on that.
+/// The incremental strategy's `append` has its own guard (`ChunkedAppendGuard`), so the
+/// full strategy's per-append state stays exactly this size.
 ///
 /// [`append_new_batch`]: RecordAccumulator::append_new_batch
-pub(crate) struct AppendGuard<'a> {
+struct AppendGuard<'a> {
     free: &'a BufferPool,
     appends_in_progress: &'a AtomicI32,
-    pub(crate) buffer: Option<Vec<u8>>,
-    pub(crate) new_batch: Option<NewBatchBuffer>,
-    pub(crate) extension_chunks: Option<Vec<Vec<u8>>>,
+    buffer: Option<Vec<u8>>,
 }
 
 impl<'a> AppendGuard<'a> {
     /// Counts the append in and arms the cleanup. Java increments at
     /// `RecordAccumulator.java:296`, just inside the `try`.
-    pub(crate) fn new(free: &'a BufferPool, appends_in_progress: &'a AtomicI32) -> Self {
+    fn new(free: &'a BufferPool, appends_in_progress: &'a AtomicI32) -> Self {
         appends_in_progress.fetch_add(1, Ordering::Relaxed);
-        Self { free, appends_in_progress, buffer: None, new_batch: None, extension_chunks: None }
+        Self { free, appends_in_progress, buffer: None }
     }
 }
 
@@ -425,14 +418,6 @@ impl Drop for AppendGuard<'_> {
         // Java's order: deallocate, then decrement.
         if let Some(buffer) = self.buffer.take() {
             self.free.deallocate(buffer);
-        }
-        if let Some(mut new_batch) = self.new_batch.take() {
-            new_batch.stream.deallocate();
-        }
-        if let Some(chunks) = self.extension_chunks.take() {
-            for chunk in chunks {
-                self.free.deallocate(chunk);
-            }
         }
         self.appends_in_progress.fetch_sub(1, Ordering::Relaxed);
     }
