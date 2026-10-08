@@ -44,9 +44,11 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![expect(non_camel_case_types)]
 
+pub(crate) mod acl;
 pub(crate) mod classic_group_state;
 pub(crate) mod cluster;
 pub(crate) mod cluster_resource;
+pub(crate) mod config;
 pub(crate) mod election_type;
 pub(crate) mod errors;
 pub(crate) mod group_state;
@@ -60,6 +62,7 @@ pub(crate) mod metrics;
 pub(crate) mod node;
 pub(crate) mod partition_info;
 pub(crate) mod record;
+pub(crate) mod resource;
 pub(crate) mod topic_collection;
 pub(crate) mod topic_id_partition;
 pub(crate) mod topic_partition;

@@ -129,6 +129,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use quote::ToTokens;
+use syn::ext::IdentExt;
 
 use super::{
     compact, ffi_class, has_tag, is_cfg_test, is_no_mangle, java_markers, type_ident, variant_payload, Context, Crate,
@@ -1762,11 +1763,11 @@ fn trait_methods(
     }
     for it in &t.items {
         let syn::TraitItem::Fn(f) = it else { continue };
-        if requires_sized(&f.sig.generics) || is_hidden(&f.attrs) || !seen.insert(f.sig.ident.to_string()) {
+        if requires_sized(&f.sig.generics) || is_hidden(&f.attrs) || !seen.insert(f.sig.ident.unraw().to_string()) {
             continue;
         }
         out.push(RustMethod {
-            name: f.sig.ident.to_string(),
+            name: f.sig.ident.unraw().to_string(),
             sig: f.sig.clone(),
             has_default: f.default.is_some(),
         });
@@ -1812,7 +1813,7 @@ fn inherent_methods(items: &[syn::Item], name: &str) -> Vec<RustMethod> {
             if !matches!(f.vis, syn::Visibility::Public(_)) || is_cfg_test(&f.attrs) || is_hidden(&f.attrs) {
                 continue;
             }
-            out.push(RustMethod { name: f.sig.ident.to_string(), sig: f.sig.clone(), has_default: false });
+            out.push(RustMethod { name: f.sig.ident.unraw().to_string(), sig: f.sig.clone(), has_default: false });
         }
     }
     out
@@ -2078,7 +2079,7 @@ impl CSurface {
                 match item {
                     syn::Item::Fn(f) if is_no_mangle(&f.attrs) => {
                         out.fns.insert(
-                            f.sig.ident.to_string(),
+                            f.sig.ident.unraw().to_string(),
                             CFn { file: file.clone(), sig: f.sig.clone(), rust_only: has_tag(&f.attrs, RUST_ONLY) },
                         );
                     },
@@ -2270,7 +2271,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                 Some(t) => {
                     match &t.item {
                         syn::Item::Enum(e) => {
-                            let got: Vec<String> = e.variants.iter().map(|v| v.ident.to_string()).collect();
+                            let got: Vec<String> = e.variants.iter().map(|v| v.ident.unraw().to_string()).collect();
                             let repr_c = e.attrs.iter().any(|a| {
                                 a.path().is_ident("repr") && a.meta.to_token_stream().to_string().contains('C')
                             });
@@ -3706,5 +3707,33 @@ mod tests {
             keys(&findings),
             ["unexpected kafka_common_Error_codes", "unexpected kafka_common_Error_t"]
         );
+    }
+
+    /// A Rust keyword used as a method name (`ConfigResource::r#type`) or
+    /// as a C enumerator (`PatternType`'s `r#match`) is compared without
+    /// its `r#` prefix, as cbindgen renders it.
+    #[test]
+    fn test_raw_identifiers_are_compared_without_their_prefix() {
+        let rust = r#"
+            pub mod common {
+                pub mod record {
+                    #[doc(alias = "org.apache.kafka.common.record.TimestampType")]
+                    pub enum TimestampType { Match, Literal }
+                    impl TimestampType {
+                        pub fn r#type(self) -> i32 { 0 }
+                    }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_record_TimestampType_t { _p: [u8; 0] }
+            #[repr(C)] pub enum kafka_common_record_TimestampType_e { r#match, literal }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(this: *const kafka_common_record_TimestampType_t) -> kafka_common_record_TimestampType_e { kafka_common_record_TimestampType_e::r#match }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_match() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_literal() -> *const kafka_common_record_TimestampType_t { std::ptr::null() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_record_TimestampType_type(this: *const kafka_common_record_TimestampType_t) -> i32 { 0 }
+        "#;
+        let findings = run("raw-identifiers", rust, ffi);
+        assert!(findings.is_empty(), "{findings:#?}");
     }
 }
