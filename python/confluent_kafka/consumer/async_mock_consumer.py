@@ -50,5 +50,8 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
 
     async def rebalance(self, *, new_assignment: Iterable[TopicPartition]) -> None:
         """See :meth:`MockConsumer.rebalance`; a coroutine listener method is
-        awaited."""
+        awaited. Until the rebalance returns, a call from another task or
+        thread raises ``ConcurrentModificationError`` *(deviation: Java's caller
+        waits for the synchronized rebalance)*; the listener's own calls back
+        into the consumer pass, and so does ``wakeup()``."""
         await self._a_rebalance(new_assignment)

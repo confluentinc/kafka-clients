@@ -32,11 +32,23 @@ waits instead of failing (Java's mock is not thread-safe but serializes).
 ``wakeup()`` only sets its flag, as Java's ``AtomicBoolean``.
 
 ``AsyncMockConsumer`` awaits the same body; ``rebalance`` awaits a coroutine
-listener method there.
+listener method there, and holds the mock's monitor for its task until it
+returns, as Java's ``synchronized`` ``rebalance`` runs the listener inside it
+(``_Monitor``). Meanwhile a method that enters Java's monitor, called from
+another task or another thread, raises ``ConcurrentModificationError`` with
+``KafkaConsumer``'s message *(deviation: Java's caller waits, which a task on
+the rebalance's own loop cannot do without stopping it)*; the rebalance's own
+task (a coroutine listener calling back into its consumer) passes. The methods
+Java does not synchronize pass too: ``group_metadata()``, ``last_poll_timeout()``
+and ``current_lag()`` without an end offset; and ``wakeup()``, which Java's mock
+synchronizes, is never refused (CLAUDE.md, Python Binding Conventions, Threads
+and callbacks). The other waiting methods run their body without an await, so
+no task can enter during one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import threading
@@ -48,10 +60,12 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
+from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 
 from ._auto_offset_reset_strategy import AutoOffsetResetStrategy
+from ._base import CONCURRENT_MESSAGE
 from ._subscription_state import FetchPosition, SubscriptionState
 from .consumer_group_metadata import ConsumerGroupMetadata
 from .consumer_records import ConsumerRecords
@@ -96,6 +110,42 @@ def _no_coroutine(result: object, what: str) -> None:
         raise TypeError(f"a coroutine {what} requires an AsyncMockConsumer")
 
 
+def _current_task() -> asyncio.Task[Any] | None:
+    """The calling task, or ``None`` on a thread with no running loop."""
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+class _Monitor:
+    """The mock's ``synchronized`` monitor: a reentrant lock, and the task an
+    ``AsyncMockConsumer.rebalance`` holds it for while it awaits the listener
+    (``owner``). Entering it from any other task or thread meanwhile raises
+    ``ConcurrentModificationError``; the owner, and anyone while there is
+    none, enter as the lock lets them.
+
+    It has no Java class: Java's monitor belongs to a thread, and every task of
+    one loop runs on the same thread, so the ``RLock`` alone cannot tell the
+    rebalance's task from another."""
+
+    __slots__ = ("_lock", "owner")
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.owner: asyncio.Task[Any] | None = None
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+        owner = self.owner
+        if owner is not None and owner is not _current_task():
+            self._lock.release()
+            raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
 class MockConsumerCore(Generic[K, V]):
     """Java's ``MockConsumer`` state and methods, shared by the sync and async
     mocks. The interface methods are defined once, on ``Consumer`` /
@@ -104,7 +154,7 @@ class MockConsumerCore(Generic[K, V]):
 
     def _init_mock(self, offset_reset_strategy: AutoOffsetResetStrategy) -> None:
         """Java's private ``MockConsumer(AutoOffsetResetStrategy)``."""
-        self._lock = threading.RLock()
+        self._lock = _Monitor()
         self._subscriptions = SubscriptionState(offset_reset_strategy)
         self._partitions: dict[str, list[PartitionInfo]] = {}
         self._records: dict[TopicPartition, list[ConsumerRecord[K, V]]] = {}
@@ -156,21 +206,26 @@ class MockConsumerCore(Generic[K, V]):
                               "rebalance listener")
 
     async def _a_rebalance(self, new_assignment: Iterable[TopicPartition]) -> None:
-        """Async ``rebalance``: a coroutine listener method is awaited."""
+        """Async ``rebalance``: a coroutine listener method is awaited, the
+        monitor held for this task throughout (``_Monitor``)."""
         with self._lock:
             new_list, added, removed = self._rebalance_begin(new_assignment)
             listener = self._subscriptions.rebalance_listener()
-        if removed and listener is not None:
-            result = listener.on_partitions_revoked(set(removed))  # type: ignore[func-returns-value]
-            if inspect.isawaitable(result):
-                await result
-        with self._lock:
-            self._subscriptions.assign_from_subscribed(new_list)
-            listener = self._subscriptions.rebalance_listener()
-        if listener is not None:
-            result = listener.on_partitions_assigned(set(added))  # type: ignore[func-returns-value]
-            if inspect.isawaitable(result):
-                await result
+            previous, self._lock.owner = self._lock.owner, _current_task()
+        try:
+            if removed and listener is not None:
+                result = listener.on_partitions_revoked(set(removed))  # type: ignore[func-returns-value]
+                if inspect.isawaitable(result):
+                    await result
+            with self._lock:
+                self._subscriptions.assign_from_subscribed(new_list)
+                listener = self._subscriptions.rebalance_listener()
+            if listener is not None:
+                result = listener.on_partitions_assigned(set(added))  # type: ignore[func-returns-value]
+                if inspect.isawaitable(result):
+                    await result
+        finally:
+            self._lock.owner = previous
 
     def _c_subscription(self) -> set[str]:
         with self._lock:
@@ -368,8 +423,9 @@ class MockConsumerCore(Generic[K, V]):
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                            ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
-        # yet.") (MockConsumer.java:536).
-        raise UnsupportedVersionError(message="Not implemented yet.")
+        # yet.") (MockConsumer.java:536), inside its synchronized body.
+        with self._lock:
+            raise UnsupportedVersionError(message="Not implemented yet.")
 
     def _offsets_of(self, partitions: Iterable[TopicPartition],
                     offsets: dict[TopicPartition, int], which: str) -> dict[TopicPartition, int]:

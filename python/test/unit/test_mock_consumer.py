@@ -17,7 +17,8 @@ Java mock's other documented behaviours with Java's messages
 (``MockConsumer.java``), each also on ``AsyncMockConsumer`` where the method
 differs by async-ness, and the two ``consumer-threading.md`` §31 regression
 tests on the mocks (a ``commit()`` inside ``on_partitions_revoked``; the
-rebalance not advancing until the listener returns), sync and async.
+rebalance not advancing until the listener returns), sync and async, and the
+async mock refusing other tasks while its rebalance awaits the listener.
 
 Master's ``test_add_record_rejects_a_2_gib_buffer`` (PR #207: a 2 GiB key or
 value through the C extension's ``MockConsumer_add_record``) is not carried
@@ -35,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError
+from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, Node, PartitionInfo, TimestampType, TopicPartition
 from confluent_kafka.common.errors import UnsupportedVersionError, WakeupError
 from confluent_kafka.consumer import (
@@ -44,6 +45,8 @@ from confluent_kafka.consumer import (
 )
 
 WAIT = 5.0
+# KafkaConsumer's message for a concurrent call (Java's AsyncKafkaConsumer.acquire()).
+CONCURRENT = "KafkaConsumer is not safe for multi-threaded access."
 
 
 def tp(topic: str, partition: int) -> TopicPartition:
@@ -781,6 +784,59 @@ def test_async_rebalance_does_not_advance_until_the_listener_returns() -> None:
         release.set()
         await asyncio.wait_for(task, WAIT)
         assert consumer.assignment() == {tp("t", 0)}
+
+    asyncio.run(main())
+
+
+def test_async_rebalance_refuses_other_tasks_while_the_listener_runs() -> None:
+    # The async classes follow KafkaConsumer's rule per event loop (CLAUDE.md,
+    # Python Binding Conventions, Threads and callbacks): while rebalance
+    # awaits its listener, a call from another task, or another thread, raises
+    # ConcurrentModificationError (Java's caller waits on the synchronized
+    # mock); the listener's own calls pass, and wakeup() is not refused.
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        partition = tp("t", 0)
+        entered, release = asyncio.Event(), asyncio.Event()
+        inside: dict[str, Any] = {}
+
+        class Waiting(ConsumerRebalanceListener):
+            async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:  # type: ignore[override]
+                entered.set()
+                await release.wait()
+                await consumer.commit(offsets={partition: OffsetAndMetadata(offset=3)})
+                inside["assignment"] = consumer.assignment()
+
+        await consumer.subscribe(topics=["t"], callback=Waiting())
+        rebalance = asyncio.ensure_future(consumer.rebalance(new_assignment=[partition]))
+        await asyncio.wait_for(entered.wait(), WAIT)
+        with pytest.raises(ConcurrentModificationError) as e:
+            await consumer.close()
+        assert str(e.value) == CONCURRENT
+        with pytest.raises(ConcurrentModificationError) as e:
+            await consumer.poll(timeout=0)
+        assert str(e.value) == CONCURRENT
+        with pytest.raises(ConcurrentModificationError) as e:
+            consumer.assignment()
+        assert str(e.value) == CONCURRENT
+        with pytest.raises(ConcurrentModificationError) as e:
+            await consumer.rebalance(new_assignment=[])
+        assert str(e.value) == CONCURRENT
+        with pytest.raises(ConcurrentModificationError) as e:
+            await asyncio.to_thread(consumer.closed)
+        assert str(e.value) == CONCURRENT
+        consumer.wakeup()
+        release.set()
+        await asyncio.wait_for(rebalance, WAIT)
+        assert inside["assignment"] == {partition}
+        assert not consumer.closed()
+        assert consumer.assignment() == {partition}
+        assert await consumer.committed(partitions=[partition]) == {
+            partition: OffsetAndMetadata(offset=3)}
+        with pytest.raises(WakeupError):
+            await consumer.poll(timeout=0)
+        await consumer.close()
+        assert consumer.closed()
 
     asyncio.run(main())
 
