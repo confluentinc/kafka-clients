@@ -18,10 +18,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+#[cfg(test)]
 use crate::common::MetricName;
 use crate::common::metrics::stats::{Avg, CumulativeSum, Max};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records consumer poll/commit timing metrics. Mirrors Java's
 /// `KafkaConsumerMetrics implements AutoCloseable`.
@@ -35,8 +37,7 @@ use crate::consumer::internals::ConsumerUtils;
 /// `synchronized`-free measurable lambda.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics")]
 pub(crate) struct KafkaConsumerMetrics {
-    metrics: Arc<Metrics>,
-    last_poll_metric_name: MetricName,
+    inner: AbstractConsumerMetricsManager,
     time_between_poll_sensor: Arc<Sensor>,
     poll_idle_sensor: Arc<Sensor>,
     committed_sensor: Arc<Sensor>,
@@ -51,6 +52,9 @@ impl KafkaConsumerMetrics {
     /// created via `metrics.sensor(name)` (INFO default) and the last-poll
     /// gauge via `metrics.addMetric` — full Java parity, no DEBUG gating.
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
+        // Java: `this(new MetricsLedger(metrics))` → `super(metrics)` (KAFKA-19542).
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(metrics));
+        let metrics = inner.metrics();
         let metric_group_name = ConsumerUtils::CONSUMER_METRIC_GROUP;
 
         let last_poll_ms = Arc::new(AtomicI64::new(0));
@@ -68,35 +72,32 @@ impl KafkaConsumerMetrics {
                 ((now - last_poll_ms) / 1000) as f64
             }
         });
-        let last_poll_metric_name = metrics.metric_name_description_tags(
+        let last_poll_metric_name = metrics.metric_name(
             "last-poll-seconds-ago",
             metric_group_name,
             "The number of seconds since the last poll() invocation.",
-            std::collections::BTreeMap::new(),
         );
         metrics
-            .add_metric_measurable(last_poll_metric_name.clone(), Box::new(last_poll))
+            .add_metric(last_poll_metric_name, Box::new(last_poll))
             .expect("registering last-poll-seconds-ago metric");
 
         let time_between_poll_sensor = metrics.sensor("time-between-poll").expect("creating time-between-poll sensor");
         time_between_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-poll-avg",
                     metric_group_name,
                     "The average delay between invocations of poll() in milliseconds.",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(Avg::new()),
             )
             .expect("adding time-between-poll-avg");
         time_between_poll_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "time-between-poll-max",
                     metric_group_name,
                     "The max delay between invocations of poll() in milliseconds.",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(Max::new()),
             )
@@ -107,11 +108,10 @@ impl KafkaConsumerMetrics {
             .expect("creating poll-idle-ratio-avg sensor");
         poll_idle_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "poll-idle-ratio-avg",
                     metric_group_name,
-                    "The average fraction of time the consumer's poll() is idle as opposed to waiting for the user code to process records.",
-                    std::collections::BTreeMap::new(),
+                    "The average fraction of time the consumer's poll() is idle as opposed to waiting for the user code to process records."
                 ),
                 Box::new(Avg::new()),
             )
@@ -122,11 +122,10 @@ impl KafkaConsumerMetrics {
             .expect("creating commit-sync-time-ns-total sensor");
         commit_sync_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "commit-sync-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in commitSync in nanoseconds",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(CumulativeSum::new()),
             )
@@ -137,19 +136,17 @@ impl KafkaConsumerMetrics {
             .expect("creating committed-time-ns-total sensor");
         committed_sensor
             .add_metric_name(
-                metrics.metric_name_description_tags(
+                metrics.metric_name(
                     "committed-time-ns-total",
                     metric_group_name,
                     "The total time the consumer has spent in committed in nanoseconds",
-                    std::collections::BTreeMap::new(),
                 ),
                 Box::new(CumulativeSum::new()),
             )
             .expect("adding committed-time-ns-total");
 
         Self {
-            metrics,
-            last_poll_metric_name,
+            inner,
             time_between_poll_sensor,
             poll_idle_sensor,
             committed_sensor,
@@ -192,14 +189,11 @@ impl KafkaConsumerMetrics {
         self.committed_sensor.record_value(duration as f64);
     }
 
-    /// Java: `close()` (`AutoCloseable`). Removes the registered metric and the
-    /// four sensors.
+    /// Removes every sensor and metric this manager registered. Since
+    /// KAFKA-19542 Java inherits `AbstractConsumerMetricsManager.close()`
+    /// instead of removing the last-poll metric and the four sensors by name.
     pub(crate) fn close(&self) {
-        self.metrics.remove_metric(&self.last_poll_metric_name);
-        self.metrics.remove_sensor(self.time_between_poll_sensor.name());
-        self.metrics.remove_sensor(self.poll_idle_sensor.name());
-        self.metrics.remove_sensor(self.commit_sync_sensor.name());
-        self.metrics.remove_sensor(self.committed_sensor.name());
+        self.inner.close();
     }
 }
 

@@ -30,7 +30,6 @@
 //! `RebalanceMetricsManager` trait can be extracted with no API change if/when
 //! Share/Streams are translated.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -42,6 +41,7 @@ use crate::common::metrics::stats::{Avg, CumulativeCount, CumulativeSum, Max, Ra
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
 use crate::consumer::internals::SubscriptionState;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records consumer-group rebalance latency, rate, total, and failure metrics,
 /// plus the `assigned-partitions` and `last-rebalance-seconds-ago` gauges.
@@ -61,6 +61,7 @@ use crate::consumer::internals::SubscriptionState;
 /// default (`metrics.sensor` / `metricName` without an explicit level).
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.ConsumerRebalanceMetricsManager")]
 pub(crate) struct ConsumerRebalanceMetricsManager {
+    inner: AbstractConsumerMetricsManager,
     // MetricName fields visible for testing (Java: `public final`).
     #[cfg(test)]
     pub(crate) rebalance_latency_avg: MetricName,
@@ -101,59 +102,51 @@ impl ConsumerRebalanceMetricsManager {
     /// `last-rebalance-seconds-ago` gauge, and the `assigned-partitions` gauge
     /// reading `subscriptions.num_assigned_partitions()`. All INFO level.
     pub(crate) fn new(metrics: &Arc<Metrics>, subscriptions: Arc<Mutex<SubscriptionState>>) -> Self {
+        // Java: `this(new MetricsLedger(metrics), ..)` → `super(metrics)` (KAFKA-19542).
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(Arc::clone(metrics)));
+        let metrics = inner.metrics();
         let metric_group_name = format!(
             "{}{}",
             ConsumerUtils::CONSUMER_METRIC_GROUP_PREFIX,
             ConsumerUtils::COORDINATOR_METRICS_SUFFIX
         );
 
-        let rebalance_latency_avg = metrics.metric_name_description_tags(
+        let rebalance_latency_avg = metrics.metric_name(
             "rebalance-latency-avg",
             &metric_group_name,
             "The average time in ms taken for a group to complete a rebalance",
-            BTreeMap::new(),
         );
-        let rebalance_latency_max = metrics.metric_name_description_tags(
+        let rebalance_latency_max = metrics.metric_name(
             "rebalance-latency-max",
             &metric_group_name,
             "The max time in ms taken for a group to complete a rebalance",
-            BTreeMap::new(),
         );
-        let rebalance_latency_total = metrics.metric_name_description_tags(
+        let rebalance_latency_total = metrics.metric_name(
             "rebalance-latency-total",
             &metric_group_name,
             "The total number of milliseconds spent in rebalances",
-            BTreeMap::new(),
         );
-        let rebalance_total = metrics.metric_name_description_tags(
-            "rebalance-total",
-            &metric_group_name,
-            "The total number of rebalance events",
-            BTreeMap::new(),
-        );
-        let rebalance_rate_per_hour = metrics.metric_name_description_tags(
+        let rebalance_total =
+            metrics.metric_name("rebalance-total", &metric_group_name, "The total number of rebalance events");
+        let rebalance_rate_per_hour = metrics.metric_name(
             "rebalance-rate-per-hour",
             &metric_group_name,
             "The number of rebalance events per hour",
-            BTreeMap::new(),
         );
-        let failed_rebalance_total = metrics.metric_name_description_tags(
+        let failed_rebalance_total = metrics.metric_name(
             "failed-rebalance-total",
             &metric_group_name,
             "The total number of failed rebalance events",
-            BTreeMap::new(),
         );
-        let failed_rebalance_rate = metrics.metric_name_description_tags(
+        let failed_rebalance_rate = metrics.metric_name(
             "failed-rebalance-rate-per-hour",
             &metric_group_name,
             "The number of failed rebalance events per hour",
-            BTreeMap::new(),
         );
-        let assigned_partitions_count = metrics.metric_name_description_tags(
+        let assigned_partitions_count = metrics.metric_name(
             "assigned-partitions",
             &metric_group_name,
             "The number of partitions currently assigned to this consumer",
-            BTreeMap::new(),
         );
 
         // Java: `registerAssignedPartitionCount(subscriptions)` — a Measurable
@@ -169,7 +162,7 @@ impl ConsumerRebalanceMetricsManager {
             guard.num_assigned_partitions() as f64
         });
         metrics
-            .add_metric_measurable(assigned_partitions_count.clone(), Box::new(num_parts))
+            .add_metric(assigned_partitions_count.clone(), Box::new(num_parts))
             .expect("registering assigned-partitions metric");
 
         let successful_rebalance_sensor =
@@ -225,17 +218,17 @@ impl ConsumerRebalanceMetricsManager {
                 ((now - last_end) / 1000) as f64
             }
         });
-        let last_rebalance_seconds_ago = metrics.metric_name_description_tags(
+        let last_rebalance_seconds_ago = metrics.metric_name(
             "last-rebalance-seconds-ago",
             &metric_group_name,
             "The number of seconds since the last rebalance event",
-            BTreeMap::new(),
         );
         metrics
-            .add_metric_measurable(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
+            .add_metric(last_rebalance_seconds_ago.clone(), Box::new(last_rebalance))
             .expect("registering last-rebalance-seconds-ago metric");
 
         Self {
+            inner,
             #[cfg(test)]
             rebalance_latency_avg,
             #[cfg(test)]
@@ -284,6 +277,23 @@ impl ConsumerRebalanceMetricsManager {
         self.failed_rebalance_sensor.record();
     }
 
+    /// Removes every sensor and metric this manager registered. Java inherits
+    /// `AbstractConsumerMetricsManager.close()` (KAFKA-19542).
+    ///
+    /// No production caller, as in Java: `AsyncKafkaConsumer.close()` closes
+    /// neither this manager nor the request manager that owns it, so these
+    /// metrics outlive `close()` when a `group.id` is set (Java's own
+    /// `testMetricsRemovedOnClose` builds its consumer without one).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Java never closes this manager: AsyncKafkaConsumer closes only the kafka-consumer, async-consumer, fetch and rebalance-callback managers"
+        )
+    )]
+    pub(crate) fn close(&self) {
+        self.inner.close();
+    }
     /// Java: `rebalanceStarted()`. Part of the manager's public surface but,
     /// as in Java, not called from the membership state machine — only the
     /// `ConsumerRebalanceMetricsManagerTest` cases exercise it. Kept (not
@@ -593,5 +603,21 @@ mod tests {
         // Both managers' metrics are present in the one registry.
         assert!(metrics.metric(&rebalance.rebalance_latency_avg).is_some());
         assert!(metrics.metric(&callback.partition_assign_latency_avg).is_some());
+    }
+
+    /// `ConsumerRebalanceMetricsManagerTest.testCleanup`, inherited from
+    /// `AbstractConsumerMetricsManagerTest` (KAFKA-19542): the override builds
+    /// the manager over a fresh `SubscriptionState(EARLIEST)`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AbstractConsumerMetricsManagerTest#testCleanup")]
+    fn test_cleanup() {
+        crate::consumer::internals::metrics::abstract_consumer_metrics_manager::tests::test_cleanup(
+            |metrics, _group_description| {
+                let subscription_state =
+                    Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
+                let manager = ConsumerRebalanceMetricsManager::new(metrics, subscription_state);
+                Box::new(move || manager.close())
+            },
+        );
     }
 }

@@ -15,7 +15,6 @@
 //! Rebalance-listener-callback latency metrics
 //! (`org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -23,6 +22,7 @@ use crate::common::MetricName;
 use crate::common::metrics::stats::{Avg, Max};
 use crate::common::metrics::{Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
+use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
 
 /// Records the latency of the user-supplied `ConsumerRebalanceListener`
 /// callbacks (`on_partitions_revoked` / `_assigned` / `_lost`). Mirrors Java's
@@ -34,6 +34,7 @@ use crate::consumer::internals::ConsumerUtils;
 /// explicit recording level).
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager")]
 pub(crate) struct RebalanceCallbackMetricsManager {
+    inner: AbstractConsumerMetricsManager,
     // MetricName fields visible for testing (Java: package-private `final`).
     #[cfg(test)]
     pub(crate) partition_revoke_latency_avg: MetricName,
@@ -62,25 +63,26 @@ impl RebalanceCallbackMetricsManager {
     /// Java: `RebalanceCallbackMetricsManager(Metrics, String grpMetricsPrefix)`.
     /// The metric group is `{prefix}-coordinator-metrics`.
     pub(crate) fn with_prefix(metrics: &Arc<Metrics>, grp_metrics_prefix: &str) -> Self {
+        // Java: `this(new MetricsLedger(metrics), ..)` → `super(metrics)` (KAFKA-19542).
+        let inner = AbstractConsumerMetricsManager::new(MetricsLedger::new(Arc::clone(metrics)));
+        let metrics = inner.metrics();
         let metric_group_name = format!("{grp_metrics_prefix}{}", ConsumerUtils::COORDINATOR_METRICS_SUFFIX);
 
         let partition_revoke_callback_sensor = metrics
             .sensor("partition-revoked-latency")
             .expect("creating partition-revoked-latency sensor");
-        let partition_revoke_latency_avg = metrics.metric_name_description_tags(
+        let partition_revoke_latency_avg = metrics.metric_name(
             "partition-revoked-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-revoked rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_revoke_callback_sensor
             .add_metric_name(partition_revoke_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-revoked-latency-avg");
-        let partition_revoke_latency_max = metrics.metric_name_description_tags(
+        let partition_revoke_latency_max = metrics.metric_name(
             "partition-revoked-latency-max",
             &metric_group_name,
             "The max time taken for a partition-revoked rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_revoke_callback_sensor
             .add_metric_name(partition_revoke_latency_max.clone(), Box::new(Max::new()))
@@ -89,20 +91,18 @@ impl RebalanceCallbackMetricsManager {
         let partition_assign_callback_sensor = metrics
             .sensor("partition-assigned-latency")
             .expect("creating partition-assigned-latency sensor");
-        let partition_assign_latency_avg = metrics.metric_name_description_tags(
+        let partition_assign_latency_avg = metrics.metric_name(
             "partition-assigned-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-assigned rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_assign_callback_sensor
             .add_metric_name(partition_assign_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-assigned-latency-avg");
-        let partition_assign_latency_max = metrics.metric_name_description_tags(
+        let partition_assign_latency_max = metrics.metric_name(
             "partition-assigned-latency-max",
             &metric_group_name,
             "The max time taken for a partition-assigned rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_assign_callback_sensor
             .add_metric_name(partition_assign_latency_max.clone(), Box::new(Max::new()))
@@ -111,26 +111,25 @@ impl RebalanceCallbackMetricsManager {
         let partition_lost_callback_sensor = metrics
             .sensor("partition-lost-latency")
             .expect("creating partition-lost-latency sensor");
-        let partition_lost_latency_avg = metrics.metric_name_description_tags(
+        let partition_lost_latency_avg = metrics.metric_name(
             "partition-lost-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-lost rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_lost_callback_sensor
             .add_metric_name(partition_lost_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-lost-latency-avg");
-        let partition_lost_latency_max = metrics.metric_name_description_tags(
+        let partition_lost_latency_max = metrics.metric_name(
             "partition-lost-latency-max",
             &metric_group_name,
             "The max time taken for a partition-lost rebalance listener callback",
-            BTreeMap::new(),
         );
         partition_lost_callback_sensor
             .add_metric_name(partition_lost_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-lost-latency-max");
 
         Self {
+            inner,
             #[cfg(test)]
             partition_revoke_latency_avg,
             #[cfg(test)]
@@ -162,6 +161,12 @@ impl RebalanceCallbackMetricsManager {
     /// Java: `recordPartitionsLostLatency(long latencyMs)`.
     pub(crate) fn record_partitions_lost_latency(&self, latency_ms: i64) {
         self.partition_lost_callback_sensor.record_value(latency_ms as f64);
+    }
+
+    /// Removes every sensor and metric this manager registered. Java inherits
+    /// `AbstractConsumerMetricsManager.close()` (KAFKA-19542).
+    pub(crate) fn close(&self) {
+        self.inner.close();
     }
 }
 
@@ -201,5 +206,37 @@ mod tests {
         assert_eq!(100.0, value(&metrics, &manager.partition_assign_latency_max));
         assert_eq!(102.0, value(&metrics, &manager.partition_lost_latency_avg));
         assert_eq!(102.0, value(&metrics, &manager.partition_lost_latency_max));
+    }
+
+    /// `RebalanceCallbackMetricsManagerTest.testCleanup`, inherited from
+    /// `AbstractConsumerMetricsManagerTest` (KAFKA-19542), translated as Java
+    /// wrote it: the Java override returns
+    /// `new HeartbeatMetricsManager(metrics, groupDescription)`, not a
+    /// `RebalanceCallbackMetricsManager` (a copy of `HeartbeatMetricsManagerTest`'s override).
+    /// [`test_cleanup_rebalance_callback_metrics_manager`] covers this class.
+    #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.metrics.AbstractConsumerMetricsManagerTest#testCleanup")]
+    fn test_cleanup() {
+        crate::consumer::internals::metrics::abstract_consumer_metrics_manager::tests::test_cleanup(
+            |metrics, group_description| {
+                let manager = crate::consumer::internals::metrics::HeartbeatMetricsManager::with_prefix(
+                    metrics,
+                    group_description,
+                );
+                Box::new(move || manager.close())
+            },
+        );
+    }
+
+    /// Rust-only companion of [`test_cleanup`]: the same check over this
+    /// class, which Java's override does not reach.
+    #[test]
+    fn test_cleanup_rebalance_callback_metrics_manager() {
+        crate::consumer::internals::metrics::abstract_consumer_metrics_manager::tests::test_cleanup(
+            |metrics, group_description| {
+                let manager = RebalanceCallbackMetricsManager::with_prefix(metrics, group_description);
+                Box::new(move || manager.close())
+            },
+        );
     }
 }
