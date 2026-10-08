@@ -656,8 +656,10 @@ cargo xtask chaos --workload producer:rust --workload consumer:c
 # Async Python consumer, async commits
 cargo xtask chaos --workload producer:rust --workload consumer:python-async --commit async
 
-# Keep broker 2 permanently down while rolling the rest, reproducibly
-cargo xtask chaos --leave-broker-down 2 --seed 7 --cycles 5
+# Keep broker 2 permanently down while rolling the rest, reproducibly. Every
+# broker is also a controller voter, so a roll with one broker held down needs
+# 5 brokers to keep a quorum (3 are rejected before the cluster starts).
+cargo xtask chaos --brokers 5 --leave-broker-down 2 --seed 7 --cycles 5
 
 # Run the named smoke test
 cargo xtask chaos --scenario simple_flow_clean_broker_roll
@@ -745,11 +747,21 @@ executes every scenario at every message size and every security protocol, one
 run at a time. An optional fourth column limits a scenario to the protocols it
 lists, for example `| plaintext`. The runner adds
 `--security-protocol P --msg-size S --rps R --reports` to each run's flags.
-[`matrix/rust-client.txt`](matrix/rust-client.txt) is the Rust client matrix.
+No matrix ships with the repository: write one for the scenarios you want to
+run, for example `my-matrix.txt`:
 
 ```
-cargo xtask chaos-matrix --matrix tests/chaos/matrix/rust-client.txt
+# Rolling restarts, every protocol; topic recreation, PLAINTEXT only.
+1 | Rolling restart (unclean stop) | --brokers 5 --partitions 6 --cycles 10 --unclean --up-wait-s 120 --drain-s 60
+2 | Topic recreate, two topics | --num-topics 2 --topic-recreate --allow-multi-topic-recreate --drain-s 180 | plaintext
 ```
+
+```
+cargo xtask chaos-matrix --matrix my-matrix.txt
+```
+
+Check a new matrix with `--check-only` first: it validates every run's
+configuration without starting a cluster.
 
 Flags and their defaults:
 
