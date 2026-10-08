@@ -218,7 +218,7 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
 /// `S` and `H` are Rust-side injection parameters with no counterpart in
 /// Java — `NetworkClient.java` is not generic — and
 /// [`NetworkClient::parse_response`] (Java's `public static
-/// NetworkClient.parseResponse`, `NetworkClient.java:824`) reads neither, but
+/// NetworkClient.parseResponse`, `NetworkClient.java:917`) reads neither, but
 /// Rust still cannot infer them at a call site (E0283).
 pub(crate) type NetworkClientStatics = NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>;
 
@@ -227,7 +227,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// into the classes the rest of the client dispatches on.
     ///
     /// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
-    /// RequestHeader)` (`NetworkClient.java:824-840`), whose whole body is two
+    /// RequestHeader)` (`NetworkClient.java:917-933`), whose whole body is two
     /// `catch` clauses around `AbstractResponse.parseResponse`:
     ///
     ///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
@@ -674,7 +674,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 Err(e) => {
                     // Java propagates the `UnsupportedVersionException` object into
                     // both the `ClientResponse` and `handleFailedRequest`
-                    // (`NetworkClient.java:588-595`), so the caller sees
+                    // (`NetworkClient.java:653-660`), so the caller sees
                     // `NodeApiVersions.latestUsableVersion`'s diagnostic — which API,
                     // which range was asked for, what the broker supports. The bare
                     // `message()` is carried (not `Display`, which prefixes the class
@@ -731,8 +731,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         //
         // Java wraps **both** steps in one `try`: `NetworkClient.send` catches
         // `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-        // (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
-        // at `:608` — inside that same `try`. Serialization is a second place the
+        // (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
+        // at `:673` — inside that same `try`. Serialization is a second place the
         // exception is raised, because the generated `write` refuses to encode a
         // non-default field the chosen version cannot carry
         // (`FieldSpec.generateNonIgnorableFieldCheck`). Both failures must therefore
@@ -773,7 +773,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// aborted send, instead of putting it on the wire.
     ///
     /// This is the body of Java's `catch (UnsupportedVersionException)` in
-    /// `NetworkClient.send` (`NetworkClient.java:583-597`), shared by the two failures
+    /// `NetworkClient.send` (`NetworkClient.java:648-663`), shared by the two failures
     /// that `try` covers: `builder.build(version)` and `request.toSend(header)`.
     fn abort_send_with_unsupported_version(
         &mut self,
@@ -783,7 +783,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         error: &std::io::Error,
     ) {
         // Java propagates the `UnsupportedVersionException` the builder
-        // threw (`NetworkClient.java:588-595`), so the builder's own
+        // threw (`NetworkClient.java:653-660`), so the builder's own
         // diagnostic, and its class, is what the caller reads. A builder
         // carries the error object inside the `io::Error`
         // (`UnsupportedVersionError::into_io_error`); a serialize failure is a
@@ -793,7 +793,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         // `Error`'s `Display` added its own (finding 232).
         let version_mismatch = UnsupportedVersionError::from_io_error(error);
         // Java builds the response header at `builder.latestAllowedVersion()`, not at
-        // the version that failed (`NetworkClient.java:589`).
+        // the version that failed (`NetworkClient.java:653`).
         let header = client_request
             .make_header(client_request.request_builder().latest_allowed_version())
             .expect("Failed to create header");
@@ -919,7 +919,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
                 // Java calls the static `parseResponse` here, not
                 // `AbstractResponse.parseResponse` directly
-                // (`NetworkClient.java:999`), so the two `catch` clauses apply.
+                // (`NetworkClient.java:1092`), so the two `catch` clauses apply.
                 match Self::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
                         // Record the throttle time of EVERY response (Java
@@ -1248,7 +1248,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             channel_state::State::AuthenticationFailed => {
                 // Java: `AuthenticationException exception = disconnectState.exception();
                 // connectionStates.authenticationFailed(nodeId, now, exception)`
-                // (`NetworkClient.java:887-888`) — the object, so the subclass the
+                // (`NetworkClient.java:980-981`) — the object, so the subclass the
                 // channel raised (`SaslAuthenticationException` vs
                 // `SslAuthenticationException`) survives all the way to
                 // `client.authenticationException(node)`. `ChannelState` only
@@ -1298,7 +1298,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             node_id,
             // Java passes `disconnectState.exception()` — the object itself, typed
             // `AuthenticationException` and non-null only in the
-            // AUTHENTICATION_FAILED state (`NetworkClient.java:906`,
+            // AUTHENTICATION_FAILED state (`NetworkClient.java:999`,
             // `ChannelState.java:76`), which `DefaultMetadataUpdater` plants with
             // `metadata.fatalError(e)` and `maybeThrowAnyException()` rethrows.
             // `ChannelState` carries that typed error, so it is forwarded
@@ -1944,7 +1944,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn authentication_error(&self, node: &crate::common::Node) -> Option<Error> {
         // Java: `return connectionStates.authenticationException(node.idString())`
-        // (`NetworkClient.java:506-507`) — the object, so the subclass reaches the
+        // (`NetworkClient.java:571-572`) — the object, so the subclass reaches the
         // caller.
         self.connection_states.authentication_error(node.id_string()).cloned()
     }
@@ -3096,8 +3096,8 @@ mod tests {
     ///
     /// Java covers both with a single `try`: `NetworkClient.send` catches
     /// `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-    /// (`NetworkClient.java:582-583`), and `doSend` calls `request.toSend(header)`
-    /// inside it at `:608`. The serialize half became reachable when the generator
+    /// (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
+    /// inside it at `:673`. The serialize half became reachable when the generator
     /// gained Java's non-default-at-unsupported-version guard (PLAN §9.1); before
     /// that fix this call site was an `.expect(..)`, so the whole class of condition
     /// would have panicked the I/O task instead of taking the path the callers'
@@ -4124,8 +4124,8 @@ mod tests {
     /// **object** from the channel to the metadata layer —
     /// `processDisconnection` calls
     /// `metadataUpdater.handleServerDisconnect(now, nodeId, Optional.ofNullable(disconnectState.exception()))`
-    /// (`NetworkClient.java:906`, parameter typed
-    /// `Optional<AuthenticationException>` at `:1245`), the updater plants it with
+    /// (`NetworkClient.java:999`, parameter typed
+    /// `Optional<AuthenticationException>` at `:1487`), the updater plants it with
     /// `metadata.fatalError(e)`, and `Metadata.maybeThrowAnyException()` rethrows
     /// that same object. So the application catches a real
     /// `AuthenticationException`.
@@ -4260,7 +4260,7 @@ mod tests {
     /// `UnsupportedVersionException` object built by
     /// `NodeApiVersions.latestUsableVersion` (`NodeApiVersions.java:162-164`)
     /// into the `ClientResponse` and into `handleFailedRequest`
-    /// (`NetworkClient.java:588-595`), so the caller learns which API, which
+    /// (`NetworkClient.java:653-660`), so the caller learns which API, which
     /// range was asked for, and what the broker supports. The literal string
     /// `"UnsupportedVersionError"` was substituted instead.
     #[tokio::test]
@@ -4319,7 +4319,7 @@ mod tests {
     /// Regression for finding 232, second arm: the request builder's own
     /// diagnostic must reach the caller unprefixed. Java propagates the
     /// `UnsupportedVersionException` the builder threw
-    /// (`NetworkClient.java:588-595`); prefixing it with the class name here
+    /// (`NetworkClient.java:653-660`); prefixing it with the class name here
     /// rendered `"UnsupportedVersionError: UnsupportedVersionError: .."` once
     /// `Error`'s `Display` added its own.
     #[tokio::test]
@@ -4977,7 +4977,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // `parseResponse`'s two catch clauses (`NetworkClient.java:824-840`).
+    // `parseResponse`'s two catch clauses (`NetworkClient.java:917-933`).
     // ---------------------------------------------------------------------------
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.

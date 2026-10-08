@@ -966,7 +966,7 @@ impl<K, V> KafkaProducer<K, V> {
             true, // discover_broker_versions
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:306-307`) reads
             // both from the config; the default strategy is `rebootstrap`.
             config.metadata_recovery_rebootstrap_trigger_ms,
             config.metadata_recovery_strategy,

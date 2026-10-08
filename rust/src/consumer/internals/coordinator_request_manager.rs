@@ -239,7 +239,7 @@ impl CoordinatorRequestManager {
     /// one-minute boundary since the last warning).
     ///
     /// Java: the inline `log.warn(...)` inside
-    /// `markCoordinatorUnknown(String, long)` (CoordinatorRequestManager.java:177-179).
+    /// `markCoordinatorUnknown(String, long)` (CoordinatorRequestManager.java:184-186).
     /// Factored out so the exact formatted message (including the
     /// `durationOfOngoingDisconnectMs` value) can be asserted directly —
     /// the Rust equivalent of Java's `LogCaptureAppender` regex on
@@ -302,7 +302,7 @@ impl CoordinatorRequestManager {
         current_time_ms: i64,
         coordinator: &crate::find_coordinator_response_data::Coordinator,
     ) {
-        // `CoordinatorRequestManager.java:184-195` (KAFKA-20246 3/N): the
+        // `CoordinatorRequestManager.java:191-201` (KAFKA-20246 3/N): the
         // coordinator keeps the broker's real node id, so the ApiVersions
         // cluster check (KIP-1242) names the right broker, and gets a `+<id>`
         // connection id, so the network layer still keeps a connection to it
@@ -373,7 +373,7 @@ impl CoordinatorRequestManager {
     /// [`Self::on_failed_response`] — translating Java's
     /// `unsent.whenComplete((clientResponse, throwable) -> { ... })`
     /// callback (Java: `makeFindCoordinatorRequest(long)`, lines
-    /// 113-132).
+    /// 120-139).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#makeFindCoordinatorRequest")]
     fn make_find_coordinator_request(
         inner: &Arc<CoordinatorRequestManagerInner>,
@@ -397,7 +397,7 @@ impl CoordinatorRequestManager {
         // task would never exit.
         let completion_time_ms = unsent.handler().completion_time_ms_cell();
         tokio::spawn(async move {
-            // Java: `CoordinatorRequestManager.java:124` —
+            // Java: `CoordinatorRequestManager.java:131` —
             // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
             // of the `whenComplete` lambda, before branching on success
             // vs. failure. Mirror that here: clear the fatal error
@@ -1189,7 +1189,7 @@ mod tests {
     }
 
     /// Phase 12.5 regression — fatal-error clearing on the failure
-    /// path. Java's `CoordinatorRequestManager.java:124`
+    /// path. Java's `CoordinatorRequestManager.java:131`
     /// (`getAndClearFatalError()`) runs UNCONDITIONALLY at the top of
     /// the `whenComplete` lambda, before branching on success vs.
     /// failure. A stale `GroupAuthorizationFailed` from a prior

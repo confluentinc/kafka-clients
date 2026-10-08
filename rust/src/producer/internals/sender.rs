@@ -992,8 +992,9 @@ impl<C: KafkaClient> Sender<C> {
 
         // Java leaks these buffers, and this port declines to.
         //
-        // `NetworkClient.close()` is `selector.close(); metadataUpdater.close();
-        // telemetrySender.close();` (`NetworkClient.java:736-746`) — it never walks
+        // `NetworkClient.close()` is the KIP-909 bootstrap-resolver shutdown, then
+        // `selector.close(); metadataUpdater.close(); telemetrySender.close();`
+        // (`NetworkClient.java:802-814`) — it never walks
         // `inFlightRequests` and never calls `completeResponses`. `Selector.close()`
         // closes each channel with `CloseMode.DISCARD_NO_NOTIFY`
         // (`Selector.java:886-892`), defined at `:96` as "discard any outstanding
@@ -1192,7 +1193,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// # Failures are isolated per response
     ///
-    /// This is `NetworkClient.completeResponses` (`NetworkClient.java:666-674`),
+    /// This is `NetworkClient.completeResponses` (`NetworkClient.java:732-740`),
     /// which wraps each `response.onComplete()` in its own `try`/`catch`:
     ///
     /// ```java
@@ -1243,7 +1244,7 @@ impl<C: KafkaClient> Sender<C> {
     /// re-insert an idempotent batch in sequence order. Java's
     /// `IllegalStateException` from `insertInSequenceOrder` escapes the completion
     /// callback but is caught **inside** `client.poll`, by
-    /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) — *not* by
+    /// `NetworkClient.completeResponses` (`NetworkClient.java:732-740`) — *not* by
     /// `Sender.run`. [`Self::handle_client_responses`] is that boundary and logs the
     /// error there, so the remaining responses of the same poll are still dispatched.
     fn handle_produce_response_for(&mut self, response: &ClientResponse, now: i64) -> Result<(), Error> {
@@ -6781,7 +6782,7 @@ mod tests {
         }
     }
 
-    /// `NetworkClient.completeResponses` (`NetworkClient.java:666-674`) catches and
+    /// `NetworkClient.completeResponses` (`NetworkClient.java:732-740`) catches and
     /// logs per response, so one failing completion must not abandon the rest of the
     /// poll's responses.
     ///

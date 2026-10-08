@@ -1992,7 +1992,7 @@ where
             true, // discover_broker_versions — mirrors Java
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:306-307`) reads
             // both from the config; the default strategy is `rebootstrap`.
             // `ConsumerConfig::new` already rejected any name other than
             // `none` / `rebootstrap`, so `for_name` cannot fail here.

@@ -65,7 +65,7 @@ impl UnsupportedVersionError {
     /// kind, through [`Self::from_io_error`].
     ///
     /// Java's builders throw the exception object and `NetworkClient.send`
-    /// catches it whole (`NetworkClient.java:583-597`); the Rust builder trait
+    /// catches it whole (`NetworkClient.java:648-663`); the Rust builder trait
     /// reports through `io::Error`, so the object rides inside it.
     pub(crate) fn into_io_error(self) -> io::Error {
         io::Error::new(io::ErrorKind::Unsupported, self)

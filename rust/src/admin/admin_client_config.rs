@@ -129,11 +129,11 @@ impl AdminClientConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:170`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::BOOTSTRAP_CONTROLLERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:162-167`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:173-178`).
                     bootstrap_controllers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
@@ -609,7 +609,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`): an empty
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:170`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix).
     #[test]

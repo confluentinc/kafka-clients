@@ -45,7 +45,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// Process-wide counter for deriving a default `client.id`.
 ///
 /// Corresponds to Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`
-/// (`ConsumerConfig.java:393`), which starts at 1. Crate-level (not per-config)
+/// (`ConsumerConfig.java:418`), which starts at 1. Crate-level (not per-config)
 /// to match Java's static scope, so successive consumers in one process get
 /// distinct ids.
 static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
@@ -615,7 +615,7 @@ impl ConsumerConfig {
         // and the string-enum keys.
         let mut config = Self::default();
 
-        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so
+        // `bootstrap.servers` is defined with `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so
         // `ConfigDef.parseValue` rejects a missing key at parse time
         // (`ConfigDef.java:537`). It is the first key `ConfigDef` defines, so this
         // check runs before any other value is parsed, as in Java.
@@ -629,7 +629,7 @@ impl ConsumerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`).
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
@@ -708,7 +708,7 @@ impl ConsumerConfig {
                 },
                 Self::PARTITION_ASSIGNMENT_STRATEGY_CONFIG => {
                     // Accepted silently per scope §20.
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:449`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:480`).
                     config.partition_assignment_strategy = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
@@ -787,7 +787,7 @@ impl ConsumerConfig {
                     config.metadata_recovery_strategy = value.clone();
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    // Java `ConsumerConfig` (`:686-689`):
+                    // Java `ConsumerConfig` (`:717-721`):
                     // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
                     if v < 0 {
@@ -881,7 +881,7 @@ impl ConsumerConfig {
                     SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
-                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:707`).
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java:743`).
                     config.config_providers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 _ => {
@@ -890,7 +890,7 @@ impl ConsumerConfig {
             }
         }
 
-        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:717`),
+        // Java runs this from `postProcessParsedConfig` (`ConsumerConfig.java:753`),
         // i.e. after every key has been parsed.
         config.maybe_override_client_id()?;
 
@@ -903,7 +903,7 @@ impl ConsumerConfig {
     /// Derives `client.id` when the user did not set one.
     ///
     /// Translated from `ConsumerConfig.maybeOverrideClientId`
-    /// (`ConsumerConfig.java:723-735`). The derived form is
+    /// (`ConsumerConfig.java:776-788`). The derived form is
     /// `consumer-<group.id>-<group.instance.id>` for a static member, otherwise
     /// `consumer-<group.id>-<n>` from a process-wide counter starting at 1 —
     /// matching Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`. When a
@@ -1040,7 +1040,7 @@ mod tests {
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
-    /// `ConsumerConfig.java:686-689`): 0 is accepted, -1 is rejected with
+    /// `ConsumerConfig.java:717-721`): 0 is accepted, -1 is rejected with
     /// Java's `ConfigDef.Range.atLeast` message.
     #[test]
     fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
@@ -1183,7 +1183,7 @@ mod tests {
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:416-418`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -1376,7 +1376,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]

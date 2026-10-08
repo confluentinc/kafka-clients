@@ -869,7 +869,7 @@ impl ConcreteResponse {
             // Java throws `CorrelationIdMismatchException`
             // (`AbstractResponse.java:105`), which `NetworkClient.parseResponse`
             // catches **by type** and either converts to a `SchemaException` or
-            // rethrows (`NetworkClient.java:829-838`). An untyped
+            // rethrows (`NetworkClient.java:922-931`). An untyped
             // `ErrorKind::InvalidData` made that dispatch unexpressible, so the
             // typed value travels in the `io::Error` payload — the crate's
             // documented mechanism for a Java exception class crossing an
