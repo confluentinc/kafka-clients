@@ -102,13 +102,6 @@ impl SaslAuthenticateResponse {
         // Not supported by the response schema
     }
 
-    /// Returns whether the client should throttle upon receiving this response.
-    ///
-    /// Always returns `false` for SASL authenticate responses.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
     /// Parses a `SaslAuthenticateResponse` from a readable buffer at the given version.
     ///
     /// # Errors
@@ -191,17 +184,6 @@ mod tests {
         let data = SaslAuthenticateResponseData::new();
         let response = SaslAuthenticateResponse::new(data);
         assert_eq!(response.throttle_time_ms(), AbstractResponse::DEFAULT_THROTTLE_TIME);
-    }
-
-    #[test]
-    fn test_should_client_throttle() {
-        let data = SaslAuthenticateResponseData::new();
-        let response = SaslAuthenticateResponse::new(data);
-        for version in SaslAuthenticateResponseData::LOWEST_SUPPORTED_VERSION
-            ..=SaslAuthenticateResponseData::HIGHEST_SUPPORTED_VERSION
-        {
-            assert!(!response.should_client_throttle(version));
-        }
     }
 
     /// Translated from `RequestResponseTest.testSaslAuthenticateRequestResponseToStringMasksSensitiveData`

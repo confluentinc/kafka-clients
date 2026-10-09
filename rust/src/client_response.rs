@@ -20,6 +20,7 @@
 use std::fmt;
 
 use crate::common::Error;
+use crate::common::errors::UnsupportedVersionError;
 use crate::common::requests::{ConcreteResponse, RequestHeader};
 
 use super::RequestCompletionHandler;
@@ -44,11 +45,14 @@ pub struct ClientResponse {
     disconnected: bool,
     /// Whether the client was disconnected because of a timeout.
     timed_out: bool,
-    /// Error message if there was a version mismatch that prevented sending the request.
+    /// The error if there was a version mismatch that prevented sending the request.
     ///
-    /// In Java this is an `UnsupportedVersionException`. We represent it as an
-    /// optional error string since `Error` is the primary error type.
-    version_mismatch: Option<String>,
+    /// Java's `UnsupportedVersionException versionMismatch` — the object, so the
+    /// crate-private subclass the request builder threw
+    /// (`UnsupportedProtocolFieldException`, Kafka 4.4) survives to
+    /// `ConsumerHeartbeatRequestManager.handleSpecificFailure`, which tells it
+    /// apart from its parent.
+    version_mismatch: Option<UnsupportedVersionError>,
     /// The authentication error, if there was one.
     ///
     /// Java's `AuthenticationException authenticationException`
@@ -76,7 +80,7 @@ impl ClientResponse {
     /// * `created_time_ms` - The unix timestamp when the corresponding request was created
     /// * `received_time_ms` - The unix timestamp when this response was received
     /// * `disconnected` - Whether the client disconnected before fully reading a response
-    /// * `version_mismatch` - Error message if there was a version mismatch
+    /// * `version_mismatch` - The error if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
     #[expect(clippy::too_many_arguments)]
@@ -88,7 +92,7 @@ impl ClientResponse {
         created_time_ms: i64,
         received_time_ms: i64,
         disconnected: bool,
-        version_mismatch: Option<String>,
+        version_mismatch: Option<UnsupportedVersionError>,
         authentication_error: Option<Error>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
@@ -123,7 +127,7 @@ impl ClientResponse {
     /// * `disconnected` - Whether the client disconnected before fully reading a response
     /// * `timed_out` - Whether the client was disconnected because of a timeout;
     ///   when `true`, `disconnected` must also be `true`
-    /// * `version_mismatch` - Error message if there was a version mismatch
+    /// * `version_mismatch` - The error if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
     #[expect(clippy::too_many_arguments)]
@@ -136,7 +140,7 @@ impl ClientResponse {
         received_time_ms: i64,
         disconnected: bool,
         timed_out: bool,
-        version_mismatch: Option<String>,
+        version_mismatch: Option<UnsupportedVersionError>,
         authentication_error: Option<Error>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
@@ -177,10 +181,10 @@ impl ClientResponse {
         self.timed_out
     }
 
-    /// Returns the version mismatch error message, if any.
+    /// Returns the version mismatch error, if any.
     #[doc(alias = "org.apache.kafka.clients.ClientResponse#versionMismatch")]
-    pub fn version_mismatch(&self) -> Option<&str> {
-        self.version_mismatch.as_deref()
+    pub fn version_mismatch(&self) -> Option<&UnsupportedVersionError> {
+        self.version_mismatch.as_ref()
     }
 
     /// Returns the authentication error, if any. Java's

@@ -19,7 +19,7 @@
 //! thin subclass of [`DeleteGroupsHandler`](super::delete_groups_handler) that
 //! only overrides `apiName()` / `displayName()`.
 
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 
 use super::DeleteGroupsHandler;
 

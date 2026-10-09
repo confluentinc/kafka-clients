@@ -131,6 +131,68 @@ def test_rebalance_without_a_listener_is_a_no_op_but_reassigns():
         assert c.assignment() == {TopicPartition("t", 5)}
 
 
+# -- MockConsumer.lose_partitions (Java losePartitions, KAFKA-20575) ---------
+
+def test_lose_partitions_calls_on_partitions_lost():
+    # Java: testLosePartitionsCallsOnPartitionsLost.
+    with MockConsumer("earliest") as c:
+        listener = RecordingListenerWithLost()
+        c.subscribe(["test"], listener)
+        c.rebalance([TopicPartition("test", 0), TopicPartition("test", 1)])
+        listener.events.clear()
+        c.lose_partitions([TopicPartition("test", 0)])
+        assert listener.events == [("lost", [("test", 0)])]
+
+
+def test_lose_partitions_without_on_partitions_lost_delegates_to_revoked():
+    # Java's default ConsumerRebalanceListener.onPartitionsLost.
+    with MockConsumer("earliest") as c:
+        listener = RecordingListener()
+        c.subscribe(["test"], listener)
+        c.rebalance([TopicPartition("test", 0)])
+        listener.events.clear()
+        c.lose_partitions([TopicPartition("test", 0)])
+        assert listener.events == [("revoked", [("test", 0)])]
+
+
+def test_lose_partitions_removes_from_assignment():
+    # Java: testLosePartitionsRemovesFromAssignment.
+    with MockConsumer("earliest") as c:
+        c.subscribe(["test"])
+        c.rebalance([TopicPartition("test", 0), TopicPartition("test", 1)])
+        c.lose_partitions([TopicPartition("test", 0)])
+        assert c.assignment() == {TopicPartition("test", 1)}
+
+
+def test_lose_partitions_raises_if_not_assigned():
+    # Java: testLosePartitionsThrowsIfNotAssigned.
+    with MockConsumer("earliest") as c:
+        c.subscribe(["test"])
+        c.rebalance([TopicPartition("test", 0)])
+        with pytest.raises(KafkaError) as exc_info:
+            c.lose_partitions([TopicPartition("test", 1)])
+        assert ("Cannot lose partitions that are not currently assigned: [test-1]"
+                in str(exc_info.value))
+        assert c.assignment() == {TopicPartition("test", 0)}
+
+
+def test_lose_partitions_clears_only_lost_records():
+    # Java: testLosePartitionsClearsOnlyLostRecords.
+    with MockConsumer("earliest") as c:
+        c.subscribe(["test"])
+        c.rebalance([TopicPartition("test", 0), TopicPartition("test", 1)])
+        c.update_beginning_offsets("test", 0, 0)
+        c.update_beginning_offsets("test", 1, 0)
+        c.seek(TopicPartition("test", 0), 0)
+        c.seek(TopicPartition("test", 1), 0)
+        c.add_record("test", 0, 0)
+        c.add_record("test", 1, 0)
+        c.lose_partitions([TopicPartition("test", 0)])
+        records = list(c.poll(0.001))
+        assert len(records) == 1
+        assert (records[0].topic, records[0].partition) == ("test", 1)
+
+
 def test_listener_missing_a_required_method_is_rejected():
     class Partial:
         def on_partitions_revoked(self, partitions):

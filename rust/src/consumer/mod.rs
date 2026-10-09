@@ -137,11 +137,33 @@ where
 {
     // ── State reads (sync — Java: non-blocking accessors) ──
 
-    /// Translates Java's `Set<TopicPartition> assignment()`.
+    /// Get the set of partitions currently assigned to this consumer. If
+    /// subscription happened by directly assigning partitions using
+    /// [`Self::assign`] then this will simply return the same partitions that
+    /// were assigned. If topic subscription was used, then this will give the
+    /// set of topic partitions currently assigned to the consumer (which may
+    /// be none if the assignment hasn't happened yet, or the partitions are in
+    /// the process of getting reassigned).
+    ///
+    /// The returned set is a snapshot of the current assignment at the time of
+    /// the call. It will not be updated if the assignment changes afterward.
+    ///
+    /// Translates Java's `Set<TopicPartition> assignment()` (javadoc from
+    /// `KafkaConsumer`, KAFKA-20341).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assignment")]
     fn assignment(&self) -> HashSet<TopicPartition>;
 
-    /// Translates Java's `Set<String> subscription()`.
+    /// Get the current subscription. Will return the same topics used in the
+    /// most recent call to [`Self::subscribe_with_topics`] or
+    /// [`Self::subscribe_with_topics_listener`], or an empty set if no such
+    /// call has been made.
+    ///
+    /// The returned set is a snapshot of the current subscription at the time
+    /// of the call. It will not be updated if the subscription changes
+    /// afterward.
+    ///
+    /// Translates Java's `Set<String> subscription()` (javadoc from
+    /// `KafkaConsumer`, KAFKA-20341).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscription")]
     fn subscription(&self) -> HashSet<String>;
 
@@ -177,7 +199,12 @@ where
     ///
     /// Sync — Java's `metrics()` does not block. The returned map is a
     /// point-in-time snapshot taken under the registry lock (a cold,
-    /// monitoring-frequency call), not a live view.
+    /// monitoring-frequency call), not a live view: metrics registered or
+    /// removed afterwards are not reflected in it, so call again to observe
+    /// them. Each [`KafkaMetric`] in it is the registry's own shared entry, so
+    /// reading its value returns the current value. (Java's javadoc,
+    /// KAFKA-20341, documents its map as an unmodifiable *live* view of the
+    /// metrics; this is the one difference.)
     ///
     /// This trait method has **no default**: it is in Java's `Consumer`
     /// interface, so every implementation provides it, and adding it without
@@ -201,7 +228,7 @@ where
     // `subscribe(SubscriptionPattern)` sends the pattern to the broker for
     // **server-side** RE2/J evaluation
     // (`TopicRe2JPatternSubscriptionChangeEvent`) —
-    // `AsyncKafkaConsumer.java:2107,2131`.
+    // `AsyncKafkaConsumer.java:2246,2268`.
     //
     // **Only the `SubscriptionPattern` form is translated.** The two
     // `subscribe(Pattern ...)` overloads are deliberately NOT implemented in
@@ -252,19 +279,42 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assign")]
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error>;
 
-    /// Translates Java's `void unsubscribe()`.
+    /// Unsubscribe from topics currently subscribed with
+    /// [`Self::subscribe_with_topics`] or [`Self::subscribe_with_pattern`].
+    /// This also clears any partitions directly assigned through
+    /// [`Self::assign`].
+    ///
+    /// **Note:** Unlike [`Self::close`], this method does not commit the
+    /// pending offsets before unsubscribing, even if `enable.auto.commit` is
+    /// enabled. To avoid duplicate processing upon re-joining, it is
+    /// recommended to explicitly call [`Self::commit_sync`] before invoking this
+    /// method.
+    ///
+    /// Translates Java's `void unsubscribe()` (javadoc from `KafkaConsumer`,
+    /// KAFKA-20119).
+    ///
+    /// # Errors
+    ///
+    /// Returns a Kafka error for any other unrecoverable errors (e.g. rebalance
+    /// callback errors).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#unsubscribe")]
     async fn unsubscribe(&mut self) -> Result<(), Error>;
 
     // ── Poll ──
 
     /// Translates Java's `ConsumerRecords<K, V> poll(Duration timeout)`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
     async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error>;
 
     // ── Commit ──
 
     /// Translates Java's `void commitSync()`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
     async fn commit_sync(&mut self) -> Result<(), Error>;
 
@@ -348,6 +398,9 @@ where
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
     async fn committed(
         &mut self,
@@ -367,11 +420,26 @@ where
     // ── Metadata (async — may fetch from broker) ──
 
     /// Translates Java's `List<PartitionInfo> partitionsFor(String topic)`.
+    ///
+    /// Returns the list of partitions, which will be empty when the given topic
+    /// is not found. Note: when both the broker config
+    /// `auto.create.topics.enable` and the consumer config
+    /// `allow.auto.create.topics` are `true`, this method may return an empty
+    /// list even though the topic is being auto-created in the background.
+    /// Callers should not assume the topic does not exist based solely on an
+    /// empty result (javadoc from `KafkaConsumer`, KAFKA-20089).
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
     async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Translates Java's
     /// `List<PartitionInfo> partitionsFor(String topic, Duration)`.
+    ///
+    /// Returns the list of partitions, which will be empty when the given topic
+    /// is not found; see [`Self::partitions_for`] for the auto-topic-creation
+    /// caveat on an empty result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
     async fn partitions_for_with_timeout(
         &mut self,
@@ -381,6 +449,9 @@ where
 
     /// Translates Java's
     /// `Map<String, List<PartitionInfo>> listTopics()`.
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#listTopics")]
     async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
@@ -405,6 +476,9 @@ where
     /// than present-with-null. Callers porting Java code that iterates
     /// `result.keySet()` expecting every queried key back must instead treat
     /// an absent key as "no offset". See [`OffsetAndTimestamp`].
+    ///
+    /// Returns [`Error::BootstrapResolution`] if DNS resolution of the bootstrap
+    /// servers fails within `bootstrap.resolve.timeout.ms` (KIP-909).
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
     async fn offsets_for_times(
         &mut self,
@@ -458,11 +532,38 @@ where
 
     // ── Pause / resume (async — Java: addAndGet on PausePartitions / ResumePartitions) ──
 
-    /// Translates Java's `void pause(Collection<TopicPartition>)`.
+    /// Suspend fetching from the requested partitions. Future calls to
+    /// [`Self::poll`] will not return any records from these partitions until
+    /// they have been resumed using [`Self::resume`]. Note that this method
+    /// does not affect partition subscription. In particular, it does not cause
+    /// a group rebalance when automatic assignment is used.
     ///
-    /// Async because Java's pause calls
+    /// The pause state is preserved across a rebalance for partitions that
+    /// remain assigned to this consumer, but it is lost for partitions that are
+    /// revoked. Which partitions are revoked depends on the group protocol in
+    /// use (see [`ConsumerConfig::GROUP_PROTOCOL_CONFIG`]):
+    ///
+    /// - Classic group protocol: the behavior depends on the assignor
+    ///   configured in `partition.assignment.strategy`: eager assignors (e.g.
+    ///   `RangeAssignor`, `RoundRobinAssignor`) revoke all partitions on every
+    ///   rebalance (pause state is not preserved); cooperative assignors (e.g.
+    ///   `CooperativeStickyAssignor`) only revoke the partitions that are
+    ///   reassigned to another consumer (pause state preserved for partitions
+    ///   that remain assigned). This client does not implement the classic
+    ///   protocol yet.
+    /// - Consumer group protocol (KIP-848): only revokes partitions that are
+    ///   reassigned to another consumer (pause state preserved for partitions
+    ///   that remain assigned).
+    ///
+    /// Translates Java's `void pause(Collection<TopicPartition>)` (javadoc
+    /// from `KafkaConsumer`, 36aab4fddd). Async because Java's pause calls
     /// `applicationEventHandler.addAndGet(new PausePartitionsEvent(...))`
-    /// which blocks (`AsyncKafkaConsumer.java:1279`).
+    /// which blocks (`AsyncKafkaConsumer.java:1380`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an illegal-state error if any of the provided partitions are not
+    /// currently assigned to this consumer.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#pause")]
     async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error>;
 

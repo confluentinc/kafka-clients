@@ -226,12 +226,6 @@ impl ElectLeadersResponse {
         Ok(Self::with_data(data))
     }
 
-    /// Whether the client should throttle on this response (always true).
-    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#shouldClientThrottle")]
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
-    }
-
     /// Converts the response data into a per-partition election result map.
     ///
     /// A partition maps to `None` if it succeeded, or to the corresponding

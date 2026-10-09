@@ -1407,6 +1407,20 @@ class AdminService(apb_grpc.AdminServiceServicer):
             LOG.exception("force_terminate_transaction raised")
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
 
+    # unregisterController (KAFKA-20395): the shared StatusResponse, like
+    # abort_transaction -- UnregisterControllerResult exposes only all().
+    async def UnregisterController(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return pb.StatusResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            await client.unregister_controller(request.controller_id,
+                                               timeout=_admin_timeout(request))
+            return pb.StatusResponse()
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("unregister_controller raised")
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+
     async def ListTransactions(self, request, context):
         client = self._get(request.admin_id)
         if client is None:

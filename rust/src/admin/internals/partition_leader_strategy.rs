@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, TopicPartition};
 use crate::{kafka_debug, kafka_error};
 

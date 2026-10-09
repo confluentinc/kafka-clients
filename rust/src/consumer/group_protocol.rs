@@ -21,7 +21,16 @@ use std::str::FromStr;
 
 use crate::common::Error;
 
-/// The group protocol that the consumer uses.
+/// The supported consumer group protocols:
+///
+/// * [`Classic`](Self::Classic) - The Classic consumer group protocol (pre
+///   KIP-848)
+/// * [`Consumer`](Self::Consumer) - The Consumer rebalance protocol (KIP-848)
+///
+/// This client implements only [`Consumer`](Self::Consumer). `Classic` is
+/// the default value of `group.protocol`, as in Java, but
+/// [`KafkaConsumer::new`](crate::consumer::KafkaConsumer::new) returns an
+/// `UnsupportedVersion` error for it.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

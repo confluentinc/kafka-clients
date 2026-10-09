@@ -26,6 +26,7 @@ pub mod admin;
 // `dead_code` allowances.
 #[expect(dead_code)]
 mod api_versions;
+mod bootstrap_configuration;
 mod client_dns_lookup;
 mod client_request;
 mod client_response;
@@ -75,6 +76,7 @@ pub mod ffi;
 pub(crate) type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
 pub(crate) use api_versions::ApiVersions;
+pub(crate) use bootstrap_configuration::BootstrapConfiguration;
 pub(crate) use client_dns_lookup::ClientDnsLookup;
 pub(crate) use client_request::ClientRequest;
 pub(crate) use client_response::ClientResponse;

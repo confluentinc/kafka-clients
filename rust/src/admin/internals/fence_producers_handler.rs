@@ -24,7 +24,7 @@ use crate::InitProducerIdRequestData;
 use crate::admin::FenceProducersOptions;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, init_producer_id_request};
-use crate::common::utils::{LogContext, ProducerIdAndEpoch};
+use crate::common::utils::internals::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, Node};
 use crate::kafka_debug;
 

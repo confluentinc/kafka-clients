@@ -65,6 +65,22 @@ pub(crate) struct FetchBuffer {
 struct FetchBufferInner {
     completed_fetches: VecDeque<CompletedFetch>,
     next_in_line_fetch: Option<CompletedFetch>,
+    /// The partition of an unconsumed fetch that
+    /// [`FetchBuffer::take_next_in_line_fetch`] or
+    /// [`FetchBuffer::poll_checked_out`] handed out and the collector has not
+    /// yet put back.
+    ///
+    /// Rust-only (no Java field). Java's `FetchCollector` works on the
+    /// next-in-line fetch *in place*, so the background thread keeps seeing it
+    /// in `bufferedPartitions()` until it is drained, and KAFKA-15529 orders
+    /// that drain after the position update. The Rust collector moves the
+    /// fetch out to work on it; without this marker the partition would read
+    /// as unbuffered for that whole window, and the background task could
+    /// fetch it again at the stale position, which is the duplicate fetch
+    /// KAFKA-15529 fixes. The fetch is put back after the position update and
+    /// the drain, so the background task then sees the consumed fetch together
+    /// with the new position.
+    checked_out_next_in_line: Option<TopicPartition>,
     closed: bool,
 }
 
@@ -171,6 +187,36 @@ impl FetchBuffer {
     pub(crate) fn push_front(&self, completed_fetch: CompletedFetch) {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.completed_fetches.push_front(completed_fetch);
+        // A fetch handed out by `poll_checked_out` is queued again.
+        guard.checked_out_next_in_line = None;
+    }
+
+    /// Removes and returns the head of the queue, as [`Self::poll`] does, but
+    /// keeps an unconsumed fetch's partition in [`Self::buffered_partitions`]
+    /// (`FetchBufferInner::checked_out_next_in_line`) until the caller hands
+    /// the fetch back with [`Self::set_next_in_line_fetch`] or
+    /// [`Self::push_front`], or gives it up with
+    /// [`Self::clear_checked_out_next_in_line`].
+    ///
+    /// Rust-only. Java's `FetchCollector.collectFetch` `peek()`s the head,
+    /// initializes it and sets it next-in-line before it `poll()`s it
+    /// (`FetchCollector.java:101-122`), so the fetch never leaves the buffer.
+    /// The Rust collector takes ownership to initialize it; without the marker
+    /// the partition would read as unbuffered in between, and the background
+    /// task could fetch it again (the KAFKA-15529 duplicate fetch).
+    pub(crate) fn poll_checked_out(&self) -> Option<CompletedFetch> {
+        let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        let fetch = guard.completed_fetches.pop_front();
+        guard.checked_out_next_in_line = fetch.as_ref().filter(|cf| !cf.is_consumed()).map(|cf| cf.partition.clone());
+        fetch
+    }
+
+    /// Forgets the fetch handed out by [`Self::poll_checked_out`] or
+    /// [`Self::take_next_in_line_fetch`], for a caller that discards it
+    /// (Java's `fetchBuffer.poll()` after a failed initialize).
+    pub(crate) fn clear_checked_out_next_in_line(&self) {
+        let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        guard.checked_out_next_in_line = None;
     }
 
     /// Returns the next-in-line fetch (the one currently being iterated
@@ -192,9 +238,15 @@ impl FetchBuffer {
 
     /// Takes the current next-in-line fetch out of the buffer, leaving
     /// `None` in its place.
+    ///
+    /// An unconsumed fetch still counts towards [`Self::buffered_partitions`]
+    /// until it is put back with [`Self::set_next_in_line_fetch`] (see
+    /// `FetchBufferInner::checked_out_next_in_line`).
     pub(crate) fn take_next_in_line_fetch(&self) -> Option<CompletedFetch> {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
-        guard.next_in_line_fetch.take()
+        let fetch = guard.next_in_line_fetch.take();
+        guard.checked_out_next_in_line = fetch.as_ref().filter(|cf| !cf.is_consumed()).map(|cf| cf.partition.clone());
+        fetch
     }
 
     /// Sets the next-in-line fetch. Pass `None` to clear it.
@@ -213,6 +265,7 @@ impl FetchBuffer {
             prev.drain();
         }
         guard.next_in_line_fetch = fetch;
+        guard.checked_out_next_in_line = None;
     }
 
     /// Awaits until the buffer is woken up (data added or explicit wakeup)
@@ -269,6 +322,15 @@ impl FetchBuffer {
         self.notify.notify_waiters();
     }
 
+    /// Whether a wakeup is pending, i.e. the next [`Self::await_wakeup`]
+    /// would return at once. Read without clearing, so a test can assert
+    /// that a code path did (or did not) wake the buffer by value instead of
+    /// by timing a wait.
+    #[cfg(test)]
+    pub(crate) fn is_woken_up_for_test(&self) -> bool {
+        self.wokenup.load(Ordering::SeqCst)
+    }
+
     /// Drops every buffered fetch whose partition is not in the retain set.
     ///
     /// Translates `void retainAll(Set<TopicPartition>)`.
@@ -293,6 +355,13 @@ impl FetchBuffer {
             next.drain();
             guard.next_in_line_fetch = None;
         }
+        if guard
+            .checked_out_next_in_line
+            .as_ref()
+            .is_some_and(|partition| !partitions.contains(partition))
+        {
+            guard.checked_out_next_in_line = None;
+        }
     }
 
     /// Returns the set of partitions for which we have data in the buffer,
@@ -307,6 +376,9 @@ impl FetchBuffer {
             && !next.is_consumed()
         {
             out.insert(next.partition.clone());
+        }
+        if let Some(partition) = guard.checked_out_next_in_line.as_ref() {
+            out.insert(partition.clone());
         }
         for cf in &guard.completed_fetches {
             out.insert(cf.partition.clone());
@@ -574,5 +646,67 @@ mod tests {
         assert!(buffer.has_completed_fetches(|cf| cf.partition.topic() == "topic-a"));
         assert!(buffer.has_completed_fetches(|cf| cf.partition.topic() == "topic-b"));
         assert!(!buffer.has_completed_fetches(|cf| cf.partition.topic() == "topic-c"));
+    }
+
+    /// KAFKA-15529 in the Rust ownership model: while the collector holds the
+    /// unconsumed next-in-line fetch, its partition still reads as buffered, so
+    /// the background task does not fetch it again at the old position. Once
+    /// the fetch is put back drained, the partition is no longer buffered.
+    #[test]
+    fn test_checked_out_next_in_line_fetch_stays_buffered() {
+        let buffer = FetchBuffer::new();
+        let partition = TopicPartition::new("topic", 0);
+        buffer.set_next_in_line_fetch(Some(CompletedFetch::new(partition.clone(), PartitionData::new())));
+
+        let mut fetch = buffer.take_next_in_line_fetch().expect("next in line");
+        assert_eq!(HashSet::from([partition.clone()]), buffer.buffered_partitions());
+
+        fetch.drain();
+        buffer.set_next_in_line_fetch(Some(fetch));
+        assert!(buffer.buffered_partitions().is_empty());
+
+        // A consumed fetch taken out does not count.
+        let _consumed = buffer.take_next_in_line_fetch().expect("next in line");
+        assert!(buffer.buffered_partitions().is_empty());
+        buffer.set_next_in_line_fetch(None);
+
+        // `retainAll` forgets a checked-out partition it does not retain.
+        buffer.set_next_in_line_fetch(Some(CompletedFetch::new(partition.clone(), PartitionData::new())));
+        let _fetch = buffer.take_next_in_line_fetch().expect("next in line");
+        buffer.retain_all(&HashSet::new());
+        assert!(buffer.buffered_partitions().is_empty());
+    }
+
+    /// Critic 100 L1: `poll_checked_out` keeps the head's partition buffered
+    /// until the fetch is handed back (`set_next_in_line_fetch`, `push_front`)
+    /// or given up (`clear_checked_out_next_in_line`).
+    #[test]
+    fn test_poll_checked_out_keeps_the_head_buffered() {
+        let buffer = FetchBuffer::new();
+        let partition = TopicPartition::new("topic", 0);
+        let all = HashSet::from([partition.clone()]);
+
+        buffer.add(CompletedFetch::new(partition.clone(), PartitionData::new()));
+        let fetch = buffer.poll_checked_out().expect("head");
+        assert_eq!(all, buffer.buffered_partitions());
+        buffer.push_front(fetch);
+        assert_eq!(all, buffer.buffered_partitions());
+        // `push_front` cleared the marker: once the queued fetch is removed
+        // with a plain `poll()`, nothing is buffered.
+        let fetch = buffer.poll().expect("head");
+        assert!(buffer.buffered_partitions().is_empty());
+        buffer.add(fetch);
+
+        let fetch = buffer.poll_checked_out().expect("head");
+        buffer.set_next_in_line_fetch(Some(fetch));
+        assert_eq!(all, buffer.buffered_partitions());
+        buffer.set_next_in_line_fetch(None);
+        assert!(buffer.buffered_partitions().is_empty());
+
+        buffer.add(CompletedFetch::new(partition, PartitionData::new()));
+        let _discarded = buffer.poll_checked_out().expect("head");
+        assert_eq!(all, buffer.buffered_partitions());
+        buffer.clear_checked_out_next_in_line();
+        assert!(buffer.buffered_partitions().is_empty());
     }
 }

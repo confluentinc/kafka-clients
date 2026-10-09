@@ -560,12 +560,15 @@ impl DefaultRecordBatch {
 
             let mut records = Vec::with_capacity(capacity_hint);
             for _ in 0..num_records {
+                // Java's `streamingIterator(bufferSupplier)` applies
+                // `Records.SOFT_MAX_ARRAY_LENGTH` (`DefaultRecordBatch.java:365`).
                 let record = DefaultRecord::read_from_stream(
                     &mut reader,
                     base_offset,
                     base_timestamp,
                     base_sequence,
                     log_append_time,
+                    AbstractRecords::SOFT_MAX_ARRAY_LENGTH,
                 )?;
                 records.push(record);
             }

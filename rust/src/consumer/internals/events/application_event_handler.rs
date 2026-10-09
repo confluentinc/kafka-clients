@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::Error;
-use crate::consumer::internals::AsyncConsumerMetrics;
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
 use super::{ApplicationEvent, ApplicationEventEnvelope};
 
@@ -98,11 +98,15 @@ impl ApplicationEventHandler {
     /// Java: `add(ApplicationEvent event)`.
     ///
     /// Stamps `enqueued_ms` onto the envelope and sends to the channel.
-    /// Returns `Err(Error::local_illegal_state(...))` if the receiver
-    /// (background task) has already been dropped — equivalent to Java's
-    /// `IllegalStateException` thrown by a closed queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bare Kafka error ([`Error::KafkaError`], Java's
+    /// `KafkaException`) when the consumer background task is no longer
+    /// running (KAFKA-18812): it would never process the event.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler#add")]
     pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), Error> {
+        self.ensure_network_thread_alive()?;
         let envelope = ApplicationEventEnvelope { event, enqueued_ms: now_ms };
         // Java records the updated queue size (`size() + 1`) BEFORE adding to
         // the queue to avoid racing the background thread's removals. We bump
@@ -112,15 +116,16 @@ impl ApplicationEventHandler {
             let new_size = queue_size.fetch_add(1, Ordering::SeqCst) + 1;
             metrics.record_application_event_queue_size(new_size as i32);
         }
-        self.sender.send(envelope).map_err(|err| {
-            // The send failed; undo the optimistic depth increment.
+        self.sender.send(envelope).map_err(|_| {
+            // The background task ended between the check above and the send
+            // (Java's check is racy the same way, and its queue then accepts
+            // an event no one will process). The send failed, so undo the
+            // optimistic depth increment and report the same error the check
+            // does.
             if let Some(queue_size) = &self.queue_size {
                 queue_size.fetch_sub(1, Ordering::SeqCst);
             }
-            Error::local_illegal_state(format!(
-                "Background task is shut down; cannot enqueue {}",
-                err.0.event.type_name()
-            ))
+            Self::background_task_not_running_error()
         })?;
         // Java: `wakeupNetworkThread()` — alert the I/O thread that it has
         // something to process so it breaks out of its blocking poll
@@ -130,6 +135,34 @@ impl ApplicationEventHandler {
         // bg task's `try_recv` drain and its `select!`.
         self.event_notify.notify_one();
         Ok(())
+    }
+
+    /// Best-effort check that the consumer background task is still running.
+    /// If it has already terminated (due to a failure or shutdown), it will
+    /// never process any events from the queue. Rather than blocking
+    /// indefinitely or timing out with a misleading error, this fails fast with
+    /// a clear error message.
+    ///
+    /// Java tests `networkThread.isAlive()` (KAFKA-18812). Here the event
+    /// channel's receiver is owned by the background task and dropped when it
+    /// ends, normally or by unwinding, so a closed channel is the Rust
+    /// equivalent of a dead thread. Java's message says "thread"; this one says
+    /// "task" (CLAUDE.md §11.7).
+    ///
+    /// Note: this is inherently racy — the task could end between this check
+    /// and the send. That window is covered by the send failing the same way.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler#ensureNetworkThreadAlive"
+    )]
+    fn ensure_network_thread_alive(&self) -> Result<(), Error> {
+        if self.sender.is_closed() {
+            return Err(Self::background_task_not_running_error());
+        }
+        Ok(())
+    }
+
+    fn background_task_not_running_error() -> Error {
+        Error::kafka_message("The consumer background task is not running and cannot process requests.")
     }
 
     /// Java: `wakeupNetworkThread()` on its own, with nothing enqueued.
@@ -215,13 +248,27 @@ mod tests {
             .expect("add() must wake the shared Notify");
     }
 
+    /// Translated from `ApplicationEventHandlerTest.testAddThrowsWhenBackgroundThreadDead`
+    /// (KAFKA-18812). Java closes the handler, which stops its network thread;
+    /// here the background task's end is the receiver being dropped.
     #[tokio::test]
     async fn add_returns_error_when_receiver_dropped() {
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
-        let err = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
-        assert!(matches!(err, Error::LocalIllegalState(_)));
+        let state = Arc::new(super::super::AsyncPollState::new());
+        let err = handler
+            .add(ApplicationEvent::AsyncPoll { deadline_ms: 10, poll_time_ms: 0, state }, 0)
+            .expect_err("must fail");
+        assert!(
+            matches!(err, Error::KafkaError(_)),
+            "Java throws a bare KafkaException: {err:?}"
+        );
+        assert!(err.message().contains("background task is not running"));
+        assert_eq!(
+            "The consumer background task is not running and cannot process requests.",
+            err.message()
+        );
     }
 
     /// M6 wiring: `add` records the application-event queue size against the
@@ -231,8 +278,8 @@ mod tests {
     async fn add_records_queue_size_when_metrics_wired() {
         use crate::common::Metric;
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::AsyncConsumerMetrics;
         use crate::consumer::internals::ConsumerUtils;
+        use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::new());
@@ -264,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn add_rolls_back_queue_size_on_send_failure() {
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::AsyncConsumerMetrics;
+        use crate::consumer::internals::metrics::AsyncConsumerMetrics;
 
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);

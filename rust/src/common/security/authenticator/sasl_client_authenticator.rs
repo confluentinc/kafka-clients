@@ -57,7 +57,7 @@ use crate::common::requests::SaslHandshakeResponse;
 use crate::common::requests::api_versions_request;
 use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
 use std::future::Future;

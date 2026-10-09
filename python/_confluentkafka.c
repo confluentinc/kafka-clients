@@ -3296,6 +3296,24 @@ static PyObject* py_MockConsumer_rebalance(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
+// Simulate a partition loss (Java's MockConsumer.losePartitions, KAFKA-20575):
+// invokes the registered listener's on_partitions_lost inline, so the GIL is
+// released for the same reason as in py_MockConsumer_rebalance.
+static PyObject* py_MockConsumer_lose_partitions(PyObject* self, PyObject* args) {
+    unsigned long long h; PyObject* tps;
+    if (!PyArg_ParseTuple(args, "KO", &h, &tps)) return NULL;
+    const char** topics = NULL; int32_t* parts = NULL;
+    Py_ssize_t n = tp_to_arrays(tps, &topics, &parts);
+    if (n < 0) return NULL;
+    const kafka_consumer_Consumer_t* c = (const kafka_consumer_Consumer_t*)(uintptr_t)h;
+    kafka_common_Error_t* e;
+    Py_BEGIN_ALLOW_THREADS
+    e = kafka_consumer_MockConsumer_lose_partitions(c, topics, parts, (int32_t)n);
+    Py_END_ALLOW_THREADS
+    PyMem_Free(topics); PyMem_Free(parts);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+}
+
 static PyObject* py_MockConsumer_add_record(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition; long long offset;
     Py_buffer key = {0}, value = {0};
@@ -3474,6 +3492,16 @@ static PyObject* py_MockAdminClient_timeout_next_request(PyObject* self, PyObjec
     if (!PyArg_ParseTuple(args, "Ki", &h, &n)) return NULL;
     kafka_common_Error_t* e = kafka_admin_MockAdminClient_timeout_next_request(
         (kafka_admin_AdminClient_t*)(uintptr_t)h, n);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
+}
+
+// Mock: Java's `MockAdminClient.Builder.usingRaftController(boolean)`; returns
+// the error handle as an int.
+static PyObject* py_MockAdminClient_set_using_raft_controller(PyObject* self, PyObject* args) {
+    unsigned long long h; int using_raft_controller;
+    if (!PyArg_ParseTuple(args, "Kp", &h, &using_raft_controller)) return NULL;
+    kafka_common_Error_t* e = kafka_admin_MockAdminClient_set_using_raft_controller(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, using_raft_controller != 0);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
@@ -6870,6 +6898,16 @@ static PyObject* py_Admin_abort_transaction_async(PyObject* self, PyObject* args
     Py_RETURN_NONE;
 }
 
+static PyObject* py_Admin_unregister_controller_async(PyObject* self, PyObject* args) {
+    unsigned long long h; int controller_id; int timeout_ms; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KiiO", &h, &controller_id, &timeout_ms, &cb)) return NULL;
+    Py_INCREF(cb);
+    kafka_admin_AdminClient_unregister_controller_async(
+        (kafka_admin_AdminClient_t*)(uintptr_t)h, (int32_t)controller_id, timeout_ms,
+        admin_op_trampoline, cb);
+    Py_RETURN_NONE;
+}
+
 static PyObject* py_Admin_force_terminate_transaction_async(PyObject* self, PyObject* args) {
     unsigned long long h; const char* transactional_id; int timeout_ms; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KsiO", &h, &transactional_id, &timeout_ms, &cb)) return NULL;
@@ -7214,6 +7252,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"PartitionInfoList_drain", py_PartitionInfoList_drain, METH_VARARGS, "Drain+destroy a PartitionInfoList handle into a list"},
     {"TopicPartitionInfoMap_drain", py_TopicPartitionInfoMap_drain, METH_VARARGS, "Drain+destroy a TopicPartitionInfoMap handle into a dict"},
     {"MockConsumer_rebalance", py_MockConsumer_rebalance, METH_VARARGS, "Mock: drive a rebalance to an assignment; returns error_int"},
+    {"MockConsumer_lose_partitions", py_MockConsumer_lose_partitions, METH_VARARGS, "Mock: lose assigned partitions (on_partitions_lost); returns error_int"},
     {"MockConsumer_add_record", py_MockConsumer_add_record, METH_VARARGS, "Mock: add a record; returns error_int"},
     {"MockConsumer_update_end_offsets", py_MockConsumer_update_end_offsets, METH_VARARGS, "Mock: set end offsets; returns error_int"},
     {"MockConsumer_update_beginning_offsets", py_MockConsumer_update_beginning_offsets, METH_VARARGS, "Mock: set beginning offsets; returns error_int"},
@@ -7233,6 +7272,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_create_partitions_async", py_Admin_create_partitions_async, METH_VARARGS, "Async createPartitions; cb(result_int, error_int)"},
     {"Admin_delete_records_async", py_Admin_delete_records_async, METH_VARARGS, "Async deleteRecords; cb(result_int, error_int)"},
     {"MockAdminClient_timeout_next_request", py_MockAdminClient_timeout_next_request, METH_VARARGS, "Mock: time out the next N requests; returns error_int"},
+    {"MockAdminClient_set_using_raft_controller", py_MockAdminClient_set_using_raft_controller,
+     METH_VARARGS, "Mock: set usingRaftController; returns error_int"},
     {"MockAdminClient_update_beginning_offsets", py_MockAdminClient_update_beginning_offsets,
      METH_VARARGS, "Mock: seed beginning offsets; returns error_int"},
     {"MockAdminClient_update_end_offsets", py_MockAdminClient_update_end_offsets, METH_VARARGS,
@@ -7388,6 +7429,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async listTransactions; cb(result_int, error_int)"},
     {"Admin_abort_transaction_async", py_Admin_abort_transaction_async, METH_VARARGS,
      "Async abortTransaction; cb(error_int) -- Java's result carries no value"},
+    {"Admin_unregister_controller_async", py_Admin_unregister_controller_async, METH_VARARGS,
+     "Async unregisterController; cb(error_int) -- Java's result carries no value"},
     {"Admin_force_terminate_transaction_async", py_Admin_force_terminate_transaction_async,
      METH_VARARGS,
      "Async forceTerminateTransaction; cb(error_int) -- Java's result carries no value"},

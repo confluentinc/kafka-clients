@@ -45,11 +45,11 @@ use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 
 use super::CoordinatorRequestManager;
-use super::HeartbeatMetricsManager;
 use super::HeartbeatRequestState;
+use super::metrics::HeartbeatMetricsManager;
 use super::{PollResult, UnsentRequest};
 
-/// Java's `Errors.exception(String message)` (`Errors.java:462-469`): a null
+/// Java's `Errors.exception(String message)` (`Errors.java:468-475`): a null
 /// broker-supplied message yields the code's own default message, a non-null
 /// one replaces it.
 ///
@@ -95,8 +95,8 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// (`recordHeartbeatSentMs`) and per-heartbeat-response latency
     /// (`recordRequestLatency`). Java passes it into the constructor
     /// (`AbstractHeartbeatRequestManager.java:110`) and records in
-    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:285`) and the
-    /// `whenComplete` lambda (`:299,311`). In Rust it shares the consumer's
+    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:309`) and the
+    /// `whenComplete` lambda (`:323,335`). In Rust it shares the consumer's
     /// `Arc<Metrics>` registry and is wired post-construction (like the
     /// commit manager's metrics manager); `None` for tests that don't
     /// exercise metrics (recording is then a no-op, value-neutral).
@@ -127,6 +127,14 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// window has a full `max.poll.interval.ms` budget. See Issue 9 in
     /// `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
     poll_timer_expires_at_ms: i64,
+    /// Every "received heartbeat interval" message [`Self::on_successful_response`]
+    /// logged, in order. The Rust stand-in for the `LogCaptureAppender` in
+    /// `AbstractHeartbeatRequestManagerTest#testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged`:
+    /// it is appended at the log site, with the level and the string that
+    /// were logged (Java's appender is set to `Level.INFO`, so a regression
+    /// to a lower level fails its test too).
+    #[cfg(test)]
+    pub(crate) logged_heartbeat_interval_messages: Vec<(log::Level, String)>,
 }
 
 impl AbstractHeartbeatRequestManager {
@@ -149,7 +157,7 @@ impl AbstractHeartbeatRequestManager {
     ) -> PollResult {
         state.heartbeat_request_state.on_send_attempt(current_time_ms);
         // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
-        // (`AbstractHeartbeatRequestManager.java:285`).
+        // (`AbstractHeartbeatRequestManager.java:309`).
         if let Some(metrics_manager) = state.metrics_manager.as_ref() {
             metrics_manager.record_heartbeat_sent_ms(current_time_ms);
         }
@@ -219,6 +227,8 @@ impl AbstractHeartbeatRequestManager {
             // `reset_poll_timer` call from the AsyncPoll event
             // arm. See [`Self::poll_timer_expires_at_ms`] doc-comment.
             poll_timer_expires_at_ms: i64::MAX,
+            #[cfg(test)]
+            logged_heartbeat_interval_messages: Vec::new(),
         }
     }
 
@@ -246,6 +256,8 @@ impl AbstractHeartbeatRequestManager {
             // timer is armed by the first `reset_poll_timer` call, not
             // at construction.
             poll_timer_expires_at_ms: i64::MAX,
+            #[cfg(test)]
+            logged_heartbeat_interval_messages: Vec::new(),
         }
     }
 
@@ -278,7 +290,7 @@ impl AbstractHeartbeatRequestManager {
     /// **Phase 10 carry-over**: Java's `resetPollTimer(pollMs)` also
     /// checks `pollTimer.isExpired()` and calls
     /// `membershipManager().maybeRejoinStaleMember()` when expired (see
-    /// `AbstractHeartbeatRequestManager.java:265-274`). The abstract
+    /// `AbstractHeartbeatRequestManager.java:289-298`). The abstract
     /// layer here lacks a back-reference to the membership manager, so
     /// the expiry-then-rejoin step must be performed by Phase 10's
     /// `consumer.poll()` epilogue after invoking `reset_poll_timer`:
@@ -334,7 +346,7 @@ impl AbstractHeartbeatRequestManager {
     /// `response.data().errorMessage()`), and is `None` when the broker left it
     /// null. Java threads that nullable string through the switch and passes it
     /// to `Errors.exception(String)`, which falls back to the code's own
-    /// default message when it is null (`Errors.java:462-469`) —
+    /// default message when it is null (`Errors.java:468-475`) —
     /// [`Error::with_message`] / [`Error::new`] are the two halves of that.
     ///
     /// `group_id` is Java's `membershipManager().groupId()`, needed by the
@@ -378,7 +390,7 @@ impl AbstractHeartbeatRequestManager {
                 // Java does NOT pass the broker's `errorMessage` here: it
                 // builds `GroupAuthorizationException.forGroupId(groupId)` and
                 // hands *that* message to `error.exception(...)`
-                // (`AbstractHeartbeatRequestManager.java:388-393`), so the
+                // (`AbstractHeartbeatRequestManager.java:419-425`), so the
                 // application sees "Not authorized to access group: <groupId>".
                 // The resulting class carries no group id of its own, because
                 // Java rebuilds it through `Errors.GROUP_AUTHORIZATION_FAILED
@@ -401,7 +413,7 @@ impl AbstractHeartbeatRequestManager {
                 // are added.
                 //
                 // Java calls `error.exception()` with NO argument here
-                // (`AbstractHeartbeatRequestManager.java:401`) — the code's
+                // (`AbstractHeartbeatRequestManager.java:432`) — the code's
                 // default "Topic authorization failed." — even though
                 // `errorMessage` is in scope and is used in the log line
                 // immediately above. That asymmetry with the arms below is
@@ -439,7 +451,7 @@ impl AbstractHeartbeatRequestManager {
                     error_message.unwrap_or_default()
                 );
                 // Java concatenates the broker text onto its own prefix
-                // (`AbstractHeartbeatRequestManager.java:428-432`), so the
+                // (`AbstractHeartbeatRequestManager.java:460-464`), so the
                 // message is never null here and `exception(String)` never
                 // falls back. A null broker message concatenates as "null" in
                 // Java; Rust renders the empty string, which is the same
@@ -457,15 +469,43 @@ impl AbstractHeartbeatRequestManager {
     }
 
     /// Marks the manager as having received a successful heartbeat
-    /// response. Updates the backoff state and the heartbeat interval.
+    /// response. Updates the backoff state and the heartbeat interval,
+    /// logging the interval when it differs from the current one
+    /// (KAFKA-20761).
     ///
     /// Java: `onResponse(R response, long currentTimeMs)` (success
     /// branch only — error responses go through
-    /// [`Self::classify_response_error`]).
-    pub(crate) fn on_successful_response(&mut self, new_heartbeat_interval_ms: i64, current_time_ms: i64) {
+    /// [`Self::classify_response_error`];
+    /// `AbstractHeartbeatRequestManager.java:365-380`). `member_id` is Java's
+    /// `membershipManager().memberId()`: the Rust split keeps the membership
+    /// manager out of this layer, so the caller passes it in (as for
+    /// `classify_response_error`'s `group_id`). The caller then runs
+    /// `membershipManager().onHeartbeatSuccess(response)`, Java's next line.
+    pub(crate) fn on_successful_response(
+        &mut self,
+        member_id: &str,
+        new_heartbeat_interval_ms: i64,
+        current_time_ms: i64,
+    ) {
+        let previous_heartbeat_interval_ms = self.heartbeat_request_state.heartbeat_interval_ms();
+        // The heartbeat interval is a group config owned by the broker, so log it when it changes to give
+        // visibility into the value the coordinator is applying (it is not derivable from client config).
+        if new_heartbeat_interval_ms != previous_heartbeat_interval_ms {
+            const LEVEL: log::Level = log::Level::Info;
+            let message = Self::heartbeat_interval_received_message(member_id, new_heartbeat_interval_ms);
+            log::log!(LEVEL, "{message}");
+            #[cfg(test)]
+            self.logged_heartbeat_interval_messages.push((LEVEL, message));
+        }
         self.heartbeat_request_state
             .update_heartbeat_interval_ms(current_time_ms, new_heartbeat_interval_ms);
         self.heartbeat_request_state.on_successful_attempt(current_time_ms);
+    }
+
+    /// The text of Java's `logger.info("Member {} received heartbeat interval {}ms from the group
+    /// coordinator", ...)` (`AbstractHeartbeatRequestManager.java:372`).
+    fn heartbeat_interval_received_message(member_id: &str, heartbeat_interval_ms: i64) -> String {
+        format!("Member {member_id} received heartbeat interval {heartbeat_interval_ms}ms from the group coordinator")
     }
 
     /// Failure path mirroring Java's `onFailure(Throwable, long)` for
@@ -625,7 +665,7 @@ mod tests {
     #[test]
     fn successful_response_updates_interval() {
         let mut mgr = make_state(0);
-        mgr.on_successful_response(5_000, 0);
+        mgr.on_successful_response("member-id", 5_000, 0);
         assert_eq!(mgr.heartbeat_request_state.heartbeat_interval_ms(), 5_000);
     }
 
@@ -656,7 +696,7 @@ mod tests {
 
     /// `GROUP_AUTHORIZATION_FAILED` ignores the broker's `ErrorMessage` and
     /// uses `GroupAuthorizationException.forGroupId(groupId)`'s text
-    /// (`AbstractHeartbeatRequestManager.java:388-393`), so the application
+    /// (`AbstractHeartbeatRequestManager.java:419-425`), so the application
     /// learns WHICH group it lacks access to.
     #[test]
     fn group_authorization_failed_uses_for_group_id_message() {
@@ -677,7 +717,7 @@ mod tests {
     }
 
     /// `TOPIC_AUTHORIZATION_FAILED` calls `error.exception()` with NO argument
-    /// (`AbstractHeartbeatRequestManager.java:401`), i.e. the code's default
+    /// (`AbstractHeartbeatRequestManager.java:432`), i.e. the code's default
     /// message — even though `errorMessage` is in scope. The asymmetry with the
     /// `INVALID_REQUEST` family below is deliberate in Java.
     #[test]
@@ -702,7 +742,7 @@ mod tests {
 
     /// `INVALID_REQUEST` / `GROUP_MAX_SIZE_REACHED` / `UNSUPPORTED_ASSIGNOR`
     /// DO carry the broker's `ErrorMessage`
-    /// (`AbstractHeartbeatRequestManager.java:404-408`,
+    /// (`AbstractHeartbeatRequestManager.java:435-440`,
     /// `error.exception(errorMessage)`). For `UNSUPPORTED_ASSIGNOR` it is the
     /// only way to learn which assignor the broker rejected.
     #[test]
@@ -726,7 +766,7 @@ mod tests {
 
     /// A NULL broker `ErrorMessage` falls back to the code's own default
     /// message, mirroring `Errors.exception(String)`
-    /// (`Errors.java:462-469`) — not to the literal text `"None"`.
+    /// (`Errors.java:468-475`) — not to the literal text `"None"`.
     #[test]
     fn invalid_request_family_falls_back_to_the_default_message() {
         let mut mgr = make_state(0);
@@ -741,7 +781,7 @@ mod tests {
     }
 
     /// `INVALID_REGULAR_EXPRESSION` concatenates the broker's text onto Java's
-    /// own prefix (`AbstractHeartbeatRequestManager.java:428-432`). The broker
+    /// own prefix (`AbstractHeartbeatRequestManager.java:460-464`). The broker
     /// text is the only actionable part — it says why the regex did not
     /// compile.
     #[test]
@@ -767,7 +807,7 @@ mod tests {
 
     /// `NOT_COORDINATOR` / `COORDINATOR_NOT_AVAILABLE` pass the broker's text
     /// to `markCoordinatorUnknown(errorMessage, ...)`
-    /// (`AbstractHeartbeatRequestManager.java:365`, `:375`), which logs it as
+    /// (`AbstractHeartbeatRequestManager.java:397`, `:407`), which logs it as
     /// the rediscovery cause. A null message must not become the literal
     /// `"None"`.
     #[test]

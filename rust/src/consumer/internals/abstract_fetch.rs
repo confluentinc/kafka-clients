@@ -251,12 +251,17 @@ impl AbstractFetch {
             fetch_target.id()
         );
         self.nodes_with_pending_fetch_requests.remove(&fetch_target.id());
+
+        // Wake the buffer whenever a node stops having a request in flight, whatever the outcome was: data, an
+        // empty response, a fetch session error, or a failure. This ensures the caller is not left waiting on a
+        // wakeup that only a completed request could have delivered.
+        self.fetch_buffer.wakeup();
     }
 
     /// Marks every session as pending-close and returns the per-node
     /// builders that produce the closing fetch requests.
     ///
-    /// Translates `Map<Node, FetchSessionHandler.FetchRequestData>
+    /// Translates `FetchRequestPreparationResult
     /// prepareCloseFetchSessionRequests()`.
     ///
     /// The `nodes` argument supplies the resolved `Node` for each
@@ -268,8 +273,8 @@ impl AbstractFetch {
     pub(crate) fn prepare_close_fetch_session_requests(
         &mut self,
         nodes: &HashMap<i32, Node>,
-    ) -> HashMap<i32, FetchSessionRequestData> {
-        let mut out: HashMap<i32, FetchSessionRequestData> = HashMap::new();
+    ) -> FetchRequestPreparationResult {
+        let mut out: HashMap<i32, (Node, FetchSessionRequestData)> = HashMap::new();
         // Mark each handler as pending-close, then build with an empty
         // builder so the resulting request only carries the
         // close-existing metadata.
@@ -279,18 +284,20 @@ impl AbstractFetch {
             handler.notify_close();
             // Skip nodes the caller couldn't resolve (Java skips
             // unreachable nodes the same way).
-            if !nodes.contains_key(&node_id) {
+            let Some(node) = nodes.get(&node_id) else {
                 debug!(
                     "Skip sending close session request to node {} since it is not reachable",
                     node_id
                 );
                 continue;
-            }
+            };
             let builder = handler.new_builder();
             let data = handler.build_request(builder);
-            out.insert(node_id, data);
+            out.insert(node_id, (node.clone(), data));
         }
-        out
+        // Closing is a one-shot operation, not part of the steady-state polling loop, so always waking the
+        // buffer here is safe even if this ends up empty.
+        FetchRequestPreparationResult::new(out, true)
     }
 
     /// Builds the consumer-side fetch-request builder for the given
@@ -429,8 +436,6 @@ impl AbstractFetch {
         let partitions: HashSet<TopicPartition> = response_data.keys().cloned().collect();
         let metric_aggregator = Arc::new(FetchMetricsAggregator::new(Arc::clone(&self.metrics_manager), partitions));
 
-        let mut needs_wakeup = true;
-
         // KIP-951: accumulate per-partition new-leader info reported on a
         // leadership-change error, applied to metadata after the loop.
         // Translates Java's `partitionsWithUpdatedLeaderInfo`
@@ -456,13 +461,12 @@ impl AbstractFetch {
                     // (definition-of-done.md §7). Java throws
                     // `IllegalStateException` (`AbstractFetch.java:184-199`),
                     // which aborts the whole response: no `CompletedFetch` is
-                    // added for this partition OR any partition after it, and
-                    // `fetchBuffer.wakeup()` (`:232`) is skipped because it
-                    // sits outside the `finally`. So one malformed entry
-                    // discards every well-formed entry beside it and leaves a
-                    // `poll()` blocking until its timeout. Rust skips only the
-                    // offending partition, keeping the rest of the response and
-                    // the wakeup. The condition means the broker echoed a
+                    // added for this partition OR any partition after it (the
+                    // buffer is still woken, since 4.4 does that in
+                    // `removePendingFetchRequest` from the `finally`). So one
+                    // malformed entry discards every well-formed entry beside
+                    // it. Rust skips only the offending partition, keeping the
+                    // rest of the response. The condition means the broker echoed a
                     // partition the client never asked for, which is a
                     // protocol-level fault this client cannot act on either
                     // way, so the narrower blast radius is preferred.
@@ -535,14 +539,11 @@ impl AbstractFetch {
                 fetch_offset,
             );
             self.fetch_buffer.add(cf);
-            needs_wakeup = false;
         }
 
-        // "Wake" the fetch buffer on any response, even if it's empty,
-        // to allow the consumer to not block indefinitely.
-        if needs_wakeup {
-            self.fetch_buffer.wakeup();
-        }
+        // KAFKA-20854: the "wake the buffer on any response, even an empty
+        // one" step that sat here moved into `remove_pending_fetch_request`,
+        // which every completion path (this one included, below) reaches.
 
         // KIP-951: apply any new-leader info reported on leadership-change
         // errors. Translates `AbstractFetch.java:233-251`. Empty on the
@@ -687,8 +688,7 @@ impl AbstractFetch {
     /// Create fetch requests for all nodes for which we have assigned
     /// partitions that have no existing requests in flight.
     ///
-    /// Translates `Map<Node, FetchSessionHandler.FetchRequestData>
-    /// prepareFetchRequests()`.
+    /// Translates `FetchRequestPreparationResult prepareFetchRequests()`.
     ///
     /// The caller supplies:
     /// - `is_unavailable`: Java's abstract `isUnavailable(Node)` — `true`
@@ -709,7 +709,7 @@ impl AbstractFetch {
         current_time_ms: i64,
         is_unavailable: impl Fn(&Node) -> bool,
         maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::Error>,
-    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::Error> {
+    ) -> Result<FetchRequestPreparationResult, crate::common::Error> {
         // Update metrics in case there was an assignment change. Java does this
         // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
         // (per-response aggregators hold clones), so its assignment-tracking
@@ -735,12 +735,27 @@ impl AbstractFetch {
         //
         // Edge: an empty cluster node list (no metadata yet) matches Java's
         // `0 == 0` -> returns empty (nothing to fetch).
+        //
+        // KAFKA-20854: the short-circuit must report the same
+        // `canWakeBufferIfNoFetchRequestsToSend` the full computation would.
+        // That is `true` only on Java's `unbuffered.isEmpty()` branch with
+        // something fetchable, i.e. when every fetchable partition is
+        // buffered; every other empty result is `false`. With nothing
+        // buffered the answer is `false` without taking the lock (fetchable ∖
+        // buffered = fetchable, so "all buffered" means "none fetchable"). An
+        // empty node list is the bootstrapping case (KIP-909): `false`, so the
+        // caller stays parked instead of spinning on immediate wakeups.
         let nodes = cluster.nodes();
         let all_nodes_unfetchable = nodes
             .iter()
             .all(|node| self.nodes_with_pending_fetch_requests.contains(&node.id()) || is_unavailable(node));
         if all_nodes_unfetchable {
-            return Ok(HashMap::new());
+            let buffered = self.fetch_buffer.buffered_partitions();
+            let can_wake = !buffered.is_empty() && {
+                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                guard.has_fetchable_partitions(|_| true) && !guard.has_fetchable_partitions(|tp| !buffered.contains(tp))
+            };
+            return Ok(FetchRequestPreparationResult::new(HashMap::new(), can_wake));
         }
 
         // Snapshot the buffered-partitions set, then take the
@@ -761,7 +776,17 @@ impl AbstractFetch {
 
         let unbuffered: Vec<TopicPartition> = guard.fetchable_partitions(|tp| !buffered.contains(tp));
         if unbuffered.is_empty() {
-            return Ok(HashMap::new());
+            // If every currently fetchable partition already has buffered data, there is no need to issue
+            // additional fetch requests. This is a safe point to wake the buffer immediately because progress
+            // can be made by consuming the buffered data. If no partitions are fetchable at all (for example,
+            // no assignment yet, invalid positions, or paused), the state will not change until some external
+            // event occurs, so an immediate wakeup would only busy-loop the caller rather than allowing it
+            // to remain parked until bounded by other mechanisms (such as heartbeat interval or poll timeout).
+            let can_wake_buffer_if_no_fetch_requests_to_send = guard.has_fetchable_partitions(|_| true);
+            return Ok(FetchRequestPreparationResult::new(
+                HashMap::new(),
+                can_wake_buffer_if_no_fetch_requests_to_send,
+            ));
         }
 
         // Compute the set of nodes for which we have buffered data —
@@ -929,7 +954,12 @@ impl AbstractFetch {
             let request_data = handler.build_request(builder);
             out.insert(node_id, (node, request_data));
         }
-        Ok(out)
+        // If every fetchable-but-unbuffered partition was skipped (for example, due to reconnect backoff,
+        // an in-flight request, or its node already hosting buffered partitions), the state will only
+        // change over time. An immediate wakeup would therefore just busy-loop the caller instead of
+        // respecting its normal backoff. This case is only relevant when fetchable partitions exist but
+        // the resulting request map is empty; otherwise the caller ignores this flag.
+        Ok(FetchRequestPreparationResult::new(out, false))
     }
 
     /// Java's `Set<Integer> bufferedNodes(Set<TopicPartition>, long)`.
@@ -999,6 +1029,58 @@ impl AbstractFetch {
     #[cfg(test)]
     pub(crate) fn pending_fetch_node_ids(&self) -> FxHashSet<i32> {
         self.nodes_with_pending_fetch_requests.clone()
+    }
+}
+
+/// The result of preparing fetch requests via
+/// [`AbstractFetch::prepare_fetch_requests`] or
+/// [`AbstractFetch::prepare_close_fetch_session_requests`].
+///
+/// Translates the nested `AbstractFetch.FetchRequestPreparationResult`
+/// (KAFKA-20854). Java keys `requests` by `Node`; the Rust map is keyed by
+/// node id and carries the resolved `Node` next to the request data, the shape
+/// both `prepare_*` methods already produced.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch$FetchRequestPreparationResult")]
+pub(crate) struct FetchRequestPreparationResult {
+    requests: HashMap<i32, (Node, FetchSessionRequestData)>,
+    can_wake_buffer_if_no_fetch_requests_to_send: bool,
+}
+
+impl FetchRequestPreparationResult {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch$FetchRequestPreparationResult#FetchRequestPreparationResult"
+    )]
+    pub(crate) fn new(
+        requests: HashMap<i32, (Node, FetchSessionRequestData)>,
+        can_wake_buffer_if_no_fetch_requests_to_send: bool,
+    ) -> Self {
+        Self { requests, can_wake_buffer_if_no_fetch_requests_to_send }
+    }
+
+    /// Map of node ids to the node and the
+    /// [`FetchSessionRequestData`] to send it, empty if there is nothing to
+    /// fetch right now.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch$FetchRequestPreparationResult#requests")]
+    pub(crate) fn requests(&self) -> &HashMap<i32, (Node, FetchSessionRequestData)> {
+        &self.requests
+    }
+
+    /// Consumes the result, returning the request map (the caller moves each
+    /// entry into an `UnsentRequest`).
+    pub(crate) fn into_requests(self) -> HashMap<i32, (Node, FetchSessionRequestData)> {
+        self.requests
+    }
+
+    /// Whether, if [`Self::requests`] is empty, this is a safe point to wake
+    /// up the `FetchBuffer` immediately, as opposed to a state that will only
+    /// change once some other event happens (for example, a metadata update,
+    /// reconnect backoff expiration, or an in-flight response arriving).
+    /// Ignored when [`Self::requests`] is non-empty.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch$FetchRequestPreparationResult#canWakeBufferIfNoFetchRequestsToSend"
+    )]
+    pub(crate) fn can_wake_buffer_if_no_fetch_requests_to_send(&self) -> bool {
+        self.can_wake_buffer_if_no_fetch_requests_to_send
     }
 }
 
@@ -1112,7 +1194,11 @@ mod tests {
         // Skip node 2 from the resolved-nodes map — Java would skip it.
 
         let out = af.prepare_close_fetch_session_requests(&nodes);
+        // KAFKA-20854: closing is one-shot, so it may always wake the buffer.
+        assert!(out.can_wake_buffer_if_no_fetch_requests_to_send());
+        let out = out.requests();
         assert_eq!(1, out.len());
+        assert_eq!(out[&1].0.id(), 1);
         assert!(out.contains_key(&1));
         assert!(!out.contains_key(&2));
     }
@@ -1184,8 +1270,10 @@ mod tests {
         let mut af = make_abstract_fetch();
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
-        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
-        assert!(result.unwrap().is_empty());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
+        assert!(result.requests().is_empty());
+        // KAFKA-20854: nothing fetchable is not a safe point to wake the buffer.
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
     }
 
     /// `prepare_fetch_requests` returns an empty map when every
@@ -1203,8 +1291,9 @@ mod tests {
         af.nodes_with_pending_fetch_requests.insert(42);
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
-        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
-        assert!(result.unwrap().is_empty());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
+        assert!(result.requests().is_empty());
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
         // Pending-set untouched.
         assert!(af.pending_fetch_node_ids().contains(&42));
     }
@@ -1230,8 +1319,11 @@ mod tests {
         // No metadata bootstrap -> cluster.nodes() is empty.
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
-        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
-        assert!(result.unwrap().is_empty(), "empty cluster must yield an empty fetch map");
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
+        assert!(result.requests().is_empty(), "empty cluster must yield an empty fetch map");
+        // KAFKA-20854 / KIP-909: no nodes yet (bootstrapping) must not wake the
+        // buffer, or the caller spins until bootstrap resolution completes.
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
     }
 
     /// Fix #2 — when EVERY cluster node is already in
@@ -1267,11 +1359,12 @@ mod tests {
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
         // All nodes pending: short-circuit to an empty map.
-        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
         assert!(
-            result.unwrap().is_empty(),
+            result.requests().is_empty(),
             "all nodes pending must short-circuit to an empty map"
         );
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
         // Pending-set untouched.
         assert!(af.pending_fetch_node_ids().contains(&0));
     }
@@ -1296,11 +1389,12 @@ mod tests {
         // No node is pending, but every node is unavailable.
         let all_unavailable = |_: &Node| true;
         let no_auth_err = |_: &Node| Ok(());
-        let result = af.prepare_fetch_requests(100, all_unavailable, no_auth_err);
+        let result = af.prepare_fetch_requests(100, all_unavailable, no_auth_err).unwrap();
         assert!(
-            result.unwrap().is_empty(),
+            result.requests().is_empty(),
             "all nodes unavailable must short-circuit to an empty map"
         );
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
     }
 
     /// Fix #2 — no partition is stranded: once a node is freed from the pending
@@ -1345,9 +1439,11 @@ mod tests {
         // Node 0 has an in-flight fetch -> the up-front short-circuit returns
         // empty (the only node is pending).
         af.nodes_with_pending_fetch_requests.insert(0);
-        let pending_result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        let pending_result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
+        // KAFKA-20854: skipped for an in-flight request, so no wakeup.
+        assert!(!pending_result.can_wake_buffer_if_no_fetch_requests_to_send());
         assert!(
-            pending_result.unwrap().is_empty(),
+            pending_result.requests().is_empty(),
             "with node 0 pending, the short-circuit must return empty"
         );
 
@@ -1356,9 +1452,124 @@ mod tests {
         af.nodes_with_pending_fetch_requests.remove(&0);
         let freed_result = af.prepare_fetch_requests(100, always_available, no_auth_err).unwrap();
         assert!(
-            freed_result.contains_key(&0),
+            freed_result.requests().contains_key(&0),
             "freeing node 0 must let the next call issue a fetch for its partition (no stall)"
         );
+    }
+
+    // ── KAFKA-20854: when an empty preparation may wake the fetch buffer ────
+
+    /// An `AbstractFetch` over a one-node cluster whose partitions
+    /// `topic-a-0`, `topic-a-1` are assigned and positioned on node 0, plus its
+    /// buffer.
+    fn positioned_abstract_fetch() -> (AbstractFetch, Arc<FetchBuffer>) {
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        bootstrap_nodes(&metadata, "topic-a", 1, 2);
+        let buffer = Arc::new(FetchBuffer::new());
+        let af = AbstractFetch::new(
+            metadata,
+            subs.clone(),
+            make_fetch_config(),
+            Arc::clone(&buffer),
+            Arc::new(BufferSupplier::create()),
+            Arc::new(crate::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
+        );
+        let leader = Node::new(0, "localhost".to_string(), 1969);
+        let mut guard = subs.lock().expect("lock");
+        let partitions: HashSet<TopicPartition> = (0..2).map(|p| TopicPartition::new("topic-a", p)).collect();
+        guard.assign_from_user(partitions.clone()).unwrap();
+        for partition in &partitions {
+            let position = crate::consumer::internals::FetchPosition::with_leader(
+                0,
+                Some(0),
+                crate::metadata::LeaderAndEpoch::new(Some(leader.clone()), Some(0)),
+            );
+            guard.seek_validated(partition, position).unwrap();
+        }
+        drop(guard);
+        (af, buffer)
+    }
+
+    fn buffer_partition(buffer: &FetchBuffer, partition: i32) {
+        buffer.add(CompletedFetch::new(
+            TopicPartition::new("topic-a", partition),
+            crate::fetch_response_data::PartitionData::new(),
+        ));
+    }
+
+    /// Java's `unbuffered.isEmpty()` branch with fetchable partitions: every
+    /// fetchable partition is buffered, so the caller can make progress by
+    /// consuming it and an immediate wakeup is safe.
+    #[test]
+    fn test_prepare_fetch_requests_all_fetchable_buffered_can_wake() {
+        let (mut af, buffer) = positioned_abstract_fetch();
+        buffer_partition(&buffer, 0);
+        buffer_partition(&buffer, 1);
+        let result = af.prepare_fetch_requests(100, |_| false, |_| Ok(())).unwrap();
+        assert!(result.requests().is_empty());
+        assert!(result.can_wake_buffer_if_no_fetch_requests_to_send());
+    }
+
+    /// Java's final return: an unbuffered fetchable partition was skipped
+    /// because its node hosts buffered partitions. That only changes over
+    /// time, so the result must not wake the buffer.
+    #[test]
+    fn test_prepare_fetch_requests_skipped_for_buffered_node_does_not_wake() {
+        let (mut af, buffer) = positioned_abstract_fetch();
+        buffer_partition(&buffer, 0);
+        let result = af.prepare_fetch_requests(100, |_| false, |_| Ok(())).unwrap();
+        assert!(
+            result.requests().is_empty(),
+            "node 0 hosts buffered data, so topic-a-1 is skipped"
+        );
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
+    }
+
+    /// The Phase-26 all-nodes-unfetchable short-circuit reports exactly what
+    /// the full computation would: `true` when everything fetchable is
+    /// buffered, `false` when an unbuffered fetchable partition remains.
+    #[test]
+    fn test_prepare_fetch_requests_short_circuit_agrees_with_full_computation() {
+        // All fetchable partitions buffered, the only node in flight.
+        let (mut af, buffer) = positioned_abstract_fetch();
+        buffer_partition(&buffer, 0);
+        buffer_partition(&buffer, 1);
+        af.nodes_with_pending_fetch_requests.insert(0);
+        let result = af.prepare_fetch_requests(100, |_| false, |_| Ok(())).unwrap();
+        assert!(result.requests().is_empty());
+        assert!(result.can_wake_buffer_if_no_fetch_requests_to_send());
+
+        // One partition buffered, the other not: Java would skip topic-a-1
+        // for the in-flight request and return `false`.
+        let (mut af, buffer) = positioned_abstract_fetch();
+        buffer_partition(&buffer, 0);
+        af.nodes_with_pending_fetch_requests.insert(0);
+        let result = af.prepare_fetch_requests(100, |_| false, |_| Ok(())).unwrap();
+        assert!(result.requests().is_empty());
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
+
+        // Nothing buffered, the node unavailable (reconnect backoff): `false`.
+        let (mut af, _buffer) = positioned_abstract_fetch();
+        let result = af.prepare_fetch_requests(100, |_| true, |_| Ok(())).unwrap();
+        assert!(result.requests().is_empty());
+        assert!(!result.can_wake_buffer_if_no_fetch_requests_to_send());
+    }
+
+    /// `remove_pending_fetch_request` wakes the buffer whatever the outcome
+    /// (KAFKA-20854 moved the wakeup there from `handleFetchSuccess`).
+    #[tokio::test]
+    async fn test_remove_pending_fetch_request_wakes_buffer() {
+        let (mut af, buffer) = positioned_abstract_fetch();
+        af.nodes_with_pending_fetch_requests.insert(0);
+        af.remove_pending_fetch_request(&Node::new(0, "localhost".to_string(), 1969), 0);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            buffer.await_wakeup(std::time::Duration::from_secs(3_600)),
+        )
+        .await
+        .expect("removing a pending fetch request must wake the buffer");
     }
 
     /// `compute_buffered_nodes` returns an empty set when the buffered

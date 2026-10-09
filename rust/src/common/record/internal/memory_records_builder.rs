@@ -21,6 +21,7 @@
 
 use std::io::{self, Write};
 
+use crate::common::Error;
 use crate::common::compress::{CompressingWriter, Compression};
 use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
@@ -31,6 +32,7 @@ use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
+use crate::common::utils::internals::ByteBufferOutputStream;
 
 /// Estimation factor to account for compression overhead.
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
@@ -58,8 +60,9 @@ enum AppendState<W: Write> {
 pub struct MemoryRecordsBuilder {
     timestamp_type: TimestampType,
     compression: Compression,
-    /// The underlying buffer holding the batch data.
-    buffer: Vec<u8>,
+    /// The underlying stream holding the batch data: a single growable buffer, or KIP-1332's
+    /// fixed chunks (Java's `bufferStream`).
+    buffer_stream: ByteBufferOutputStream,
     magic: i8,
     initial_position: usize,
     base_offset: i64,
@@ -105,7 +108,7 @@ impl MemoryRecordsBuilder {
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn new(
-        mut buffer: Vec<u8>,
+        buffer: Vec<u8>,
         initial_position: usize,
         magic: i8,
         compression: Compression,
@@ -121,6 +124,96 @@ impl MemoryRecordsBuilder {
         write_limit: usize,
         delete_horizon_ms: i64,
     ) -> Self {
+        Self::with_stream_at(
+            ByteBufferOutputStream::Single(buffer),
+            initial_position,
+            magic,
+            compression,
+            timestamp_type,
+            base_offset,
+            log_append_time,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            is_transactional,
+            is_control_batch,
+            partition_leader_epoch,
+            write_limit,
+            delete_horizon_ms,
+        )
+        .expect("a single-buffer stream never fails to position")
+    }
+
+    /// Create a builder over an existing output stream, starting at the stream's current
+    /// position. Corresponds to Java's `MemoryRecordsBuilder(ByteBufferOutputStream, ...)`; the
+    /// incremental allocation strategy (KIP-1332) passes a
+    /// [`ByteBufferOutputStream::Chunked`] stream here.
+    ///
+    /// # Errors
+    ///
+    /// The error from positioning the stream past the batch header (Java's
+    /// `bufferStream.position(initialPosition + batchHeaderSizeInBytes)`), e.g. `IllegalState` for
+    /// a chunked stream that has already been written to, or `IllegalArgument` when its chunks
+    /// cannot hold the header.
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
+    pub(crate) fn with_buffer_stream(
+        buffer_stream: ByteBufferOutputStream,
+        magic: i8,
+        compression: Compression,
+        timestamp_type: TimestampType,
+        base_offset: i64,
+        log_append_time: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        is_transactional: bool,
+        is_control_batch: bool,
+        partition_leader_epoch: i32,
+        write_limit: usize,
+        delete_horizon_ms: i64,
+    ) -> Result<Self, Error> {
+        let initial_position = buffer_stream.position()?;
+        Self::with_stream_at(
+            buffer_stream,
+            initial_position,
+            magic,
+            compression,
+            timestamp_type,
+            base_offset,
+            log_append_time,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            is_transactional,
+            is_control_batch,
+            partition_leader_epoch,
+            write_limit,
+            delete_horizon_ms,
+        )
+    }
+
+    /// The constructor body shared by [`new`](Self::new) (Java's `ByteBuffer` constructors,
+    /// which take the start from the buffer's position; Rust passes it explicitly) and
+    /// [`with_buffer_stream`](Self::with_buffer_stream).
+    #[expect(clippy::too_many_arguments)]
+    fn with_stream_at(
+        mut buffer_stream: ByteBufferOutputStream,
+        initial_position: usize,
+        magic: i8,
+        compression: Compression,
+        timestamp_type: TimestampType,
+        base_offset: i64,
+        log_append_time: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        is_transactional: bool,
+        is_control_batch: bool,
+        partition_leader_epoch: i32,
+        write_limit: usize,
+        delete_horizon_ms: i64,
+    ) -> Result<Self, Error> {
         // Validate parameters
         if magic > RecordBatch::MAGIC_VALUE_V0 && timestamp_type == TimestampType::NoTimestampType {
             panic!("TimestampType must be set for magic >= 0");
@@ -142,18 +235,33 @@ impl MemoryRecordsBuilder {
 
         let batch_header_size =
             AbstractRecords::record_batch_header_size_in_bytes(magic, compression.compression_type());
-        let initial_buffer_capacity = buffer.capacity();
-
-        // Ensure the buffer is large enough for the header
         let header_end = initial_position + batch_header_size;
-        if buffer.len() < header_end {
-            buffer.resize(header_end, 0);
-        }
+        let initial_buffer_capacity = match &mut buffer_stream {
+            ByteBufferOutputStream::Single(buffer) => {
+                let initial_buffer_capacity = buffer.capacity();
+                // Ensure the buffer is large enough for the header
+                if buffer.len() < header_end {
+                    buffer.resize(header_end, 0);
+                }
+                if compression.compression_type() == CompressionType::None {
+                    // Truncate to header_end so Write::write_all appends records
+                    // right after the header placeholder.
+                    buffer.truncate(header_end);
+                }
+                initial_buffer_capacity
+            },
+            ByteBufferOutputStream::Chunked(stream) => {
+                // Java's `bufferStream.position(initialPosition + batchHeaderSizeInBytes)`: the
+                // header slot is skipped in the chunks and written into the flattened buffer at
+                // close. Compressed output is appended at close, so for both codecs the records
+                // start right after the header.
+                let initial_buffer_capacity = stream.initial_capacity()?;
+                stream.set_position(header_end)?;
+                initial_buffer_capacity
+            },
+        };
 
         let append_stream = if compression.compression_type() == CompressionType::None {
-            // Truncate to header_end so Write::write_all appends records
-            // right after the header placeholder.
-            buffer.truncate(header_end);
             AppendState::Direct
         } else {
             let append_buf = Vec::new();
@@ -170,10 +278,10 @@ impl MemoryRecordsBuilder {
             None
         };
 
-        Self {
+        Ok(Self {
             timestamp_type,
             compression,
-            buffer,
+            buffer_stream,
             magic,
             initial_position,
             base_offset,
@@ -200,7 +308,7 @@ impl MemoryRecordsBuilder {
             built_records: None,
             closed: false,
             aborted: false,
-        }
+        })
     }
 
     /// Create a new builder with default delete_horizon_ms (NO_TIMESTAMP).
@@ -241,15 +349,34 @@ impl MemoryRecordsBuilder {
         )
     }
 
-    /// Returns the underlying buffer.
+    /// Returns the underlying buffer (Java's `bufferStream.buffer()`).
+    ///
+    /// Takes `&mut self` because a chunked stream flattens its chunks on the first call (Java's
+    /// `ChunkedByteBufferOutputStream.buffer()`).
+    ///
+    /// # Errors
+    ///
+    /// `IllegalState` for a chunked stream that has not been closed for appends, or has been
+    /// deallocated.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#buffer")]
-    pub fn buffer(&self) -> &Vec<u8> {
-        &self.buffer
+    pub fn buffer(&mut self) -> Result<&[u8], Error> {
+        match &mut self.buffer_stream {
+            ByteBufferOutputStream::Single(buffer) => Ok(buffer),
+            ByteBufferOutputStream::Chunked(stream) => stream.buffer().map(|bytes| &bytes[..]),
+        }
     }
 
-    /// Returns a mutable reference to the underlying buffer.
-    pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buffer
+    /// The underlying output stream, exposed so the incremental strategy can manage its
+    /// chunk-backed stream. Rust needs the mutable form to attach and return chunks.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#bufferStream")]
+    pub(crate) fn buffer_stream(&self) -> &ByteBufferOutputStream {
+        &self.buffer_stream
+    }
+
+    /// Mutable access to the underlying output stream; see [`buffer_stream`](Self::buffer_stream).
+    /// Rust-only: Java's single `bufferStream()` returns a mutable object.
+    pub(crate) fn buffer_stream_mut(&mut self) -> &mut ByteBufferOutputStream {
+        &mut self.buffer_stream
     }
 
     /// Returns the initial capacity of the buffer.
@@ -262,8 +389,16 @@ impl MemoryRecordsBuilder {
     ///
     /// This is used by [`RecordAccumulator::deallocate`] to return the actual batch
     /// buffer to the pool rather than allocating a new one.
+    ///
+    /// Single-buffer streams only: a chunked stream's memory is returned through
+    /// [`buffer_stream_mut`](Self::buffer_stream_mut) and
+    /// `ChunkedByteBufferOutputStream::deallocate` (Java's `ChunkedProducerBatch.deallocateBuffer`),
+    /// so for it this returns an empty `Vec` and leaves the chunks attached.
     pub fn take_buffer(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buffer)
+        match &mut self.buffer_stream {
+            ByteBufferOutputStream::Single(buffer) => std::mem::take(buffer),
+            ByteBufferOutputStream::Chunked(_) => Vec::new(),
+        }
     }
 
     /// Returns the actual compression ratio after building.
@@ -299,14 +434,14 @@ impl MemoryRecordsBuilder {
     /// Close this builder and return the resulting `MemoryRecords`.
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:238-244`), and shares its **idempotence**: Java
+    /// (`MemoryRecordsBuilder.java:246-252`), and shares its **idempotence**: Java
     /// memoises the result in `builtRecords`, `close()` returns early once that field
-    /// is set (`:365-366`), and nothing but `reopenAndRewriteProducerState` ever clears
+    /// is set (`:373-374`), and nothing but `reopenAndRewriteProducerState` ever clears
     /// it. So Java's `build()` may be called any number of times and hands back the
     /// same `MemoryRecords` view every time. Callers depend on that —
-    /// `ProducerBatch.records()` (`ProducerBatch.java:483-485`) is `build()`, and it is
+    /// `ProducerBatch.records()` (`ProducerBatch.java:502-504`) is `build()`, and it is
     /// called once to serialise the produce request and again by
-    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:334`) when the broker
+    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:353`) when the broker
     /// answers `MESSAGE_TOO_LARGE`.
     ///
     /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
@@ -329,13 +464,13 @@ impl MemoryRecordsBuilder {
         //
         // That invariant is worth stating because it is what aligns Rust's
         // [`is_closed`](Self::is_closed) with Java's. Java has no `closed` field: its
-        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:885-887`).
+        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:914-916`).
         // The deleted `take_built_records` broke the correspondence — it left
         // `closed == true` with `built_records == None` — and the `built_size` shadow
         // field existed precisely to paper over the gap in
         // [`estimated_size_in_bytes`](Self::estimated_size_in_bytes). With the
         // correspondence restored, that accessor collapses back to Java's two-arm form
-        // (`:899-901`) as a consequence rather than a coincidence. Raised by Critic 50.
+        // (`:928-930`) as a consequence rather than a coincidence. Raised by Critic 50.
         self.built_records.clone().expect("build() called but no records built")
     }
 
@@ -413,19 +548,34 @@ impl MemoryRecordsBuilder {
     pub fn close_for_record_appends(&mut self) {
         match std::mem::replace(&mut self.append_stream, AppendState::Closed) {
             AppendState::Direct => {
-                // Records already written directly into self.buffer — nothing to copy.
+                // Records already written directly into the stream — nothing to copy.
             },
             AppendState::Compressed(writer) => match writer.finish() {
-                Ok(compressed_data) => {
-                    let header_end = self.initial_position + self.batch_header_size_in_bytes;
-                    self.buffer.truncate(header_end);
-                    self.buffer.extend_from_slice(&compressed_data);
+                Ok(compressed_data) => match &mut self.buffer_stream {
+                    ByteBufferOutputStream::Single(buffer) => {
+                        let header_end = self.initial_position + self.batch_header_size_in_bytes;
+                        buffer.truncate(header_end);
+                        buffer.extend_from_slice(&compressed_data);
+                    },
+                    ByteBufferOutputStream::Chunked(stream) => {
+                        // Java writes the compressor's output into the chunked stream, which
+                        // throws once the attached chunks are full (growth is KAFKA-20579); the
+                        // producer rejects compression with the incremental strategy.
+                        if let Err(e) = stream.write_with_bytes(&compressed_data) {
+                            panic!("Failed to finish compression: {}", e);
+                        }
+                    },
                 },
                 Err(e) => {
                     panic!("Failed to finish compression: {}", e);
                 },
             },
-            AppendState::Closed => {},
+            AppendState::Closed => return,
+        }
+        // Java closes the append stream, which closes the underlying stream: a no-op for a single
+        // buffer, and for a chunked stream it stops appends and releases the unused chunks.
+        if let ByteBufferOutputStream::Chunked(stream) = &mut self.buffer_stream {
+            stream.close();
         }
     }
 
@@ -433,8 +583,31 @@ impl MemoryRecordsBuilder {
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#abort")]
     pub fn abort(&mut self) {
         self.close_for_record_appends();
-        self.buffer.truncate(self.initial_position);
+        self.reset_buffer_to_initial_position();
         self.aborted = true;
+    }
+
+    /// Java's `buffer().position(initialPosition)`: discard everything written after the start
+    /// of the batch.
+    fn reset_buffer_to_initial_position(&mut self) {
+        let initial_position = self.initial_position;
+        self.with_written_buffer(|buffer| buffer.truncate(initial_position));
+    }
+
+    /// Runs `f` on the written bytes as one contiguous, mutable buffer (Java's `bufferStream.buffer()`
+    /// written to in place): the builder's own `Vec` for a single-buffer stream, the flattened
+    /// buffer for a chunked one. Only called once the builder is closed for appends.
+    fn with_written_buffer<R>(&mut self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+        match &mut self.buffer_stream {
+            ByteBufferOutputStream::Single(buffer) => f(buffer),
+            // A builder's chunked stream is closed by `close_for_record_appends` and deallocated
+            // only when its batch completes, after the builder's last use; any other state is a
+            // bug in the caller (Java's `IllegalStateException`).
+            ByteBufferOutputStream::Chunked(stream) => match stream.rewrite_buffer(f) {
+                Ok(result) => result,
+                Err(e) => panic!("{}", e.message()),
+            },
+        }
     }
 
     /// Reopen a closed (but not aborted) batch for rewriting producer state.
@@ -475,7 +648,7 @@ impl MemoryRecordsBuilder {
         self.close_for_record_appends();
 
         if self.num_records == 0 {
-            self.buffer.truncate(self.initial_position);
+            self.reset_buffer_to_initial_position();
             self.built_records = Some(MemoryRecords::empty());
         } else if self.magic > RecordBatch::MAGIC_VALUE_V1 {
             let written_compressed = self.write_default_batch_header();
@@ -503,8 +676,19 @@ impl MemoryRecordsBuilder {
     /// previous `to_vec()` performed — and wrap it in `Bytes` (which adopts the
     /// freshly allocated `Vec` with no extra copy). The receive path, which is
     /// the actual zero-copy target of §27, is unaffected by this.
+    ///
+    /// A chunked stream (KIP-1332) already made its one copy when it flattened its chunks, and
+    /// caches the result as a `Bytes`, so its batch is an O(1) slice of that buffer: the chunked
+    /// path copies exactly once, like the single-buffer path.
     fn take_batch_data(&mut self) -> bytes::Bytes {
-        bytes::Bytes::from(self.buffer[self.initial_position..].to_vec())
+        match &mut self.buffer_stream {
+            ByteBufferOutputStream::Single(buffer) => bytes::Bytes::from(buffer[self.initial_position..].to_vec()),
+            ByteBufferOutputStream::Chunked(stream) => match stream.buffer() {
+                Ok(flattened) => flattened.slice(self.initial_position..),
+                // See `with_written_buffer`.
+                Err(e) => panic!("{}", e.message()),
+            },
+        }
     }
 
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#validateProducerState")]
@@ -533,8 +717,6 @@ impl MemoryRecordsBuilder {
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#writeDefaultBatchHeader")]
     fn write_default_batch_header(&mut self) -> usize {
         self.ensure_open_for_record_batch_write();
-        let size = self.buffer.len() - self.initial_position;
-        let written_compressed = size - RecordBatch::RECORD_BATCH_OVERHEAD;
         let offset_delta = (self.last_offset.unwrap() - self.base_offset) as i32;
 
         let max_timestamp = if self.timestamp_type == TimestampType::LogAppendTime {
@@ -543,7 +725,7 @@ impl MemoryRecordsBuilder {
             self.max_timestamp
         };
 
-        // Compute has_delete_horizon before borrowing self.buffer mutably
+        // Compute has_delete_horizon before borrowing the buffer stream mutably
         let has_delete_horizon = self.has_delete_horizon_ms();
         let initial_position = self.initial_position;
         let base_offset = self.base_offset;
@@ -559,28 +741,30 @@ impl MemoryRecordsBuilder {
         let partition_leader_epoch = self.partition_leader_epoch;
         let num_records = self.num_records;
 
-        DefaultRecordBatch::write_header_at(
-            &mut self.buffer,
-            initial_position,
-            base_offset,
-            offset_delta,
-            size,
-            magic,
-            compression_type,
-            timestamp_type,
-            base_timestamp,
-            max_timestamp,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            is_transactional,
-            is_control_batch,
-            has_delete_horizon,
-            partition_leader_epoch,
-            num_records,
-        );
-
-        written_compressed
+        self.with_written_buffer(|buffer| {
+            let size = buffer.len() - initial_position;
+            DefaultRecordBatch::write_header_at(
+                buffer,
+                initial_position,
+                base_offset,
+                offset_delta,
+                size,
+                magic,
+                compression_type,
+                timestamp_type,
+                base_timestamp,
+                max_timestamp,
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                is_transactional,
+                is_control_batch,
+                has_delete_horizon,
+                partition_leader_epoch,
+                num_records,
+            );
+            size - RecordBatch::RECORD_BATCH_OVERHEAD
+        })
     }
 
     /// Append a new record at the given offset.
@@ -741,8 +925,14 @@ impl MemoryRecordsBuilder {
     ) -> io::Result<usize> {
         match &mut self.append_stream {
             AppendState::Direct => {
-                let size =
-                    DefaultRecord::write_to(&mut self.buffer, offset_delta, timestamp_delta, key, value, headers)?;
+                let size = match &mut self.buffer_stream {
+                    ByteBufferOutputStream::Single(buffer) => {
+                        DefaultRecord::write_to(buffer, offset_delta, timestamp_delta, key, value, headers)?
+                    },
+                    ByteBufferOutputStream::Chunked(stream) => {
+                        DefaultRecord::write_to(stream, offset_delta, timestamp_delta, key, value, headers)?
+                    },
+                };
                 Ok(size as usize)
             },
             AppendState::Compressed(writer) => {
@@ -798,14 +988,49 @@ impl MemoryRecordsBuilder {
     /// Get an estimate of the number of bytes written.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#estimatedBytesWritten")]
     fn estimated_bytes_written(&self) -> usize {
+        self.estimated_bytes_written_with_uncompressed_size(self.uncompressed_records_size_in_bytes)
+    }
+
+    /// Returns the projected number of bytes the builder would write for the given uncompressed
+    /// record bytes: exact for uncompressed, a ratio-aware estimate for compressed.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#estimatedBytesWritten")]
+    fn estimated_bytes_written_with_uncompressed_size(&self, uncompressed_size: usize) -> usize {
         if self.compression.compression_type() == CompressionType::None {
-            self.batch_header_size_in_bytes + self.uncompressed_records_size_in_bytes
+            self.batch_header_size_in_bytes + uncompressed_size
         } else {
             self.batch_header_size_in_bytes
-                + (self.uncompressed_records_size_in_bytes as f32
-                    * self.estimated_compression_ratio
-                    * COMPRESSION_RATE_ESTIMATION_FACTOR) as usize
+                + (uncompressed_size as f32 * self.estimated_compression_ratio * COMPRESSION_RATE_ESTIMATION_FACTOR)
+                    as usize
         }
+    }
+
+    /// Projected value of [`estimated_bytes_written`](Self::estimated_bytes_written) after
+    /// appending one more record with the given fields, using the record's worst-case
+    /// (upper-bound) per-record size. Used by the incremental strategy to size mid-batch chunk
+    /// extensions.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#estimatedBytesWrittenAfter")]
+    pub(crate) fn estimated_bytes_written_after(
+        &self,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+    ) -> usize {
+        let record_size = if self.magic < RecordBatch::MAGIC_VALUE_V2 {
+            // `Records.LOG_OVERHEAD + LegacyRecord.recordSize(magic, key, value)`. `LegacyRecord`
+            // is not translated (this builder rejects legacy appends), so its
+            // `recordOverhead(magic) + keySize + valueSize` is spelled out: the overhead is
+            // `RECORD_OVERHEAD_V0` = 14 (crc 4, magic 1, attributes 1, key and value sizes 4 + 4)
+            // for magic 0, and `RECORD_OVERHEAD_V1` = 22 (plus an 8-byte timestamp) for magic 1.
+            let record_overhead = if self.magic == RecordBatch::MAGIC_VALUE_V0 {
+                14
+            } else {
+                22
+            };
+            AbstractRecords::LOG_OVERHEAD + record_overhead + key.map_or(0, <[u8]>::len) + value.map_or(0, <[u8]>::len)
+        } else {
+            DefaultRecord::record_size_upper_bound(key, value, headers) as usize
+        };
+        self.estimated_bytes_written_with_uncompressed_size(self.uncompressed_records_size_in_bytes + record_size)
     }
 
     /// Set the estimated compression ratio.
@@ -818,6 +1043,10 @@ impl MemoryRecordsBuilder {
     ///
     /// If no records have been appended, then this returns true.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#hasRoomFor")]
+    // `inline(always)`: on the producer's per-record path, and called from two places since
+    // KIP-1332 (the plain append and the chunked extension check), so fat LTO otherwise keeps it
+    // out of line (Critic 98 P1, measured in a production build).
+    #[inline(always)]
     pub fn has_room_for(
         &self,
         timestamp: i64,
@@ -1487,8 +1716,8 @@ mod tests {
     }
 
     /// `build()` is **idempotent**, matching Java: `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:238-244`) memoises into `builtRecords`, `close()`
-    /// returns early once that field is set (`:365-366`), and nothing but
+    /// (`MemoryRecordsBuilder.java:246-252`) memoises into `builtRecords`, `close()`
+    /// returns early once that field is set (`:373-374`), and nothing but
     /// `reopenAndRewriteProducerState` clears it. Every call therefore yields the same
     /// bytes.
     ///
@@ -1564,7 +1793,7 @@ mod tests {
             builder.append_kv(0, Some(b"a"), Some(b"1"));
             builder.abort();
             // After abort, the buffer should be truncated to initial_position (0)
-            assert_eq!(0, builder.buffer().len());
+            assert_eq!(0, builder.buffer().unwrap().len());
         }
     }
 
@@ -1703,4 +1932,262 @@ mod tests {
     // testWriteLeaderChangeControlBatchWithoutLeaderEpoch, testWriteLeaderChangeControlBatch
     // are skipped because they require EndTransactionMarker, ControlRecordType, and
     // LeaderChangeMessage which are not yet implemented.
+}
+
+/// Rust tests for the KIP-1332 chunked stream behind the builder (KAFKA-20578). Java covers the
+/// builder's chunked path only through `ChunkedRecordAccumulatorTest` (Phase 8); these pin the
+/// builder-level contract that test relies on.
+#[cfg(test)]
+mod chunked_stream_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::producer::internals::{BufferPool, ChunkedByteBufferOutputStream};
+
+    /// Small chunks, so the 61-byte batch header and the records both straddle chunk boundaries.
+    const CHUNK_SIZE: usize = 32;
+
+    fn chunked_builder(pool: &Arc<BufferPool>, chunks: usize, compression: Compression) -> MemoryRecordsBuilder {
+        let initial = pool.try_allocate_chunks((chunks * CHUNK_SIZE) as i32).unwrap();
+        let stream = ChunkedByteBufferOutputStream::new(initial, CHUNK_SIZE, Some(Arc::clone(pool))).unwrap();
+        MemoryRecordsBuilder::with_buffer_stream(
+            ByteBufferOutputStream::Chunked(stream),
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            compression,
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+            RecordBatch::NO_TIMESTAMP,
+        )
+        .unwrap()
+    }
+
+    fn single_builder() -> MemoryRecordsBuilder {
+        MemoryRecordsBuilder::with_default(
+            Vec::with_capacity(1024),
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+        )
+    }
+
+    fn append_records(builder: &mut MemoryRecordsBuilder) {
+        for i in 0..5u8 {
+            builder.append(1_700_000_000_000 + i as i64, Some(&[i; 7]), Some(&[i; 23]), &[]);
+        }
+    }
+
+    /// The chunked stream produces byte-for-byte the batch the single-buffer stream does, and
+    /// closing releases the chunks the records never reached.
+    #[test]
+    fn test_chunked_stream_builds_the_same_batch_as_a_single_buffer() {
+        let pool = Arc::new(BufferPool::new_incremental_for_test(64 * CHUNK_SIZE as i64, CHUNK_SIZE));
+        let mut chunked = chunked_builder(&pool, 16, Compression::none().build());
+        assert!(chunked.buffer_stream().is_chunked());
+        assert_eq!(CHUNK_SIZE, chunked.initial_capacity());
+        let mut single = single_builder();
+        append_records(&mut chunked);
+        append_records(&mut single);
+        assert_eq!(single.estimated_size_in_bytes(), chunked.estimated_size_in_bytes());
+
+        let expected = single.build();
+        let records = chunked.build();
+        assert_eq!(expected.buffer(), records.buffer());
+        assert_eq!(5, records.records().count());
+
+        // 61-byte header + 5 records of 37 bytes = 246 bytes: 8 chunks hold data, 8 were released
+        // at close.
+        assert_eq!(246, records.size_in_bytes());
+        assert_eq!(56 * CHUNK_SIZE as i64, pool.available_memory());
+        // The data-bearing chunks stay until the batch completes.
+        chunked.buffer_stream_mut().as_chunked_mut().unwrap().deallocate();
+        assert_eq!(64 * CHUNK_SIZE as i64, pool.available_memory());
+        // The built batch lives in the flattened buffer, not the chunks.
+        assert_eq!(expected.buffer(), records.buffer());
+    }
+
+    /// `reopen_and_rewrite_producer_state` on a chunked builder: the second close rewrites the
+    /// header of the flattened buffer with the new producer state, leaving the records intact and
+    /// the batch handed out by the first close unchanged — the same result as the single-buffer
+    /// path.
+    #[test]
+    fn test_reopen_and_rewrite_producer_state_on_chunked_stream() {
+        let pool = Arc::new(BufferPool::new_incremental_for_test(64 * CHUNK_SIZE as i64, CHUNK_SIZE));
+        let mut chunked = chunked_builder(&pool, 16, Compression::none().build());
+        let mut single = single_builder();
+        for builder in [&mut chunked, &mut single] {
+            builder.set_producer_state(1000, 5, 7, false);
+            append_records(builder);
+        }
+        let first = chunked.build();
+        let first_bytes = first.buffer().to_vec();
+        assert_eq!(1000, first.batches().next().unwrap().producer_id());
+
+        for builder in [&mut chunked, &mut single] {
+            builder.reopen_and_rewrite_producer_state(2000, 6, 42, true);
+        }
+        assert!(!chunked.is_closed());
+        let rewritten = chunked.build();
+        let expected = single.build();
+        assert_eq!(expected.buffer(), rewritten.buffer(), "same bytes as the single-buffer path");
+        let batch = rewritten.batches().next().unwrap();
+        assert_eq!(2000, batch.producer_id());
+        assert_eq!(6, batch.producer_epoch());
+        assert_eq!(42, batch.base_sequence());
+        assert!(batch.is_transactional());
+        assert!(batch.is_valid(), "the CRC covers the rewritten header");
+        assert_eq!(5, rewritten.records().count());
+        assert_eq!(first_bytes, first.buffer(), "the earlier batch is not mutated");
+        assert_eq!(&first_bytes[61..], &rewritten.buffer()[61..], "the records are untouched");
+    }
+
+    /// Abort and an empty close leave a chunked builder with nothing written past the batch
+    /// start, as `buffer().position(initialPosition)` does in Java.
+    #[test]
+    fn test_abort_and_empty_close_on_chunked_stream() {
+        let pool = Arc::new(BufferPool::new_incremental_for_test(64 * CHUNK_SIZE as i64, CHUNK_SIZE));
+        let mut aborted = chunked_builder(&pool, 16, Compression::none().build());
+        append_records(&mut aborted);
+        aborted.abort();
+        assert_eq!(0, aborted.buffer().unwrap().len());
+
+        let mut empty = chunked_builder(&pool, 4, Compression::none().build());
+        let records = empty.build();
+        assert_eq!(0, records.size_in_bytes());
+        assert_eq!(0, empty.buffer().unwrap().len());
+        drop(aborted);
+        drop(empty);
+        assert_eq!(
+            64 * CHUNK_SIZE as i64,
+            pool.available_memory(),
+            "dropping the builders returns their chunks"
+        );
+    }
+
+    /// The chunked stream must be positioned before any write, so a stream that was already
+    /// written to is refused with the stream's error instead of a panic.
+    #[test]
+    fn test_with_buffer_stream_rejects_a_written_stream() {
+        let pool = Arc::new(BufferPool::new_incremental_for_test(64 * CHUNK_SIZE as i64, CHUNK_SIZE));
+        let initial = pool.try_allocate_chunks(4 * CHUNK_SIZE as i32).unwrap();
+        let mut stream = ChunkedByteBufferOutputStream::new(initial, CHUNK_SIZE, Some(Arc::clone(&pool))).unwrap();
+        stream.write_with_b(1).unwrap();
+        let err = MemoryRecordsBuilder::with_buffer_stream(
+            ByteBufferOutputStream::Chunked(stream),
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+            RecordBatch::NO_TIMESTAMP,
+        )
+        .err()
+        .expect("a written stream cannot be positioned");
+        assert_eq!("position() can only be called before any writes", err.message());
+    }
+
+    /// The single-buffer stream ignores its `Vec`'s contents past the position, as before.
+    #[test]
+    fn test_with_buffer_stream_single_starts_at_the_position() {
+        let mut builder = MemoryRecordsBuilder::with_buffer_stream(
+            ByteBufferOutputStream::Single(vec![0xAB; 3]),
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+            RecordBatch::NO_TIMESTAMP,
+        )
+        .unwrap();
+        append_records(&mut builder);
+        let records = builder.build();
+        let mut expected = single_builder();
+        append_records(&mut expected);
+        assert_eq!(expected.build().buffer(), records.buffer());
+        assert_eq!(
+            &[0xAB; 3][..],
+            &builder.buffer().unwrap()[..3],
+            "bytes before the batch are kept"
+        );
+    }
+
+    /// `estimated_bytes_written_after` (Java's `estimatedBytesWrittenAfter`): the current estimate
+    /// plus the record's upper-bound size, ratio-adjusted when compressed.
+    #[test]
+    fn test_estimated_bytes_written_after() {
+        let key = [1u8; 7];
+        let value = [2u8; 23];
+        let upper_bound = DefaultRecord::record_size_upper_bound(Some(&key), Some(&value), &[]) as usize;
+
+        let mut builder = single_builder();
+        assert_eq!(
+            61 + upper_bound,
+            builder.estimated_bytes_written_after(Some(&key), Some(&value), &[])
+        );
+        append_records(&mut builder);
+        assert_eq!(61 + 5 * 37, builder.estimated_size_in_bytes());
+        assert_eq!(
+            61 + 5 * 37 + upper_bound,
+            builder.estimated_bytes_written_after(Some(&key), Some(&value), &[])
+        );
+        assert_eq!(
+            61 + 5 * 37 + DefaultRecord::record_size_upper_bound(None, None, &[]) as usize,
+            builder.estimated_bytes_written_after(None, None, &[])
+        );
+
+        let mut compressed = MemoryRecordsBuilder::with_default(
+            Vec::with_capacity(1024),
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::gzip().build(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            1024,
+        );
+        compressed.set_estimated_compression_ratio(0.5);
+        append_records(&mut compressed);
+        let uncompressed = 5 * 37 + upper_bound;
+        assert_eq!(
+            61 + (uncompressed as f32 * 0.5 * COMPRESSION_RATE_ESTIMATION_FACTOR) as usize,
+            compressed.estimated_bytes_written_after(Some(&key), Some(&value), &[])
+        );
+    }
 }

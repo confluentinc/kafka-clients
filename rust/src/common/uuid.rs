@@ -56,7 +56,7 @@ impl Uuid {
     /// Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
     ///
     /// This will not generate a UUID equal to `ZERO_UUID`, `ONE_UUID`, or one whose
-    /// string representation starts with a dash ("-").
+    /// string representation contains a dash ("-").
     #[doc(alias = "org.apache.kafka.common.Uuid#randomUuid")]
     pub fn random_uuid() -> Self {
         loop {
@@ -66,7 +66,7 @@ impl Uuid {
             if uuid == Self::ZERO_UUID || uuid == Self::ONE_UUID {
                 continue;
             }
-            if uuid.to_base64_string().starts_with('-') {
+            if uuid.to_base64_string().contains('-') {
                 continue;
             }
             return uuid;
@@ -400,7 +400,7 @@ mod tests {
 
     /// Translated from Java UuidTest.testRandomUuid (RepeatedTest(100)).
     /// Verifies that random UUIDs are not ZERO_UUID, not METADATA_TOPIC_ID,
-    /// and do not start with a dash.
+    /// and contain no dash (KAFKA-20072).
     #[test]
     #[doc(alias = "org.apache.kafka.common.UuidTest#testRandomUuid")]
     fn test_random_uuid() {
@@ -408,7 +408,7 @@ mod tests {
             let random_id = Uuid::random_uuid();
             assert_ne!(Uuid::ZERO_UUID, random_id);
             assert_ne!(Uuid::METADATA_TOPIC_ID, random_id);
-            assert!(!random_id.to_string().starts_with('-'));
+            assert!(!random_id.to_string().contains('-'));
         }
     }
 

@@ -27,7 +27,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::{kafka_debug, kafka_error};
 
 use super::ApiRequestScope;

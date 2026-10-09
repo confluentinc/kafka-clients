@@ -88,11 +88,11 @@ impl ConsumerLogTruncationError {
     ///
     /// `LogTruncationException` does not override
     /// `OffsetOutOfRangeException.partitions()`
-    /// (`OffsetOutOfRangeException.java:51-54`), so this is the key set of
+    /// (`OffsetOutOfRangeException.java:64-67`), so this is the key set of
     /// `offset_out_of_range_partitions` — NOT of
     /// [`divergent_offsets`](Self::divergent_offsets). The distinction is the
     /// whole point of the accessor: Java's javadoc
-    /// (`LogTruncationException.java:48-56`) tells the caller to iterate
+    /// (`LogTruncationException.java:64-72`) tells the caller to iterate
     /// `partitions()` and then look each one up in `divergentOffsets()`,
     /// "because there is no guarantee that this offset will be known" for
     /// every truncated partition.
@@ -168,7 +168,7 @@ mod tests {
     ///
     /// Java: `LogTruncationException(Map, Map)` composes
     /// `"Truncated partitions detected with divergent offsets " +
-    /// divergentOffsets` (`LogTruncationException.java:36-42`); Java's
+    /// divergentOffsets` (`LogTruncationException.java:45-48`); Java's
     /// `Map.toString()` braces the entries.
     #[test]
     fn test_log_truncation_default_message_and_accessors() {
@@ -188,8 +188,8 @@ mod tests {
 
     /// `LogTruncationException` does NOT override `partitions()`, so it inherits
     /// `OffsetOutOfRangeException`'s `offsetOutOfRangePartitions.keySet()`
-    /// (`OffsetOutOfRangeException.java:51-54`). That is what makes the javadoc
-    /// at `LogTruncationException.java:48-56` meaningful: iterate
+    /// (`OffsetOutOfRangeException.java:64-67`). That is what makes the javadoc
+    /// at `LogTruncationException.java:64-72` meaningful: iterate
     /// `partitions()`, then look each one up in `divergentOffsets()`, "because
     /// there is no guarantee that this offset will be known". So the two sets
     /// are deliberately allowed to differ, and `partitions()` must follow the
@@ -211,7 +211,7 @@ mod tests {
 
     /// `LogTruncationException extends OffsetOutOfRangeException extends
     /// InvalidOffsetException extends KafkaException`
-    /// (`LogTruncationException.java:29`), where the middle two are the
+    /// (`LogTruncationException.java:35`), where the middle two are the
     /// CONSUMER package's classes — so it answers to both consumer predicates
     /// and to neither `ApiException` nor `RetriableException`.
     #[test]

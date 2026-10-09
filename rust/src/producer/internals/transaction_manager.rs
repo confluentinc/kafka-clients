@@ -26,6 +26,7 @@ use crate::ApiVersions;
 use crate::EndTxnRequestData;
 use crate::FindCoordinatorRequestData;
 use crate::InitProducerIdRequestData;
+use crate::Metadata;
 use crate::TxnOffsetCommitRequestData;
 use crate::common::errors::TransactionAbortableError;
 use crate::common::protocol::{ApiKeys, Errors};
@@ -33,17 +34,17 @@ use crate::common::record::internal::RecordBatch;
 use crate::common::requests::CoordinatorType;
 use crate::common::requests::{
     AddPartitionsToTxnResponse, CommittedOffset, ConcreteResponse, PartitionResponse, RequestBuilder,
-    TransactionResult, TxnOffsetCommitRequestBuilderOptionsBuilder, add_offsets_to_txn_request,
-    add_partitions_to_txn_request, end_txn_request, find_coordinator_request, init_producer_id_request,
-    txn_offset_commit_request,
+    TransactionResult, add_offsets_to_txn_request, add_partitions_to_txn_request, end_txn_request,
+    find_coordinator_request, init_producer_id_request, txn_offset_commit_request,
 };
-use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
+use crate::common::utils::internals::{LogContext, ProducerIdAndEpoch};
+use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition, Uuid};
 use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
 use crate::producer::internals::{
     InFlightBatchKey, ProducerBatch, TransactionalRequestResult, TxnPartitionEntry, TxnPartitionMap,
 };
-use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
+use crate::txn_offset_commit_request_data::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 
 /// The Sender task's queue of transactional requests waiting to be sent.
 ///
@@ -578,10 +579,15 @@ pub(crate) enum TxnRequestHandlerKind {
         /// The consumer group the offsets belong to (Java 1799).
         group_metadata: ConsumerGroupMetadataImpl,
     },
-    /// `TxnOffsetCommitHandler` (Java 1856-1951).
+    /// `TxnOffsetCommitHandler` (Java 1912-2050).
     TxnOffsetCommit {
         /// The request being sent.
         builder: txn_offset_commit_request::Builder,
+        /// Snapshot of the topic-id -> name map captured when the request was
+        /// built. v6+ responses omit the topic name on the wire, so we resolve
+        /// it via this snapshot rather than the live metadata cache (which may
+        /// have changed by the time the response arrives).
+        topic_names_by_ids: HashMap<Uuid, String>,
     },
     /// `AddPartitionsToTxnHandler` (Java 1541-1649).
     AddPartitionsToTxn {
@@ -679,7 +685,7 @@ impl TxnRequestHandler {
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Box::new(builder.clone()),
             TxnRequestHandlerKind::EndTxn { builder } => Box::new(builder.clone()),
             TxnRequestHandlerKind::AddOffsetsToTxn { builder, .. } => Box::new(builder.clone()),
-            TxnRequestHandlerKind::TxnOffsetCommit { builder } => Box::new(builder.clone()),
+            TxnRequestHandlerKind::TxnOffsetCommit { builder, .. } => Box::new(builder.clone()),
         }
     }
 
@@ -758,7 +764,7 @@ impl TxnRequestHandler {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn txn_offset_commit_request_data(&self) -> Option<&TxnOffsetCommitRequestData> {
         match &self.kind {
-            TxnRequestHandlerKind::TxnOffsetCommit { builder } => Some(builder.data()),
+            TxnRequestHandlerKind::TxnOffsetCommit { builder, .. } => Some(builder.data()),
             _ => None,
         }
     }
@@ -901,7 +907,7 @@ impl fmt::Debug for TxnRequestHandler {
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => write!(f, "{builder:?}"),
             TxnRequestHandlerKind::EndTxn { builder } => write!(f, "{builder:?}"),
             TxnRequestHandlerKind::AddOffsetsToTxn { builder, .. } => write!(f, "{builder:?}"),
-            TxnRequestHandlerKind::TxnOffsetCommit { builder } => write!(f, "{builder:?}"),
+            TxnRequestHandlerKind::TxnOffsetCommit { builder, .. } => write!(f, "{builder:?}"),
         }
     }
 }
@@ -1101,6 +1107,20 @@ pub(crate) struct TransactionManager {
     /// Read by [`Self::handle_coordinator_ready`] and
     /// [`Self::maybe_update_transaction_v2_enabled`].
     api_versions: Arc<ApiVersions>,
+    /// The producer's metadata (Java 106, KIP-1319): read by
+    /// [`Self::txn_offset_commit_handler`] for the topic ids that let a
+    /// `TxnOffsetCommit` negotiate v6.
+    ///
+    /// Lock order is manager → `Metadata`, as in Java (`synchronized
+    /// sendOffsetsToTransaction` reaches `metadata.topicIds()`). `topic_ids()` takes
+    /// only `Metadata`'s internal lock. `Metadata` does call out while holding that
+    /// lock — `Metadata::update` runs `ProducerMetadata`'s retain and request-builder
+    /// closures and the `ClusterResourceListeners` under it — but none of those
+    /// callbacks takes the manager's lock or `pending_requests` (they reach only
+    /// `ProducerMetadata`'s own lock or user listeners), so the order cannot invert
+    /// (`producer-transactions.md` §2-§3). A callback added to `Metadata` must keep
+    /// it that way.
+    metadata: Arc<Metadata>,
 
     txn_partition_map: TxnPartitionMap,
 
@@ -1109,12 +1129,15 @@ pub(crate) struct TransactionManager {
     /// Filled by [`Self::txn_offset_commit_handler`] (Java 1226) and drained
     /// per-partition by [`Self::handle_txn_offset_commit_response`] (Java 1930).
     ///
-    /// The handler builds its request from *this* map rather than from the offsets it
-    /// was handed, so each construction picks up whatever is still outstanding — but
-    /// a *retry* of an already-built handler re-sends that construction's snapshot,
-    /// not a shrunken one. See
-    /// [`Self::handle_txn_offset_commit_response`] for why, and for why narrowing the
-    /// retry would be a wire-level divergence.
+    /// In 4.4 (KIP-1319, `TransactionManager.java:1258-1290`) each handler's request
+    /// is built once, from the offsets passed to *that* call; this map is only
+    /// written there, never read to build a request. It tracks what is still
+    /// unacknowledged: it drives the response tail's three-way choice and
+    /// [`Self::has_pending_offset_commits`], and a leftover is never re-sent by a
+    /// later handler. A *retry* of an already-built handler re-sends that handler's
+    /// own snapshot, not a shrunken one — see
+    /// [`Self::handle_txn_offset_commit_response`] for why narrowing the retry
+    /// would be a wire-level divergence.
     pending_txn_offset_commits: HashMap<TopicPartition, CommittedOffset>,
 
     // If a batch bound for a partition expired locally after being sent at least once, the partition is considered
@@ -1216,7 +1239,7 @@ pub(crate) struct TransactionManager {
     /// true of the other three and **false of this one**: Java reads it from the
     /// *application* thread on every failed send, through
     /// `KafkaProducer.doSend`'s `catch (ApiException e)`
-    /// (`KafkaProducer.java:1066`) → [`Self::maybe_transition_to_error_state`]
+    /// (`KafkaProducer.java:1140`) → [`Self::maybe_transition_to_error_state`]
     /// (`:781`) → [`Self::need_to_trigger_epoch_bump_from_client`] (`:1310`). That
     /// call site already exists here, at `kafka_producer.rs:775`, so a
     /// Sender-confined field could not serve it.
@@ -1278,7 +1301,7 @@ impl TransactionManager {
     /// Creates a transaction manager.
     ///
     /// Translated from `TransactionManager(LogContext, String, int, long,
-    /// ApiVersions, boolean)` (Java 208).
+    /// ApiVersions, Metadata, boolean)` (Java 233).
     ///
     /// Phase 3's MILESTONE-11 GUARD, which refused a `transactional_id` so that
     /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
@@ -1294,6 +1317,7 @@ impl TransactionManager {
         transaction_timeout_ms: i32,
         retry_backoff_ms: i64,
         api_versions: Arc<ApiVersions>,
+        metadata: Arc<Metadata>,
         enable_2pc: bool,
     ) -> Self {
         Self {
@@ -1303,6 +1327,7 @@ impl TransactionManager {
             transactional_id,
             transaction_timeout_ms,
             api_versions,
+            metadata,
             partitions_with_unresolved_sequences: HashMap::new(),
             partitions_to_rewrite_sequences: HashSet::new(),
             new_partitions_in_transaction: HashSet::new(),
@@ -1336,7 +1361,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
-    /// (`KafkaProducer.java:654`). This returns the [`TransactionalRequestResult`]
+    /// (`KafkaProducer.java:714`). This returns the [`TransactionalRequestResult`]
     /// instead, and Phase 6's `KafkaProducer::init_transactions` awaits it — the
     /// manager must not await anything, because the caller holds the shared mutex
     /// and rules §4 forbids holding it across an `.await`.
@@ -1527,7 +1552,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// Java's caller blocks on `result.await(maxBlockTimeMs, ..)`
-    /// (`KafkaProducer.java:742`); this returns the
+    /// (`KafkaProducer.java:807`); this returns the
     /// [`TransactionalRequestResult`] and Phase 6's
     /// `KafkaProducer::commit_transaction` awaits it, because the caller holds the
     /// shared mutex and rules §4 forbids holding it across an `.await`.
@@ -1564,14 +1589,14 @@ impl TransactionManager {
     /// `beginAbort()` is the **only** transactional entry point Java reaches from two
     /// threads (`grep -rn '\.beginAbort(' producer/`):
     ///
-    ///   - `KafkaProducer.abortTransaction` (`KafkaProducer.java:818`) — application;
+    ///   - `KafkaProducer.abortTransaction` (`KafkaProducer.java:909`) — application;
     ///   - `Sender.run`'s shutdown abort loop (`Sender.java:273`) — the Sender task.
     ///
     /// So rules §1's "where a method is reachable from both, it takes `caller` as a
     /// parameter and forwards it — do NOT default it" applies here and nowhere else in
-    /// this phase: `beginCommit` (`KafkaProducer.java:783`),
-    /// `sendOffsetsToTransaction` (`:740`), `maybeAddPartition` (`:1045`),
-    /// `initializeTransactions` (`:652`) and `beginTransaction` (`:679`) each have
+    /// this phase: `beginCommit` (`KafkaProducer.java:874`),
+    /// `sendOffsetsToTransaction` (`:805`), `maybeAddPartition` (`:1119`),
+    /// `initializeTransactions` (`:712`) and `beginTransaction` (`:738`) each have
     /// exactly one Java caller, all application-side.
     ///
     /// The difference is not cosmetic. An invalid `→ ABORTING_TRANSACTION` on the
@@ -1659,7 +1684,7 @@ impl TransactionManager {
     /// # Not blocking here
     ///
     /// As [`Self::begin_commit`]: Java's caller blocks on
-    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:820`); Phase 6 awaits
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:911`); Phase 6 awaits
     /// the returned handle.
     ///
     /// # Errors
@@ -1743,35 +1768,76 @@ impl TransactionManager {
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: &dyn ConsumerGroupMetadata,
     ) -> TxnRequestHandler {
-        for (topic_partition, offset_and_metadata) in offsets {
+        // Resolve topic ids from the metadata cache at request build time.
+        // KafkaProducer.sendOffsetsToTransaction has already ensured the cache
+        // is fresh for these topics, so this is a non-blocking lookup.
+        let topic_ids = self.metadata.topic_ids();
+        let mut request_topics_by_name: HashMap<&str, usize> = HashMap::new();
+        let mut topic_names_by_ids: HashMap<Uuid, String> = HashMap::new();
+        let mut topics: Vec<TxnOffsetCommitRequestTopic> = Vec::new();
+        let mut all_have_topic_ids = true;
+
+        // Java walks the caller's `offsets` map, so its topic and partition order
+        // is that map's iteration order; sorted here by topic and then partition
+        // for a deterministic encoding (`producer-transactions.md` §10).
+        let mut entries: Vec<(&TopicPartition, &OffsetAndMetadata)> = offsets.iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| (a.topic(), a.partition()).cmp(&(b.topic(), b.partition())));
+
+        for (tp, offset_and_metadata) in entries {
             // Java's `OffsetAndMetadata.metadata()` is nullable and passed straight
             // through; this crate normalises it to a `String` at construction (as
             // Java's own constructor does for null), so it is always present here.
-            let committed_offset = CommittedOffset::new(
-                offset_and_metadata.offset(),
-                Some(offset_and_metadata.metadata().to_string()),
-                offset_and_metadata.leader_epoch(),
+            self.pending_txn_offset_commits.insert(
+                tp.clone(),
+                CommittedOffset::new(
+                    offset_and_metadata.offset(),
+                    Some(offset_and_metadata.metadata().to_string()),
+                    offset_and_metadata.leader_epoch(),
+                ),
             );
-            self.pending_txn_offset_commits
-                .insert(topic_partition.clone(), committed_offset);
+            let topic_id = topic_ids.get(tp.topic()).copied().unwrap_or_else(Uuid::zero);
+            all_have_topic_ids &= topic_id != Uuid::zero();
+            let position = *request_topics_by_name.entry(tp.topic()).or_insert_with(|| {
+                let mut topic = TxnOffsetCommitRequestTopic::new();
+                topic.set_name(tp.topic().to_string()).set_topic_id(topic_id);
+                topics.push(topic);
+                if topic_id != Uuid::zero() {
+                    topic_names_by_ids.insert(topic_id, tp.topic().to_string());
+                }
+                topics.len() - 1
+            });
+            let mut partition = TxnOffsetCommitRequestPartition::new();
+            partition
+                .set_partition_index(tp.partition())
+                .set_committed_offset(offset_and_metadata.offset())
+                .set_committed_leader_epoch(
+                    offset_and_metadata
+                        .leader_epoch()
+                        .unwrap_or(RecordBatch::NO_PARTITION_LEADER_EPOCH),
+                )
+                .set_committed_metadata(Some(offset_and_metadata.metadata().to_string()));
+            topics[position].partitions.push(partition);
         }
 
-        let builder = txn_offset_commit_request::Builder::with_options(
+        let mut data = TxnOffsetCommitRequestData::new();
+        data
             // `ensureTransactional()` has already run, so the id is present.
-            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
-                .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
-                .set_consumer_group_id(group_metadata.group_id())
-                .set_producer_id(self.producer_id_and_epoch.producer_id)
-                .set_producer_epoch(self.producer_id_and_epoch.epoch)
-                .set_pending_txn_offset_commits(&self.pending_txn_offset_commits)
-                .set_is_transaction_v2_enabled(self.is_transaction_v2_enabled())
-                .set_member_id(group_metadata.member_id().to_string())
-                .set_generation_id(group_metadata.generation_id())
-                .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
-                .build()
-                .expect("TxnOffsetCommitRequestBuilderOptionsBuilder::build: every mandatory parameter is set above"),
-        );
-        let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
+            .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+            .set_group_id(group_metadata.group_id().to_string())
+            .set_producer_id(self.producer_id_and_epoch.producer_id)
+            .set_producer_epoch(self.producer_id_and_epoch.epoch)
+            .set_member_id(group_metadata.member_id().to_string())
+            .set_generation_id_or_member_epoch(group_metadata.generation_id())
+            .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
+            .set_topics(topics);
+        // v6 (topic ids) is offered only when every topic resolved to an id;
+        // otherwise the request is capped at v5 and keyed by name (KIP-1319).
+        let builder = if all_have_topic_ids {
+            txn_offset_commit_request::Builder::for_topic_ids_or_names(data, self.is_transaction_v2_enabled())
+        } else {
+            txn_offset_commit_request::Builder::for_topic_names(data, self.is_transaction_v2_enabled())
+        };
+        let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder, topic_names_by_ids };
         match result {
             Some(result) => TxnRequestHandler::with_result(result, self.retry_backoff_ms, kind),
             None => TxnRequestHandler::new("TxnOffsetCommitHandler", self.retry_backoff_ms, kind),
@@ -2375,7 +2441,7 @@ impl TransactionManager {
     /// lines above the call (`Sender.java:288-289`): "fail all the incomplete
     /// transactional requests and batches and *wake up the threads waiting on the
     /// futures*". Those threads are `KafkaProducer.initTransactions` &c. blocked in
-    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:654`). Phase 5a
+    /// `result.await(maxBlockTimeMs, ..)` (`KafkaProducer.java:714`). Phase 5a
     /// makes half of that real — [`Self::initialize_transactions`] now hands out a
     /// result and this method's `pendingTransition` branch fails it — and Phase 6
     /// adds the `KafkaProducer` method that awaits it.
@@ -2726,7 +2792,7 @@ impl TransactionManager {
     ///
     /// Translated from `isSendToPartitionAllowed(TopicPartition)` (Java 466),
     /// called from `RecordAccumulator.shouldStopDrainBatchesForPartition`
-    /// (`RecordAccumulator.java:818`) — which Phase 4 translates, hence this method
+    /// (`RecordAccumulator.java:866`) — which Phase 4 translates, hence this method
     /// arriving before the rest of the transactional entry points.
     ///
     /// Phase 5a completed the transactional arm; since Phase 5b filled
@@ -3857,7 +3923,7 @@ impl TransactionManager {
             | TxnRequestHandlerKind::AddOffsetsToTxn { .. } => self.transactional_id(),
             TxnRequestHandlerKind::FindCoordinator { .. } => None,
             // Java 1899.
-            TxnRequestHandlerKind::TxnOffsetCommit { ref builder } => Some(&builder.data().group_id),
+            TxnRequestHandlerKind::TxnOffsetCommit { ref builder, .. } => Some(&builder.data().group_id),
         }
     }
 
@@ -4499,20 +4565,20 @@ impl TransactionManager {
     /// # What `pendingTxnOffsetCommits` does **not** do: shrink the retry
     ///
     /// Both builders snapshot the topic collection at construction — Java's
-    /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
-    /// and
-    /// [`txn_offset_commit_request::Builder::with_options`]
-    /// takes the map by reference and
-    /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
-    /// since the handler outlives the call). `reenqueue()` (Java 1394) and
+    /// `txnOffsetCommitHandler` builds the `TxnOffsetCommitRequestData` once and
+    /// hands it to the builder, and [`Self::txn_offset_commit_handler`] does the
+    /// same (the builder owns its data; it cannot borrow
+    /// `self.pending_txn_offset_commits`, since the handler outlives the call).
+    /// `reenqueue()` (Java 1394) and
     /// [`Self::retry`] both re-enqueue the *same handler with the same builder*, and
     /// nothing between the two touches `builder.data`. So a retry re-sends the **full
     /// original** offset list, including partitions that already returned `NONE`.
     ///
-    /// What the map governs is (a) the tail's three-way choice above, and (b) the
-    /// contents of the *next* [`Self::txn_offset_commit_handler`] construction — e.g.
-    /// a subsequent `sendOffsetsToTransaction`, which is where leftovers are folded
-    /// in.
+    /// What the map governs is the tail's three-way choice above (and
+    /// [`Self::has_pending_offset_commits`]). It does **not** feed the next
+    /// [`Self::txn_offset_commit_handler`]: since 4.4 (`TransactionManager.java:1258-1290`)
+    /// a later `sendOffsetsToTransaction` sends only the offsets it is given, so a
+    /// leftover is never folded into another request.
     ///
     /// **Do not "fix" this by rebuilding the builder before `retry`.** It would send
     /// a reduced request where Java sends the full one — a wire-level divergence
@@ -4524,7 +4590,7 @@ impl TransactionManager {
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
-        let TxnRequestHandlerKind::TxnOffsetCommit { builder } = &handler.kind else {
+        let TxnRequestHandlerKind::TxnOffsetCommit { builder, topic_names_by_ids } = &handler.kind else {
             return Err(Error::local_illegal_state(
                 "handle_txn_offset_commit_response called for another request kind",
             ));
@@ -4538,71 +4604,104 @@ impl TransactionManager {
         };
         let group_id = builder.data().group_id.clone();
         let mut coordinator_reloaded = false;
-        let errors = txn_offset_commit_response.errors();
 
         kafka_debug!(
             self.log_context,
-            "Received TxnOffsetCommit response for consumer group {}: {}",
+            "Received TxnOffsetCommit response for consumer group {}: {:?}",
             group_id,
-            format_partition_errors(&errors)
+            txn_offset_commit_response.data().topics
         );
 
-        // Java iterates a `HashMap`; sorted here so which error wins a `break` is
-        // reproducible (see [`sorted_partition_errors`]).
-        for (topic_partition, error) in sorted_partition_errors(&errors) {
-            if error == Errors::None {
-                self.pending_txn_offset_commits.remove(topic_partition);
-            } else if error == Errors::CoordinatorNotAvailable
-                || error == Errors::NotCoordinator
-                || error == Errors::RequestTimedOut
-            {
-                if !coordinator_reloaded {
-                    coordinator_reloaded = true;
-                    self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Group, &group_id)?;
-                }
-            } else if error.error().is_some_and(|e| e.is_retriable_error()) {
-                // If the topic is unknown, the coordinator is loading, or is another retriable error, retry with the
-                // current coordinator
-                continue;
-            } else if error == Errors::GroupAuthorizationFailed {
-                // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
-                self.abortable_error(&handler, Error::group_authorization(group_id.clone()))?;
-                break;
-            } else if error == Errors::FencedInstanceId || error == Errors::TransactionAbortable {
-                self.abortable_error(&handler, Error::new(error))?;
-                break;
-            } else if error == Errors::UnknownMemberId || error == Errors::IllegalGeneration {
-                // Java 1923: `new CommitFailedException("Transaction offset Commit
-                // failed due to consumer group metadata mismatch: " + ..)`.
-                // `CommitFailedException extends KafkaException` directly, so it is a
-                // `KafkaException` that is NOT an `ApiException` — exactly what
-                // `ConsumerCommitFailedError` encodes. (A code-resolved
-                // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
-                self.abortable_error(
-                    &handler,
-                    Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
-                        "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
-                        error.message()
-                    ))),
-                )?;
-                break;
-            } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
-                // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
-                // just treat it the same as PRODUCE_FENCED.
-                self.fatal_error(&handler, Error::new(Errors::ProducerFenced))?;
-                break;
-            } else if error == Errors::TransactionalIdAuthorizationFailed
-                || error == Errors::UnsupportedForMessageFormat
-            {
-                self.fatal_error(&handler, Error::new(error))?;
-                break;
+        // Iterated in the response's own topic and partition order, as Java does
+        // (89f3888c87): which error wins a `break` follows the wire.
+        for response_topic in &txn_offset_commit_response.data().topics {
+            // v6+ responses omit the topic name on the wire; fall back to
+            // the snapshot taken at request build time.
+            let topic_name = if !response_topic.name.is_empty() {
+                &response_topic.name
+            } else if let Some(name) = topic_names_by_ids.get(&response_topic.topic_id) {
+                name
             } else {
-                // Java 1937: `new KafkaException("Unexpected error in
-                // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
-                self.fatal_error(
-                    &handler,
-                    Error::kafka_message(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
-                )?;
+                kafka_warn!(
+                    self.log_context,
+                    "Received TxnOffsetCommit response for consumer group {} with an unknown topic id {}",
+                    group_id,
+                    response_topic.topic_id
+                );
+                continue;
+            };
+            for response_partition in &response_topic.partitions {
+                let topic_partition = TopicPartition::new(topic_name.clone(), response_partition.partition_index);
+                let error = Errors::for_code(response_partition.error_code);
+                if error == Errors::None {
+                    self.pending_txn_offset_commits.remove(&topic_partition);
+                } else if error == Errors::CoordinatorNotAvailable
+                    || error == Errors::NotCoordinator
+                    || error == Errors::RequestTimedOut
+                {
+                    if !coordinator_reloaded {
+                        coordinator_reloaded = true;
+                        self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Group, &group_id)?;
+                    }
+                } else if error.error().is_some_and(|e| e.is_retriable_error()) {
+                    // The topic is unknown, the coordinator is loading, or it is another retriable error;
+                    // retry with the current coordinator.
+                } else if error == Errors::GroupAuthorizationFailed {
+                    // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
+                    self.abortable_error(&handler, Error::group_authorization(group_id.clone()))?;
+                    break;
+                } else if error == Errors::FencedInstanceId || error == Errors::TransactionAbortable {
+                    self.abortable_error(&handler, Error::new(error))?;
+                    break;
+                } else if error == Errors::UnknownMemberId
+                    || error == Errors::IllegalGeneration
+                    || error == Errors::GroupIdNotFound
+                    || error == Errors::StaleMemberEpoch
+                {
+                    // GROUP_ID_NOT_FOUND and STALE_MEMBER_EPOCH are returned by
+                    // TxnOffsetCommit v6+. Older versions map them to
+                    // ILLEGAL_GENERATION. All four indicate a consumer group
+                    // metadata mismatch and must abort the transaction.
+                    //
+                    // Java: `new CommitFailedException("Transaction offset Commit
+                    // failed due to consumer group metadata mismatch: " + ..)`.
+                    // `CommitFailedException extends KafkaException` directly, so it is a
+                    // `KafkaException` that is NOT an `ApiException` — exactly what
+                    // `ConsumerCommitFailedError` encodes. (A code-resolved
+                    // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
+                    self.abortable_error(
+                        &handler,
+                        Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
+                            "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
+                            error.message()
+                        ))),
+                    )?;
+                    break;
+                } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
+                    // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
+                    // just treat it the same as PRODUCE_FENCED.
+                    self.fatal_error(&handler, Error::new(Errors::ProducerFenced))?;
+                    break;
+                } else if error == Errors::TransactionalIdAuthorizationFailed
+                    || error == Errors::UnsupportedForMessageFormat
+                {
+                    self.fatal_error(&handler, Error::new(error))?;
+                    break;
+                } else {
+                    // Java: `new KafkaException("Unexpected error in
+                    // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
+                    self.fatal_error(
+                        &handler,
+                        Error::kafka_message(format!(
+                            "Unexpected error in TxnOffsetCommitResponse: {}",
+                            error.message()
+                        )),
+                    )?;
+                    break;
+                }
+            }
+            // Stop processing further topics once the transaction has reached a terminal state.
+            if handler.result.is_completed() {
                 break;
             }
         }
@@ -4902,8 +5001,9 @@ mod tests {
     use crate::common::record::TimestampType;
     use crate::common::record::internal::MemoryRecords;
     use crate::common::requests::{
-        AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
-        FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptionsBuilder, TxnOffsetCommitResponse,
+        AbstractRequest, AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse,
+        EndTxnResponse, FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptionsBuilder,
+        TxnOffsetCommitRequest, TxnOffsetCommitResponse,
     };
     use crate::producer::internals::SenderStatics;
 
@@ -4983,6 +5083,33 @@ mod tests {
         transaction_v2_enabled: bool,
         enable_2pc: bool,
     ) -> TransactionManager {
+        manager_with_metadata(transactional_id, transaction_v2_enabled, enable_2pc, test_metadata())
+    }
+
+    /// Java's `metadata` field (Java 156): `new ProducerMetadata(0, 0,
+    /// Long.MAX_VALUE, Long.MAX_VALUE, logContext, new ClusterResourceListeners())`.
+    /// The manager holds the underlying `Metadata`, as Java's constructor takes a
+    /// `Metadata`.
+    fn test_metadata() -> Arc<Metadata> {
+        crate::producer::internals::ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            i64::MAX,
+            crate::common::internals::ClusterResourceListeners::new(),
+        )
+        .metadata_arc()
+    }
+
+    /// As [`manager_with_transactional_id_and_2pc`], over a caller-supplied
+    /// `metadata` — Java's fixture always passes its shared `this.metadata`, which
+    /// the KIP-1319 tests seed with topic ids through `client.updateMetadata`.
+    fn manager_with_metadata(
+        transactional_id: Option<String>,
+        transaction_v2_enabled: bool,
+        enable_2pc: bool,
+        metadata: Arc<Metadata>,
+    ) -> TransactionManager {
         fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
             let mut version = ApiVersion::new();
             version.set_api_key(api_key.id());
@@ -5026,6 +5153,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             DEFAULT_RETRY_BACKOFF_MS,
             api_versions,
+            metadata,
             enable_2pc,
         )
     }
@@ -5400,6 +5528,7 @@ mod tests {
             .next_request(pending_requests, false)
             .expect("next_request does not fail on this path")
             .expect("a TxnOffsetCommit request must be pending");
+        assert_txn_offset_commit_request_uses_topic_names(&negotiate_txn_offset_commit(manager, &handler));
         let data = handler.txn_offset_commit_request_data().expect("a TxnOffsetCommit handler");
         assert_eq!(data.group_id, consumer_group_id);
         assert_eq!(data.producer_id, manager.producer_id_and_epoch().producer_id);
@@ -5407,7 +5536,7 @@ mod tests {
         if let Some(group_metadata) = group_metadata {
             assert_eq!(data.group_instance_id.as_deref(), group_metadata.group_instance_id());
             assert_eq!(data.member_id, group_metadata.member_id());
-            assert_eq!(data.generation_id, group_metadata.generation_id());
+            assert_eq!(data.generation_id_or_member_epoch, group_metadata.generation_id());
         }
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
@@ -5415,6 +5544,50 @@ mod tests {
             TxnOffsetCommitResponse::with_request_throttle_ms_response_data(0, &error_map),
         );
         manager.handle_response(handler, &response, coordinators, pending_requests)
+    }
+
+    /// Builds `handler`'s `TxnOffsetCommit` at the version the network client
+    /// would negotiate with node `"0"`: the highest version both the builder's
+    /// allowed range and the node's advertised range contain
+    /// (`NetworkClient.doSend` → `NodeApiVersions.latestUsableVersion`). Java's
+    /// tests observe this version through `MockClient`; these manager-level tests
+    /// play the network client's part.
+    fn negotiate_txn_offset_commit(
+        manager: &TransactionManager,
+        handler: &TxnRequestHandler,
+    ) -> TxnOffsetCommitRequest {
+        let mut builder = handler.clone_request_builder();
+        let version = manager
+            .api_versions()
+            .get("0")
+            .expect("node 0 advertises its API versions")
+            .latest_usable_version_in_range(
+                &ApiKeys::TXN_OFFSET_COMMIT,
+                builder.oldest_allowed_version(),
+                builder.latest_allowed_version(),
+            )
+            .expect("a usable TxnOffsetCommit version");
+        match builder.build_version(version).expect("the request builds") {
+            AbstractRequest::TxnOffsetCommit(request) => request,
+            other => panic!("expected a TxnOffsetCommit request, got {other}"),
+        }
+    }
+
+    /// Java's `assertTxnOffsetCommitRequestUsesTopicNames` (KIP-1319, 83976543fe),
+    /// which both `prepareTxnOffsetCommitResponse` overloads now run.
+    fn assert_txn_offset_commit_request_uses_topic_names(request: &TxnOffsetCommitRequest) {
+        assert!(
+            request.version() < 6,
+            "Expected TxnOffsetCommit request at version < 6, got {}",
+            request.version()
+        );
+        for topic in &request.data().topics {
+            assert!(
+                !topic.name.is_empty(),
+                "Expected every request topic to carry a non-empty name at version {}",
+                request.version()
+            );
+        }
     }
 
     /// `new OffsetAndMetadata(offset)`, which cannot fail for a non-negative offset.
@@ -5507,6 +5680,36 @@ mod tests {
         manager
             .begin_commit(pending_requests)
             .expect_err("committing after an abortable error must be refused");
+        assert!(manager.has_error());
+
+        manager
+            .begin_abort(pending_requests, Caller::App)
+            .expect("an abort clears an abortable error");
+        assert!(!manager.has_error());
+    }
+
+    /// Mirrors `assertAbortableError(CommitFailedException.class)` (Java 4590-4602):
+    /// `beginCommit()` is refused with a `KafkaException` whose cause is the
+    /// `CommitFailedException`, and `beginAbort()` then clears the error.
+    ///
+    /// [`assert_abortable_error`] keys on a wire code, and `CommitFailedException`
+    /// has none (it is [`Error::ConsumerCommitFailed`]), so this variant checks the
+    /// refusal's `source()` instead.
+    fn assert_abortable_commit_failed_error(manager: &mut TransactionManager, pending_requests: &mut PendingRequests) {
+        let refusal = manager
+            .begin_commit(pending_requests)
+            .expect_err("committing after an abortable error must be refused");
+        assert_eq!(
+            refusal.message(),
+            "Cannot execute transactional method because we are in an error state"
+        );
+        let cause = std::error::Error::source(&refusal)
+            .and_then(|source| source.downcast_ref::<Error>())
+            .expect("the refusal carries the recorded error as its cause");
+        assert!(
+            matches!(cause, Error::ConsumerCommitFailed(_)),
+            "expected a ConsumerCommitFailed cause, got {cause:?}"
+        );
         assert!(manager.has_error());
 
         manager
@@ -5868,6 +6071,7 @@ mod tests {
             TRANSACTION_TIMEOUT_MS,
             DEFAULT_RETRY_BACKOFF_MS,
             Arc::new(ApiVersions::new()),
+            test_metadata(),
             false,
         );
         manager.maybe_update_transaction_v2_enabled(false);
@@ -6032,7 +6236,7 @@ mod tests {
     /// the application side.
     ///
     /// The pair matters because `beginAbort` is the *only* transactional entry point
-    /// Java reaches from both threads — `KafkaProducer.java:818` and
+    /// Java reaches from both threads — `KafkaProducer.java:909` and
     /// `Sender.java:273` — and the Sender is currently this crate's only live caller
     /// (see [`TransactionManager::begin_abort`]). Hardcoding [`Caller::App`] there
     /// compiled, passed every other test, and silently dropped the poisoning contract
@@ -7279,7 +7483,355 @@ mod tests {
                 expected_message
             );
             assert!(manager.has_abortable_error());
+            assert_abortable_commit_failed_error(&mut manager, &mut pending);
         }
+    }
+
+    /// Translated from `testGroupMetadataMismatchErrorInTxnOffsetCommit`
+    /// (`@EnumSource(names = {"GROUP_ID_NOT_FOUND", "STALE_MEMBER_EPOCH"})`,
+    /// 7f5861817d).
+    ///
+    /// TxnOffsetCommit v6+ returns these two codes where older versions map them to
+    /// `ILLEGAL_GENERATION`; all of them abort the transaction with a
+    /// `CommitFailedException`. The message is asserted exactly
+    /// (`definition-of-done.md` §3).
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testGroupMetadataMismatchErrorInTxnOffsetCommit"
+    )]
+    async fn test_group_metadata_mismatch_error_in_txn_offset_commit() {
+        for (error, expected_message) in [
+            (
+                Errors::GroupIdNotFound,
+                "Transaction offset Commit failed due to consumer group metadata mismatch: The group id does not exist.",
+            ),
+            (
+                Errors::StaleMemberEpoch,
+                "Transaction offset Commit failed due to consumer group metadata mismatch: The member epoch is stale. \
+                 The member must retry after receiving its updated member epoch via the ConsumerGroupHeartbeat API.",
+            ),
+        ] {
+            let mut manager = transactional_manager(false);
+            let mut pending = PendingRequests::new();
+            let mut coordinators = CoordinatorNodes::new();
+            let partition = TopicPartition::new("foo".to_string(), 0);
+            let send_offsets_result = send_offsets_and_discover_group_coordinator(
+                &mut manager,
+                &mut coordinators,
+                &mut pending,
+                ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID),
+                &[(partition.clone(), 39)],
+            )
+            .await;
+
+            run_txn_offset_commit(
+                &mut manager,
+                &mut coordinators,
+                &mut pending,
+                CONSUMER_GROUP_ID,
+                &[(partition, error)],
+            )
+            .expect("a group-metadata mismatch moves to an abortable error");
+
+            let last_error = manager.last_error().expect("an abortable error is recorded");
+            assert!(
+                matches!(last_error, Error::ConsumerCommitFailed(_)),
+                "expected ConsumerCommitFailed for {error:?}, got {last_error:?}"
+            );
+            assert_eq!(last_error.message(), expected_message);
+            assert!(send_offsets_result.is_completed());
+            assert!(!send_offsets_result.is_successful());
+            let result_error = send_offsets_result.error().expect("the result carries an error");
+            assert!(matches!(result_error, Error::ConsumerCommitFailed(_)), "{result_error:?}");
+            assert!(manager.has_abortable_error());
+            assert_abortable_commit_failed_error(&mut manager, &mut pending);
+        }
+    }
+
+    /// `TOPIC_ID` of the KIP-1319 tests: a fixed id for [`TOPIC`].
+    const TOPIC_ID: Uuid = Uuid::new(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+
+    /// `client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(1,
+    /// singletonMap(topic, 2), Map.of(topic, TOPIC_ID)))`: seeds `metadata` with
+    /// [`TOPIC`]'s id.
+    fn seed_topic_id(metadata: &Metadata) {
+        let update = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &HashMap::from([(TOPIC.to_string(), 2)]),
+            &|_| None,
+            &HashMap::from([(TOPIC.to_string(), TOPIC_ID)]),
+        );
+        metadata.update_with_current_request_version(&update, false, 0);
+    }
+
+    /// `initializeTransactionManager(Optional.of(transactionalId), true)`,
+    /// `doInitTransactions()`, `beginTransaction()`, the topic-id seeding, and
+    /// `sendOffsetsToTransaction(offsets, new ConsumerGroupMetadata(consumerGroupId))`
+    /// — then the group-coordinator discovery Java's `runUntil` performs. Under
+    /// Transaction V2 there is no `AddOffsetsToTxn`: the `TxnOffsetCommit` is
+    /// enqueued at once.
+    async fn send_offsets_with_topic_ids(
+        manager: &mut TransactionManager,
+        coordinators: &mut CoordinatorNodes,
+        pending: &mut PendingRequests,
+        metadata: &Metadata,
+        offsets: &[(TopicPartition, i64)],
+    ) -> Arc<TransactionalRequestResult> {
+        do_init_transactions(manager, pending, PRODUCER_ID, EPOCH).await;
+        assert!(manager.is_transaction_v2_enabled(), "these tests run under Transaction V2");
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        seed_topic_id(metadata);
+
+        let offsets: HashMap<TopicPartition, OffsetAndMetadata> = offsets
+            .iter()
+            .map(|(partition, value)| (partition.clone(), offset(*value)))
+            .collect();
+        let result = manager
+            .send_offsets_to_transaction(offsets, ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID), pending)
+            .expect("sendOffsetsToTransaction is valid in IN_TRANSACTION");
+        discover_group_coordinator(manager, coordinators, pending, CONSUMER_GROUP_ID)
+            .expect("the group coordinator is discovered");
+        result
+    }
+
+    /// Translated from `testTxnOffsetCommitNegotiatesV6WhenAllTopicIdsAreAvailable`
+    /// (83976543fe): every topic has an id, so the request negotiates the latest
+    /// version and carries the id. The v6 response names the topic by id only;
+    /// the handler resolves it through the build-time snapshot.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTxnOffsetCommitNegotiatesV6WhenAllTopicIdsAreAvailable"
+    )]
+    async fn test_txn_offset_commit_negotiates_v6_when_all_topic_ids_are_available() {
+        let metadata = test_metadata();
+        let mut manager = manager_with_metadata(Some(TRANSACTIONAL_ID.to_string()), true, false, Arc::clone(&metadata));
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        let send_offsets_result = send_offsets_with_topic_ids(
+            &mut manager,
+            &mut coordinators,
+            &mut pending,
+            &metadata,
+            &[(tp0(), 1), (tp1(), 1)],
+        )
+        .await;
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the TxnOffsetCommit is pending");
+        let request = negotiate_txn_offset_commit(&manager, &handler);
+        assert_eq!(request.version(), ApiKeys::TXN_OFFSET_COMMIT.latest_version());
+        assert_eq!(request.data().topics.len(), 1);
+        assert_eq!(request.data().topics[0].topic_id, TOPIC_ID);
+
+        let mut response_topic = crate::txn_offset_commit_response_data::TxnOffsetCommitResponseTopic::new();
+        response_topic.set_topic_id(TOPIC_ID).set_partitions(
+            [tp0(), tp1()]
+                .iter()
+                .map(|tp| {
+                    let mut partition = crate::txn_offset_commit_response_data::TxnOffsetCommitResponsePartition::new();
+                    partition
+                        .set_partition_index(tp.partition())
+                        .set_error_code(Errors::None.code());
+                    partition
+                })
+                .collect(),
+        );
+        let mut response_data = crate::TxnOffsetCommitResponseData::new();
+        response_data.set_topics(vec![response_topic]);
+        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_data(response_data));
+        manager
+            .handle_response(handler, &response, &mut coordinators, &mut pending)
+            .expect("a successful v6 response is handled");
+
+        assert!(send_offsets_result.is_completed());
+        assert!(send_offsets_result.is_successful());
+        assert!(!manager.has_pending_offset_commits());
+    }
+
+    /// Translated from `testTxnOffsetCommitDowngradesToV5WhenAnyTopicIdIsMissing`
+    /// (83976543fe): `other` is not in the metadata cache, so the builder caps at
+    /// v5 and every topic is keyed by name.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTxnOffsetCommitDowngradesToV5WhenAnyTopicIdIsMissing"
+    )]
+    async fn test_txn_offset_commit_downgrades_to_v5_when_any_topic_id_is_missing() {
+        let metadata = test_metadata();
+        let mut manager = manager_with_metadata(Some(TRANSACTIONAL_ID.to_string()), true, false, Arc::clone(&metadata));
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        let other_tp = TopicPartition::new("other".to_string(), 0);
+        let send_offsets_result = send_offsets_with_topic_ids(
+            &mut manager,
+            &mut coordinators,
+            &mut pending,
+            &metadata,
+            &[(tp0(), 1), (other_tp.clone(), 1)],
+        )
+        .await;
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the TxnOffsetCommit is pending");
+        let request = negotiate_txn_offset_commit(&manager, &handler);
+        assert!(request.version() < 6, "Expected downgrade to v0-5, got {}", request.version());
+        assert_eq!(request.version(), 5, "Transaction V2 is on, so the name-keyed cap is v5");
+        for topic in &request.data().topics {
+            assert!(!topic.name.is_empty());
+        }
+
+        let response =
+            ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_request_throttle_ms_response_data(
+                0,
+                &HashMap::from([(tp0(), Errors::None), (other_tp, Errors::None)]),
+            ));
+        manager
+            .handle_response(handler, &response, &mut coordinators, &mut pending)
+            .expect("a successful v5 response is handled");
+
+        assert!(send_offsets_result.is_completed());
+        assert!(send_offsets_result.is_successful());
+    }
+
+    /// Translated from `testTxnOffsetCommitRetriesOnUnknownTopicIdAtV6`
+    /// (83976543fe): `UNKNOWN_TOPIC_ID` is retriable, so the commit stays pending,
+    /// the request is re-enqueued, and no error is recorded.
+    #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTxnOffsetCommitRetriesOnUnknownTopicIdAtV6"
+    )]
+    async fn test_txn_offset_commit_retries_on_unknown_topic_id_at_v6() {
+        let metadata = test_metadata();
+        let mut manager = manager_with_metadata(Some(TRANSACTIONAL_ID.to_string()), true, false, Arc::clone(&metadata));
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        let send_offsets_result =
+            send_offsets_with_topic_ids(&mut manager, &mut coordinators, &mut pending, &metadata, &[(tp0(), 1)]).await;
+
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the TxnOffsetCommit is pending");
+        assert_eq!(
+            negotiate_txn_offset_commit(&manager, &handler).version(),
+            ApiKeys::TXN_OFFSET_COMMIT.latest_version()
+        );
+
+        let mut partition = crate::txn_offset_commit_response_data::TxnOffsetCommitResponsePartition::new();
+        partition
+            .set_partition_index(tp0().partition())
+            .set_error_code(Errors::UnknownTopicId.code());
+        let mut response_topic = crate::txn_offset_commit_response_data::TxnOffsetCommitResponseTopic::new();
+        response_topic.set_topic_id(TOPIC_ID).set_partitions(vec![partition]);
+        let mut response_data = crate::TxnOffsetCommitResponseData::new();
+        response_data.set_topics(vec![response_topic]);
+        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_data(response_data));
+        manager
+            .handle_response(handler, &response, &mut coordinators, &mut pending)
+            .expect("a retriable response is handled");
+
+        assert!(
+            !send_offsets_result.is_completed(),
+            "UNKNOWN_TOPIC_ID is retriable; the commit should still be pending"
+        );
+        assert!(manager.has_pending_offset_commits());
+        assert!(!manager.has_error());
+        let retried = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the TxnOffsetCommit is re-enqueued");
+        assert!(retried.txn_offset_commit_request_data().is_some());
+    }
+
+    /// A v6 response topic whose id the build-time snapshot does not know is
+    /// skipped with a warning, as Java does (83976543fe), so the retry loop is
+    /// unaffected: the partition stays pending and the request is retried.
+    #[tokio::test]
+    async fn test_txn_offset_commit_skips_a_response_topic_with_an_unknown_id() {
+        let metadata = test_metadata();
+        let mut manager = manager_with_metadata(Some(TRANSACTIONAL_ID.to_string()), true, false, Arc::clone(&metadata));
+        let mut pending = PendingRequests::new();
+        let mut coordinators = CoordinatorNodes::new();
+        let send_offsets_result =
+            send_offsets_with_topic_ids(&mut manager, &mut coordinators, &mut pending, &metadata, &[(tp0(), 1)]).await;
+        let handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the TxnOffsetCommit is pending");
+
+        let mut partition = crate::txn_offset_commit_response_data::TxnOffsetCommitResponsePartition::new();
+        partition
+            .set_partition_index(tp0().partition())
+            .set_error_code(Errors::None.code());
+        let mut response_topic = crate::txn_offset_commit_response_data::TxnOffsetCommitResponseTopic::new();
+        response_topic.set_topic_id(Uuid::new(9, 9)).set_partitions(vec![partition]);
+        let mut response_data = crate::TxnOffsetCommitResponseData::new();
+        response_data.set_topics(vec![response_topic]);
+        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::with_data(response_data));
+        manager
+            .handle_response(handler, &response, &mut coordinators, &mut pending)
+            .expect("the response is handled");
+
+        assert!(!send_offsets_result.is_completed());
+        assert!(manager.has_pending_offset_commits());
+        assert!(!manager.has_error());
+    }
+
+    /// 4.4 builds the request from the offsets **passed in**, not from every
+    /// pending offset (83976543fe), sorted by topic then partition (rules §10).
+    #[tokio::test]
+    async fn test_txn_offset_commit_carries_only_the_offsets_passed_in_sorted() {
+        let mut manager = transactional_manager(true);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        let first: HashMap<TopicPartition, OffsetAndMetadata> =
+            HashMap::from([(TopicPartition::new("b".to_string(), 1), offset(1))]);
+        manager
+            .send_offsets_to_transaction(first, ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID), &mut pending)
+            .expect("valid");
+        let second: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::from([
+            (TopicPartition::new("b".to_string(), 3), offset(3)),
+            (TopicPartition::new("a".to_string(), 2), offset(2)),
+            (TopicPartition::new("b".to_string(), 0), offset(0)),
+        ]);
+        manager
+            .send_offsets_to_transaction(second, ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID), &mut pending)
+            .expect("valid");
+
+        let _first_handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the first TxnOffsetCommit is pending");
+        let second_handler = manager
+            .next_request(&mut pending, false)
+            .expect("next_request does not fail on this path")
+            .expect("the second TxnOffsetCommit is pending");
+        let data = second_handler
+            .txn_offset_commit_request_data()
+            .expect("a TxnOffsetCommit handler");
+        let layout: Vec<(&str, Vec<i32>)> = data
+            .topics
+            .iter()
+            .map(|topic| {
+                (
+                    topic.name.as_str(),
+                    topic.partitions.iter().map(|p| p.partition_index).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(layout, vec![("a", vec![2]), ("b", vec![0, 3])]);
+        assert_eq!(
+            manager.pending_txn_offset_commits.len(),
+            4,
+            "every offset is still recorded as pending"
+        );
     }
 
     /// KIP-939 `prepareTransaction()` (Java 342) moves `IN_TRANSACTION` to
@@ -9868,6 +10420,7 @@ mod tests {
                 TRANSACTION_TIMEOUT_MS,
                 DEFAULT_RETRY_BACKOFF_MS,
                 api_versions,
+                test_metadata(),
                 false,
             );
             let mut coordinators = CoordinatorNodes::new();

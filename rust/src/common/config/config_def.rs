@@ -45,7 +45,7 @@ pub(crate) struct ConfigDef;
 
 impl ConfigDef {
     /// Java's `String.trim()`, which `ConfigDef.parseType` applies to every
-    /// `String` value before parsing it (`ConfigDef.java:705`).
+    /// `String` value before parsing it (`ConfigDef.java:707-709`).
     ///
     /// Unlike [`str::trim`] it strips every character `<= U+0020` (all ASCII
     /// control characters and the space) and nothing else — in particular not
@@ -55,11 +55,11 @@ impl ConfigDef {
     }
 
     /// The `Type.LIST` arm of Java's `ConfigDef.parseType` for a `String`
-    /// value (`ConfigDef.java:766-775`):
+    /// value (`ConfigDef.java:768-777`):
     ///
     /// ```java
     /// if (trimmed.isEmpty())
-    ///     return Collections.emptyList();
+    ///     return List.of();
     /// else
     ///     return Arrays.asList(COMMA_WITH_WHITESPACE.split(trimmed, -1));
     /// ```
@@ -101,7 +101,7 @@ impl ConfigDef {
 /// no client key this crate parses uses them, so that half is omitted.
 ///
 /// Java's `ConfigDef.parseValue` calls `ensureValid` directly, without
-/// wrapping (`ConfigDef.java:551`), and `ValidList` throws the
+/// wrapping (`ConfigDef.java:553`), and `ValidList` throws the
 /// single-message `ConfigException(String)`. So the errors are
 /// [`Error::config_message`], with no `Invalid value ... for configuration`
 /// prefix.
@@ -169,7 +169,7 @@ impl ValidList {
     /// and validate it with `anyNonDuplicateValues(is_empty_allowed, false)`,
     /// which is what `ConfigDef.parse` does for each such key.
     ///
-    /// As in `ConfigDef.parseValue` (`ConfigDef.java:541-548`), duplicates are
+    /// As in `ConfigDef.parseValue` (`ConfigDef.java:544-551`), duplicates are
     /// removed first, keeping the order of first occurrence, with a warning;
     /// the deduplicated list is validated and returned. The duplicate check in
     /// [`Self::ensure_valid`] therefore cannot fire here, as in Java.

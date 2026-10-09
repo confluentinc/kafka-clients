@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::requests::metadata_request;
-use crate::common::utils::LogContext;
+use crate::common::utils::internals::LogContext;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::SubscriptionState;
 use crate::metadata::{Metadata, MetadataOverrides};

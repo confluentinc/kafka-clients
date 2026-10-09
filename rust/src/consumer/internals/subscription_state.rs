@@ -1464,14 +1464,6 @@ impl SubscriptionState {
         result
     }
 
-    /// Translates Java's `hasPartitionsNeedingValidation(long)`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasPartitionsNeedingValidation")]
-    pub(crate) fn has_partitions_needing_validation(&self, now_ms: i64) -> bool {
-        self.assignment
-            .state_iter()
-            .any(|s| s.awaiting_validation() && !s.awaiting_retry_backoff(now_ms) && s.position.is_some())
-    }
-
     // ── Pause / resume / fetchable ──────────────────────────────────────
 
     /// Translates Java's `pausedPartitions()`.
@@ -1522,6 +1514,26 @@ impl SubscriptionState {
             }
         }
         result
+    }
+
+    /// Whether any assigned partition is fetchable (by the same cheap check
+    /// [`Self::fetchable_partitions`] applies first) and passes
+    /// `is_available`. Stops at the first match and allocates nothing, unlike
+    /// `!fetchable_partitions(..).is_empty()`.
+    ///
+    /// Translates Java's `hasFetchablePartitions(Predicate<TopicPartition>)`
+    /// (KAFKA-20854).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#hasFetchablePartitions")]
+    pub(crate) fn has_fetchable_partitions(&self, is_available: impl Fn(&TopicPartition) -> bool) -> bool {
+        for (tp, state) in self.assignment.iter() {
+            if (self.subscription_type == SubscriptionType::AutoTopicsShare
+                || self.is_fetchable_and_subscribed(tp, state))
+                && is_available(tp)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Translates Java's `pause(TopicPartition)`.
@@ -3161,6 +3173,46 @@ mod tests {
         });
         assert!(predicate_evaluated.load(Ordering::SeqCst));
         assert_eq!(fetchable[0], tp_test_0());
+    }
+
+    /// `has_fetchable_partitions` (KAFKA-20854; Java adds no test of its own)
+    /// agrees with `!fetchable_partitions(..).is_empty()` and runs the same
+    /// cheap check before the predicate: no assignment, an unpositioned
+    /// partition and a paused one are all "nothing fetchable", and the
+    /// predicate is not consulted for them.
+    #[test]
+    fn test_has_fetchable_partitions_matches_fetchable_partitions() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut state = new_state();
+        // No assignment.
+        assert!(!state.has_fetchable_partitions(|_| true));
+
+        // Assigned, but no position yet: not fetchable.
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let predicate_evaluated = Arc::new(AtomicBool::new(false));
+        let pe = Arc::clone(&predicate_evaluated);
+        assert!(!state.has_fetchable_partitions(move |_| {
+            pe.store(true, Ordering::SeqCst);
+            true
+        }));
+        assert!(!predicate_evaluated.load(Ordering::SeqCst));
+
+        // Positioned: fetchable, and the predicate decides.
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.has_fetchable_partitions(|_| true));
+        assert!(!state.has_fetchable_partitions(|_| false));
+        let tp0 = tp_test_0();
+        assert!(!state.has_fetchable_partitions(|tp| tp != &tp0));
+        assert_eq!(
+            state.has_fetchable_partitions(|_| true),
+            !state.fetchable_partitions(|_| true).is_empty()
+        );
+
+        // Paused: not fetchable again.
+        state.pause(&tp_test_0()).unwrap();
+        assert!(!state.has_fetchable_partitions(|_| true));
+        assert!(state.fetchable_partitions(|_| true).is_empty());
     }
 
     // ─── Phase 7d: maybe_validate_position_for_current_leader /

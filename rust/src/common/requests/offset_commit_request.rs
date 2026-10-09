@@ -29,6 +29,8 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::common::internals::UnsupportedProtocolFieldErrorOptionsBuilder;
+
 use crate::OffsetCommitRequestData;
 use crate::OffsetCommitResponseData;
 use crate::common::TopicPartition;
@@ -237,12 +239,12 @@ impl RequestBuilder for Builder {
         }
         // Java validates the version-vs-topic-id / version-vs-name invariants here.
         if self.data.group_instance_id.is_some() && version < 7 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "The broker offset commit api version {version} does not support usage of config group.instance.id."
-                ),
-            ));
+            return Err(UnsupportedProtocolFieldErrorOptionsBuilder::new()
+                .set_field_or_value("GroupInstanceId")
+                .set_api_key_name(&ApiKeys::OFFSET_COMMIT.to_string())
+                .set_api_version(version)
+                .set_lowest_supported_version(7)
+                .into_io_error());
         }
         if version >= 10 {
             for topic in &self.data.topics {
@@ -363,7 +365,10 @@ mod tests {
         data.set_group_instance_id(Some("instance-a".to_string()));
         let mut builder = Builder::for_topic_ids_or_names(data);
         let err = builder.build_version(6).unwrap_err();
-        assert!(err.to_string().contains("group.instance.id"));
+        crate::common::internals::assert_unsupported_protocol_field(
+            &err,
+            "The cluster does not support [GroupInstanceId] in OFFSET_COMMIT API version 6. Upgrade the cluster to OFFSET_COMMIT API version >= 7 to enable [GroupInstanceId].",
+        );
     }
 
     /// `error_response_data` propagates the supplied error code to every

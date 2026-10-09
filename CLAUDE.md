@@ -202,7 +202,7 @@ Follow the role assigned to you as described in [agent-roles.md](.claude/rules/a
 Use LSP plugins when available and working, notify when it's not working, avoid grepping when unnecessary.
 
 ## Source Reference
-Java source in `kafka/` directory (Apache Kafka 4.3.1)
+Java source in `kafka/` directory (Apache Kafka 4.4.0)
 
 The public-API and deprecation rules are checked against a later release: `@InterfaceAudience.Public`
 (§2) against Kafka 4.4, and deprecations (§3) against 4.3.1 plus 4.4. The exact tags are

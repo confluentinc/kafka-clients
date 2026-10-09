@@ -20,19 +20,19 @@
 //! they are crate-private. They are translated in full (DoD #2), but the client uses only part of it; the
 //! rest has no caller yet, or only the translated tests. Nothing outside the
 //! crate can reach it, so the module allows dead code rather than dropping
-//! Java methods.
+//! Java methods. Since the Kafka 4.4 move of the internal utilities to
+//! [`internals`], every remaining item here that the client does not call is
+//! exercised by the translated tests, so the expectation applies only to
+//! non-test builds.
 
-#![expect(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
-mod byte_utils;
-mod exponential_backoff;
-mod log_context;
+pub(crate) mod internals;
 #[macro_use]
 mod log_macros;
 // Java ships `MockTime` in the clients test jar.
 #[cfg(test)]
 mod mock_time;
-mod producer_id_and_epoch;
 mod system_time;
 mod time;
 // `utils.rs` inside `utils/` mirrors Java's `org.apache.kafka.common.utils.Utils`
@@ -41,12 +41,8 @@ mod time;
 #[expect(clippy::module_inception)]
 mod utils;
 
-pub(crate) use byte_utils::ByteUtils;
-pub(crate) use exponential_backoff::ExponentialBackoff;
-pub(crate) use log_context::LogContext;
 #[cfg(test)]
 pub(crate) use mock_time::MockTime;
-pub(crate) use producer_id_and_epoch::ProducerIdAndEpoch;
 pub(crate) use system_time::SystemTime;
 pub(crate) use time::Time;
 pub(crate) use utils::Utils;

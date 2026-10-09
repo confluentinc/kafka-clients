@@ -46,4 +46,13 @@ impl MetricValueProvider {
             MetricValueProvider::Gauge(g) => g.value(config, now),
         }
     }
+
+    /// The provider's type name, or `None` for a closure; see
+    /// [`Measurable::type_name`](crate::common::metrics::Measurable::type_name).
+    pub(crate) fn type_name(&self) -> Option<&'static str> {
+        match self {
+            MetricValueProvider::Measurable(m) => m.type_name(),
+            MetricValueProvider::Gauge(g) => g.type_name(),
+        }
+    }
 }

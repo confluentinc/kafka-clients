@@ -170,6 +170,28 @@ pub enum Errors {
     StreamsInvalidTopologyEpoch = 131,
     StreamsTopologyFenced = 132,
     ShareSessionLimitReached = 133,
+    GroupDeletionFailed = 134,
+    StreamsTopologyDescriptionUpdateFailed = 135,
+    ControllerIdNotRegistered = 136,
+}
+
+/// Test-only view of the declared code range, standing in for Java's
+/// `Errors.values()` in every test that must walk all codes.
+#[cfg(test)]
+impl Errors {
+    /// The highest code Java's `Errors` declares (4.4: `CONTROLLER_ID_NOT_REGISTERED`).
+    ///
+    /// The single bound every full-code test walk uses (`-1..=MAX_CODE`).
+    /// `test_enum_name_matches_java_constant_for_every_code` pins it from both
+    /// sides: every code up to it is declared, and `MAX_CODE + 1` is not — so
+    /// adding a code without bumping this fails there instead of silently
+    /// shrinking the other walks.
+    pub(crate) const MAX_CODE: i16 = 136;
+
+    /// Every declared constant, in code order (`-1..=MAX_CODE`, contiguous).
+    pub(crate) fn all_for_test() -> Vec<Errors> {
+        (-1i16..=Self::MAX_CODE).map(Errors::for_code).collect()
+    }
 }
 
 impl Errors {
@@ -339,6 +361,9 @@ impl Errors {
             Self::StreamsInvalidTopologyEpoch => "STREAMS_INVALID_TOPOLOGY_EPOCH",
             Self::StreamsTopologyFenced => "STREAMS_TOPOLOGY_FENCED",
             Self::ShareSessionLimitReached => "SHARE_SESSION_LIMIT_REACHED",
+            Self::GroupDeletionFailed => "GROUP_DELETION_FAILED",
+            Self::StreamsTopologyDescriptionUpdateFailed => "STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED",
+            Self::ControllerIdNotRegistered => "CONTROLLER_ID_NOT_REGISTERED",
         }
     }
 
@@ -552,9 +577,7 @@ impl Errors {
             },
             Self::ShareSessionNotFound => "The share session was not found.",
             Self::InvalidShareSessionEpoch => "The share session epoch is invalid.",
-            Self::FencedStateEpoch => {
-                "The share coordinator rejected the request because the share-group state epoch did not match."
-            },
+            Self::FencedStateEpoch => "The coordinator rejected the request because the state epoch did not match.",
             Self::InvalidVoterKey => "The voter key doesn't match the receiving replica's key.",
             Self::DuplicateVoter => "The voter is already part of the set of voters.",
             Self::VoterNotFound => "The voter is not part of the set of voters.",
@@ -566,6 +589,13 @@ impl Errors {
             Self::StreamsInvalidTopologyEpoch => "The supplied topology epoch is invalid.",
             Self::StreamsTopologyFenced => "The supplied topology epoch is outdated.",
             Self::ShareSessionLimitReached => "The limit of share sessions has been reached.",
+            Self::GroupDeletionFailed => {
+                "DeleteGroups could not complete; see the error message on the per-group result for details."
+            },
+            Self::StreamsTopologyDescriptionUpdateFailed => {
+                "The broker could not process the topology description update; see the error message for details."
+            },
+            Self::ControllerIdNotRegistered => "The given controller ID was not registered.",
         }
     }
 
@@ -594,6 +624,9 @@ impl Errors {
             },
             Self::ConcurrentTransactions => Some(Error::ConcurrentTransactions(
                 ConcurrentTransactionsError::with_default_message(),
+            )),
+            Self::ControllerIdNotRegistered => Some(Error::ControllerIdNotRegistered(
+                ControllerIdNotRegisteredError::with_default_message(),
             )),
             Self::CoordinatorLoadInProgress => Some(Error::CoordinatorLoadInProgress(
                 CoordinatorLoadInProgressError::with_default_message(),
@@ -647,6 +680,9 @@ impl Errors {
             },
             Self::GroupAuthorizationFailed => {
                 Some(Error::GroupAuthorization(GroupAuthorizationError::with_default_message()))
+            },
+            Self::GroupDeletionFailed => {
+                Some(Error::GroupDeletionFailed(GroupDeletionFailedError::with_default_message()))
             },
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::with_default_message())),
             Self::GroupMaxSizeReached => {
@@ -815,6 +851,9 @@ impl Errors {
             Self::StreamsInvalidTopologyEpoch => Some(Error::StreamsInvalidTopologyEpoch(
                 StreamsInvalidTopologyEpochError::with_default_message(),
             )),
+            Self::StreamsTopologyDescriptionUpdateFailed => Some(Error::StreamsTopologyDescriptionUpdateFailed(
+                StreamsTopologyDescriptionUpdateFailedError::with_default_message(),
+            )),
             Self::StreamsTopologyFenced => {
                 Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::with_default_message()))
             },
@@ -907,14 +946,14 @@ impl Errors {
     #[doc(alias = "org.apache.kafka.common.protocol.Errors#exceptionName")]
     pub fn error_name(&self) -> Option<&'static str> {
         // `ErrorName` is the per-class answer, so this does not repeat
-        // `error()`'s 135-arm match — the class it resolves to answers for
+        // `error()`'s 138-arm match — the class it resolves to answers for
         // itself, exactly as `getClass().getName()` does in Java.
         //
         // It does build the class to ask it, which costs the default message's
         // `String` where Java reads a cached instance. That is [`error`]'s
         // existing cost, not a new one, and this is a diagnostic accessor with
         // no hot-path caller (Java's is one log statement in `FetchCollector`);
-        // the alternative is a second 135-arm match that can drift from the
+        // the alternative is a second 138-arm match that can drift from the
         // first.
         self.error().map(|e| crate::common::error::ErrorName::name(&e))
     }
@@ -937,6 +976,9 @@ impl Errors {
             },
             Self::ConcurrentTransactions => {
                 Some(Error::ConcurrentTransactions(ConcurrentTransactionsError::new(message)))
+            },
+            Self::ControllerIdNotRegistered => {
+                Some(Error::ControllerIdNotRegistered(ControllerIdNotRegisteredError::new(message)))
             },
             Self::CoordinatorLoadInProgress => {
                 Some(Error::CoordinatorLoadInProgress(CoordinatorLoadInProgressError::new(message)))
@@ -985,6 +1027,7 @@ impl Errors {
             Self::GroupAuthorizationFailed => {
                 Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
             },
+            Self::GroupDeletionFailed => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
             Self::GroupSubscribedToTopic => {
@@ -1101,6 +1144,9 @@ impl Errors {
             },
             Self::StreamsInvalidTopologyEpoch => Some(Error::StreamsInvalidTopologyEpoch(
                 StreamsInvalidTopologyEpochError::new(message),
+            )),
+            Self::StreamsTopologyDescriptionUpdateFailed => Some(Error::StreamsTopologyDescriptionUpdateFailed(
+                StreamsTopologyDescriptionUpdateFailedError::new(message),
             )),
             Self::StreamsTopologyFenced => Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::new(message))),
             Self::TelemetryTooLarge => Some(Error::TelemetryTooLarge(TelemetryTooLargeError::new(message))),
@@ -1337,6 +1383,9 @@ impl Errors {
             131 => Self::StreamsInvalidTopologyEpoch,
             132 => Self::StreamsTopologyFenced,
             133 => Self::ShareSessionLimitReached,
+            134 => Self::GroupDeletionFailed,
+            135 => Self::StreamsTopologyDescriptionUpdateFailed,
+            136 => Self::ControllerIdNotRegistered,
             _ => Self::UnknownServerError,
         }
     }
@@ -1372,7 +1421,7 @@ mod tests {
     /// code 17 (`INVALID_TOPIC_EXCEPTION`), whose Java constants carry the word
     /// CLAUDE.md §2 bans from Rust code. See the comments at their arms in
     /// [`Errors::enum_name`].
-    const JAVA_CONSTANT_NAMES: [(i16, &str); 135] = [
+    const JAVA_CONSTANT_NAMES: [(i16, &str); 138] = [
         (-1, "UNKNOWN_SERVER_ERROR"),
         (0, "NONE"),
         (1, "OFFSET_OUT_OF_RANGE"),
@@ -1508,6 +1557,9 @@ mod tests {
         (131, "STREAMS_INVALID_TOPOLOGY_EPOCH"),
         (132, "STREAMS_TOPOLOGY_FENCED"),
         (133, "SHARE_SESSION_LIMIT_REACHED"),
+        (134, "GROUP_DELETION_FAILED"),
+        (135, "STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED"),
+        (136, "CONTROLLER_ID_NOT_REGISTERED"),
     ];
 
     /// Java's `Errors` overrides no `toString()`, so `Enum.name()` — the
@@ -1521,7 +1573,7 @@ mod tests {
     ///   rendering something else.
     ///
     /// A sampled test cannot catch a single wrong or missing arm, which is why
-    /// this walks all 135 codes (the precedent is
+    /// this walks all 138 codes (the precedent is
     /// `test_retriable_errors_match_java_hierarchy`).
     #[test]
     fn test_enum_name_matches_java_constant_for_every_code() {
@@ -1543,7 +1595,7 @@ mod tests {
         assert_eq!(names.len(), JAVA_CONSTANT_NAMES.len(), "duplicate constant name in the table");
         let codes: HashSet<i16> = JAVA_CONSTANT_NAMES.iter().map(|(code, _)| *code).collect();
         assert_eq!(codes.len(), JAVA_CONSTANT_NAMES.len(), "duplicate code in the table");
-        for code in -1..=133i16 {
+        for code in -1..=Errors::MAX_CODE {
             assert_eq!(
                 Errors::for_code(code).code(),
                 code,
@@ -1554,7 +1606,7 @@ mod tests {
         // The table ends where the enum ends: a newly added code falls back to
         // `UnknownServerError`, which is the signal to extend both.
         assert_eq!(
-            Errors::for_code(134),
+            Errors::for_code(Errors::MAX_CODE + 1),
             Errors::UnknownServerError,
             "a new error code was added — add it to JAVA_CONSTANT_NAMES"
         );
@@ -1703,6 +1755,9 @@ mod tests {
             Errors::StreamsInvalidTopologyEpoch,
             Errors::StreamsTopologyFenced,
             Errors::ShareSessionLimitReached,
+            Errors::GroupDeletionFailed,
+            Errors::StreamsTopologyDescriptionUpdateFailed,
+            Errors::ControllerIdNotRegistered,
         ];
         for error in &all_errors {
             assert_eq!(
@@ -1822,6 +1877,11 @@ mod tests {
         // `BufferExhaustedException`, its one subclass, has no entry in `Errors`.
         let timeout: HashSet<Errors> = [Errors::RequestTimedOut].into_iter().collect();
 
+        // UnsupportedVersionException — `UNSUPPORTED_VERSION` is its only coded
+        // member; its subclasses (`UnsupportedProtocolFieldException`, the
+        // `NoBatched*` request exceptions) have no entry in `Errors`.
+        let unsupported_version: HashSet<Errors> = [Errors::UnsupportedVersion].into_iter().collect();
+
         // Three client-side-only families: `SerializationException` and the two
         // `clients.consumer` offset classes are raised by the client, never
         // reported by a broker, so no code may answer `true`. An all-`false`
@@ -1829,11 +1889,14 @@ mod tests {
         // predicates is ever wired to a coded payload by mistake.
         let client_side_only: HashSet<Errors> = HashSet::new();
 
-        let cases: [PredicateCase; 10] = [
+        let cases: [PredicateCase; 11] = [
             ("is_kafka_error", &all_coded, |e| e.error().is_some_and(|x| x.is_kafka_error())),
             ("is_api_error", &all_coded, |e| e.error().is_some_and(|x| x.is_api_error())),
             ("is_timeout_error", &timeout, |e| {
                 e.error().is_some_and(|x| x.is_timeout_error())
+            }),
+            ("is_unsupported_version_error", &unsupported_version, |e| {
+                e.error().is_some_and(|x| x.is_unsupported_version_error())
             }),
             ("is_serialization_error", &client_side_only, |e| {
                 e.error().is_some_and(|x| x.is_serialization_error())
@@ -1892,6 +1955,12 @@ mod tests {
     fn test_hierarchy_predicates_nest() {
         for code in -1i16..=200 {
             let e = Errors::for_code(code);
+            if e.error().is_some_and(|x| x.is_unsupported_version_error()) {
+                assert!(
+                    e.error().is_some_and(|x| x.is_invalid_configuration_error()),
+                    "{e:?}: unsupported-version must be invalid-configuration"
+                );
+            }
             if e.error().is_some_and(|x| x.is_invalid_metadata_error()) {
                 assert!(
                     e.error().is_some_and(|x| x.is_refresh_retriable_error()),
@@ -2278,7 +2347,7 @@ mod tests {
         // Verify no duplicate codes exist by checking round-trip for all codes in range
         use std::collections::HashSet;
         let mut seen = HashSet::new();
-        for code in -1..=133 {
+        for code in -1..=Errors::MAX_CODE {
             let error = Errors::for_code(code);
             if error != Errors::UnknownServerError || code == -1 {
                 assert!(seen.insert(error.code()), "Duplicate code: {}", error.code());
@@ -2291,27 +2360,27 @@ mod tests {
     // clients/src/test/java/org/apache/kafka/common/protocol/ErrorsTest.java)
     //
     // Java iterates `Errors.values()`. Rust has no `values()`, so each of these
-    // walks `for_code(-1..=133)` through [`all_codes`], which asserts up front
-    // that the walk really does reach all 135 declared constants — otherwise a
+    // walks `for_code(-1..=136)` through [`all_codes`], which asserts up front
+    // that the walk really does reach all 138 declared constants — otherwise a
     // shrunken walk would let every one of these pass vacuously.
     // -----------------------------------------------------------------------
 
-    /// The 135 declared `Errors` constants, standing in for Java's
+    /// The 138 declared `Errors` constants, standing in for Java's
     /// `Errors.values()`.
     ///
-    /// The codes are contiguous from -1 to 133, so the walk is exhaustive; the
+    /// The codes are contiguous from -1 to 136, so the walk is exhaustive; the
     /// distinctness assertion is what keeps it that way if a constant is ever
     /// added out of range.
     fn all_codes() -> Vec<Errors> {
-        let codes: Vec<Errors> = (-1i16..=133).map(Errors::for_code).collect();
+        let codes = Errors::all_for_test();
         let distinct: HashSet<Errors> = codes.iter().copied().collect();
         assert_eq!(
             distinct.len(),
             codes.len(),
-            "for_code(-1..=133) must reach each constant exactly once, or every \
+            "for_code(-1..=MAX_CODE) must reach each constant exactly once, or every \
              ErrorsTest translation below passes vacuously"
         );
-        assert_eq!(codes.len(), 135, "Errors declares 135 constants in Kafka 4.2");
+        assert_eq!(codes.len(), 138, "Errors declares 138 constants in Kafka 4.4");
         codes
     }
 
@@ -2453,6 +2522,68 @@ mod tests {
                     "{error:?}: Display must open with the class name, got {rendered:?}"
                 );
             }
+        }
+    }
+
+    /// The codes Kafka 4.4 adds or rewords (`Errors.java:415,425-427`), pinned
+    /// to Java's exact text, constant name and class.
+    ///
+    /// The message is the class's default text (`Errors.exception()`), so it is
+    /// part of the behavioural contract: an `ApiException` built from the code
+    /// carries it verbatim. `FENCED_STATE_EPOCH` was reworded in 4.4 (Java commit
+    /// 8ba75d04cb) from the share-coordinator-specific text to a generic one,
+    /// because the code is no longer share-group-only.
+    #[test]
+    fn test_errors_added_or_reworded_in_kafka_4_4() {
+        let cases: [(i16, Errors, &str, &str, &str); 4] = [
+            (
+                124,
+                Errors::FencedStateEpoch,
+                "FENCED_STATE_EPOCH",
+                "FencedStateEpochError",
+                "The coordinator rejected the request because the state epoch did not match.",
+            ),
+            (
+                134,
+                Errors::GroupDeletionFailed,
+                "GROUP_DELETION_FAILED",
+                "GroupDeletionFailedError",
+                "DeleteGroups could not complete; see the error message on the per-group result for details.",
+            ),
+            (
+                135,
+                Errors::StreamsTopologyDescriptionUpdateFailed,
+                "STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED",
+                "StreamsTopologyDescriptionUpdateFailedError",
+                "The broker could not process the topology description update; see the error message for details.",
+            ),
+            (
+                136,
+                Errors::ControllerIdNotRegistered,
+                "CONTROLLER_ID_NOT_REGISTERED",
+                "ControllerIdNotRegisteredError",
+                "The given controller ID was not registered.",
+            ),
+        ];
+        for (code, error, constant, class, message) in cases {
+            assert_eq!(Errors::for_code(code), error, "for_code({code})");
+            assert_eq!(error.code(), code);
+            assert_eq!(error.enum_name(), constant);
+            assert_eq!(error.message(), message, "{constant}: default message");
+            assert_eq!(error.error_name(), Some(class), "{constant}: class");
+
+            let built = error.error().expect("every non-NONE code names a class");
+            assert_eq!(built.error(), error, "{constant}: the class must own its code");
+            assert_eq!(built.message(), message, "{constant}: Errors.exception() message");
+            assert_eq!(built.to_string(), format!("{class}: {message}"));
+            // All four are plain `ApiException` subclasses (no `RetriableException`
+            // in their Java `extends` chain).
+            assert!(built.is_kafka_error() && built.is_api_error(), "{constant}");
+            assert!(!built.is_retriable_error(), "{constant} must not be retriable");
+
+            let custom = error.error_with_message("from the broker").expect("named class");
+            assert_eq!(custom.error(), error);
+            assert_eq!(custom.message(), "from the broker");
         }
     }
 

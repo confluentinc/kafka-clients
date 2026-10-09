@@ -381,6 +381,7 @@ impl fmt::Display for RequestHeader {
 mod tests {
     use super::*;
     use crate::common::protocol::Writable;
+    use crate::common::utils::internals::ByteUtils;
 
     /// Helper: serializes a RequestHeader into a ByteBufferAccessor for parsing tests.
     /// Equivalent to Java's `RequestTestUtils.serializeRequestHeader`.
@@ -492,6 +493,43 @@ mod tests {
         assert_eq!(parsed.correlation_id(), 123);
         assert_eq!(*parsed.api_key(), ApiKeys::FIND_COORDINATOR);
         assert_eq!(parsed.api_version(), 10);
+    }
+
+    /// Translated from Java `RequestHeaderTest.testHugeDeclaredTaggedFieldCountIsRejected`.
+    ///
+    /// The buffer really holds `declared_count` padding bytes, so the remaining-bytes
+    /// guard alone would let the count through and the hard cap is what rejects it.
+    /// Java wraps the reader's failure in an `InvalidRequestException` and asserts on
+    /// its cause; [`RequestHeader::parse`] returns the reader's error directly.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeaderTest#testHugeDeclaredTaggedFieldCountIsRejected")]
+    fn test_huge_declared_tagged_field_count_is_rejected() {
+        let mut header_data = RequestHeaderData::new();
+        header_data.set_client_id(Some("client".to_string()));
+        header_data.set_correlation_id(123);
+        header_data.set_request_api_key(ApiKeys::FIND_COORDINATOR.id());
+        header_data.set_request_api_version(10);
+        let mut cache = ObjectSerializationCache::new();
+        let size = Message::size(&header_data, &mut cache, 2).unwrap();
+        let mut prefix = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
+        Message::write(&mut header_data, &mut prefix, &cache, 2).unwrap();
+        let mut bytes = prefix.into_buffer();
+        assert_eq!(Some(0u8), bytes.pop(), "expected an empty tagged-fields section to replace");
+
+        let declared_count: u32 = 20_000_000;
+        ByteUtils::write_unsigned_varint(declared_count, &mut bytes).unwrap();
+        bytes.resize(bytes.len() + declared_count as usize, 0);
+        let mut buffer = ByteBufferAccessor::new(bytes);
+
+        let e = RequestHeader::parse(&mut buffer).unwrap_err();
+        assert!(
+            e.to_string().contains("exceeds the maximum allowed count"),
+            "Expected a hard-cap rejection, but got: {e}"
+        );
+        assert_eq!(
+            "Tried to read 20000000 tagged fields, which exceeds the maximum allowed count of 10000.",
+            e.to_string()
+        );
     }
 
     /// Translated from Java `RequestHeaderTest.verifySizeMethodsReturnSameValue`.

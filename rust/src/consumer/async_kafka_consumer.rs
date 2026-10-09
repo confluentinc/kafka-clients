@@ -63,8 +63,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
-use crate::common::utils::LogContext;
 use crate::common::utils::Time;
+use crate::common::utils::internals::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRebalanceListener;
@@ -72,7 +72,6 @@ use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
-use crate::consumer::internals::AsyncConsumerMetrics;
 use crate::consumer::internals::ConsumerInterceptors;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::ConsumerRebalanceListenerInvoker;
@@ -81,7 +80,6 @@ use crate::consumer::internals::FetchBuffer;
 use crate::consumer::internals::FetchCollector;
 use crate::consumer::internals::FetchMetricsManager;
 use crate::consumer::internals::FetchMetricsRegistry;
-use crate::consumer::internals::KafkaConsumerMetrics;
 use crate::consumer::internals::MemberState;
 use crate::consumer::internals::MemberStateListener;
 use crate::consumer::internals::OffsetAndTimestampInternal;
@@ -96,6 +94,9 @@ use crate::consumer::internals::events::CompletableEvent;
 use crate::consumer::internals::events::CompletableEventReaper;
 use crate::consumer::internals::events::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::internals::metrics::AsyncConsumerMetrics;
+use crate::consumer::internals::metrics::KafkaConsumerMetrics;
+use crate::consumer::internals::metrics::RebalanceCallbackMetricsManager;
 use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
@@ -1229,7 +1230,7 @@ where
     metrics: Arc<Metrics>,
 
     /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
-    /// `AsyncKafkaConsumer.java:291`). Records `time-between-poll`,
+    /// `AsyncKafkaConsumer.java:370`). Records `time-between-poll`,
     /// `poll-idle-ratio-avg`, `last-poll-seconds-ago`,
     /// `commit-sync-time-ns-total`, `committed-time-ns-total` into the same
     /// `metrics` registry. Wired in `poll`/`commit_sync`/`committed`/`close`.
@@ -1242,6 +1243,17 @@ where
     /// `process_background_events` (bg-event queue/processing time) and
     /// removed in `close`.
     async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+
+    /// The fetch metrics manager (Java `private final FetchMetricsManager
+    /// fetchMetricsManager`, a field since KAFKA-19542). The fetch path holds
+    /// clones of the same `Arc`; the consumer keeps one to close it.
+    fetch_metrics_manager: Arc<FetchMetricsManager>,
+
+    /// The rebalance-callback metrics manager (Java `private final
+    /// RebalanceCallbackMetricsManager rebalanceCallbackMetricsManager`, a field
+    /// since KAFKA-19542). Shared with the rebalance listener invoker; the
+    /// consumer keeps one to close it.
+    rebalance_callback_metrics_manager: Arc<RebalanceCallbackMetricsManager>,
 
     /// Shared mirror of the background-event queue depth (Java reads
     /// `backgroundEventQueue.size()`; tokio mpsc has no `len()`). Bumped by
@@ -1263,7 +1275,7 @@ where
     /// [`Self::state_notifier`] directly on the membership manager).
     group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Java: `private final AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot`
-    /// (`AsyncKafkaConsumer.java:317`).
+    /// (`AsyncKafkaConsumer.java:396`).
     ///
     /// Snapshot of the partitions assigned to this consumer through the
     /// **group-management** path (not `assign(...)` — manually-assigned
@@ -1329,7 +1341,7 @@ where
     /// buffered records. Shared with [`ConsumerStateNotifier`] via `Arc`.
     has_pending_reconciliation: Arc<AtomicBool>,
     /// Java: `private final PositionsValidator positionsValidator`
-    /// (`AsyncKafkaConsumer.java:405`). Read-only from this side: the app
+    /// (`AsyncKafkaConsumer.java:407`). Read-only from this side: the app
     /// task calls [`PositionsValidator::can_skip_update_fetch_positions`]
     /// on the `poll()` critical path, while the background task owns every
     /// mutation through the `OffsetsRequestManager` that shares the `Arc`.
@@ -1498,7 +1510,7 @@ impl ConsumerStateNotifier {
     }
 
     /// Java: `private void updateGroupMetadata(Optional<Integer> memberEpoch, String memberId)`
-    /// (`AsyncKafkaConsumer.java:772-784`).
+    /// (`AsyncKafkaConsumer.java:864-876`).
     ///
     /// Updates the cached [`ConsumerGroupMetadata`] to carry the new
     /// epoch / member-id. Java's implementation is an `updateAndGet`
@@ -1524,7 +1536,7 @@ impl ConsumerStateNotifier {
     }
 
     /// Java: `private void resetGroupMetadata()`
-    /// (`AsyncKafkaConsumer.java:1857-1865`).
+    /// (`AsyncKafkaConsumer.java:1964-1972`).
     ///
     /// Resets the cached [`ConsumerGroupMetadata`] to the
     /// `UNKNOWN_GENERATION_ID` / `UNKNOWN_MEMBER_ID` defaults,
@@ -1567,13 +1579,13 @@ impl ConsumerStateNotifier {
 
 impl MemberStateListener for ConsumerStateNotifier {
     /// Java: `memberStateListener.onMemberEpochUpdated(memberEpoch, memberId)`
-    /// (`AsyncKafkaConsumer.java:344-347`).
+    /// (`AsyncKafkaConsumer.java:425-428`).
     fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str) {
         self.update_group_metadata(member_epoch, member_id);
     }
 
     /// Java: `memberStateListener.onGroupAssignmentUpdated(partitions)`
-    /// (`AsyncKafkaConsumer.java:349-352`). Snapshots the assignment so
+    /// (`AsyncKafkaConsumer.java:430-433`). Snapshots the assignment so
     /// `runRebalanceCallbacksOnClose` can drive listener callbacks over
     /// the **group**-assigned partitions specifically (manual
     /// `assign(...)` partitions are intentionally excluded).
@@ -1622,6 +1634,12 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// Async-consumer background-task / event-queue metrics
     /// (`AsyncConsumerMetrics`), recording into the same `metrics` registry.
     pub async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    /// The fetch metrics manager (Java's test constructor takes it since
+    /// KAFKA-19542).
+    pub fetch_metrics_manager: Arc<FetchMetricsManager>,
+    /// The rebalance-callback metrics manager (Java's test constructor takes it
+    /// since KAFKA-19542).
+    pub rebalance_callback_metrics_manager: Arc<RebalanceCallbackMetricsManager>,
     /// Shared mirror of the background-event queue depth.
     pub background_event_queue_size: Arc<AtomicI64>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
@@ -1632,7 +1650,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub time: Arc<dyn Time>,
     /// Shared `Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>` slot. Java has a
     /// **single** `AtomicReference<Optional<ConsumerGroupMetadata>>` field
-    /// (`AsyncKafkaConsumer.java:289`); the same slot is referenced by
+    /// (`AsyncKafkaConsumer.java:366`); the same slot is referenced by
     /// the `MemberStateListener` registered on the membership manager AND
     /// read by the public `groupMetadata()` accessor. The Rust
     /// translation enforces that single-source-of-truth contract by
@@ -1643,14 +1661,14 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Shared `Arc<Mutex<HashSet<TopicPartition>>>` slot mirroring
     /// Java's `groupAssignmentSnapshot` field
-    /// (`AsyncKafkaConsumer.java:317`). Same single-source-of-truth
+    /// (`AsyncKafkaConsumer.java:396`). Same single-source-of-truth
     /// contract as [`Self::group_metadata`] — the production ctor builds
     /// once and threads the Arc through both
     /// `ConsumerStateNotifier::on_group_assignment_updated` (writer) and
     /// `AsyncKafkaConsumer::run_rebalance_callbacks_on_close` (reader).
     pub group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
     /// The single `MemberStateListener` instance (Java
-    /// `AsyncKafkaConsumer.java:343-353`'s anonymous-inner-class
+    /// `AsyncKafkaConsumer.java:424-439`'s anonymous-inner-class
     /// `memberStateListener`) that writes to
     /// [`Self::group_metadata`] and [`Self::group_assignment_snapshot`].
     /// The production ctor clones this Arc and registers it on
@@ -1660,7 +1678,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// register `consumer.state_notifier()` on a custom membership
     /// manager when they bypass the production ctor.
     pub state_notifier: Arc<ConsumerStateNotifier>,
-    /// The shared [`PositionsValidator`] (Java `AsyncKafkaConsumer.java:405`).
+    /// The shared [`PositionsValidator`] (Java `AsyncKafkaConsumer.java:407`).
     /// The SAME `Arc` must also have been passed to the
     /// `OffsetsRequestManager` in `request_managers`, or the app-side skip
     /// decision reads state the background side never writes.
@@ -1682,12 +1700,12 @@ where
     /// `ConsumerNetworkThread`) and call this directly.
     ///
     /// Mirrors Java's test-visible constructor at
-    /// `AsyncKafkaConsumer.java:521` (the 20-arg form), with the
+    /// `AsyncKafkaConsumer.java:608` (the 20-arg form), with the
     /// metrics / telemetry parameters dropped per Phase 11 PLAN.md
     /// deferrals.
     /// Production constructor — translates Java's primary
     /// `AsyncKafkaConsumer(ConsumerConfig, Deserializer<K>, Deserializer<V>,
-    /// Optional<StreamsRebalanceData>)` (`AsyncKafkaConsumer.java:355-518`)
+    /// Optional<StreamsRebalanceData>)` (`AsyncKafkaConsumer.java:441-605`)
     /// in three buildable slices per Phase-12 PLAN.md:
     ///
     /// - **Commit (1/N) — this method:** Builds channels, subscriptions,
@@ -1723,7 +1741,7 @@ where
     ///
     /// Java wraps the whole constructor body in
     /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
-    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so EVERY
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:596-604`), so EVERY
     /// construction failure reaches the caller as a `KafkaException` carrying
     /// that message with the underlying failure as its cause. This wrapper
     /// reproduces that; [`Self::new_inner`] holds the body.
@@ -1817,7 +1835,7 @@ where
         config.maybe_override_client_id()?;
 
         // Java `new GroupRebalanceConfig(config, ProtocolType.CONSUMER)`
-        // (`AsyncKafkaConsumer.java:470-473`) validates a set
+        // (`AsyncKafkaConsumer.java:472-475`) validates a set
         // `group.instance.id` (`GroupRebalanceConfig.java:68-72`) regardless of
         // `client.id`; `ConsumerConfig` only does so when it derives the id.
         if let Some(group_instance_id) = config.group_instance_id() {
@@ -1869,12 +1887,18 @@ where
             cluster_resource_listeners,
         ));
 
-        // Java lines 416-417 — `addresses =
-        // ClientUtils.parseAndValidateAddresses(config)`,
-        // `metadata.bootstrap(addresses)`.
-        let addresses =
-            ClientUtils::parse_and_validate_addresses(config.bootstrap_servers(), config.client_dns_lookup())?;
-        metadata.bootstrap(addresses);
+        // Java 4.4 — `ClientUtils.maybeBootstrapMetadataSynchronously(config,
+        // bootstrap.servers, metadata)` (KIP-909 / KAFKA-20939): with
+        // `bootstrap.resolve.timeout.ms=0` (the default) the addresses are
+        // resolved and the metadata bootstrapped here, so an unresolvable host
+        // fails construction; with a positive value the NetworkClient resolves
+        // them asynchronously.
+        ClientUtils::maybe_bootstrap_metadata_synchronously(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.bootstrap_servers(),
+            &metadata,
+        )?;
 
         // Java line 420 — `fetchConfig = new FetchConfig(config)`.
         let fetch_config = FetchConfig::with_consumer_config(&config)?;
@@ -1902,18 +1926,14 @@ where
         // M7 over THIS same registry — no re-plumb.
         let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
 
-        // M4: the consumer-level + heartbeat + offset-commit metrics managers
-        // all register against the SAME `Arc<Metrics>` registry. Java
-        // constructs each from `metrics` in the relevant constructor
-        // (`KafkaConsumerMetrics`/`HeartbeatMetricsManager`/
-        // `OffsetCommitMetricsManager`). The heartbeat/commit managers are
-        // wired into their bg-task request managers post-construction (the
-        // request managers are built below), mirroring the coordinator/
-        // interceptor-hook setter pattern.
+        // M4: the consumer-level metrics register against the SAME
+        // `Arc<Metrics>` registry as every other manager. The heartbeat and
+        // offset-commit metrics managers are built below, only when their
+        // request manager is: Java builds each inside that request manager's
+        // constructor (`CommitRequestManager.java:172`,
+        // `ConsumerHeartbeatRequestManager.java:72`), so a consumer without a
+        // `group.id` never registers them, and nothing removes them on close.
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
-        let offset_commit_metrics_manager =
-            Arc::new(crate::consumer::internals::OffsetCommitMetricsManager::new(&metrics));
-        let heartbeat_metrics_manager = Arc::new(crate::consumer::internals::HeartbeatMetricsManager::new(&metrics));
 
         // M6: the async-consumer background-task / event-queue metrics
         // (`AsyncConsumerMetrics`, `AsyncKafkaConsumer.java`). Registered
@@ -1986,7 +2006,7 @@ where
             true, // discover_broker_versions — mirrors Java
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:306-307`) reads
             // both from the config; the default strategy is `rebootstrap`.
             // `ConsumerConfig::new` already rejected any name other than
             // `none` / `rebootstrap`, so `for_name` cannot fail here.
@@ -1996,6 +2016,18 @@ where
             log_context.clone(),
         );
         network_client.set_time(Arc::clone(&time));
+        // `ClientUtils.createNetworkClient` passes `metadata.cluster.check.enable`
+        // to the `NetworkClient` constructor (`ClientUtils.java:309`, KIP-1242).
+        network_client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
+        // `ClientUtils.createNetworkClient(config, bootstrap.servers, ...)` passes
+        // `bootstrapConfiguration(config, bootstrapServers)` to the
+        // `NetworkClient` constructor (KIP-909, `NetworkClientDelegate.java:491`).
+        network_client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.retry_backoff_ms(),
+            config.bootstrap_servers(),
+        )?);
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,
@@ -2051,7 +2083,7 @@ where
         // the consumer struct (built inside `with_components`).
         //
         // `initializeGroupMetadata(String, Optional<String>)`
-        // (`AsyncKafkaConsumer.java:747-757`) rejects a present-but-empty
+        // (`AsyncKafkaConsumer.java:839-849`) rejects a present-but-empty
         // `group.id` before building anything:
         //
         // ```java
@@ -2153,6 +2185,13 @@ where
         if let Some(commit_arc) = commit.as_ref() {
             commit_arc.set_completion_notify(Arc::clone(&event_notify));
         }
+        // Likewise when the FindCoordinator forwarder applies a response: the
+        // coordinator manager reports `i64::MAX` while its request is in flight
+        // (KAFKA-20253), so without this wake the newly discovered coordinator
+        // would sit unused until the network poll timed out.
+        if let Some(coord_arc) = coordinator.as_ref() {
+            coord_arc.set_completion_notify(Arc::clone(&event_notify));
+        }
         if let (Some(coord_arc), Some(commit_arc)) = (coordinator.as_ref(), commit.as_ref()) {
             commit_arc.set_coordinator(Arc::clone(coord_arc));
         }
@@ -2169,11 +2208,14 @@ where
                 as Arc<dyn crate::consumer::internals::AutoCommitInterceptorHook>);
         }
 
-        // M4: wire the OffsetCommitMetricsManager into the commit manager so
-        // the commit-response handler records per-commit request latency
-        // (`CommitRequestManager.java:767`).
+        // M4: build the OffsetCommitMetricsManager for the commit manager
+        // (Java: in the `CommitRequestManager` constructor,
+        // `CommitRequestManager.java:172`), so the commit-response handler
+        // records per-commit request latency (`CommitRequestManager.java:864`).
         if let Some(commit_arc) = commit.as_ref() {
-            commit_arc.set_offset_commit_metrics_manager(Arc::clone(&offset_commit_metrics_manager));
+            commit_arc.set_offset_commit_metrics_manager(Arc::new(
+                crate::consumer::internals::metrics::OffsetCommitMetricsManager::new(&metrics),
+            ));
         }
 
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
@@ -2191,7 +2233,9 @@ where
             (Some(gid), Some(commit_arc)) => Some(Arc::new(ConsumerMembershipManager::new(
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
-                None, // rack_id — Java reads from ConsumerConfig.CLIENT_RACK_CONFIG
+                // Java's `GroupRebalanceConfig.rackId` (`GroupRebalanceConfig.java:57-58`):
+                // `client.rack`, absent when empty.
+                Some(config.client_rack()).filter(|rack| !rack.is_empty()).map(str::to_string),
                 config.max_poll_interval_ms(),
                 config.group_remote_assignor().map(|s| s.to_string()),
                 Arc::clone(&subscriptions),
@@ -2207,10 +2251,12 @@ where
                 // the consumer's shared Arc<Metrics> (M3 field). Java builds the
                 // ConsumerRebalanceMetricsManager inside the membership-manager
                 // constructor; we build it here and pass it in.
-                Some(Arc::new(crate::consumer::internals::ConsumerRebalanceMetricsManager::new(
-                    &metrics,
-                    Arc::clone(&subscriptions),
-                ))),
+                Some(Arc::new(
+                    crate::consumer::internals::metrics::ConsumerRebalanceMetricsManager::new(
+                        &metrics,
+                        Arc::clone(&subscriptions),
+                    ),
+                )),
                 Arc::clone(&time),
             ))),
             _ => None,
@@ -2230,17 +2276,27 @@ where
                         Arc::clone(membership),
                         Arc::clone(&background_event_handler),
                     );
-                    // M4: wire the HeartbeatMetricsManager so the send/response
-                    // paths record `last-heartbeat-seconds-ago` /
-                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:285,299`).
-                    hb.set_metrics_manager(Arc::clone(&heartbeat_metrics_manager));
+                    // M4: build the HeartbeatMetricsManager (Java: in the
+                    // `ConsumerHeartbeatRequestManager` constructor,
+                    // `ConsumerHeartbeatRequestManager.java:72`) so the
+                    // send/response paths record `last-heartbeat-seconds-ago` /
+                    // `heartbeat-latency` (`AbstractHeartbeatRequestManager.java:309,323,335`).
+                    hb.set_metrics_manager(Arc::new(
+                        crate::consumer::internals::metrics::HeartbeatMetricsManager::new(&metrics),
+                    ));
+                    // Wake the bg task when the heartbeat response forwarder (a
+                    // spawned task) has queued a completion, so a new
+                    // assignment, fence or fatal error is applied at once
+                    // rather than after the poll timeout (up to the heartbeat
+                    // interval while the request is in flight).
+                    hb.set_completion_notify(Arc::clone(&event_notify));
                     Some(hb)
                 },
                 _ => None,
             };
 
         // Java: `this.positionsValidator = new PositionsValidator(logContext, time,
-        // subscriptions, metadata);` (`AsyncKafkaConsumer.java:517`). Built here, on
+        // subscriptions, metadata);` (`AsyncKafkaConsumer.java:519`). Built here, on
         // the application side, because the app task consults it on the `poll()`
         // critical path; the same `Arc` is handed to the `OffsetsRequestManager`
         // below, which passes it on to its `OffsetFetcherUtils` (Java `:548` →
@@ -2324,6 +2380,7 @@ where
                 maybe_auth,
                 Arc::clone(&api_versions),
                 Arc::clone(&fetch_metrics_manager),
+                config.retry_backoff_ms(),
             );
             // Wake the bg task when a fetch response is ready so it is drained
             // into the FetchBuffer promptly, instead of waiting for the
@@ -2351,7 +2408,7 @@ where
         //
         // Java keeps a SINGLE `AtomicReference<Optional<ConsumerGroupMetadata>> groupMetadata`
         // field and a SINGLE `MemberStateListener` instance
-        // (`AsyncKafkaConsumer.java:289, 343-353, 447`). Both the
+        // (`AsyncKafkaConsumer.java:366, 424-439, 533`). Both the
         // constructor's initial `groupMetadata.set(initializeGroupMetadata(...))`
         // write AND the listener's `updateGroupMetadata(...)` writes
         // target the same slot.
@@ -2461,11 +2518,11 @@ where
         // wire them post-construction so the no-arg `new` stays usable in
         // tests. The metrics manager registers against the consumer's shared
         // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
+        // Java keeps the manager in a field since KAFKA-19542 so `close()` can
+        // close it (`AsyncKafkaConsumer.java:568`).
+        let rebalance_callback_metrics_manager = Arc::new(RebalanceCallbackMetricsManager::new(&metrics));
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
-        rebalance_listener_invoker.set_metrics(
-            crate::consumer::internals::RebalanceCallbackMetricsManager::new(&metrics),
-            Arc::clone(&time),
-        );
+        rebalance_listener_invoker.set_metrics(Arc::clone(&rebalance_callback_metrics_manager), Arc::clone(&time));
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
         // `CompletableEventReaper` as the application reaper since the
@@ -2622,6 +2679,8 @@ where
             metrics,
             kafka_consumer_metrics,
             async_consumer_metrics,
+            fetch_metrics_manager,
+            rebalance_callback_metrics_manager,
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker: _offset_commit_callback_invoker,
@@ -2689,7 +2748,7 @@ where
         // and threaded through here. The production ctor registers the
         // SAME `state_notifier` Arc on the membership manager BEFORE the
         // bg-task spawn — mirroring Java's single `MemberStateListener`
-        // instance (`AsyncKafkaConsumer.java:289, 343-353, 447`). Tests
+        // instance (`AsyncKafkaConsumer.java:366, 424-439, 533`). Tests
         // construct their own Arcs and either register the notifier
         // themselves or skip registration if they don't exercise the
         // membership path.
@@ -2708,6 +2767,8 @@ where
             metrics: components.metrics,
             kafka_consumer_metrics: components.kafka_consumer_metrics,
             async_consumer_metrics: components.async_consumer_metrics,
+            fetch_metrics_manager: components.fetch_metrics_manager,
+            rebalance_callback_metrics_manager: components.rebalance_callback_metrics_manager,
             background_event_queue_size: components.background_event_queue_size,
             client_id: components.client_id,
             group_id: components.group_id,
@@ -2756,6 +2817,16 @@ where
     // (`testListPartitionsAfterClose` style) are listed in the commit-8
     // test-skip rationale.
     //
+    // # Bootstrap-failure behavior (deliberate Java divergence, KIP-909)
+    //
+    // Java 4.4's `acquireAndEnsureOpen()` also throws the permanent
+    // `BootstrapResolutionException` (`AsyncKafkaConsumer.java:2205`), so
+    // `assignment()`, `subscription()`, `paused()`, `groupMetadata()` and
+    // `currentLag()` throw it once asynchronous bootstrap resolution has
+    // failed. For the reason above, the Rust accessors cannot: they keep
+    // returning their current / stub value. Every `Result`-returning API
+    // returns `Error::BootstrapResolution` through `ensure_open()`.
+    //
     // # Mutable Set semantics (deliberate Java divergence)
     //
     // Java wraps the returned `Set` with `Collections.unmodifiableSet(...)`.
@@ -2772,6 +2843,10 @@ where
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`). See the module-level "Sync state-read
     /// methods" comment for rationale.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn assignment(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.assigned_partitions()
@@ -2783,6 +2858,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn subscription(&self) -> std::collections::HashSet<String> {
         let subs = self.subscriptions.lock().unwrap();
         subs.subscription()
@@ -2794,6 +2873,10 @@ where
     /// `Collections.unmodifiableSet(...)`). **Returns the empty set
     /// silently when the consumer is closed** (Java throws
     /// `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn paused(&self) -> std::collections::HashSet<TopicPartition> {
         let subs = self.subscriptions.lock().unwrap();
         subs.paused_partitions()
@@ -2811,7 +2894,7 @@ where
     }
 
     /// Java: `Map<MetricName, ? extends Metric> metrics()`
-    /// (`AsyncKafkaConsumer.java:1200-1202`:
+    /// (`AsyncKafkaConsumer.java:1301-1303`:
     /// `return Collections.unmodifiableMap(metrics.metrics());`).
     ///
     /// Snapshots the consumer's owned `Arc<Metrics>` registry — the SAME
@@ -2833,7 +2916,7 @@ where
     /// # Java divergence
     ///
     /// Java's `groupMetadata()` throws `InvalidGroupIdException` when
-    /// `group.id` is unset (`AsyncKafkaConsumer.java:1428-1436` calls
+    /// `group.id` is unset (`AsyncKafkaConsumer.java:1529-1537` calls
     /// `throwIfGroupIdNotDefined()` inside `acquireAndEnsureOpen`).
     /// The Rust translation returns a stub metadata with an empty group id
     /// and unknown generation / member ids for groupless consumers,
@@ -2863,6 +2946,10 @@ where
     /// receives its first heartbeat response with a member-epoch
     /// (or until tests invoke the notifier directly), the cache is
     /// empty and this method returns a fresh stub.
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
@@ -2890,6 +2977,10 @@ where
     ///
     /// **Returns `None` silently when the consumer is closed** (Java
     /// throws `IllegalStateException`).
+    ///
+    /// **Returns the current value after a permanent bootstrap failure**
+    /// (Java throws `BootstrapResolutionException`, KIP-909); see the
+    /// module-level "Sync state-read methods" comment.
     pub fn current_lag(&self, _topic_partition: &TopicPartition) -> Option<i64> {
         // The bg-task `current_lag_async` path is the one that drives the
         // event; this accessor only reads cached state and currently has
@@ -2991,7 +3082,7 @@ where
     // this seam.
 
     /// Translates Java's `private void throwIfGroupIdNotDefined()`
-    /// (`AsyncKafkaConsumer.java:1192-1197`). Java throws
+    /// (`AsyncKafkaConsumer.java:1293-1298`). Java throws
     /// `InvalidGroupIdException` (`ApiException` subclass with
     /// `Errors.InvalidGroupId`); the Rust analog is
     /// `Error::invalid_group_id(...)` which surfaces a `KafkaError`
@@ -3010,12 +3101,19 @@ where
     /// Translates Java's `acquireAndEnsureOpen()` — the runtime
     /// reentrancy guard is dropped per Phase 11 PLAN.md deferral #4
     /// (Rust's `&mut self` enforces single-caller exclusivity at
-    /// compile time), so this is just the `closed` check.
+    /// compile time), so this is the `closed` check followed by
+    /// `metadata.maybeThrowBootstrapFatalException()` (KIP-909): once
+    /// asynchronous bootstrap resolution has failed, every `Result`-returning
+    /// API that acquires the consumer returns the
+    /// [`BootstrapResolutionError`](crate::common::errors::BootstrapResolutionError).
+    /// The sync accessors (`assignment`, `subscription`, `paused`,
+    /// `group_metadata`, `current_lag`) have no error channel and keep
+    /// returning their value — see the "Sync state-read methods" comment.
     fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
             return Err(Error::local_illegal_state("This consumer has already been closed."));
         }
-        Ok(())
+        self.metadata.maybe_return_bootstrap_fatal_error()
     }
 
     /// Java: `void subscribe(Collection<String>)`.
@@ -3166,7 +3264,7 @@ where
     /// `processBackgroundEvents(future, timer, ignoreErrorPredicate)` so
     /// any rebalance-listener callbacks raised during the teardown can be
     /// driven from the caller's task while the unsubscribe future is
-    /// outstanding (Java `AsyncKafkaConsumer.java:1830-1855`). The Rust
+    /// outstanding (Java `AsyncKafkaConsumer.java:1933-1962`). The Rust
     /// translation routes the handle's receiver through
     /// [`Self::process_background_events_until`] so the same interleaved
     /// drain happens — without it, the bg task would await the
@@ -3174,7 +3272,7 @@ where
     /// `add_and_get`.
     pub async fn unsubscribe(&mut self) -> Result<(), Error> {
         // Java's `acquireAndEnsureOpen()` sits OUTSIDE the `try`
-        // (`AsyncKafkaConsumer.java:1830`), so a closed-consumer failure is
+        // (`AsyncKafkaConsumer.java:1934`), so a closed-consumer failure is
         // not covered by the `catch (Exception e) { log.error("Unsubscribe
         // failed", e); throw e; }` below — match that by returning before the
         // guarded section.
@@ -3231,7 +3329,7 @@ where
     }
 
     /// The body of Java's `unsubscribe()` `try` block
-    /// (`AsyncKafkaConsumer.java:1831-1849`, excluding the trailing
+    /// (`AsyncKafkaConsumer.java:1934-1956`, excluding the trailing
     /// `resetGroupMetadata()`).
     ///
     /// Split out so that the caller can reproduce Java's outer
@@ -3269,7 +3367,7 @@ where
             "Failed while waiting for the unsubscribe event to complete",
             // Java's `unsubscribe()` does NOT call
             // `wakeupTrigger.setActiveTask(...)` (see
-            // `AsyncKafkaConsumer.java:1830-1850`). Match that.
+            // `AsyncKafkaConsumer.java:1933-1957`). Match that.
             false,
             /* skip_rebalance_callback = */ false,
             // AK 4.3.1 (KAFKA-20428): unsubscribe passes
@@ -3344,7 +3442,7 @@ where
     ///     [`Self::process_background_events_until`] to decide whether
     ///     to keep spinning the drain loop or fall through to the
     ///     bounded `pollInterval` wait (Java
-    ///     `AsyncKafkaConsumer.java:2287-2293`).
+    ///     `AsyncKafkaConsumer.java:2459-2465`).
     ///   - `Err(Error)` on the first error event drained. Subsequent
     ///     events are still processed (mirroring Java's
     ///     `firstError.compareAndSet`); the additional errors are logged
@@ -3567,7 +3665,7 @@ where
                     //
                     // Message-fidelity note (Critic 64, Observation 2): Java has a
                     // single literal for this skip
-                    // (`AsyncKafkaConsumer.java:2359`, "...consumer is
+                    // (`AsyncKafkaConsumer.java:2373`, "...consumer is
                     // unsubscribing"), and reaches it ONLY via the unsubscribe
                     // path — Java's `close()` never passes
                     // `skipAssignmentEvents=true`. Rust reaches this arm on BOTH
@@ -3939,7 +4037,7 @@ where
 
     /// Java: `KafkaException e = ConsumerUtils.maybeWrapAsKafkaException(t);`
     /// followed by `firstError.compareAndSet(null, e)`
-    /// (`AsyncKafkaConsumer.java:2213-2216`) — the error is wrapped FIRST, so
+    /// (`AsyncKafkaConsumer.java:2381-2384`) — the error is wrapped FIRST, so
     /// both the recorded error and the warn-logged one are `KafkaException`s;
     /// then first-error-wins, and subsequent errors are logged at `warn`.
     ///
@@ -3960,7 +4058,7 @@ where
     // ── Poll ───────────────────────────────────────────────────────────
     //
     // Translates Java's `AsyncKafkaConsumer.poll(Duration timeout)` body
-    // (`AsyncKafkaConsumer.java:836-885`). The Java implementation drives a
+    // (`AsyncKafkaConsumer.java:932-981`). The Java implementation drives a
     // `do { } while (timer.notExpired())` loop with three stages:
     //
     //   1. `wakeupTrigger.maybeTriggerWakeup()` at the TOP of the loop —
@@ -3985,14 +4083,14 @@ where
     ///   - The `try/finally` in Java is realized with an inner helper
     ///     (`poll_inner`) so `kafkaConsumerMetrics.recordPollEnd` runs on
     ///     every exit path (the `finally`), matching
-    ///     `AsyncKafkaConsumer.java:882`.
+    ///     `AsyncKafkaConsumer.java:978`.
     ///   - `interceptors.onConsume(...)` mutates the records in place via
     ///     `Mutex<ConsumerInterceptors>`.
     pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error> {
         self.ensure_open()?;
 
         // Java: `kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs())`
-        // (`AsyncKafkaConsumer.java:841`) — recorded right after
+        // (`AsyncKafkaConsumer.java:937`) — recorded right after
         // `acquireAndEnsureOpen`, before the subscription check. The timer is
         // created at `poll()` entry, so `currentTimeMs()` is the entry time.
         let start_ms = self.time.milliseconds();
@@ -4008,7 +4106,7 @@ where
         result
     }
 
-    /// The `try`-body of [`Self::poll`] (`AsyncKafkaConsumer.java:842-880`).
+    /// The `try`-body of [`Self::poll`] (`AsyncKafkaConsumer.java:936-976`).
     /// Separated so [`Self::poll`] can record `recordPollEnd` in a
     /// `finally`-equivalent regardless of how this returns.
     async fn poll_inner(&mut self, timeout: Duration, start_ms: i64) -> Result<ConsumerRecords<K, V>, Error> {
@@ -4049,7 +4147,7 @@ where
             // `ConsumerRecords.isEmpty()` (records-only). Returning here when
             // only the position advanced (e.g. an all-aborted batch under
             // READ_COMMITTED) avoids blocking until the poll timeout
-            // (`AsyncKafkaConsumer.java:861`).
+            // (`AsyncKafkaConsumer.java:957`).
             if !records.is_fetch_empty() {
                 // Java: `sendPrefetches(timer)` — eagerly enqueue the next
                 // batch of fetches so the user's processing overlaps with
@@ -4068,23 +4166,55 @@ where
             if self.time.milliseconds() >= poll_deadline_ms {
                 break;
             }
+
+            // Rust-only (CLAUDE.md §11.6; Java's thread spins without starving
+            // anything): an iteration can come round without ever returning
+            // `Pending`. `poll_for_fetches` returns at once when
+            // `maximumTimeToWait` is 0 (Java's value while, for example, a
+            // JOINING member's first heartbeat is in flight with a zero
+            // interval, or an auto-commit timer has expired), and
+            // `await_wakeup` / the reconciliation-check wait complete without
+            // suspending when the buffer was already woken. Looping straight
+            // back would monopolise the caller's tokio worker for the whole
+            // window: no other task on it runs and its I/O driver is not
+            // polled. Yield once per empty iteration, as `Selector::poll`
+            // does on its non-blocking path, so co-scheduled tasks progress.
+            // The background task runs on its own thread, so this only
+            // changes how the waiting app task shares its worker.
+            tokio::task::yield_now().await;
         }
 
         Ok(ConsumerRecords::empty())
     }
 
     /// Java: `private void checkInflightPoll(Timer timer, boolean firstPass)`
-    /// (`AsyncKafkaConsumer.java:893-928`).
+    /// (`AsyncKafkaConsumer.java:992-1029`).
     ///
-    /// Drives the lifetime of the inflight [`ApplicationEvent::AsyncPoll`]
-    /// event. On the first pass of a `poll()` call it clears any leftover
-    /// event from the previous invocation. If no event is currently
-    /// inflight it submits a fresh one. The pending `OffsetCommitCallback`
-    /// queue is drained and `process_background_events` is invoked, so a
-    /// failed callback / fatal background error short-circuits with the
-    /// inflight event cleared (matching Java's `try { … } catch (Throwable t) { … }`).
+    /// Manages the lifecycle of the [`ApplicationEvent::AsyncPoll`] event. If
+    /// no event is currently processing, a new one is started asynchronously.
+    /// Each invocation checks whether the *inflight* event has completed; if
+    /// so, a new event is submitted in its place so a fetch request stays in
+    /// flight. If the completed event left records buffered no new event is
+    /// submitted here (it would gate those records behind a fresh
+    /// validate-positions stage). Instead the buffered records are returned and
+    /// the next fetch is pipelined by [`Self::poll`] via `send_prefetches`.
+    ///
+    /// The pending `OffsetCommitCallback` queue is drained and
+    /// `process_background_events` is invoked, so a failed callback / fatal
+    /// background error short-circuits with the inflight event cleared
+    /// (matching Java's `try { … } catch (Throwable t) { … }`).
     async fn check_inflight_poll(&mut self, poll_deadline_ms: i64, first_pass: bool) -> Result<(), Error> {
-        if first_pass && self.inflight_poll.is_some() {
+        // Clear the current inflight poll if we can, so a new one (and a new
+        // fetch) is submitted below. On the first pass this may clear a
+        // leftover from the previous poll(). On later passes it clears
+        // inflights that have completed (KAFKA-20780). A completed poll that
+        // filled the buffer is kept, so its records are returned first (see
+        // `maybe_clear_previous_inflight_poll`).
+        if self
+            .inflight_poll
+            .as_ref()
+            .is_some_and(|inflight| first_pass || inflight.state.is_complete())
+        {
             self.maybe_clear_previous_inflight_poll()?;
         }
 
@@ -4114,7 +4244,7 @@ where
             log::trace!("Inflight event AsyncPoll failed due to {err}, clearing");
             self.inflight_poll = None;
             // Java: `throw ConsumerUtils.maybeWrapAsKafkaException(t)`
-            // (`AsyncKafkaConsumer.java:919`) — the conditional wrap, so a
+            // (`AsyncKafkaConsumer.java:1021`) — the conditional wrap, so a
             // generic runtime error from user-supplied callback code still
             // reaches the application as a `KafkaException`.
             return Err(crate::consumer::internals::ConsumerUtils::maybe_wrap_as_kafka_error(err));
@@ -4143,7 +4273,7 @@ where
     }
 
     /// Java: `private void maybeClearPreviousInflightPoll()`
-    /// (`AsyncKafkaConsumer.java:930-963`).
+    /// (`AsyncKafkaConsumer.java:1031-1064`).
     fn maybe_clear_previous_inflight_poll(&mut self) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
@@ -4179,7 +4309,7 @@ where
     }
 
     /// Java: `private void maybeClearCurrentInflightPoll(boolean newlySubmittedEvent)`
-    /// (`AsyncKafkaConsumer.java:965-986`).
+    /// (`AsyncKafkaConsumer.java:1066-1087`).
     fn maybe_clear_current_inflight_poll(&mut self, newly_submitted_event: bool) -> Result<(), Error> {
         let inflight = match self.inflight_poll.as_ref() {
             Some(i) => i,
@@ -4207,7 +4337,7 @@ where
     }
 
     /// Java: `private Fetch<K, V> pollForFetches(Timer timer)`
-    /// (`AsyncKafkaConsumer.java:1872-1932`).
+    /// (`AsyncKafkaConsumer.java:1979-2040`).
     ///
     /// Collects buffered records; if none are available yet, **blocks** on
     /// the [`FetchBuffer`] wakeup until the background task adds data, the
@@ -4239,53 +4369,14 @@ where
             return Ok(fetch);
         }
 
-        // Java (AK 4.3.1): `pollTimeout` is computed AFTER the first
-        // `collectFetch()` returns empty — no need to compute it when data is
-        // already available.
-        // `pollTimeout = min(maximumTimeToWait, timer.remainingMs())` when
-        // committed-offset management is enabled (always true for a group
-        // consumer). Capping at `maximumTimeToWait` bounds how long this
-        // blocks so the poll loop re-runs `check_inflight_poll` — draining §31
-        // background events / rebalance callbacks — at least that often. The
-        // heartbeat manager's `maximum_time_to_wait` shrinks during membership
-        // work, exactly as in Java.
+        // Java: `pollTimeout` is computed AFTER the first `collectFetch()`
+        // returns empty — no need to compute it when data is already
+        // available. See [`Self::poll_for_fetches_timeout_ms`].
         let remaining = self.remaining_ms(poll_deadline_ms);
-        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
+        let poll_timeout_ms = self.poll_for_fetches_timeout_ms(remaining);
         if poll_timeout_ms <= 0 {
             // No time left to wait; the caller's loop re-checks the deadline.
             return Ok(fetch);
-        }
-
-        // Java (`AsyncKafkaConsumer.java:1888-1904`): clamp the wait to
-        // `retry.backoff.ms` when there are no assigned partitions, or any
-        // assigned partition lacks a valid position. In those states the
-        // background task is looking up positions (offset reset / committed
-        // fetch) and may be backing off after a failure, so blocking for the
-        // full timeout would stall poll() unnecessarily. This matters in this
-        // port specifically because `OffsetsRequestManager` does not shrink
-        // `maximum_time_to_wait`, so without this clamp the `await_wakeup`
-        // below could park up to `MAX_POLL_TIMEOUT_MS` during the
-        // join / post-rebalance window before positions are valid. No
-        // `.await` is held across the `SubscriptionState` guard (§16).
-        if poll_timeout_ms > self.retry_backoff_ms {
-            // Java copies the assignment set (`subscriptions.assignedPartitions()`)
-            // and iterates it calling `hasValidPosition(tp)` — a fresh HashSet +
-            // per-partition map lookup on EVERY poll(). The observable predicate
-            // is exactly "no assigned partitions, or any assigned partition
-            // lacks a valid position", which the existing Java-mirrored
-            // accessors compute allocation-free (`numAssignedPartitions`,
-            // `hasAllFetchPositions`). Java's copy is a cheap TLAB nursery
-            // allocation the GC absorbs; in Rust it was a malloc + 24 Arc
-            // clones + SipHash inserts per poll (~1.3% of app-thread CPU on
-            // the cloud profile). CLAUDE.md §13: keep it off the heap
-            // (Phase 27 Fix #3).
-            let needs_backoff = {
-                let subs = self.subscriptions.lock().unwrap();
-                subs.num_assigned_partitions() == 0 || !subs.has_all_fetch_positions()
-            };
-            if needs_backoff {
-                poll_timeout_ms = self.retry_backoff_ms;
-            }
         }
 
         // Ensure a fetch is in flight before we block. `await_wakeup` only
@@ -4319,6 +4410,67 @@ where
         // a wakeup; the caller's loop re-checks the deadline / surfaces the
         // wakeup. All three of its guards run again, as in Java.
         self.collect_fetch().await
+    }
+
+    /// How long [`Self::poll_for_fetches`] may block on the fetch buffer,
+    /// given `remaining_ms` of the caller's poll timer. Java computes this
+    /// inline in `pollForFetches` (`AsyncKafkaConsumer.java:1987-2012`, 4.4);
+    /// it is a separate method here so the value the application task waits
+    /// for can be asserted directly (the KAFKA-20854 / KAFKA-20970 /
+    /// KAFKA-21010 busy-loop tests).
+    ///
+    /// `pollTimeout = min(maximumTimeToWait, timer.remainingMs())`. Capping at
+    /// `maximumTimeToWait` (the background task's cached minimum over the
+    /// request managers) bounds how long this blocks, so the poll loop re-runs
+    /// `check_inflight_poll` — draining §31 background events / rebalance
+    /// callbacks — at least that often. KAFKA-20854 dropped Java's
+    /// `isCommittedOffsetsManagementEnabled()` condition on the `min`; this
+    /// port always applied it.
+    ///
+    /// Then the wait is bounded by `retry.backoff.ms` when background progress
+    /// may make fetching possible soon, judged from the current application-task
+    /// state rather than possibly stale background-task state:
+    ///   - no assigned partitions: group membership not established yet,
+    ///     assignments revoked but not reassigned, bootstrap DNS resolution
+    ///     (KIP-909) still in progress, or manual assignment not done yet;
+    ///   - some partition without a valid position: the background task may be
+    ///     fetching committed offsets, looking up offsets by timestamp, or
+    ///     backing off after a failure;
+    ///   - (KAFKA-20854) some fetchable partition with no buffered data: it may
+    ///     have been skipped for reconnect backoff, an in-flight request or a
+    ///     missing leader, and the background task no longer wakes the buffer
+    ///     for those states, so bound the wait to retry once the condition
+    ///     clears.
+    ///
+    /// Java copies the assignment for the position check; the first two
+    /// predicates here use the allocation-free `num_assigned_partitions` /
+    /// `has_all_fetch_positions` (Phase 27 Fix #3). Each `SubscriptionState`
+    /// read takes and drops the lock, as each Java `synchronized` call does,
+    /// and the buffer's lock is never taken while it is held. No `.await` is
+    /// held across either guard (§16).
+    fn poll_for_fetches_timeout_ms(&self, remaining_ms: i64) -> i64 {
+        let poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining_ms);
+        if poll_timeout_ms <= self.retry_backoff_ms {
+            return poll_timeout_ms;
+        }
+        let needs_backoff = {
+            let subs = self.subscriptions.lock().unwrap();
+            subs.num_assigned_partitions() == 0 || !subs.has_all_fetch_positions()
+        };
+        if needs_backoff {
+            return self.retry_backoff_ms;
+        }
+        let buffered = self.fetch_buffer.buffered_partitions();
+        let has_unbuffered_fetchable = self
+            .subscriptions
+            .lock()
+            .unwrap()
+            .has_fetchable_partitions(|tp| !buffered.contains(tp));
+        if has_unbuffered_fetchable {
+            self.retry_backoff_ms
+        } else {
+            poll_timeout_ms
+        }
     }
 
     /// AK 4.3.1 (KAFKA-20106): the first stage of `collectFetch()`.
@@ -4446,7 +4598,7 @@ where
     // ── Commit ─────────────────────────────────────────────────────────
     //
     // Translates Java's `commitSync()` / `commitAsync()` family
-    // (`AsyncKafkaConsumer.java:993-1052`, `1692-1748`). The shared
+    // (`AsyncKafkaConsumer.java:1094-1153`, `1692-1748`). The shared
     // helper `commit(commit_event)` validates group_id, drains pending
     // callbacks, returns the early-completed receiver for empty offsets,
     // adds the event, awaits `offsets_ready`, and returns the
@@ -4468,7 +4620,7 @@ where
 
     /// Translates Java's
     /// `private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(CommitEvent)`
-    /// (`AsyncKafkaConsumer.java:1038-1052`).
+    /// (`AsyncKafkaConsumer.java:1139-1153`).
     ///
     /// Returns the typed receiver from the commit event's handle. Callers
     /// either await it (sync path) or attach a spawned-task continuation
@@ -4532,7 +4684,7 @@ where
         // more useful than strict Java parity here). `commit_async` passes
         // `enable_wakeup=false` because Java's `commitAsync` is documented
         // as non-blocking and never throws `WakeupException` — Issue 22
-        // regression (`AsyncKafkaConsumer.java:1684-1700`).
+        // regression (`AsyncKafkaConsumer.java:1116-1137`).
         let or_deadline_ms = self.default_api_timeout_deadline_ms();
         self.process_background_events_until::<()>(
             offsets_ready_rx,
@@ -4582,7 +4734,7 @@ where
     ///
     /// # Java divergence — single deadline vs Java's fresh `requestTimer`
     ///
-    /// Java's `commitSync` (`AsyncKafkaConsumer.java:1706-1724`) computes
+    /// Java's `commitSync` (`AsyncKafkaConsumer.java:1809-1827`) computes
     /// TWO independent timers:
     ///   1. `calculateDeadlineMs(time, timeout)` is baked into the
     ///      `SyncCommitEvent` for the bg-side commit RPC.
@@ -4605,7 +4757,7 @@ where
     ) -> Result<(), Error> {
         self.ensure_open()?;
         // Java: `long commitStart = time.nanoseconds()` at the top of
-        // `commitSync` (`AsyncKafkaConsumer.java:1709`), recorded in `finally`
+        // `commitSync` (`AsyncKafkaConsumer.java:1811`), recorded in `finally`
         // as `recordCommitSync(time.nanoseconds() - commitStart)` (`:1721`).
         let commit_start_ns = self.time.nanoseconds();
         let result = self.commit_sync_inner(offsets, timeout).await;
@@ -4615,7 +4767,7 @@ where
     }
 
     /// The `try`-body of [`Self::commit_sync_internal`]
-    /// (`AsyncKafkaConsumer.java:1710-1718`). Separated so the caller can
+    /// (`AsyncKafkaConsumer.java:1812-1821`). Separated so the caller can
     /// record `recordCommitSync` in a `finally`-equivalent.
     async fn commit_sync_inner(
         &mut self,
@@ -4640,7 +4792,7 @@ where
 
         // Java: `ConsumerUtils.getResult(commitFuture, requestTimer)`
         // with `wakeupTrigger.setActiveTask(commitFuture)` for the
-        // duration of the await (`AsyncKafkaConsumer.java:1716,
+        // duration of the await (`AsyncKafkaConsumer.java:1819,
         // :1719-1724`). Issue 10 / §31: route through
         // `process_background_events_until` so a mid-wait
         // rebalance-listener callback is delivered on the caller's
@@ -4709,7 +4861,7 @@ where
         callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
     ) -> Result<(), Error> {
         self.ensure_open()?;
-        // Issue 22 / `AsyncKafkaConsumer.java:1684-1700`: Java's
+        // Issue 22 / `AsyncKafkaConsumer.java:1116-1137`: Java's
         // `commitAsync` is documented as non-blocking and never throws
         // `WakeupException`. Pass `enable_wakeup=false` so a concurrent
         // `wakeup()` does NOT interrupt the preliminary offsets-ready
@@ -4722,7 +4874,7 @@ where
             .await?;
 
         // Empty explicit offsets: Java's `commit()` returns an already-completed
-        // future (`AsyncKafkaConsumer.java:1042-1044`), so `whenComplete` runs
+        // future (`AsyncKafkaConsumer.java:1143-1145`), so `whenComplete` runs
         // inline on the calling thread and the result replaces
         // `lastPendingAsyncCommit` (`:1019`). Enqueue the callbacks here and
         // store an already-completed pending commit, without chaining behind
@@ -4807,7 +4959,7 @@ where
 
     /// Translates Java's
     /// `private void awaitPendingAsyncCommitsAndExecuteCommitCallbacks(Timer timer, boolean enableWakeup)`
-    /// (`AsyncKafkaConsumer.java:1726-1749`).
+    /// (`AsyncKafkaConsumer.java:1829-1852`).
     ///
     /// If there is a pending async commit, await it (bounded by the
     /// deadline) and then drain the callback invoker queue. The
@@ -4919,7 +5071,7 @@ where
     //
     // Translates Java's `seek(...)` / `seekToBeginning(...)` /
     // `seekToEnd(...)` / `position(...)` / `committed(...)` /
-    // `currentLag(...)` (`AsyncKafkaConsumer.java:1055-1155, 1413-1425`).
+    // `currentLag(...)` (`AsyncKafkaConsumer.java:1155-1291, 1514-1526`).
     //
     // The seek methods route through a `SeekUnvalidated` /
     // `ResetOffset` event. `position` and `committed` route through
@@ -5021,7 +5173,7 @@ where
     }
 
     /// Java: `long position(TopicPartition, Duration timeout)`
-    /// (`AsyncKafkaConsumer.java:1133-1155`).
+    /// (`AsyncKafkaConsumer.java:1234-1256`).
     pub async fn position_with_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
         self.ensure_open()?;
         {
@@ -5064,7 +5216,7 @@ where
                 .await;
             // Java's `updateFetchPositions` catches `TimeoutException`
             // only and returns false; any other exception propagates
-            // (`AsyncKafkaConsumer.java:1960-1971`). Issue 14: replace
+            // (`AsyncKafkaConsumer.java:2093-2104`). Issue 14: replace
             // the previous `.await.ok()` blanket swallow with explicit
             // error handling.
             match drain_result {
@@ -5098,7 +5250,7 @@ where
     }
 
     /// Java: `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>, Duration)`
-    /// (`AsyncKafkaConsumer.java:1162-1190`).
+    /// (`AsyncKafkaConsumer.java:1263-1291`).
     pub async fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
@@ -5106,7 +5258,7 @@ where
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
         self.ensure_open()?;
         // Java: `long start = time.nanoseconds()` after `acquireAndEnsureOpen`
-        // (`AsyncKafkaConsumer.java:1166`), recorded in `finally` as
+        // (`AsyncKafkaConsumer.java:1267`), recorded in `finally` as
         // `recordCommitted(time.nanoseconds() - start)` (`:1187`) — runs on
         // every exit path (empty partitions, group-id errors, timeout).
         let start_ns = self.time.nanoseconds();
@@ -5133,7 +5285,7 @@ where
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
         // Java's `committed(...)` calls `setActiveTask(event.future())`
-        // (`AsyncKafkaConsumer.java:1176`) so a concurrent `wakeup()`
+        // (`AsyncKafkaConsumer.java:1277`) so a concurrent `wakeup()`
         // interrupts the wait — `enable_wakeup=true`. Issue 10 / §31:
         // the helper interleaves bg-event drains so a mid-wait
         // rebalance-listener callback is delivered on the caller's
@@ -5151,7 +5303,7 @@ where
             Ok(map) => Ok(map),
             Err(Error::Timeout(_)) => {
                 // Issue 19: Java formats the partitions set via
-                // `Set.toString()` (`[t-0, t-1]`) — `AsyncKafkaConsumer.java:1180-1182`.
+                // `Set.toString()` (`[t-0, t-1]`) — `AsyncKafkaConsumer.java:1281-1283`.
                 // The Rust analog uses `TopicPartition`'s Display
                 // (`Display: "{topic}-{partition}"`) and emits the
                 // same `[a-0, b-1]` shape rather than the noisy
@@ -5167,7 +5319,7 @@ where
     }
 
     /// Java: `OptionalLong currentLag(TopicPartition)`
-    /// (`AsyncKafkaConsumer.java:1413-1425`).
+    /// (`AsyncKafkaConsumer.java:1514-1526`).
     ///
     /// Phase 11 commit (6/N) wires the `CurrentLag` event. The previous
     /// stub (commit (2/N)) returned `None` for every input.
@@ -5232,7 +5384,7 @@ where
 
     /// Translates Java's
     /// `private Map<TopicPartition, Long> beginningOrEndOffset(Collection<TopicPartition>, long timestamp, Duration timeout)`
-    /// (`AsyncKafkaConsumer.java:1366-1411`).
+    /// (`AsyncKafkaConsumer.java:1467-1512`).
     async fn beginning_or_end_offsets(
         &mut self,
         partitions: &[TopicPartition],
@@ -5280,7 +5432,7 @@ where
             .await;
         match result {
             Ok(offsets_map) => {
-                // Java's `beginningOrEndOffset(...)` (`AsyncKafkaConsumer.java:1366-1411`)
+                // Java's `beginningOrEndOffset(...)` (`AsyncKafkaConsumer.java:1467-1512`)
                 // returns a map keyed on every requested partition mapped
                 // to `entry.getValue().offset()`. The Rust translation
                 // now mirrors that all-or-error contract: every
@@ -5331,7 +5483,7 @@ where
     }
 
     /// Java: `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long>, Duration)`
-    /// (`AsyncKafkaConsumer.java:1303-1344`).
+    /// (`AsyncKafkaConsumer.java:1404-1445`).
     pub async fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -5388,7 +5540,7 @@ where
             .await;
         match result {
             Ok(offsets_map) => {
-                // Java's `offsetsForTimes` (`AsyncKafkaConsumer.java:1303-1344`)
+                // Java's `offsetsForTimes` (`AsyncKafkaConsumer.java:1404-1445`)
                 // filters out null values silently and converts each
                 // `OffsetAndTimestampInternal` to the public-class
                 // `OffsetAndTimestamp` via
@@ -5425,7 +5577,7 @@ where
     }
 
     /// Java: `List<PartitionInfo> partitionsFor(String topic, Duration)`
-    /// (`AsyncKafkaConsumer.java:1210-1235`).
+    /// (`AsyncKafkaConsumer.java:1311-1336`).
     pub async fn partitions_for_with_timeout(
         &mut self,
         topic: &str,
@@ -5445,7 +5597,7 @@ where
 
         if timeout.is_zero() {
             // Java: `throw new TimeoutException();`
-            // (`AsyncKafkaConsumer.java:1219`) — the class, code
+            // (`AsyncKafkaConsumer.java:1320`) — the class, code
             // (`REQUEST_TIMED_OUT`) and retriable ancestry all match; only the
             // message differs. RECORDED DEVIATION
             // (definition-of-done.md §7): Java's no-arg constructor leaves
@@ -5465,7 +5617,7 @@ where
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `partitionsFor` calls `setActiveTask(future)`
-        // (`AsyncKafkaConsumer.java:1223`) — `enable_wakeup=true`.
+        // (`AsyncKafkaConsumer.java:1324`) — `enable_wakeup=true`.
         let map = self
             .submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
                 ApplicationEvent::TopicMetadata { handle, topic: topic.to_string() },
@@ -5485,7 +5637,7 @@ where
     }
 
     /// Java: `Map<String, List<PartitionInfo>> listTopics(Duration)`
-    /// (`AsyncKafkaConsumer.java:1242-1260`).
+    /// (`AsyncKafkaConsumer.java:1343-1361`).
     pub async fn list_topics_with_timeout(
         &mut self,
         timeout: Duration,
@@ -5493,7 +5645,7 @@ where
         self.ensure_open()?;
         if timeout.is_zero() {
             // Java: `throw new TimeoutException();`
-            // (`AsyncKafkaConsumer.java:1247`). Same recorded deviation as
+            // (`AsyncKafkaConsumer.java:1348`). Same recorded deviation as
             // `partitions_for_with_timeout` above — Java's message is null, which
             // `Error` cannot represent; class, code and ancestry match.
             return Err(Error::timeout(format!(
@@ -5506,7 +5658,7 @@ where
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `listTopics` calls `setActiveTask(future)`
-        // (`AsyncKafkaConsumer.java:1251`) — `enable_wakeup=true`.
+        // (`AsyncKafkaConsumer.java:1352`) — `enable_wakeup=true`.
         self.submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
             ApplicationEvent::AllTopicsMetadata { handle },
             receiver,
@@ -5520,7 +5672,7 @@ where
     // ── Pause / resume ─────────────────────────────────────────────────
 
     /// Java: `void pause(Collection<TopicPartition>)`
-    /// (`AsyncKafkaConsumer.java:1273-1283`).
+    /// (`AsyncKafkaConsumer.java:1374-1384`).
     pub async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.ensure_open()?;
         if partitions.is_empty() {
@@ -5543,7 +5695,7 @@ where
     }
 
     /// Java: `void resume(Collection<TopicPartition>)`
-    /// (`AsyncKafkaConsumer.java:1286-1296`).
+    /// (`AsyncKafkaConsumer.java:1387-1397`).
     pub async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.ensure_open()?;
         if partitions.is_empty() {
@@ -5565,7 +5717,7 @@ where
 
     // ── Enforce rebalance (KIP-848: unsupported) ──────────────────────
 
-    /// Java: `void enforceRebalance()` (`AsyncKafkaConsumer.java:1438-1441`).
+    /// Java: `void enforceRebalance()` (`AsyncKafkaConsumer.java:1539-1542`).
     ///
     /// Both Java overloads log a warning and otherwise no-op under the
     /// KIP-848 protocol (the classic protocol implements them via
@@ -5578,7 +5730,7 @@ where
     }
 
     /// Java: `void enforceRebalance(String reason)`
-    /// (`AsyncKafkaConsumer.java:1443-1446`). Same log + no-op body as
+    /// (`AsyncKafkaConsumer.java:1544-1547`). Same log + no-op body as
     /// [`Self::enforce_rebalance`]; Java ignores `reason` here too.
     pub async fn enforce_rebalance_with_reason(&mut self, _reason: &str) -> Result<(), Error> {
         log::warn!("Operation not supported in new consumer group protocol");
@@ -5586,7 +5738,7 @@ where
     }
 
     /// Java: `private void sendPrefetches(Timer timer)`
-    /// (`AsyncKafkaConsumer.java:1995-2003`).
+    /// (`AsyncKafkaConsumer.java:2119-2127`).
     ///
     /// Submits a non-completable `CreateFetchRequests` event so the bg
     /// task can pipeline the next fetch round-trip with the user's
@@ -5611,7 +5763,7 @@ where
     // ── Close path ─────────────────────────────────────────────────────
     //
     // Translates Java's `close()` chain
-    // (`AsyncKafkaConsumer.java:1422-1588`). The close sequence runs
+    // (`AsyncKafkaConsumer.java:1550-1691`). The close sequence runs
     // best-effort: each step that throws is logged and the close
     // continues so the network thread is always joined. The final error
     // (if any) is propagated only when `swallow_error=false`.
@@ -5657,7 +5809,7 @@ where
     /// `private void close(Duration timeout,
     ///                     CloseOptions.GroupMembershipOperation membershipOperation,
     ///                     boolean swallowException)`
-    /// (`AsyncKafkaConsumer.java:1540-1588`).
+    /// (`AsyncKafkaConsumer.java:1641-1691`).
     async fn close_internal(
         &mut self,
         timeout: Duration,
@@ -5677,7 +5829,7 @@ where
         self.wakeup_trigger.disable();
 
         // Java's `createTimerForCloseRequests(timeout)`
-        // (`AsyncKafkaConsumer.java:1590-1594`) caps the user-supplied
+        // (`AsyncKafkaConsumer.java:1693-1697`) caps the user-supplied
         // timeout at `requestTimeoutMs`. With the default config
         // (timeout=30s, request_timeout_ms=30s) the cap is a no-op,
         // but a user calling `close(Duration::from_secs(300))` would
@@ -5737,7 +5889,7 @@ where
         // Step 7 & 8: shut down the network thread, bounding its cleanup by
         // what is left of the close timer — Java's
         // `applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs()))`
-        // (`AsyncKafkaConsumer.java:1652`).
+        // (`AsyncKafkaConsumer.java:1665`).
         let remaining_ms = close_deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
         self.network_thread_close
             .signal_close(Duration::from_millis(remaining_ms as u64));
@@ -5755,21 +5907,29 @@ where
         }
 
         // Java: `closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics",
-        // firstException)` (`AsyncKafkaConsumer.java:1573`) — removes the
+        // firstException)` (`AsyncKafkaConsumer.java:1674`) — removes the
         // consumer-level poll/commit metrics from the registry. `close()` is
         // infallible here (no error to fold into `first_error`).
         self.kafka_consumer_metrics.close();
 
         // Java: `closeQuietly(asyncConsumerMetrics, "async consumer metrics",
-        // firstException)` (`AsyncKafkaConsumer.java:1574`) — removes the
+        // firstException)` (`AsyncKafkaConsumer.java:1675`) — removes the
         // async-consumer background-task / event-queue sensors from the
         // registry. `close()` is infallible here.
         self.async_consumer_metrics.close();
 
+        // Java (KAFKA-19542): `closeQuietly(fetchMetricsManager, "consumer fetch
+        // metrics", firstException)` and `closeQuietly(rebalanceCallbackMetricsManager,
+        // "consumer rebalance callback metrics")` (`AsyncKafkaConsumer.java:1676-1677`)
+        // — remove the fetch metrics, including the per-topic / per-partition
+        // ones, and the rebalance-callback latency metrics. Both infallible.
+        self.fetch_metrics_manager.close();
+        self.rebalance_callback_metrics_manager.close();
+
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
-        // Java (`AsyncKafkaConsumer.java:1581-1587`):
+        // Java (`AsyncKafkaConsumer.java:1684-1690`):
         //
         // ```java
         // Throwable exception = firstException.get();
@@ -5800,7 +5960,7 @@ where
     }
 
     /// Java: `private void autoCommitOnClose(final Timer timer)`
-    /// (`AsyncKafkaConsumer.java:1596-1604`).
+    /// (`AsyncKafkaConsumer.java:1699-1707`).
     async fn auto_commit_on_close(&mut self, deadline_ms: i64) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
@@ -5823,7 +5983,7 @@ where
     }
 
     /// Java: `private void stopFindCoordinatorOnClose()`
-    /// (`AsyncKafkaConsumer.java:1661-1666`).
+    /// (`AsyncKafkaConsumer.java:1764-1769`).
     fn stop_find_coordinator_on_close(&self) -> Result<(), Error> {
         if self.group_id.is_none() {
             return Ok(());
@@ -5835,7 +5995,7 @@ where
     }
 
     /// Java: `private void runRebalanceCallbacksOnClose()`
-    /// (`AsyncKafkaConsumer.java:1606-1643`).
+    /// (`AsyncKafkaConsumer.java:1709-1746`).
     ///
     /// Invokes the user's `on_partitions_revoked` (if `memberEpoch > 0`)
     /// or `on_partitions_lost` (if `memberEpoch <= 0`) on the
@@ -5846,7 +6006,7 @@ where
     /// # Why `group_assignment_snapshot` and not `subscriptions.assigned_partitions()`
     ///
     /// Java reads from `groupAssignmentSnapshot.get()`
-    /// (`AsyncKafkaConsumer.java:1624`) which is populated only by the
+    /// (`AsyncKafkaConsumer.java:1727`) which is populated only by the
     /// `MemberStateListener.onGroupAssignmentUpdated` callback fired
     /// during reconciliation. The snapshot deliberately excludes
     /// partitions added via `assign(...)` (manual assignment) so
@@ -5898,7 +6058,7 @@ where
         };
 
         // Java: `if (error != null) throw ConsumerUtils.maybeWrapAsKafkaException(error);`
-        // (`AsyncKafkaConsumer.java:1641-1642`). Without the wrap the same
+        // (`AsyncKafkaConsumer.java:1744-1745`). Without the wrap the same
         // user-listener error is classified differently depending on the path
         // that surfaced it: wrapped on a normal rebalance (via
         // `maybe_wrap_as_kafka_error_with_msg`) but raw here, so
@@ -5908,7 +6068,7 @@ where
     }
 
     /// Java: `private void leaveGroupOnClose(Timer, GroupMembershipOperation)`
-    /// (`AsyncKafkaConsumer.java:1645-1659`).
+    /// (`AsyncKafkaConsumer.java:1748-1762`).
     async fn leave_group_on_close(
         &mut self,
         deadline_ms: i64,
@@ -6412,6 +6572,7 @@ mod tests {
             Arc::clone(&metrics),
             crate::consumer::internals::ConsumerUtils::CONSUMER_METRIC_GROUP,
         ));
+        let rebalance_callback_metrics_manager = Arc::new(RebalanceCallbackMetricsManager::new(&metrics));
         let background_event_queue_size = Arc::new(AtomicI64::new(0));
         let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
             Arc::clone(&metadata),
@@ -6459,6 +6620,11 @@ mod tests {
             metrics,
             kafka_consumer_metrics,
             async_consumer_metrics,
+            // Java's test constructor takes `mock(FetchMetricsManager.class)` /
+            // `mock(RebalanceCallbackMetricsManager.class)` here; the real
+            // managers over the fixture's registry stand in for the mocks.
+            fetch_metrics_manager,
+            rebalance_callback_metrics_manager,
             background_event_queue_size,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
@@ -6537,7 +6703,7 @@ mod tests {
 
     /// Java parity: `memberStateListener.onMemberEpochUpdated` →
     /// `updateGroupMetadata` populates the cached metadata.
-    /// (`AsyncKafkaConsumer.java:343-353`, `:772-784`).
+    /// (`AsyncKafkaConsumer.java:424-439`, `:772-784`).
     #[tokio::test]
     async fn state_notifier_populates_group_metadata_on_epoch_update() {
         let consumer = make_test_consumer();
@@ -6568,7 +6734,7 @@ mod tests {
 
     /// Java parity: `memberStateListener.onGroupAssignmentUpdated` →
     /// `setGroupAssignmentSnapshot(partitions)` updates the snapshot
-    /// (`AsyncKafkaConsumer.java:349-352`, `:786-788`).
+    /// (`AsyncKafkaConsumer.java:430-438`, `:786-788`).
     #[tokio::test]
     async fn state_notifier_updates_group_assignment_snapshot() {
         let consumer = make_test_consumer();
@@ -6631,7 +6797,7 @@ mod tests {
         // App-side observes the change through the same shared slot the
         // listener wrote into — proving the `state_notifier` and
         // `group_metadata` Arcs are wired as a single source of truth
-        // (Java `AsyncKafkaConsumer.java:289, 343-353`).
+        // (Java `AsyncKafkaConsumer.java:366, 424-439`).
         let meta = consumer.group_metadata();
         assert_eq!(meta.generation_id(), 99);
         assert_eq!(meta.member_id(), "member-from-listener");
@@ -6754,7 +6920,7 @@ mod tests {
     /// an empty `member_id`.
     /// Java wraps the whole `AsyncKafkaConsumer` constructor body in
     /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
-    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so every
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:596-604`), so every
     /// construction failure reaches the caller with that exact message and the
     /// underlying failure as its cause.
     ///
@@ -6803,6 +6969,169 @@ mod tests {
             source.to_string().contains("Invalid url in bootstrap.servers"),
             "cause must be the address-parse failure, got: {source}"
         );
+    }
+
+    /// Translated from
+    /// `KafkaConsumerTest.testConsumerBootstrapResolutionExceptionPropagatedToPoll`
+    /// (KIP-909), for `GroupProtocol.CONSUMER`; the `CLASSIC` case is out of
+    /// scope (consumer-threading.md §20: `KafkaConsumer::new` rejects it before
+    /// any bootstrap work). With a positive `bootstrap.resolve.timeout.ms` and
+    /// an unresolvable host the consumer is created; `poll` fails with the
+    /// `BootstrapResolutionException` once the budget runs out, and so does
+    /// every later call.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerBootstrapResolutionExceptionPropagatedToPoll"
+    )]
+    async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::KafkaConsumer;
+
+        // Use an invalid hostname that will fail DNS resolution (using RFC 6761 reserved .invalid TLD)
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            // Set a short bootstrap timeout so the test doesn't take too long
+            (
+                ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "3000".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let mut consumer = KafkaConsumer::new::<String, String>(
+            ConsumerConfig::new(&props).unwrap(),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        // Subscribe to a topic to trigger metadata fetch
+        consumer.subscribe_with_topics(vec!["test-topic".to_string()]).await.unwrap();
+
+        // Poll continuously until we get the BootstrapResolutionException
+        // The error should be returned after bootstrap.resolve.timeout.ms expires
+        let start = std::time::Instant::now();
+        let max_wait = Duration::from_millis(15000); // 15 seconds max to prevent test hanging
+        let error = loop {
+            assert!(
+                start.elapsed() < max_wait,
+                "Expected the BootstrapResolutionError within {}ms",
+                max_wait.as_millis()
+            );
+            if let Err(error @ Error::BootstrapResolution(_)) = consumer.poll(Duration::from_millis(100)).await {
+                break error;
+            }
+        };
+
+        // Verify the error message contains information about DNS resolution failure
+        assert_eq!(
+            error.message(),
+            "Failed to resolve bootstrap servers after 3000ms. \
+             Please check your bootstrap.servers configuration and DNS settings."
+        );
+
+        // After the first failure, any further API call must also fail. This guards against
+        // accidentally clearing the bootstrap error from the metadata layer.
+        let again = consumer.poll(Duration::from_millis(100)).await;
+        assert!(matches!(again, Err(Error::BootstrapResolution(_))), "got {:?}", again.err());
+        consumer.close().await.unwrap();
+    }
+
+    /// Critic 92, Issue 2: built as the C / Python bindings build it — outside
+    /// any runtime, so every resolution attempt is started from the consumer's
+    /// own `kafka-consumer-io` runtime — `close_with_options(1 s)` returns within
+    /// Java's bound (1 s, plus at most 2 s waiting on the resolver) while slow
+    /// lookups are in flight. With the resolution on that runtime's blocking pool,
+    /// three 5 s lookups held `close()` for ~15 s.
+    #[test]
+    fn test_close_is_bounded_while_a_bootstrap_resolution_is_in_flight() {
+        use std::collections::HashMap;
+
+        use crate::ClientUtils;
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::{CloseOptions, KafkaConsumer};
+
+        let servers: Vec<String> = (0..3)
+            .map(|i| format!("host{i}{}:9092", ClientUtils::SLOW_TEST_HOST_SUFFIX))
+            .collect();
+        let props = HashMap::from([
+            (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), servers.join(",")),
+            (
+                ConsumerConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "120000".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let mut consumer = KafkaConsumer::new::<String, String>(
+            ConsumerConfig::new(&props).unwrap(),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("a positive timeout defers resolution, so construction succeeds");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let elapsed = runtime.block_on(async move {
+            consumer
+                .subscribe_with_topics(vec!["topic".to_string()])
+                .await
+                .expect("subscribe");
+            consumer
+                .poll(Duration::from_millis(100))
+                .await
+                .expect("poll while bootstrapping");
+            let started = std::time::Instant::now();
+            consumer
+                .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+                .await
+                .expect("close");
+            started.elapsed()
+        });
+        assert!(elapsed < Duration::from_secs(5), "close_with_options(1 s) took {elapsed:?}");
+    }
+
+    /// Translated from
+    /// `KafkaConsumerTest.testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero`
+    /// (KAFKA-20939), for `GroupProtocol.CONSUMER` (`CLASSIC` is out of scope,
+    /// as above): the default `bootstrap.resolve.timeout.ms=0` resolves DNS
+    /// synchronously in the constructor, so an unresolvable host fails
+    /// construction with the `ConfigException` wrapped in the constructor's
+    /// `KafkaException`, and no consumer instance is created.
+    #[tokio::test(flavor = "multi_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"
+    )]
+    async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_bootstrap_when_timeout_zero() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::KafkaConsumer;
+
+        let props = HashMap::from([
+            (
+                ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "unresolvable.invalid:9092".to_string(),
+            ),
+            (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+            (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+        ]);
+        let config = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
+        let error =
+            KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))
+                .err()
+                .expect("construction must fail");
+        assert_eq!(error.message(), "Failed to construct kafka consumer");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
     }
 
     /// A config built with `ConsumerConfig::default()` and the setters skips
@@ -6890,6 +7219,52 @@ mod tests {
             "The configured group.id should not be an empty string or whitespace.",
             cause.message()
         );
+    }
+
+    /// `client.rack` reaches the membership manager as Java's
+    /// `GroupRebalanceConfig.rackId` (`GroupRebalanceConfig.java:57-58`),
+    /// trimmed, and an empty one (the default) is no rack. Before Critic 96 F3
+    /// the constructor always passed `None`, so a KIP-848 heartbeat never
+    /// carried the consumer's rack.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rack_reaches_the_membership_manager() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        for (configured, expected) in [(Some(" rack-1 "), Some("rack-1")), (None, None), (Some(""), None)] {
+            let mut props = HashMap::from([
+                ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+                ("group.id".to_string(), "rack-group".to_string()),
+                ("group.protocol".to_string(), "consumer".to_string()),
+                ("enable.auto.commit".to_string(), "false".to_string()),
+            ]);
+            if let Some(rack) = configured {
+                props.insert(ConsumerConfig::CLIENT_RACK_CONFIG.to_string(), rack.to_string());
+            }
+            let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+                ConsumerConfig::new(&props).expect("config validates"),
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .expect("ctor should succeed against a refused broker");
+            let membership = consumer
+                .request_managers
+                .lock()
+                .unwrap()
+                .consumer_membership
+                .clone()
+                .expect("group.id set → membership must be Some");
+            assert_eq!(expected, membership.rack_id(), "client.rack = {configured:?}");
+            consumer.close().await.expect("close");
+        }
     }
 
     /// Java validates `group.instance.id` again in the constructor
@@ -7157,6 +7532,131 @@ mod tests {
                 // assertion will be a clear failure.
             },
         }
+    }
+
+    /// A stand-in background task for the 4.4 tests below: it applies the
+    /// subscription, unsubscribe and pause events to the shared
+    /// `SubscriptionState` and completes them, as Java's
+    /// `complete*EventSuccessfully` mock answers do, and records the name of
+    /// every event it sees.
+    fn apply_and_complete_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+    ) -> (tokio::task::JoinHandle<()>, Arc<Mutex<Vec<&'static str>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_task = Arc::clone(&seen);
+        let task = tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                seen_in_task.lock().unwrap().push(env.event.type_name());
+                match &env.event {
+                    ApplicationEvent::TopicSubscriptionChange { topics, listener, .. } => {
+                        subscriptions
+                            .lock()
+                            .unwrap()
+                            .subscribe_with_topics(topics.clone(), listener.clone())
+                            .unwrap();
+                    },
+                    ApplicationEvent::Unsubscribe { .. } => subscriptions.lock().unwrap().unsubscribe(),
+                    ApplicationEvent::PausePartitions { partitions, .. } => {
+                        let mut subs = subscriptions.lock().unwrap();
+                        for tp in partitions {
+                            subs.pause(tp).unwrap();
+                        }
+                    },
+                    _ => {},
+                }
+                complete_event(&env);
+            }
+        });
+        (task, seen)
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPauseFlagPreservedForRetainedPartitionAcrossRebalance`
+    /// (36aab4fddd): a paused partition stays paused across a reconciliation
+    /// that keeps it assigned, and a newly added one starts unpaused.
+    #[tokio::test]
+    async fn test_pause_flag_preserved_for_retained_partition_across_rebalance() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let subscriptions = Arc::clone(&handles.subscriptions);
+        let (drainer, _seen) = apply_and_complete_events(handles.app_event_rx, Arc::clone(&subscriptions));
+        let tp0 = TopicPartition::new("topic1", 0);
+        let tp1 = TopicPartition::new("topic1", 1);
+        let tp2 = TopicPartition::new("topic1", 2);
+
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+        consumer
+            .subscribe_with_topics_listener(vec!["topic1".to_string()], Arc::new(NoopListener))
+            .await
+            .unwrap();
+
+        // Simulate a rebalance that reconciled a new assignment of tp0 and tp1.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_subscribed_awaiting_callback(&[tp0.clone(), tp1.clone()], &[tp0.clone(), tp1.clone()])
+            .unwrap();
+        assert_eq!(HashSet::from([tp0.clone(), tp1.clone()]), consumer.assignment());
+
+        // Pause tp0, the partition that will be retained across the rebalance.
+        consumer.pause(std::slice::from_ref(&tp0)).await.unwrap();
+        assert_eq!(HashSet::from([tp0.clone()]), consumer.paused());
+
+        // Reconcile a new assignment that retains tp0, revokes tp1, and adds tp2.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_subscribed_awaiting_callback(&[tp0.clone(), tp2.clone()], std::slice::from_ref(&tp2))
+            .unwrap();
+
+        // tp0 is retained across the rebalance, so its pause state must be
+        // preserved. The newly added tp2 starts unpaused.
+        assert_eq!(HashSet::from([tp0.clone(), tp2]), consumer.assignment());
+        assert_eq!(
+            HashSet::from([tp0]),
+            consumer.paused(),
+            "Partition that remain assigned should keep the pause state"
+        );
+        drainer.abort();
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testUnsubscribeDoesNotCommitOffsetsEvenWithAutoCommitEnabled`
+    /// (KAFKA-20119, 40e9fcd742; a5137f7c38 only stubs Java's close-time
+    /// commit, which this fixture's drainer completes anyway): with
+    /// `enable.auto.commit` on, `unsubscribe()` sends an `Unsubscribe` event and
+    /// no commit event of any kind.
+    #[tokio::test]
+    async fn test_unsubscribe_does_not_commit_offsets_even_with_auto_commit_enabled() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        assert!(
+            consumer.auto_commit_enabled,
+            "the fixture's enable.auto.commit is Java's default, true"
+        );
+        let (drainer, seen) = apply_and_complete_events(handles.app_event_rx, Arc::clone(&handles.subscriptions));
+
+        // Subscribe to a topic.
+        consumer.subscribe_with_topics(vec!["topic".to_string()]).await.unwrap();
+        // Focus on the unsubscribe behavior.
+        seen.lock().unwrap().clear();
+
+        // This should NOT commit offsets even though auto-commit is enabled.
+        consumer.unsubscribe().await.unwrap();
+
+        let events = seen.lock().unwrap().clone();
+        assert!(events.contains(&"Unsubscribe"), "UnsubscribeEvent was sent: {events:?}");
+        for commit in ["CommitSync", "CommitAsync", "CommitOnClose"] {
+            assert!(!events.contains(&commit), "no {commit} event despite auto-commit: {events:?}");
+        }
+        assert!(consumer.subscription().is_empty());
+        drainer.abort();
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -8298,7 +8798,7 @@ mod tests {
         drop(handles.subscriptions);
     }
 
-    /// Java `AsyncKafkaConsumer.java:2057` — `collectFetch()` consults the
+    /// Java `AsyncKafkaConsumer.java:2073` — `collectFetch()` consults the
     /// SHARED [`PositionsValidator`], so an error the background side cached
     /// through `OffsetFetcherUtils` surfaces on the application task.
     ///
@@ -8640,7 +9140,7 @@ mod tests {
     /// (`commit_sync`, here) must observe a `wakeup()` posted by
     /// another task and return `Error::Wakeup`. This mirrors
     /// Java's `wakeupTrigger.setActiveTask(commitFuture)` discipline at
-    /// `AsyncKafkaConsumer.java:1716`.
+    /// `AsyncKafkaConsumer.java:1819`.
     #[tokio::test]
     async fn issue_11_commit_sync_observes_wakeup_during_wait() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
@@ -8679,7 +9179,7 @@ mod tests {
     /// The previous `.await.ok()` blanket-swallowed all errors so the
     /// user observed a generic Timeout instead of the root cause.
     /// Java only catches `TimeoutException`
-    /// (`AsyncKafkaConsumer.java:1960-1971`); anything else propagates.
+    /// (`AsyncKafkaConsumer.java:2093-2104`); anything else propagates.
     #[tokio::test]
     async fn issue_14_position_propagates_non_timeout_errors() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
@@ -8722,7 +9222,7 @@ mod tests {
 
     /// Issue 22 regression: `commit_async` must NOT observe wakeup at
     /// any phase of the call. Java's `commitAsync`
-    /// (`AsyncKafkaConsumer.java:1684-1700`) is documented as
+    /// (`AsyncKafkaConsumer.java:1116-1137`) is documented as
     /// non-blocking and never throws `WakeupException`. Pre-cancelling
     /// the wakeup token before calling `commit_async` must not surface
     /// `Error::Wakeup`.
@@ -9837,7 +10337,7 @@ mod tests {
         );
         // Java wraps each background-event failure through
         // `ConsumerUtils.maybeWrapAsKafkaException(t)`
-        // (`AsyncKafkaConsumer.java:2213`), so what reaches the application is
+        // (`AsyncKafkaConsumer.java:2381`), so what reaches the application is
         // always a `KafkaException` — even though the bg task raised a generic
         // `IllegalStateException`.
         assert!(
@@ -10285,7 +10785,7 @@ mod tests {
 
     /// Rust-specific companion to the two tests above, covering an empty-offsets
     /// `commit_async` issued while an earlier async commit is in flight. As in
-    /// Java (`AsyncKafkaConsumer.java:1019, 1042-1044`), the empty commit
+    /// Java (`AsyncKafkaConsumer.java:1120, 1143-1145`), the empty commit
     /// completes immediately and replaces `lastPendingAsyncCommit`, so it is
     /// not chained behind the earlier commit: its callback is enqueued before
     /// `commit_async` returns, the next `commit_sync` does not wait for the
@@ -10468,7 +10968,7 @@ mod tests {
     /// `close(CloseOptions.timeout(t))` must bound the bg task's `cleanup()`
     /// by what is left of the close timer: Java hands
     /// `Duration.ofMillis(closeTimer.remainingMs())` to
-    /// `applicationEventHandler.close(..)` (`AsyncKafkaConsumer.java:1652`),
+    /// `applicationEventHandler.close(..)` (`AsyncKafkaConsumer.java:1665`),
     /// which assigns it to `ConsumerNetworkThread.closeTimeout`
     /// (`ConsumerNetworkThread.java:380`). Before the fix the Rust close path
     /// signalled shutdown without a timeout, so `cleanup()` kept its 30 s
@@ -10508,7 +11008,7 @@ mod tests {
     /// `close_with_options(CloseOptions::new_timeout(..))` is the replacement
     /// for Java's deprecated `close(Duration timeout)`, whose body is exactly
     /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`) and which is not translated
+    /// (`AsyncKafkaConsumer.java:1556-1558`) and which is not translated
     /// (CLAUDE.md §3). The user timeout must reach the close path.
     ///
     /// Asserting `is_closed()` alone would not catch a dropped timeout, so
@@ -10566,7 +11066,7 @@ mod tests {
     /// Issue 15 regression: `close_internal` must cap the
     /// user-supplied timeout at `request.timeout.ms` per Java's
     /// `createTimerForCloseRequests(timeout)`
-    /// (`AsyncKafkaConsumer.java:1590-1594`). We assert directly on
+    /// (`AsyncKafkaConsumer.java:1693-1697`). We assert directly on
     /// the deadline carried by the close-path event — Java's
     /// `LeaveGroupOnCloseEvent(deadline)` is built with the capped
     /// timer; the Rust analog flows through
@@ -11901,7 +12401,7 @@ mod tests {
 
     /// Java's `initializeGroupMetadata` rejects a present-but-EMPTY `group.id`
     /// before building anything
-    /// (`AsyncKafkaConsumer.java:747-757`), and the constructor's
+    /// (`AsyncKafkaConsumer.java:839-849`), and the constructor's
     /// `catch (Throwable t)` then wraps it (`:509-517`).
     ///
     /// Accepting it leaves the consumer internally inconsistent: `Some("")` is
@@ -11986,7 +12486,7 @@ mod tests {
     /// ```java
     /// throw new KafkaException("Failed to close kafka consumer", exception);
     /// ```
-    /// (`AsyncKafkaConsumer.java:1586`).
+    /// (`AsyncKafkaConsumer.java:1689`).
     ///
     /// This is what makes `catch (KafkaException e)` around `close()` — the
     /// canonical Java idiom — reliable. Returning the recorded error raw breaks
@@ -12034,5 +12534,330 @@ mod tests {
         // The consumer is still marked closed — the wrap happens after the
         // state flip, as in Java.
         assert!(consumer.is_closed());
+    }
+
+    // ─── KAFKA-20780 / KAFKA-20315: the inflight `AsyncPoll` lifecycle ───
+
+    /// Assigns and positions `topic1-0` so `poll()` gets past its
+    /// preconditions without the background task.
+    fn assign_and_seek_for_poll(handles: &ConsumerTestHandles) -> TopicPartition {
+        let tp = TopicPartition::new("topic1", 0);
+        let mut subs = handles.subscriptions.lock().unwrap();
+        subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+        subs.seek(&tp, 0).unwrap();
+        tp
+    }
+
+    /// Drains every queued application event, returning the `AsyncPoll`
+    /// states and the number of `CreateFetchRequests` events seen.
+    fn drain_poll_events(handles: &mut ConsumerTestHandles) -> (Vec<Arc<AsyncPollState>>, usize) {
+        let mut polls = Vec::new();
+        let mut prefetches = 0;
+        while let Ok(env) = handles.app_event_rx.try_recv() {
+            match env.event {
+                ApplicationEvent::AsyncPoll { state, .. } => polls.push(state),
+                ApplicationEvent::CreateFetchRequests { .. } => prefetches += 1,
+                _ => {},
+            }
+        }
+        (polls, prefetches)
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testInflightPollResubmittedAfterCompletionWithEmptyBuffer`
+    /// (KAFKA-20780). One `poll()` runs two internal passes over an empty
+    /// buffer; the poll event submitted on the first completes during the
+    /// first wait, and the second pass must submit a fresh one so a fetch stays
+    /// pending. Before the fix only the first pass submitted (the second was
+    /// starved until a third pass cleared the completed event).
+    ///
+    /// Java completes the event from a mocked `awaitWakeup` and advances a
+    /// `MockTime` 150 ms per pass under a 200 ms timeout. Here the stand-in
+    /// background task completes each event 30 ms after it arrives, while the
+    /// real wait is bounded at `retry.backoff.ms` (100 ms: the partition is
+    /// fetchable with nothing buffered), so the 200 ms poll also runs exactly
+    /// two passes and the event completes inside the first wait.
+    #[tokio::test]
+    async fn test_inflight_poll_resubmitted_after_completion_with_empty_buffer() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        consumer.max_time_to_wait_ms.store(150, Ordering::Release);
+
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let submitted_in_task = Arc::clone(&submitted);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    submitted_in_task.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        state.mark_validate_positions_complete();
+                        state.complete_successfully();
+                    });
+                }
+            }
+        });
+
+        let records = consumer.poll(Duration::from_millis(200)).await.expect("poll ok");
+        assert!(records.is_empty());
+        // Let the drainer count the last event.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // A fresh poll event on each of the two passes.
+        assert_eq!(2, submitted.load(Ordering::SeqCst));
+        drainer.abort();
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollSurfacesInflightPollErrorAndResumes`
+    /// (KAFKA-20780): an inflight poll that completed with an error surfaces it
+    /// from `poll()` and is cleared, so the next `poll()` submits a fresh event.
+    ///
+    /// Java's mock completes the event inside `add()`, so the first `poll()`
+    /// throws. The Rust handler's `add` is a channel send, so the event is
+    /// completed between two `poll()` calls and surfaces at the start of the
+    /// second; the third resumes.
+    #[tokio::test]
+    async fn test_poll_surfaces_inflight_poll_error_and_resumes() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+
+        consumer.poll(Duration::ZERO).await.expect("first poll ok");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len());
+        // The inflight poll completes with an error (e.g. a failed fetch);
+        // poll() must surface it and clear it.
+        polls[0].complete_with_error(Error::kafka_message("fetch failed"));
+        let err = consumer.poll(Duration::ZERO).await.expect_err("the inflight error surfaces");
+        assert_eq!("fetch failed", err.message());
+        assert!(err.is_kafka_error());
+        assert!(consumer.inflight_poll.is_none(), "the errored event is cleared");
+
+        // The next (successful) poll submits a fresh event rather than
+        // re-raising.
+        consumer.poll(Duration::ZERO).await.expect("poll resumes");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len(), "two AsyncPoll events in all");
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testBufferedRecordsReturnedWithoutResubmittingPollEvent`
+    /// (KAFKA-20780): when the inflight poll completed and filled the buffer,
+    /// the next `poll()` returns those records without submitting a new poll
+    /// event (a fresh one would re-run validate-positions and starve them).
+    ///
+    /// Also carries the assertion 20e952c783 added to Java's
+    /// `testCommitInRebalanceCallback`: when `poll()` returns records the next
+    /// fetch is pipelined (`CreateFetchRequests`), so a fetch request stays
+    /// pending while the application processes them.
+    #[tokio::test]
+    async fn test_buffered_records_returned_without_resubmitting_poll_event() {
+        use crate::common::compress::Compression;
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::{MemoryRecords, SimpleRecord};
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = assign_and_seek_for_poll(&handles);
+
+        // The first poll submits a poll event; it stays in flight.
+        consumer.poll(Duration::ZERO).await.expect("first poll ok");
+        let (polls, _) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len());
+
+        // That poll event now completes and its fetch has filled the buffer.
+        polls[0].mark_validate_positions_complete();
+        polls[0].complete_successfully();
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            0,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            &[SimpleRecord::with_timestamp_key_value(
+                0,
+                Some(b"key".to_vec()),
+                Some(b"value".to_vec()),
+            )],
+        );
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(1);
+        partition_data.set_records(Some(bytes::Bytes::from(records.buffer().to_vec())));
+        consumer.fetch_buffer.add(CompletedFetch::new(tp, partition_data));
+
+        // The next poll returns the buffered records and submits no new poll
+        // event (only the original one exists).
+        let polled = consumer.poll(Duration::ZERO).await.expect("poll ok");
+        assert_eq!(1, polled.count());
+        let (polls, prefetches) = drain_poll_events(&mut handles);
+        assert!(polls.is_empty(), "no AsyncPoll event resubmitted");
+        assert!(prefetches >= 1, "the next fetch is pipelined when poll() returns records");
+    }
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollDoesNotAddNewAsyncPollEventWhenOneIsAlreadyInFlight`
+    /// (KAFKA-20315, 0fd8327920): while the poll event stays in flight, the
+    /// many internal passes of one `poll()` add it only once.
+    ///
+    /// Java bounds each wait with a mocked `awaitWakeup` over `MockTime`
+    /// (`maximumTimeToWait` 100 ms, 450 ms timeout). Here the waits are real,
+    /// bounded at `retry.backoff.ms` (100 ms).
+    #[tokio::test]
+    async fn test_poll_does_not_add_new_async_poll_event_when_one_is_already_in_flight() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        consumer.max_time_to_wait_ms.store(100, Ordering::Release);
+
+        let started = std::time::Instant::now();
+        let records = consumer.poll(Duration::from_millis(450)).await.expect("poll ok");
+        assert!(records.is_empty());
+        // The "wait for fetches" path ran, i.e. more than one pass.
+        assert!(started.elapsed() >= Duration::from_millis(400));
+
+        let (polls, prefetches) = drain_poll_events(&mut handles);
+        assert_eq!(1, polls.len(), "only one AsyncPoll event despite multiple loop iterations");
+        assert!(prefetches >= 2, "each pass waited for fetches ({prefetches} prefetches)");
+    }
+
+    // ─── KAFKA-20854: the `pollForFetches` wait bound ────────────────────
+
+    /// Translated from `AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop`,
+    /// as KAFKA-20854 amended it. With a manually assigned, positioned
+    /// partition whose data is already buffered, and the background task
+    /// reporting `maximumTimeToWait() == Long.MAX_VALUE` (the UNSUBSCRIBED
+    /// heartbeat manager, KAFKA-20426), nothing bounds the wait: the
+    /// application task waits the full 500 ms user timeout, not 0.
+    ///
+    /// Java drives `poll(Duration.ofMillis(500))` with a mocked buffer and
+    /// captures the `Timer` handed to `awaitWakeup`; that `Timer` is
+    /// [`AsyncKafkaConsumer::poll_for_fetches_timeout_ms`]'s value, asserted
+    /// here directly.
+    #[tokio::test]
+    async fn test_poll_with_manual_assignment_does_not_busy_loop() {
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            subs.seek(&tp, 0).unwrap();
+        }
+        consumer.max_time_to_wait_ms.store(i64::MAX, Ordering::Release);
+        // The partition is fetchable but already buffered, so the wait is not bounded.
+        consumer.fetch_buffer.add(CompletedFetch::new(tp.clone(), PartitionData::new()));
+
+        let poll_timeout_ms = 500;
+        assert_eq!(
+            poll_timeout_ms,
+            consumer.poll_for_fetches_timeout_ms(poll_timeout_ms),
+            "Expected poll wait timer to use the full user timeout (no busy loop)"
+        );
+    }
+
+    /// The other branches of the same bound (KAFKA-20854; Java has no
+    /// dedicated test): each "background progress may enable fetching" state
+    /// waits exactly `retry.backoff.ms`, never 0 and never the full timeout.
+    /// The first case is the bootstrapping consumer (KIP-909): nothing
+    /// assigned yet.
+    #[tokio::test]
+    async fn test_poll_for_fetches_timeout_bounded_by_retry_backoff() {
+        use crate::consumer::internals::CompletedFetch;
+        use crate::fetch_response_data::PartitionData;
+
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let retry_backoff_ms = consumer.retry_backoff_ms;
+        assert_eq!(retry_backoff_ms, 100, "the fixture's retry.backoff.ms default");
+        consumer.max_time_to_wait_ms.store(i64::MAX, Ordering::Release);
+
+        // No assigned partitions (bootstrap resolution / group join pending).
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Assigned, but without a valid position.
+        let tp0 = TopicPartition::new("topic1", 0);
+        let tp1 = TopicPartition::new("topic1", 1);
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp0.clone(), tp1.clone()]))
+            .unwrap();
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Positioned, but tp1 is fetchable with nothing buffered (skipped for
+        // backoff / an in-flight request / a missing leader).
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.seek(&tp0, 0).unwrap();
+            subs.seek(&tp1, 0).unwrap();
+        }
+        consumer
+            .fetch_buffer
+            .add(CompletedFetch::new(tp0.clone(), PartitionData::new()));
+        assert_eq!(retry_backoff_ms, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Everything fetchable is buffered: the full timeout.
+        consumer
+            .fetch_buffer
+            .add(CompletedFetch::new(tp1.clone(), PartitionData::new()));
+        assert_eq!(30_000, consumer.poll_for_fetches_timeout_ms(30_000));
+
+        // Below the backoff, the smaller of the background bound and the
+        // caller's timer wins unchanged — including 0, which the caller turns
+        // into an immediate return rather than a wait.
+        assert_eq!(40, consumer.poll_for_fetches_timeout_ms(40));
+        consumer.max_time_to_wait_ms.store(0, Ordering::Release);
+        assert_eq!(0, consumer.poll_for_fetches_timeout_ms(30_000));
+    }
+
+    /// Critic 93 Issue 1: while `maximumTimeToWait` is 0 (Java's value, for
+    /// instance while a JOINING member's first heartbeat is in flight with a
+    /// zero interval), `poll()` loops without blocking. It must still yield
+    /// every iteration, or it monopolises its tokio worker: on a
+    /// `current_thread` runtime a co-scheduled task would not run until
+    /// `poll()` returns. In the integration harness that task was the
+    /// `BrokerProxy` forwarding the very heartbeat response the spin was
+    /// waiting for, so every first join stalled for the 30 s request timeout.
+    ///
+    /// Mutation check: without the `yield_now` in `poll_inner` the spawned
+    /// task has not run at all by the time `poll()` returns 300 ms later, and
+    /// the test fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_poll_yields_while_maximum_time_to_wait_is_zero() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            subs.seek(&tp, 0).unwrap();
+        }
+        // The background task's published bound: no wait at all.
+        consumer.max_time_to_wait_ms.store(0, Ordering::Release);
+
+        let start = std::time::Instant::now();
+        let ran_after = Arc::new(Mutex::new(None::<Duration>));
+        let ran_after_task = Arc::clone(&ran_after);
+        tokio::spawn(async move {
+            *ran_after_task.lock().unwrap() = Some(start.elapsed());
+        });
+
+        let poll_timeout = Duration::from_millis(300);
+        let records = crate::consumer::Consumer::poll(&mut consumer, poll_timeout)
+            .await
+            .expect("poll");
+        let poll_took = start.elapsed();
+        assert!(records.is_empty());
+        // Waits out (about) its timeout: the deadline is on the fixture's
+        // millisecond clock, so allow for rounding.
+        assert!(
+            poll_took >= Duration::from_millis(250),
+            "poll waits out its timeout: {poll_took:?}"
+        );
+
+        let ran_after = ran_after.lock().unwrap().expect("the co-scheduled task ran during poll()");
+        assert!(
+            ran_after < Duration::from_millis(100),
+            "a task on the same current_thread runtime first ran {ran_after:?} into a {poll_timeout:?} poll(): \
+             poll() spun without yielding while maximumTimeToWait was 0"
+        );
+        drop(handles.subscriptions);
     }
 }
