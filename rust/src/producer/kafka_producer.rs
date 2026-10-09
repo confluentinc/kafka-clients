@@ -1365,13 +1365,11 @@ impl<K, V> KafkaProducer<K, V> {
     pub async fn init_transactions(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        // Java measures `time.nanoseconds()` around the wait for
-        // `producerMetrics.recordInit(..)`. There is no metrics layer in this crate
-        // yet — `KafkaProducerMetrics` and the whole `org.apache.kafka.common.metrics`
-        // package are listed in `remaining_classes.txt` — so the timing statements
-        // that exist only to feed a sensor are not translated. The same note covers
-        // `recordBeginTxn`, `recordSendOffsets`, `recordCommitTxn` and
-        // `recordAbortTxn` below.
+        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:663`), fed to
+        // `producerMetrics.recordInit(time.nanoseconds() - now)` (`:667`) after a
+        // successful await. Timed with the injected `time`, as Java times with its
+        // injected `Time` — the same clock `flush` and `waitOnMetadata` read.
+        let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1384,8 +1382,9 @@ impl<K, V> KafkaProducer<K, V> {
         result
             .await_result_timeout(self.max_block_timeout(), Self::INIT_TXN_TIMEOUT_MSG)
             .await?;
-        // Java runs this only after a successful await, so the `?` above must stay
-        // ahead of it.
+        // Java records only after a successful await (`:667`), so the `?` above must
+        // stay ahead of both this and `maybeUpdateTransactionV2Enabled`.
+        self.producer_metrics.record_init(self.time.nanoseconds() - start);
         transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
         Ok(())
     }
@@ -1413,7 +1412,13 @@ impl<K, V> KafkaProducer<K, V> {
     pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        transaction_manager.lock().unwrap().begin_transaction()
+        // Java: `long now = time.nanoseconds()` (`KafkaProducer.java:689`) around the
+        // synchronous state transition, recorded on success (`:691`). Java times this
+        // even though there is no wait; kept faithful.
+        let start = self.time.nanoseconds();
+        transaction_manager.lock().unwrap().begin_transaction()?;
+        self.producer_metrics.record_begin_txn(self.time.nanoseconds() - start);
+        Ok(())
     }
 
     /// Sends a list of specified offsets to the consumer group coordinator, and
@@ -1477,12 +1482,16 @@ impl<K, V> KafkaProducer<K, V> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
 
-        // Java 738: an empty map is a no-op, and in particular does not consult the
-        // transaction state at all.
+        // Java 749: an empty map is a no-op, and in particular does not consult the
+        // transaction state at all. It is also left unmetered — Java starts the timer
+        // inside the `if (!offsets.isEmpty())` block, after this check.
         if offsets.is_empty() {
             return Ok(());
         }
 
+        // Java: `long start = time.nanoseconds()` inside the non-empty branch
+        // (`KafkaProducer.java:750`), recorded after a successful await (`:754`).
+        let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1495,7 +1504,9 @@ impl<K, V> KafkaProducer<K, V> {
         self.wakeup.notify_one();
         result
             .await_result_timeout(self.max_block_timeout(), Self::SEND_OFFSETS_TIMEOUT_MSG)
-            .await
+            .await?;
+        self.producer_metrics.record_send_offsets(self.time.nanoseconds() - start);
+        Ok(())
     }
 
     /// Commits the ongoing transaction. This method will flush any unsent records
@@ -1540,6 +1551,9 @@ impl<K, V> KafkaProducer<K, V> {
     pub async fn commit_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
+        // Java: `long commitStart = time.nanoseconds()` (`KafkaProducer.java:793`),
+        // recorded after a successful await (`:797`).
+        let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1548,7 +1562,9 @@ impl<K, V> KafkaProducer<K, V> {
         self.wakeup.notify_one();
         result
             .await_result_timeout(self.max_block_timeout(), Self::COMMIT_TXN_TIMEOUT_MSG)
-            .await
+            .await?;
+        self.producer_metrics.record_commit_txn(self.time.nanoseconds() - start);
+        Ok(())
     }
 
     /// Aborts the ongoing transaction. Any unflushed produce messages will be
@@ -1583,6 +1599,9 @@ impl<K, V> KafkaProducer<K, V> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         kafka_info!(self.log_context, "Aborting incomplete transaction");
+        // Java: `long abortStart = time.nanoseconds()` (`KafkaProducer.java:828`),
+        // taken after the log line, recorded after a successful await (`:832`).
+        let start = self.time.nanoseconds();
         let result = {
             // `pending_requests` before the manager, per the field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1595,7 +1614,9 @@ impl<K, V> KafkaProducer<K, V> {
         self.wakeup.notify_one();
         result
             .await_result_timeout(self.max_block_timeout(), Self::ABORT_TXN_TIMEOUT_MSG)
-            .await
+            .await?;
+        self.producer_metrics.record_abort_txn(self.time.nanoseconds() - start);
+        Ok(())
     }
 
     /// The shared [`TransactionManager`], or the error Java's
@@ -6476,21 +6497,53 @@ mod tests {
             .expect("commitTransaction");
     }
 
+    /// Reads a producer-level metric's current value. Translated from
+    /// `KafkaProducerTest.getMetricValue` (Java 1208-1212):
+    /// `metrics.metric(metrics.metricName(name, "producer-metrics")).metricValue()`.
+    fn get_metric_value(producer: &KafkaProducer<String, String>, name: &str) -> f64 {
+        // `metric_value()` is a `Metric`-trait method (Java's `Metric.metricValue()`).
+        use crate::common::Metric;
+        let mn = producer.metrics.metric_name(name, "producer-metrics");
+        producer
+            .metrics
+            .metric(&mn)
+            .expect("metric present")
+            .metric_value()
+            .as_double()
+            .expect("a double metric value")
+    }
+
+    /// Translated from `KafkaProducerTest.getAndAssertDurationAtLeast` (Java
+    /// 1841-1845): reads the duration metric, asserts it is at least `floor`, and
+    /// returns it.
+    ///
+    /// The producer times transaction control with its injected `time`, as Java
+    /// does, so a test that installs `MockTime` with an auto-tick gets Java's
+    /// durations: every `time.nanoseconds()` read advances the clock by one tick,
+    /// and callers pass Java's `tick.toNanos()` floors unchanged.
+    fn get_and_assert_duration_at_least(producer: &KafkaProducer<String, String>, name: &str, floor: f64) -> f64 {
+        let value = get_metric_value(producer, name);
+        assert!(value >= floor, "{name} duration {value} is below floor {floor}");
+        value
+    }
+
+    /// Translated from `KafkaProducerTest.assertDurationAtLeast` (Java 1837-1839):
+    /// asserts the duration is at least `floor`, discarding the value.
+    fn assert_duration_at_least(producer: &KafkaProducer<String, String>, name: &str, floor: f64) {
+        get_and_assert_duration_at_least(producer, name, floor);
+    }
+
     /// Translated from `KafkaProducerTest.testMeasureAbortTransactionDuration`
-    /// (Java 1502-1530).
+    /// (Java 1509-1536).
     ///
-    /// # What is and is not covered
-    ///
-    /// Java's assertions are all on the `txn-abort-time-ns-total` sensor: that it is
-    /// positive after the first abort and larger after the second. There is no metrics
-    /// layer in this crate — `KafkaProducerMetrics` and the whole
-    /// `org.apache.kafka.common.metrics` package are in `remaining_classes.txt` — so
-    /// those two assertions are not representable and are dropped.
-    ///
-    /// The operation sequence they surround is translated in full and is not trivial:
-    /// two complete `beginTransaction` / `abortTransaction` cycles over one
-    /// `initTransactions`, which is what proves `abortTransaction` leaves the manager
-    /// in a state a *second* transaction can start from.
+    /// Runs two complete `beginTransaction` / `abortTransaction` cycles over one
+    /// `initTransactions` — which proves `abortTransaction` leaves the manager in a
+    /// state a *second* transaction can start from — and asserts, as Java does, that
+    /// `txn-abort-time-ns-total` is positive after the first abort and strictly larger
+    /// after the second. Java's `assertTrue(first > 0)` / `assertTrue(second > first)`
+    /// carry over unchanged: the producer times with the injected `MockTime`, whose
+    /// one-millisecond auto-tick (Java's `new MockTime(1)`) advances every read, so
+    /// each abort records a strictly positive duration and the cumulative total grows.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testMeasureAbortTransactionDuration")]
     async fn test_measure_abort_transaction_duration() {
@@ -6498,6 +6551,10 @@ mod tests {
         ctx.time.set_auto_tick_ms(1);
         init_transactions(&mut ctx).await;
 
+        // Java captures `first` after abort #0 (`first > 0`) and asserts abort #1 is
+        // `> first`. A zero-initialised `previous` folds both into one strict-growth
+        // check: attempt 0 asserts `value > 0`, attempt 1 asserts `value > first`.
+        let mut previous = 0.0_f64;
         for attempt in 0..2 {
             ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
             ctx.producer
@@ -6506,33 +6563,57 @@ mod tests {
             drive(&mut ctx.sender, ctx.producer.abort_transaction())
                 .await
                 .unwrap_or_else(|error| panic!("abortTransaction {}: {}", attempt, error));
+
+            let value = get_metric_value(&ctx.producer, "txn-abort-time-ns-total");
+            assert!(
+                value > previous,
+                "txn-abort-time-ns-total must grow after abort {attempt}: {value} <= {previous}"
+            );
+            previous = value;
         }
     }
 
     /// Translated from `KafkaProducerTest.testMeasureTransactionDurations`
-    /// (Java 1841-1891).
+    /// (Java 1848-1897).
     ///
-    /// The `txn-init-time-ns-total` / `txn-begin-time-ns-total` /
-    /// `txn-send-offsets-time-ns-total` / `txn-commit-time-ns-total` assertions are
-    /// dropped for the reason given on [`test_measure_abort_transaction_duration`].
-    /// What remains is the full V1 offsets round trip run **twice** over one
-    /// `initTransactions`: `AddOffsetsToTxn`, a `FindCoordinator` for the group,
-    /// `TxnOffsetCommit`, `EndTxn` — and, on the second pass, no second
-    /// `FindCoordinator`, because the group coordinator is already known. That
-    /// asymmetry is Java's too (the second batch of prepared responses omits it) and is
-    /// the part of this test that exercises real behaviour.
+    /// Asserts every transaction-control latency sensor Java asserts —
+    /// `txn-init-time-ns-total`, `txn-begin-time-ns-total`,
+    /// `txn-send-offsets-time-ns-total`, `txn-commit-time-ns-total` — around a full V1
+    /// offsets round trip run **twice** over one `initTransactions`: `AddOffsetsToTxn`,
+    /// a `FindCoordinator` for the group, `TxnOffsetCommit`, `EndTxn` — and, on the
+    /// second pass, no second `FindCoordinator`, because the group coordinator is
+    /// already known. That asymmetry is Java's too (the second batch of prepared
+    /// responses omits it).
+    ///
+    /// Round 1 captures each duration and asserts it is at least one tick; round 2
+    /// asserts it grew by at least one more ([`get_and_assert_duration_at_least`] /
+    /// [`assert_duration_at_least`]) — Java's `tick.toNanos()` floors, reachable
+    /// because the producer times with the injected one-second-tick `MockTime`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testMeasureTransactionDurations")]
     async fn test_measure_transaction_durations() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
-        // Java's `new MockTime(Duration.ofSeconds(1).toMillis())` — a one-second tick,
-        // which is what made the duration assertions meaningful.
-        ctx.time.set_auto_tick_ms(1000);
+        // Java's `new MockTime(Duration.ofSeconds(1).toMillis())` — a one-second tick
+        // on every read of the clock the producer times transaction control with.
+        const TICK_MS: i64 = 1000;
+        // Java's `tick.toNanos()`.
+        const TICK_NANOS: f64 = (TICK_MS * 1_000_000) as f64;
+        ctx.time.set_auto_tick_ms(TICK_MS);
         init_transactions(&mut ctx).await;
+
+        // Java: assertDurationAtLeast(producer, "txn-init-time-ns-total", tick.toNanos()).
+        assert_duration_at_least(&ctx.producer, "txn-init-time-ns-total", TICK_NANOS);
 
         const GROUP_ID: &str = "group";
         let node = coordinator_node();
         let partition = TopicPartition::new(TOPIC.to_string(), 0);
+
+        // Round-1 captures; round 2's `first + tick` floors hold because these are
+        // CumulativeSum sensors — the round-2 total is the round-1 total plus a
+        // second delta of at least one tick.
+        let mut begin_first = 0.0_f64;
+        let mut send_off_first = 0.0_f64;
+        let mut commit_first = 0.0_f64;
 
         for (attempt, offset) in [(0usize, 5i64), (1, 10)] {
             ctx.sender
@@ -6551,6 +6632,12 @@ mod tests {
             ctx.producer
                 .begin_transaction()
                 .unwrap_or_else(|error| panic!("beginTransaction {}: {}", attempt, error));
+            // Java: getAndAssertDurationAtLeast (round 1) / assertDurationAtLeast (round 2).
+            if attempt == 0 {
+                begin_first = get_and_assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", TICK_NANOS);
+            } else {
+                assert_duration_at_least(&ctx.producer, "txn-begin-time-ns-total", begin_first + TICK_NANOS);
+            }
 
             let group_metadata = ConsumerGroupMetadataImpl::new(GROUP_ID);
             let offsets = HashMap::from([(
@@ -6563,10 +6650,21 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("sendOffsetsToTransaction {}: {}", attempt, error));
+            if attempt == 0 {
+                send_off_first =
+                    get_and_assert_duration_at_least(&ctx.producer, "txn-send-offsets-time-ns-total", TICK_NANOS);
+            } else {
+                assert_duration_at_least(&ctx.producer, "txn-send-offsets-time-ns-total", send_off_first + TICK_NANOS);
+            }
 
             drive(&mut ctx.sender, ctx.producer.commit_transaction())
                 .await
                 .unwrap_or_else(|error| panic!("commitTransaction {}: {}", attempt, error));
+            if attempt == 0 {
+                commit_first = get_and_assert_duration_at_least(&ctx.producer, "txn-commit-time-ns-total", TICK_NANOS);
+            } else {
+                assert_duration_at_least(&ctx.producer, "txn-commit-time-ns-total", commit_first + TICK_NANOS);
+            }
         }
     }
 
@@ -7079,13 +7177,15 @@ mod tests {
     //   341 testRetriesAndIdempotenceForIdempotentProducers
     //   413 testInflightRequestsAndIdempotenceForIdempotentProducers
     //
-    // ASSERTIONS DROPPED, NOT WHOLE TESTS (2 methods): every
-    // `getMetricValue(producer, "txn-*-time-ns-total")` in
+    // TRANSLATED IN FULL, ASSERTIONS INCLUDED (2 methods):
     // `testMeasureAbortTransactionDuration` and `testMeasureTransactionDurations`.
-    // `KafkaProducerMetrics` and the whole `org.apache.kafka.common.metrics` package
-    // are listed in `remaining_classes.txt`, so there is no sensor to read. Both
-    // methods are translated for the operation sequences they surround, which are the
-    // parts that exercise production behaviour; each says so at the test.
+    // `KafkaProducerMetrics` and `org.apache.kafka.common.metrics` are translated and
+    // wired (`KafkaProducer::{init_transactions, begin_transaction,
+    // send_offsets_to_transaction, commit_transaction, abort_transaction}` now call the
+    // matching `record_*` sensor), so every `getMetricValue(producer,
+    // "txn-*-time-ns-total")` assertion is translated via `get_metric_value` /
+    // `get_and_assert_duration_at_least` / `assert_duration_at_least`, against Java's
+    // own `tick.toNanos()` floors: the producer times with the injected `MockTime`.
     // =====================================================================
 
     // -- `configureTransactionState` tests ----------------------------------
