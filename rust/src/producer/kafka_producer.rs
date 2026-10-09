@@ -2574,8 +2574,12 @@ where
         // handles as intended. Java's `toMillis()` throws `ArithmeticException` on
         // overflow; clamping is preferred here because `Duration::MAX` is the
         // conventional way to express an unbounded timeout in Rust.
-        // `AsyncKafkaConsumer` applies the same clamp on close.
-        let timeout_ms = timeout.as_millis().min(i64::MAX as u128) as i64;
+        // `AsyncKafkaConsumer` applies the same clamp on close. The `Duration` is
+        // normalized to the same whole-millisecond value, so the sender wait below
+        // uses the timeout that is logged and checked, as Java joins the I/O thread
+        // for `timeoutMs`.
+        let timeout = Duration::from_millis(timeout.as_millis().min(i64::MAX as u128) as u64);
+        let timeout_ms = timeout.as_millis() as i64;
         kafka_info!(
             self.log_context,
             "Closing the Kafka producer with timeoutMillis = {} ms.",
