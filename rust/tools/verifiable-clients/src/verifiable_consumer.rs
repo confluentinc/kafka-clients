@@ -521,7 +521,8 @@ impl VerifiableConsumer {
                 }
             }
 
-            self.consumed_messages += partition_records.len() as i32;
+            // Wraps on overflow, as Java's `int consumedMessages` does.
+            self.consumed_messages = self.consumed_messages.wrapping_add(partition_records.len() as i32);
             if self.is_finished() {
                 break;
             }
@@ -1013,6 +1014,19 @@ mod tests {
         // maxOffset (12) + 1.
         assert_eq!(offsets.get(&tp).unwrap().offset(), 13);
         assert_eq!(consumer.consumed_messages, 3);
+    }
+
+    #[test]
+    fn on_records_received_consumed_count_wraps_on_overflow() {
+        // Without a message limit, the count wraps past `i32::MAX`, as Java's
+        // `int` does.
+        let mut consumer = verifiable_with(-1, false);
+        consumer.consumed_messages = i32::MAX;
+        let tp = TopicPartition::new("t", 0);
+        let records = records_of(vec![(tp, vec![record("t", 0, 10), record("t", 0, 11)])]);
+
+        consumer.on_records_received(&records).unwrap();
+        assert_eq!(consumer.consumed_messages, i32::MIN + 1);
     }
 
     #[test]
