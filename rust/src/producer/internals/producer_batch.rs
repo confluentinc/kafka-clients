@@ -37,6 +37,7 @@ use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
+use crate::common::utils::SystemTime;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
@@ -253,6 +254,7 @@ impl ProducerBatch {
             timestamp,
             key_size,
             value_size,
+            &SystemTime,
         ));
 
         self.thunks
@@ -299,6 +301,7 @@ impl ProducerBatch {
             timestamp,
             key_size,
             value_size,
+            &SystemTime,
         ));
 
         // Chain the future to the original thunk.

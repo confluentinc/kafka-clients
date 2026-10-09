@@ -31,6 +31,8 @@ use crate::common::Error;
 use crate::common::KafkaFutureOps;
 use crate::common::TopicPartition;
 use crate::common::record::internal::RecordBatch;
+use crate::common::utils::SystemTime;
+use crate::common::utils::Time;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
 
@@ -53,6 +55,13 @@ pub struct FutureRecordMetadata {
     serialized_key_size: i32,
     /// The size of the serialized value in bytes. -1 if null.
     serialized_value_size: i32,
+    /// The clock used to compute the deadline in
+    /// [`get_with_timeout`](Self::get_with_timeout), Java's `time` field.
+    ///
+    /// A `'static` reference rather than an `Arc`: one `FutureRecordMetadata` is
+    /// created per record on the send path, and Java's callers all pass the
+    /// `Time.SYSTEM` singleton, which `&SystemTime` reproduces at no per-record cost.
+    time: &'static dyn Time,
     /// Chained future for when a batch is split. Protected by a mutex because
     /// `chain()` can be called from a different task than `get()`.
     ///
@@ -71,6 +80,7 @@ impl FutureRecordMetadata {
     /// * `create_timestamp` - The timestamp assigned to this record
     /// * `serialized_key_size` - Size of the serialized key (-1 if null)
     /// * `serialized_value_size` - Size of the serialized value (-1 if null)
+    /// * `time` - The clock used for the [`get_with_timeout`](Self::get_with_timeout) deadline
     #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#FutureRecordMetadata")]
     pub fn new(
         result: Arc<ProduceRequestResult>,
@@ -78,6 +88,7 @@ impl FutureRecordMetadata {
         create_timestamp: i64,
         serialized_key_size: i32,
         serialized_value_size: i32,
+        time: &'static dyn Time,
     ) -> Self {
         Self {
             result,
@@ -85,6 +96,7 @@ impl FutureRecordMetadata {
             create_timestamp,
             serialized_key_size,
             serialized_value_size,
+            time,
             next_record_metadata: Mutex::new(None),
         }
     }
@@ -106,6 +118,7 @@ impl FutureRecordMetadata {
             create_timestamp: RecordBatch::NO_TIMESTAMP,
             serialized_key_size: -1,
             serialized_value_size: -1,
+            time: &SystemTime,
             next_record_metadata: Mutex::new(None),
         }
     }
@@ -171,7 +184,15 @@ impl FutureRecordMetadata {
         timeout: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
         Box::pin(async move {
-            let deadline = tokio::time::Instant::now() + timeout;
+            // Handle overflow, as Java does. `TimeUnit.toMillis` saturates at
+            // `Long.MAX_VALUE`, and the deadline saturates there too.
+            let now = self.time.milliseconds();
+            let timeout_millis = timeout.as_millis().min(i64::MAX as u128) as i64;
+            let deadline = if i64::MAX - timeout_millis < now {
+                i64::MAX
+            } else {
+                now + timeout_millis
+            };
 
             // Step 1: Await THIS node's result with timeout
             //
@@ -187,7 +208,7 @@ impl FutureRecordMetadata {
             if !occurred {
                 return Err(Error::local_timeout(format!(
                     "Timeout after waiting for {} ms.",
-                    timeout.as_millis()
+                    timeout_millis
                 )));
             }
 
@@ -199,8 +220,13 @@ impl FutureRecordMetadata {
             };
 
             if let Some(chained) = next {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                return chained.get_with_timeout(remaining).await;
+                // Java passes `deadline - time.milliseconds()` even when it is
+                // negative, and `await` with a non-positive timeout does not wait.
+                // A `Duration` cannot be negative, so the remainder floors at 0.
+                let remaining_ms = deadline - self.time.milliseconds();
+                return chained
+                    .get_with_timeout(Duration::from_millis(remaining_ms.max(0) as u64))
+                    .await;
             }
 
             self.value_or_error()
@@ -327,24 +353,132 @@ mod tests {
     use super::*;
     use crate::common::TopicPartition;
     use crate::common::record::internal::RecordBatch;
+    use crate::common::utils::MockTime;
 
     fn make_result(tp: TopicPartition) -> Arc<ProduceRequestResult> {
         Arc::new(ProduceRequestResult::new(tp))
     }
 
-    /// Translated from `FutureRecordMetadataTest.testFutureGetWithSeconds` (adapted).
+    /// Java's `private final MockTime time = new MockTime()`. Leaked so it can be
+    /// passed as the `'static` clock a `FutureRecordMetadata` holds.
+    fn mock_time() -> &'static MockTime {
+        Box::leak(Box::new(MockTime::new()))
+    }
+
+    /// Java's `futureRecordMetadata(ProduceRequestResult)` helper.
+    fn future_record_metadata(result: &Arc<ProduceRequestResult>, time: &'static MockTime) -> FutureRecordMetadata {
+        FutureRecordMetadata::new(Arc::clone(result), 0, RecordBatch::NO_TIMESTAMP, 0, 0, time)
+    }
+
+    /// Shared body of the two `FutureRecordMetadataTest` translations below.
     ///
-    /// The Java test uses mocks to verify `await(timeout, unit)` is called with the
-    /// correct timeout values when chaining. In Rust, we verify the equivalent behavior
-    /// by testing that a chained future correctly delegates to the chained result.
+    /// Java mocks `ProduceRequestResult.await(long, TimeUnit)` to return `true` and
+    /// verifies the chained result was awaited with exactly 1000 ms. There is no mock
+    /// here, so the chained result is left incomplete: its wait then times out, and
+    /// the error reports the timeout it was given. With the clock frozen, Java's
+    /// `deadline - time.milliseconds()` is exactly the full timeout.
+    async fn assert_chained_future_is_awaited_for_1000_ms(timeout: Duration) {
+        let time = mock_time();
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let produce_request_result = make_result(tp.clone());
+        let future = future_record_metadata(&produce_request_result, time);
+
+        let chained_produce_request_result = make_result(tp);
+        future.chain(future_record_metadata(&chained_produce_request_result, time));
+
+        produce_request_result.set(0, RecordBatch::NO_TIMESTAMP, None);
+        produce_request_result.done();
+
+        let error = future
+            .get_with_timeout(timeout)
+            .await
+            .expect_err("the chained result never completes");
+        assert!(matches!(error, Error::LocalTimeout(_)), "got {error:?}");
+        assert_eq!("Timeout after waiting for 1000 ms.", error.message());
+    }
+
+    /// Translated from `FutureRecordMetadataTest.testFutureGetWithSeconds`.
+    #[tokio::test]
+    async fn test_future_get_with_seconds() {
+        assert_chained_future_is_awaited_for_1000_ms(Duration::from_secs(1)).await;
+    }
+
+    /// Translated from `FutureRecordMetadataTest.testFutureGetWithMilliSeconds`.
+    #[tokio::test]
+    async fn test_future_get_with_milli_seconds() {
+        assert_chained_future_is_awaited_for_1000_ms(Duration::from_millis(1000)).await;
+    }
+
+    /// The chained wait receives only the time left before the deadline: Java's
+    /// `nextRecordMetadata.get(deadline - time.milliseconds(), MILLISECONDS)`.
+    #[tokio::test]
+    async fn test_chained_future_is_awaited_for_the_remaining_time() {
+        let time = mock_time();
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let produce_request_result = make_result(tp.clone());
+        let future = future_record_metadata(&produce_request_result, time);
+        let chained_produce_request_result = make_result(tp);
+        future.chain(future_record_metadata(&chained_produce_request_result, time));
+
+        // `join!` polls the wait first, so it reads the clock before 300 ms pass.
+        let (outcome, ()) = tokio::join!(future.get_with_timeout(Duration::from_millis(1000)), async {
+            tokio::task::yield_now().await;
+            time.sleep(300);
+            produce_request_result.set(0, RecordBatch::NO_TIMESTAMP, None);
+            produce_request_result.done();
+        });
+
+        let error = outcome.expect_err("the chained result never completes");
+        assert_eq!("Timeout after waiting for 700 ms.", error.message());
+    }
+
+    /// Regression test with no Java counterpart: `Duration::MAX` must not overflow
+    /// the deadline. Java saturates the deadline at `Long.MAX_VALUE`
+    /// (`FutureRecordMetadata.java:70-73`), so `get(Long.MAX_VALUE, MILLISECONDS)`
+    /// waits without limit; adding `Duration::MAX` to an `Instant` panics instead.
+    #[tokio::test]
+    async fn test_get_with_timeout_duration_max_does_not_overflow() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        let result = make_result(tp.clone());
+        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        result.set(100, RecordBatch::NO_TIMESTAMP, None);
+        result.done();
+        let metadata = future.get_with_timeout(Duration::MAX).await.expect("the result is complete");
+        assert_eq!(100, metadata.offset());
+
+        // The chained path computes the remaining time from the saturated deadline.
+        let result1 = make_result(tp.clone());
+        let result2 = make_result(tp);
+        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        future1.chain(FutureRecordMetadata::new(
+            Arc::clone(&result2),
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            0,
+            0,
+            &SystemTime,
+        ));
+        result1.set(100, RecordBatch::NO_TIMESTAMP, None);
+        result1.done();
+        result2.set(200, RecordBatch::NO_TIMESTAMP, None);
+        result2.done();
+        let metadata = future1
+            .get_with_timeout(Duration::MAX)
+            .await
+            .expect("both results are complete");
+        assert_eq!(200, metadata.offset());
+    }
+
+    /// `get()` follows the chain to the split batch's result.
     #[tokio::test]
     async fn test_future_get_with_chained_result() {
         let tp = TopicPartition::new("test".to_string(), 0);
         let result1 = make_result(tp.clone());
         let result2 = make_result(tp);
 
-        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
-        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
 
         future1.chain(chained);
 
@@ -359,17 +493,15 @@ mod tests {
         assert_eq!(200, metadata.offset());
     }
 
-    /// Translated from `FutureRecordMetadataTest.testFutureGetWithMilliSeconds` (adapted).
-    ///
-    /// Test that get with timeout works correctly through a chain.
+    /// `get_with_timeout` follows the chain to the split batch's result.
     #[tokio::test]
     async fn test_future_get_with_timeout_chained() {
         let tp = TopicPartition::new("test".to_string(), 0);
         let result1 = make_result(tp.clone());
         let result2 = make_result(tp);
 
-        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
-        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
 
         future1.chain(chained);
 
@@ -388,7 +520,7 @@ mod tests {
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
 
-        let future = FutureRecordMetadata::new(Arc::clone(&result), 3, 1234567890, 10, 20);
+        let future = FutureRecordMetadata::new(Arc::clone(&result), 3, 1234567890, 10, 20, &SystemTime);
 
         assert!(!future.is_done());
 
@@ -409,7 +541,7 @@ mod tests {
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
 
-        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
+        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0, &SystemTime);
 
         result.set(0, 9999, None);
         result.done();
@@ -426,7 +558,7 @@ mod tests {
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
 
-        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
+        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0, &SystemTime);
 
         let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|idx| {
             if idx == 0 {
@@ -447,7 +579,7 @@ mod tests {
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
 
-        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
+        let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0, &SystemTime);
 
         let err = future.get_with_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
         // Java throws `java.util.concurrent.TimeoutException` here
@@ -467,8 +599,8 @@ mod tests {
         let result1 = make_result(tp.clone());
         let result2 = make_result(tp);
 
-        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
-        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
 
         future1.chain(chained);
 
@@ -489,9 +621,9 @@ mod tests {
         let result2 = make_result(tp.clone());
         let result3 = make_result(tp);
 
-        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
-        let chained1 = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
-        let chained2 = FutureRecordMetadata::new(Arc::clone(&result3), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        let future1 = FutureRecordMetadata::new(Arc::clone(&result1), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        let chained1 = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
+        let chained2 = FutureRecordMetadata::new(Arc::clone(&result3), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
 
         future1.chain(chained1);
         future1.chain(chained2);
@@ -513,7 +645,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let result = make_result(tp);
 
-        let future = Arc::new(FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0));
+        let future = Arc::new(FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0, &SystemTime));
 
         let future_clone = Arc::clone(&future);
         let handle = tokio::spawn(async move { future_clone.get().await });
@@ -548,6 +680,7 @@ mod tests {
             RecordBatch::NO_TIMESTAMP,
             0,
             0,
+            &SystemTime,
         ));
 
         // Start get() in a background task -- it will block on result1
@@ -559,7 +692,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // Step 2: chain() is called (batch split scenario) WHILE get() is awaiting
-        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0, &SystemTime);
         future.chain(chained);
 
         // Step 3: Complete result1 (original batch marked as done)
