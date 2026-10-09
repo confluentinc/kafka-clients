@@ -42,6 +42,11 @@ public static class ChaosFlavours
 /// constructor over the real clients. The only flavour-specific code in the suite lives in
 /// <see cref="Create"/> and the doubles it builds.
 /// </summary>
+/// <remarks>
+/// This test project is a <b>local gate, not run in CI</b> (PLAN Q2): run it with
+/// <c>make -C dotnet test-grpc-server-dotnet</c>, which <c>test-dotnet</c> deliberately does not
+/// call.
+/// </remarks>
 internal sealed class ChaosHarness : IDisposable
 {
     internal const string Topic = "chaos-topic";

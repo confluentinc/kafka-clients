@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
@@ -39,7 +40,16 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     public ConsumerRecords<byte[], byte[]> Poll(TimeSpan timeout)
     {
         _script.ApplyPending(this);
-        return _inner.Poll(timeout);
+        ConsumerRecords<byte[], byte[]> records = _inner.Poll(timeout);
+        if (records.Count == 0)
+        {
+            // The mock returns at once when it has nothing (rust/src/consumer/mock_consumer.rs
+            // poll never waits); a real consumer waits out the timeout first. Waiting here keeps
+            // an idle workload's loop from spinning, without changing what any poll returns.
+            Thread.Sleep(timeout);
+        }
+
+        return records;
     }
 
     /// <inheritdoc/>
