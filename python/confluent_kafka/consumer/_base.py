@@ -319,14 +319,22 @@ class _Use:
         return state._h
 
     def __exit__(self, *exc: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        """End this use; once ended, a second call does nothing (see
+        ``_ConsumerState._release_abandoned``)."""
         state = self._state
         with state._lifecycle:
+            if not self._thread:
+                return
             state._uses -= 1
             remaining = state._use_threads[self._thread] - 1
             if remaining:
                 state._use_threads[self._thread] = remaining
             else:
                 del state._use_threads[self._thread]
+            self._thread = 0
             if state._uses == 0:
                 state._lifecycle.notify_all()
 
@@ -346,7 +354,9 @@ class _ConsumerState:
     consumer as it was (and when its FFI close still fails because another thread
     is inside the consumer, the consumer stays open, as in Java). Once closed, it
     waits for the uses still counted before it frees the handle. A waiting call is
-    one use, covering its submission, its wait and its callbacks.
+    one use, covering its submission, its wait and its callbacks; an awaiting call
+    whose event loop has closed can never resume, so its use is ended at the start
+    of the next awaiting call and in ``close()`` (``_release_abandoned``).
     """
 
     def __init__(self) -> None:
@@ -367,10 +377,10 @@ class _ConsumerState:
         # an operation's completion, so the waiting call wakes and drains.
         self._pending_event = threading.Event()
         self._pending_notify_ref: Callable[[], None] | None = None
-        # The awaiting calls' (loop, event) pairs the notify wakes. The notify
-        # is registered once per consumer, so a call the guard rejects cannot
-        # take it from the call in flight.
-        self._async_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+        # The awaiting calls' (loop, event) pairs the notify wakes, with the use
+        # each holds. The notify is registered once per consumer, so a call the
+        # guard rejects cannot take it from the call in flight.
+        self._async_waiters: dict[tuple[asyncio.AbstractEventLoop, asyncio.Event], _Use] = {}
         # The awaiting calls' results on their way to their loop (AsyncConsumer).
         self._undelivered = Undelivered()
         # The thread running commit_nowait()'s synchronous FFI call while a
@@ -480,6 +490,7 @@ class _ConsumerState:
         deserializers (Java closes them last, ``AsyncKafkaConsumer.close``)."""
         with self._lifecycle:
             self._state = _CLOSED
+            self._release_abandoned()
             while self._uses:
                 self._lifecycle.wait()
             handle, self._h = self._h, 0
@@ -497,6 +508,17 @@ class _ConsumerState:
         self._pending_notify_ref = None
         close_if_defined(self._key_deserializer)
         close_if_defined(self._value_deserializer)
+
+    def _release_abandoned(self) -> None:
+        """End the use of every awaiting call whose event loop has closed: its
+        task can never resume, so its use would never end and ``close()`` would
+        wait for it for good. Its result is freed through ``_undelivered``, or
+        on arrival if it has not arrived. While its native call still runs, the
+        core refuses a close (``ConcurrentModificationError``), so the handle is
+        not freed under it."""
+        for waiter, use in list(self._async_waiters.items()):
+            if waiter[0].is_closed() and self._async_waiters.pop(waiter, None) is use:
+                use.release()
 
     # ---- callbacks: the caller-thread window ------------------------------
     def _in_callback(self) -> bool:
@@ -783,6 +805,7 @@ class _ConsumerState:
         The results of earlier calls left for an event loop that has closed are
         freed first (see :class:`~confluent_kafka._async.Undelivered`)."""
         self._undelivered.free_closed()
+        self._release_abandoned()
         if after_commit_nowait and not self._in_callback():
             await self._await_commit_continuation()
         loop = asyncio.get_running_loop()
@@ -802,8 +825,9 @@ class _ConsumerState:
             self._undelivered.hand_over(loop, deliver, payload, free)
 
         cancelled: asyncio.CancelledError | None = None
-        with self._use() as h:
-            self._async_waiters.add(waiter)
+        use = self._use()
+        with use as h:
+            self._async_waiters[waiter] = use
             try:
                 submit(h, cb)
                 while not fut.done():
@@ -817,7 +841,7 @@ class _ConsumerState:
                             _lib.Consumer_wakeup(h)
                 await self._drain_pending_async(h, errors, forward)
             finally:
-                self._async_waiters.discard(waiter)
+                self._async_waiters.pop(waiter, None)
         payload = fut.result()
         if cancelled is not None:
             free(payload)

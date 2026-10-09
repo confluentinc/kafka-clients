@@ -1347,8 +1347,7 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     assert held.raised == []
     assert capfd.readouterr().err == ""
     assert freed_errors == [error]
-    stopped_loop.abandon()  # the call's task gives its use of the consumer back
-    asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
 
 def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
@@ -1367,8 +1366,59 @@ def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     assert freed_errors == []
     asyncio.run(consumer.assign(partitions=[TP0]))
     assert freed_errors == [error]
-    stopped_loop.abandon()  # the call's task gives its use of the consumer back
-    asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+    _close_bounded(consumer, stopped_loop)  # the call's task still pending
+
+
+@pytest.mark.parametrize("same_thread", [True, False], ids=["same thread", "another thread"])
+def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
+        same_thread: bool, hold_completion: Any, freed_errors: list[int],
+        stopped_loop: Any) -> None:
+    # An awaiting call holds a use of the consumer until it ends. Its task is
+    # left pending on a loop that stops, with its result queued there, and the
+    # loop closes: the call can never resume. close() from a fresh loop, on the
+    # call's thread or another one, returns and frees the stranded result; it
+    # used to wait for that use for good (from another thread, to raise
+    # ConcurrentModificationError).
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_async")
+
+    def leave_a_call() -> None:
+        stopped_loop.start(consumer.position(partition=TP0))
+        held.release.set()
+        held.delivered.wait(WAIT)
+        stopped_loop.loop.close()
+
+    if same_thread:
+        leave_a_call()
+    else:
+        caller = threading.Thread(target=leave_a_call)
+        caller.start()
+        caller.join(WAIT)
+    assert held.delivered.is_set() and stopped_loop.loop.is_closed()
+    ((_, error),) = held.payloads
+    assert freed_errors == []
+    _close_bounded(consumer, stopped_loop)
+    assert freed_errors == [error]
+
+
+def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) -> None:
+    """``close()`` from a fresh loop on this thread, which must not wait for the
+    call left on ``stopped_loop``. Should it wait, a timer ends that call's use
+    after WAIT, so the test fails instead of hanging the suite."""
+    fired = threading.Event()
+
+    def end_the_call() -> None:
+        fired.set()
+        stopped_loop.abandon()
+
+    watchdog = threading.Timer(WAIT, end_the_call)
+    watchdog.start()
+    try:
+        asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+    finally:
+        watchdog.cancel()
+    assert not fired.is_set(), "close() waited for a call whose event loop had closed"
+    assert consumer._is_closed()  # noqa: SLF001
 
 
 def test_wakeup_before_poll_raises_once() -> None:

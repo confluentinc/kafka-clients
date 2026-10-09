@@ -407,6 +407,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 await self._await_commit_continuation()
             except Exception as exc:  # noqa: BLE001 - raised after the close
                 deferred = exc
+        # A call left on a closed event loop does not hold the consumer.
+        self._release_abandoned()
         if not self._begin_close():
             return
         try:
@@ -509,7 +511,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         loop = asyncio.get_running_loop()
         pending = asyncio.Event()
         waiter = (loop, pending)
-        self._async_waiters.add(waiter)
+        self._async_waiters[waiter] = use
         try:
             try:
                 await self._await_listener(*handoff, errors)
@@ -531,7 +533,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
                 self._deferred_error = exc
         finally:
-            self._async_waiters.discard(waiter)
+            self._async_waiters.pop(waiter, None)
             use.__exit__(None, None, None)
 
     def _follow_commit_nowait(self, spec: Any, adapter: Any) -> None:
