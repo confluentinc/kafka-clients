@@ -156,6 +156,7 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::ByteBufferAccessor;
 
     /// Byte-level wire-encoding check for a v0 (non-flexible) request with a
     /// single group. Field-by-field:
@@ -170,6 +171,28 @@ mod tests {
         let mut req = builder.build_version(0).unwrap();
         let expected: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x67, 0x31];
         assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
+    }
+
+    /// The standard-encoding branch of a message that is flexible only from v5 is
+    /// generated separately from a never-flexible message's, so it is pinned on its own:
+    /// below v5 a negative INT16 `Groups` element length is a null element, which Java
+    /// rejects (`MessageDataGenerator.java:613-617`). Field-by-field:
+    ///   groups: int32 array len 1                -> 00 00 00 01
+    ///     element: int16 string len -1           -> FF FF (or 00 00 for the boundary)
+    ///   include_authorized_operations: bool      -> 00 (v3+; left unread below v3)
+    #[test]
+    fn test_parse_rejects_negative_group_length() {
+        for version in 0..=4 {
+            let mut buf = ByteBufferAccessor::new(vec![0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0x00]);
+            let error = DescribeGroupsRequest::parse(&mut buf, version).expect_err("a null element must not parse");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "non-nullable field groups element was serialized as null");
+
+            // Zero is the boundary: an empty group id is a valid, non-null element.
+            let mut buf = ByteBufferAccessor::new(vec![0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+            let parsed = DescribeGroupsRequest::parse(&mut buf, version).unwrap();
+            assert_eq!(parsed.data().groups, vec![String::new()]);
+        }
     }
 
     #[test]

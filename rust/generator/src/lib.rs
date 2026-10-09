@@ -3528,7 +3528,15 @@ fn generate_field_read(
             generate_records_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Array(element_type) => {
-            generate_array_read(file, &field_name, element_type, flexible_versions, indent, nullable)?;
+            generate_array_read(
+                file,
+                &field_name,
+                &field.camel_case_name(),
+                element_type,
+                flexible_versions,
+                indent,
+                nullable,
+            )?;
         },
         FieldType::Struct(struct_name) => {
             if nullable {
@@ -3851,14 +3859,21 @@ fn generate_records_read(
 }
 
 /// Generate array field read code, handling nullable fields.
+///
+/// `camel_case_name` is the field's `FieldSpec::camel_case_name` — Java's
+/// `camelCaseName()`. Java reads string elements as the field `name + " element"`
+/// (`MessageDataGenerator.java:668-677`), so element errors name it the same way and
+/// the text is byte-identical to the Java client's.
 fn generate_array_read(
     file: &mut fs::File,
     field_name: &str,
+    camel_case_name: &str,
     element_type: &FieldType,
     flexible_versions: Versions,
     indent: &str,
     nullable: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let element_name = format!("{} element", camel_case_name);
     let null_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
@@ -3890,13 +3905,13 @@ fn generate_array_read(
             writeln!(file, "{}let mut _arr = Vec::with_capacity(length as usize);", ind)?;
             // We need a temporary field_name for element reads
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read_to_vec(file, element_type, "_arr", flexible_versions)?;
+            generate_array_element_read_to_vec(file, element_type, "_arr", &element_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
             writeln!(file, "{}result.{} = Some(_arr);", ind, fn_name)?;
         } else {
             writeln!(file, "{}result.{} = Vec::with_capacity(length as usize);", ind, fn_name)?;
             writeln!(file, "{}for _ in 0..length {{", ind)?;
-            generate_array_element_read(file, element_type, fn_name, flexible_versions)?;
+            generate_array_element_read(file, element_type, fn_name, &element_name, flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
         }
         Ok(())
@@ -3960,17 +3975,20 @@ fn generate_array_element_read_to_vec(
     file: &mut fs::File,
     element_type: &FieldType,
     vec_name: &str,
+    element_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Reuse the same logic but with a different prefix (no "result." prefix)
-    generate_array_element_read_with_prefix(file, element_type, vec_name, "", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, vec_name, "", element_name, flexible_versions)
 }
 
+/// `element_name` is the Java name errors give an element (see `generate_array_read`).
 fn generate_array_element_read_with_prefix(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
     prefix: &str,
+    element_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = format!("{}{}", prefix, array_name);
@@ -4003,6 +4021,14 @@ fn generate_array_element_read_with_prefix(
             writeln!(file, "                {}.push(readable.read_double()?);", target)?;
         },
         FieldType::String => {
+            // Elements are non-nullable (`Versions.NONE`, `MessageDataGenerator.java:673`),
+            // so Java throws on a negative standard-encoding length (`:613-617`). Check it
+            // before the `usize` cast: a negative `i16` sign-extends to a size `vec!`
+            // cannot allocate, and it panics.
+            let neg_action = format!(
+                "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"non-nullable field {} was serialized as null\"));",
+                element_name
+            );
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
                     // All versions flexible: use compact encoding
@@ -4046,8 +4072,11 @@ fn generate_array_element_read_with_prefix(
                     )?;
                     writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
-                    writeln!(file, "                    let mut bytes = vec![0u8; str_len];")?;
+                    writeln!(file, "                    let str_len = readable.read_short()?;")?;
+                    writeln!(file, "                    if str_len < 0 {{")?;
+                    writeln!(file, "                        {}", neg_action)?;
+                    writeln!(file, "                    }}")?;
+                    writeln!(file, "                    let mut bytes = vec![0u8; str_len as usize];")?;
                     writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
                     writeln!(
                         file,
@@ -4058,8 +4087,11 @@ fn generate_array_element_read_with_prefix(
                 }
             } else {
                 // No flexible versions: always use standard encoding
-                writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
-                writeln!(file, "                let mut bytes = vec![0u8; str_len];")?;
+                writeln!(file, "                let str_len = readable.read_short()?;")?;
+                writeln!(file, "                if str_len < 0 {{")?;
+                writeln!(file, "                    {}", neg_action)?;
+                writeln!(file, "                }}")?;
+                writeln!(file, "                let mut bytes = vec![0u8; str_len as usize];")?;
                 writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
                 writeln!(
                     file,
@@ -4086,9 +4118,10 @@ fn generate_array_element_read(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
+    element_name: &str,
     flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", flexible_versions)
+    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", element_name, flexible_versions)
 }
 
 fn generate_field_write(

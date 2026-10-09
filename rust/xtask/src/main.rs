@@ -15,9 +15,10 @@
 mod java;
 mod lint_custom;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 use anyhow::Context as _;
@@ -87,6 +88,7 @@ fn format_check() -> anyhow::Result<()> {
 }
 
 fn check_generated() -> anyhow::Result<()> {
+    check_message_specs_in_sync()?;
     check_error_codes_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
@@ -149,6 +151,86 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
     }
 
     Ok(files)
+}
+
+// ---------------------------------------------------------------------------
+// Message specs copied from the `kafka` submodule
+// ---------------------------------------------------------------------------
+//
+// `build.rs` generates the wire-protocol code from `generator/messages/*.json`
+// at build time, so no generated message code is checked in. The specs are a
+// copy of the `kafka` submodule's, kept in the crate because the crates.io
+// package (`Cargo.toml` `include`) cannot reach the submodule. The copy is
+// what can drift: a hand edit, or a submodule bump that does not re-copy the
+// specs, would silently build wire formats other than the pinned Kafka
+// release's.
+//
+// `check-generated` compares the two byte for byte and fails on any
+// difference. Without the submodule it fails too, as `lint-custom` does: a
+// skip that exits 0 would let a checkout without it pass unchecked.
+
+const MESSAGE_SPECS: &str = "generator/messages";
+const KAFKA_MESSAGE_SPECS: &str = "../kafka/clients/src/main/resources/common/message";
+
+/// Fail when `generator/messages/` no longer matches the `kafka` submodule's specs.
+fn check_message_specs_in_sync() -> anyhow::Result<()> {
+    println!("🔍 Checking message specs against the kafka submodule...");
+
+    // Hints run in `rust/`, xtask's working directory, so the submodule is `../kafka`.
+    if !Path::new(KAFKA_MESSAGE_SPECS).is_dir() {
+        eprintln!("\n❌ Cannot check message specs: no `{KAFKA_MESSAGE_SPECS}`");
+        eprintln!("   Run in rust/: git submodule update --init ../kafka");
+        exit(1);
+    }
+
+    let copy = read_message_specs(Path::new(MESSAGE_SPECS))?;
+    let drift = message_spec_drift(&copy, &read_message_specs(Path::new(KAFKA_MESSAGE_SPECS))?);
+    if !drift.is_empty() {
+        eprintln!("\n❌ `{MESSAGE_SPECS}` does not match `{KAFKA_MESSAGE_SPECS}`:");
+        for line in &drift {
+            eprintln!("   {line}");
+        }
+        // A pull that moves the pinned commit leaves the submodule checkout
+        // behind, and re-copying from it would revert the pulled specs.
+        eprintln!("   Fix, in rust/:");
+        eprintln!("     If you did not move the kafka submodule yourself, update it first (git pull does not):");
+        eprintln!("       git submodule update ../kafka");
+        eprintln!("     If they still differ, copy the submodule's specs:");
+        eprintln!("       rm {MESSAGE_SPECS}/*.json && cp {KAFKA_MESSAGE_SPECS}/*.json {MESSAGE_SPECS}/");
+        exit(1);
+    }
+
+    println!("✅ Message specs match the kafka submodule ({} specs)", copy.len());
+    Ok(())
+}
+
+/// The specs in `dir` by file name: its `*.json` files, the ones the generator
+/// reads (`generator/src/lib.rs`). Kafka's `README.md` beside them is not one.
+fn read_message_specs(dir: &Path) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+    let mut specs = BTreeMap::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            specs.insert(entry.file_name().to_string_lossy().into_owned(), fs::read(&path)?);
+        }
+    }
+    Ok(specs)
+}
+
+/// One line per spec that differs between the copy and the submodule's, in
+/// file-name order; empty when they match.
+fn message_spec_drift(copy: &BTreeMap<String, Vec<u8>>, kafka: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    let names: BTreeSet<&String> = copy.keys().chain(kafka.keys()).collect();
+    names
+        .into_iter()
+        .filter_map(|name| match (copy.get(name), kafka.get(name)) {
+            (Some(ours), Some(theirs)) if ours == theirs => None,
+            (Some(_), Some(_)) => Some(format!("{name}: differs")),
+            (Some(_), None) => Some(format!("{name}: only in {MESSAGE_SPECS}/")),
+            (None, _) => Some(format!("{name}: only in the kafka submodule")),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,7 +1922,7 @@ fn print_help() {
         "Tasks:
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
-  check-generated Check generated code formatting and error-code staleness (no changes)
+  check-generated Check message-spec drift, generated code formatting and error-code staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for the multilanguage test harness
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
@@ -2021,6 +2103,45 @@ version = "0.1.0"
         ] {
             assert!(pipeline.contains(&command), "publish-crates-io.yml does not run `{command}`");
         }
+    }
+
+    fn specs(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+        files
+            .iter()
+            .map(|&(name, body)| (name.to_string(), body.as_bytes().to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn matching_specs_have_no_drift() {
+        let both = specs(&[("A.json", "{}"), ("B.json", "{ \"apiKey\": 1 }")]);
+        assert!(message_spec_drift(&both, &both).is_empty());
+    }
+
+    #[test]
+    fn reports_every_kind_of_drift_in_name_order() {
+        let copy = specs(&[("A.json", "{}"), ("B.json", "{ \"edited\": true }"), ("D.json", "{}")]);
+        let kafka = specs(&[("A.json", "{}"), ("B.json", "{}"), ("C.json", "{}")]);
+        assert_eq!(
+            message_spec_drift(&copy, &kafka),
+            [
+                "B.json: differs",
+                "C.json: only in the kafka submodule",
+                "D.json: only in generator/messages/"
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_only_json_files() {
+        let dir = std::env::temp_dir().join(format!("xtask-message-specs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("nested.json")).unwrap();
+        fs::write(dir.join("A.json"), "{}").unwrap();
+        fs::write(dir.join("README.md"), "# Messages").unwrap();
+        let read = read_message_specs(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read.unwrap(), specs(&[("A.json", "{}")]));
     }
 
     fn strings(args: &[&str]) -> Vec<String> {

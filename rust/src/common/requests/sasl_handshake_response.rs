@@ -119,6 +119,7 @@ impl std::fmt::Display for SaslHandshakeResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::ByteBufferAccessor;
     use crate::common::requests::ConcreteResponse;
 
     #[test]
@@ -191,6 +192,37 @@ mod tests {
             let parsed = SaslHandshakeResponse::parse(&mut buf, version).unwrap();
             assert_eq!(original.data().error_code, parsed.data().error_code);
             assert_eq!(original.data().mechanisms, parsed.data().mechanisms);
+        }
+    }
+
+    /// A negative INT16 element length is a null element, which Java rejects for the
+    /// non-nullable `Mechanisms` array (`MessageDataGenerator.java:613-617`, via the
+    /// element read at `:668-677`) rather than sizing a buffer from it. This response
+    /// is decoded before SASL authentication completes. Neither version is flexible:
+    ///   error_code: int16 0                -> 00 00
+    ///   mechanisms: int32 array len 1      -> 00 00 00 01
+    ///     element:  int16 string len < 0   -> FF FF (-1) or 80 00 (-32768)
+    #[test]
+    fn test_parse_rejects_negative_mechanism_length() {
+        for version in
+            SaslHandshakeResponseData::LOWEST_SUPPORTED_VERSION..=SaslHandshakeResponseData::HIGHEST_SUPPORTED_VERSION
+        {
+            for length in [[0xFF, 0xFF], [0x80, 0x00]] {
+                let mut bytes = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+                bytes.extend_from_slice(&length);
+                let mut buf = ByteBufferAccessor::new(bytes);
+                let error = SaslHandshakeResponse::parse(&mut buf, version).expect_err("a null element must not parse");
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert_eq!(
+                    error.to_string(),
+                    "non-nullable field mechanisms element was serialized as null"
+                );
+            }
+
+            // Zero is the boundary: an empty mechanism name is a valid, non-null element.
+            let mut buf = ByteBufferAccessor::new(vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+            let parsed = SaslHandshakeResponse::parse(&mut buf, version).unwrap();
+            assert_eq!(parsed.enabled_mechanisms(), &[String::new()]);
         }
     }
 }

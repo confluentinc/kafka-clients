@@ -862,7 +862,10 @@ through one crate-private `generated` module.*
 ### Pipeline
 
 1. JSON specifications live in `generator/messages/`: 198 Kafka protocol
-   definitions, the same set as Apache Kafka 4.3.1.
+   definitions, the same set as Apache Kafka 4.3.1. They are a copy of the
+   `kafka` submodule's `clients/src/main/resources/common/message/`, because
+   the crates.io package cannot reach the submodule, and
+   `cargo xtask check-generated` fails when the copy differs from it.
 2. The generator code in `generator/src/` parses the specs and emits Rust
    code.
 3. `build.rs` invokes the generator at build time.
