@@ -7,6 +7,54 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 18 / Phase 1 — ".NET backends for the chaos harness": DONE (2026-10-09); not pushed. N=94. Mode A.** Branch `prashah_dev_dotnet_binding`, base `918219ac` (= `origin/prashah_dev_dotnet_binding`, PR #196). The commits are not squashed:
+  - Plan `231625cb`. S0 `9c088d82` (merge of master `5d4c6b80`, upstream #184's chaos harness; no conflicts, `--remerge-diff` empty).
+  - S1 `594e8643` (the `dotnet` / `dotnet-async` backends in `rust/tests/chaos/{workload.rs,config.rs,README.md}`, `rust/xtask/src/main.rs`, `design/current/chaos-parity-gap.md` and the server csproj's `chaos_service.proto` line).
+  - S2 `8fcc63d7` (shared plumbing, `dotnet/grpc-server/Chaos/`), `5c600e21` (the sync `ChaosWorkloadServiceImpl`), `4a40bab3` + `8acd915e` (the unit-test project and T4–T20), `4c7f5480` (`make -C dotnet test-grpc-server-dotnet`).
+  - S3 `02215941` (the async `AsyncChaosWorkloadServiceImpl`), `c7042005` (the async test rows). Then this close.
+
+  Plan and review record: `design/history/M18/P1-chaos-harness-dotnet/PLAN.md` (the rulings are in its Approval record). There is no `COMMENTS.DONE.94.md`: Critic 94 filed nothing. Proof of Mode A: `git diff 9c088d82..c7042005` is empty for `rust/src`, `cbindgen.toml`, `generator`, `build.rs`, `Cargo.toml` / `Cargo.lock`, `python`, `c`, `dotnet/src`, `.semaphore` and the root `Makefile`. In `rust/tests` it touches only `chaos/{README.md,config.rs,workload.rs}`. The header SHA-1 is unchanged (`7c27280e…`) and the EntryPoint count stays 576.
+  - **What shipped.** `cargo xtask chaos --workload <role>:dotnet` and `<role>:dotnet-async` now drive the .NET gRPC servers over upstream's `ChaosWorkloadService` (`chaos_service.proto`), natively or in a container (`MULTILANG_BACKEND_MODE`).
+    - The sync servicer runs each workload on a dedicated background thread. The async one runs each workload with `Task.Run`.
+    - Both pass `CancellationToken.None` to Send / Flush / Close / Subscribe / Poll / Commit / Committed (D6/D7).
+    - Both close in this order: `Close` → `handle.Dispose` → the consumer's dispose.
+    - Both settle each record through a port of Python's `_RecordOutcomes`.
+    - The new public API is zero types, and the new `[DllImport]` count is zero.
+  - **User rulings (2026-10-09).**
+    - D1–D12 were approved as recommended.
+    - Q1: the stale upstream README / parity-gap passages are left as they are. Q4: the Mac smoke is enough. Q5: not for now.
+    - Q2 and Q3 ("yes if Python also does it") resolve to **match Python**. Python has no chaos-server or gRPC-server tests in CI, so `test-grpc-server-dotnet` is a **local gate only**: `test-dotnet`, the root Makefile, `.semaphore` and the `.sln` don't call it. #184 recorded no Python E2E runs, so the 24-run matrix became the three smokes below.
+  - **Gates at close (`c7042005`):**
+    - Chaos unit tests 166 (integration-tests) / 175 (multilanguage-tests), up from 163 / 172 at S0. xtask 82.
+    - `cargo xtask format-check` and `lint` clean.
+    - `test-grpc-server-dotnet` **101/101** (80 sync + 18 async theory rows + 3 async facts; Release, net10.0; `dotnet format --verify-no-changes` clean).
+    - Unit tests **3010/3010** on net8.0 and net10.0, soak 165/165.
+    - Native gRPC integration **169 passed**, with a test-name list identical to S0's. No TODO / FIXME.
+  - **End-to-end (PLAN §7.5; PLAINTEXT, 100 B, 1000 rps, one broker roll; every run PASS, every workload ended `Finished`, 0 failed sends, 0 duplicates, 0 lost, 0 ordering violations, 0 poll errors):**
+    - **d1** (sync → sync, native): 41,506 delivered; in-flight peak 512; revoked=1 assigned=2 (1 consumer with a listener); 54 committed offsets checked, 0 violations; 0 commit errors.
+    - **d2** (async → async, native): 39,923 delivered; in-flight peak 1032; revoked=1 assigned=1; 48 checked, 0 violations; 0 commit errors.
+    - **c1** (async producer → sync consumer, `--commit async`, **container**, the `dotnet[-async]-grpc-server:dev` images with a linux/amd64 `.so` cross-built in `rust:1-bookworm`): 41,707 delivered; in-flight peak 534; revoked=1 assigned=1; 6 checked, 0 violations; **6 commit errors**, all `ConsumerRetriableCommitFailedError`. Commit errors are informational in the verifier. **They are not a .NET defect.** The oracle run (`producer:rust` + `consumer:rust`, `--commit async`, same roll) passed with **11** of the same error. A broker roll makes retriable async-commit failures normal.
+    - R1 (a 30 s pump drain at close) did not appear: each run took 45–48 s in total, about 40 s of it sending.
+  - **Critic 94.** One pass over `9c088d82..c7042005` (the PLAN §10 checklist, the CI-wiring check, a 101/101 re-run): **no findings**. Unfiled observations, each OOM-only or accepted by the plan:
+    - `CloseQuietly` doesn't set the listener's `Closing` after a poll-loop crash.
+    - `RunGuarded` has no backstop if building `Failed` itself throws.
+    - `StopAllAndWait` can snapshot a workload before its completion is set.
+    - The `_closing` revoke read-back can't be reached through a mock-derived handle. The d1/d2 smokes cover it.
+  - **For the user:**
+    1. Q3 was read as "match Python", so the unit tests stay out of CI and there is no chaos matrix. This can be overridden.
+    2. Q1's stale lines remain in upstream's chaos README and `design/current/chaos-parity-gap.md` (outside the rows S1 edited). R3 is deferred under Q5. It is a doc inaccuracy: `IDeliveryCallback.cs:146-148` says a synchronous `KafkaException` from `Send` means the core rejected the record before accepting it. That is false for an error raised after the core appended the record.
+    3. `rust/target/release/libconfluent_kafka.so` (untracked build output) now holds the c1 linux/amd64 build. The stale Oct 2 artifact it replaced is backed up in the session scratchpad.
+    4. Rule suggestions: the three in PLAN §16, none applied to a rule file. Execution added six notes, also not applied:
+       - PLAN §8's S1 smoke command is producer-only, which the harness's config rejects; S1 paired it with a consumer;
+       - add `README.md` to the Gate 4 list;
+       - agents edit memory files with Edit, never Write;
+       - run the server tests only through the make target (a direct `dotnet test` can pick up a stale debug native);
+       - record `CanBeCanceled` in the token tests;
+       - note that `MockConsumer.Poll` never waits out its timeout.
+    5. Environment, not this phase: the optional S0 native C baseline was skipped because the C gRPC server's CMake cannot find Protobuf on this Mac. A `kafka-perf` container from another session was running throughout; it didn't collide.
+  - **Next unused dotnet N = 95.**
+  - **Not pushed.** The user pushes with `git push-external`.
+
 - **Milestone 11 / Phase 4.2 — "sync `Send` returns `KafkaFuture<RecordMetadata>`": DONE (2026-10-08); pushed except this close. N=93. Mode A.** Branch `prashah_dev_dotnet_binding`, base `d6ce0512`. The phase is pushed through `03897aea` (= `origin/prashah_dev_dotnet_binding`, PR #196) and not squashed; its 13 `fixup!`s were pushed as they are:
   - Plan `a1fb6f3e`. S1 `742b1911` (`KafkaFuture<T>`, `SyncCompletion<T>`). S2 `b838e120` (the pump's single-future path). S3 `c9813476` (the switch). S4 `bc5926a5` (callback and error tests, the allocation budget).
   - S5 `507ff98e` + `aab3b7fd` (the docs; rules E1–E9 and F1–F8). S6 `4f643f4f` (the pipelined sync perf loop). Then this close.
