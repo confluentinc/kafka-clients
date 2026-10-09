@@ -521,7 +521,14 @@ void test_transaction_methods_on_non_transactional_producer(void) {
 
     /* The real-producer arm of send_offsets_to_transaction: marshaling, the
      * group-metadata clone and the blocking call all run here. Nothing else in the
-     * suite reaches it — the mock tests take the other arm. */
+     * suite reaches it — the mock tests take the other arm.
+     *
+     * Unlike the other four methods this one does not fail with the
+     * non-transactional error. Since Kafka 4.4 (KIP-1319) the producer first
+     * awaits metadata for the offsets' topics (KafkaProducer.java:803), and only
+     * then calls into the transaction manager. With no transactional.id the
+     * producer is still idempotent, so it does hold a manager, and with no
+     * reachable broker the metadata wait fails after max.block.ms first. */
     kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
     kafka_consumer_ConsumerGroupMetadata_t *group_metadata =
         kafka_consumer_Consumer_group_metadata(consumer);
@@ -536,7 +543,8 @@ void test_transaction_methods_on_non_transactional_producer(void) {
         group_metadata);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    TEST_ASSERT_EQUAL_STRING("Failed to update metadata after 300 ms.",
+                             kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
 
     /* A null group_metadata is rejected before the guard is even taken, with a

@@ -1350,12 +1350,21 @@ async fn check_too_large_record_for_replication_with_ack_all<F: ProducerBackendF
 /// (`ProducerFailureHandlingTest.java:218-237`).
 ///
 /// Java asks the admin to create `__consumer_offsets` with the group
-/// coordinator's topic configs, without looking at the (rejected) result, and
-/// then `waitTopicDeletion` proves through broker internals (metadata cache,
-/// replica and log managers) that no such topic exists. Those internals are not
-/// observable from a client, so that wait is omitted; the admin result is
-/// awaited only so the request has reached the controller before the produce,
-/// and is ignored exactly like Java's.
+/// coordinator's topic configs, without looking at the result, and then calls
+/// `waitTopicDeletion`, which inspects broker internals (metadata cache, replica
+/// and log managers) and includes `ensureConsistentMetadata`. Those internals
+/// are not observable from a client. The admin result is ignored exactly like
+/// Java's.
+///
+/// Against the broker images this suite runs, the create is accepted: KRaft
+/// only prohibits creating `__cluster_metadata` (`ControllerApis.scala:440`).
+/// So the topic exists, and on this two-broker cluster the produce can reach
+/// the partition leader before that broker has applied the new topic. The
+/// leader then answers `UNKNOWN_TOPIC_ID` instead of the `INVALID_TOPIC` that
+/// `ReplicaManager` returns for internal topics, and with `retries=0` that is
+/// the error the record fails with. The client-observable half of Java's
+/// `ensureConsistentMetadata` is to wait until the leader serves the partition,
+/// which [`test_utils::wait_for_partition_leaders`] does.
 async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
     {
@@ -1372,6 +1381,7 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
             NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))
                 .set_configs(topic_config);
         let _ = admin.create_topics(&[new_topic]).all().get().await;
+        test_utils::wait_for_partition_leaders(admin.as_ref(), GROUP_METADATA_TOPIC_NAME, 0..1).await;
     }
 
     let producer = factory
