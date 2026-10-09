@@ -218,23 +218,26 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Inject an exception to be returned by the next
     /// [`Consumer::poll`] call. The
-    /// exception is taken (cleared) on use.
+    /// exception is taken (cleared) on use; `None` clears a pending one.
     ///
-    /// Translates Java's `setPollException(KafkaException)`.
+    /// Translates Java's `setPollException(KafkaException)`, whose `null`
+    /// argument clears the field.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setPollException")]
-    pub fn set_poll_error(&mut self, error: Error) {
-        self.poll_error = Some(error);
+    pub fn set_poll_error(&mut self, error: Option<Error>) {
+        self.poll_error = error;
     }
 
     /// Inject an exception to be returned by the next
     /// [`Consumer::beginning_offsets`] /
     /// [`Consumer::end_offsets`]
-    /// call. The exception is taken (cleared) on use.
+    /// call. The exception is taken (cleared) on use; `None` clears a pending
+    /// one.
     ///
-    /// Translates Java's `setOffsetsException(KafkaException)`.
+    /// Translates Java's `setOffsetsException(KafkaException)`, whose `null`
+    /// argument clears the field.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException")]
-    pub fn set_offsets_error(&mut self, error: Error) {
-        self.offsets_error = Some(error);
+    pub fn set_offsets_error(&mut self, error: Option<Error>) {
+        self.offsets_error = error;
     }
 
     /// Set the maximum number of records returned in a single
@@ -1165,6 +1168,51 @@ mod tests {
         c.closed = true;
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalState(_)));
+    }
+
+    /// Java's `setPollException(null)` clears a pending poll exception
+    /// (`MockConsumer.java:344-346`): the next `poll` then succeeds.
+    #[tokio::test]
+    async fn set_poll_error_none_clears_the_pending_error() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = TopicPartition::new("t", 0);
+        c.assign(vec![tp.clone()]).await.expect("assign");
+        c.update_beginning_offsets(HashMap::from([(tp, 0)]));
+
+        c.set_poll_error(Some(Error::local_illegal_state("boom")));
+        c.set_poll_error(None);
+        assert!(
+            c.poll(Duration::from_millis(0)).await.is_ok(),
+            "the cleared error must not fire"
+        );
+
+        c.set_poll_error(Some(Error::local_illegal_state("boom")));
+        let err = c.poll(Duration::from_millis(0)).await.unwrap_err();
+        assert_eq!(err.message(), "boom");
+        assert!(c.poll(Duration::from_millis(0)).await.is_ok(), "the error fires once");
+    }
+
+    /// Java's `setOffsetsException(null)` clears a pending offsets exception
+    /// (`MockConsumer.java:348-350`).
+    #[tokio::test]
+    async fn set_offsets_error_none_clears_the_pending_error() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        let tp = TopicPartition::new("t", 0);
+        c.update_end_offsets(HashMap::from([(tp.clone(), 5)]));
+
+        c.set_offsets_error(Some(Error::local_illegal_state("boom")));
+        c.set_offsets_error(None);
+        let offsets = c
+            .end_offsets(std::slice::from_ref(&tp))
+            .await
+            .expect("the cleared error must not fire");
+        assert_eq!(offsets.get(&tp), Some(&5));
+
+        c.set_offsets_error(Some(Error::local_illegal_state("boom")));
+        let err = c.end_offsets(std::slice::from_ref(&tp)).await.unwrap_err();
+        assert_eq!(err.message(), "boom");
     }
 
     /// A [`ConsumerHandle`] obtained from the mock fires the SAME wakeup
