@@ -27,7 +27,7 @@ DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
-.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet
+.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -179,6 +179,34 @@ test-soak-dotnet: build-dotnet
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
+
+# ---------------------------------------------------------------------------
+# gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service
+# (ChaosWorkloadServiceImpl and the shared Chaos/* plumbing) driven over
+# MockProducer / MockConsumer through its internal client-factory seam. No broker,
+# no Docker.
+#
+# ⚠ A LOCAL GATE, NOT RUN IN CI (PLAN Q2, matching Python, whose chaos and gRPC
+# servers have no tests in CI either). `test-dotnet` deliberately does NOT call
+# this target, and neither the root Makefile nor any .semaphore job references
+# it: run `make -C dotnet test-grpc-server-dotnet` by hand for server changes.
+#
+# Like the soak, both projects sit outside the solution, so `dotnet format
+# $(SOLUTION)` never reaches them; hence the two explicit format passes. The
+# server P/Invokes the same native, hence build-dotnet first (CLAUDE.md §7.1).
+#
+# net10.0 only: the server is a Microsoft.NET.Sdk.Web app, the ASP.NET Core 8
+# runtime is absent locally and in CI (M17/P1 D3), and the test project targets
+# net10.0 alone.
+# ---------------------------------------------------------------------------
+GRPC_SERVER_PROJECT := $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj
+GRPC_SERVER_TESTS := $(REPO_ROOT)/dotnet/tests/Confluent.Kafka.GrpcServer.UnitTests/Confluent.Kafka.GrpcServer.UnitTests.csproj
+
+test-grpc-server-dotnet: build-dotnet
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(GRPC_SERVER_TESTS)
+	$(DOTNET) format $(GRPC_SERVER_PROJECT) --verify-no-changes
+	$(DOTNET) format $(GRPC_SERVER_TESTS) --verify-no-changes
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(GRPC_SERVER_TESTS)
 
 # ---------------------------------------------------------------------------
 # Performance suite (M13/P1). Kept OUT of the solution (like grpc-server), so
