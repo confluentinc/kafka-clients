@@ -363,7 +363,7 @@ rust/src/ffi/           # feature-gated: --features ffi; 265 files, 2299 exporte
     ├── options/        #   invokers), one <Rpc>Result_t and one <Rpc>Options_t per Java class
     └── ...
 
-rust/xtask/ffi-baseline.txt   # burn-down baseline of check-ffi-translation (7 by-design lines)
+rust/xtask/ffi-baseline.txt   # burn-down baseline of check-ffi-translation (5 by-design lines)
 
 c/
 ├── CMakeLists.txt, Makefile, Dockerfile.grpc, README.md

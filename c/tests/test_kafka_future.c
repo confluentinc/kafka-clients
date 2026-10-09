@@ -149,10 +149,9 @@ static void test_then_apply_runs_the_function_once_and_borrows_its_result(void) 
     TEST_ASSERT_EQUAL_PTR(&doubler.output, out);
     TEST_ASSERT_EQUAL_INT(1, doubler.calls);
 
-    // `then_apply_try` is the same operation in C: every `apply` carries the
-    // error slot. Chained off the derived future it doubles again.
+    // Chained off the derived future it doubles again.
     function = kafka_common_KafkaFuture_BaseFunction_new(&doubler, double_apply);
-    kafka_common_KafkaFuture_t *chained = kafka_common_KafkaFuture_then_apply_try(derived, function);
+    kafka_common_KafkaFuture_t *chained = kafka_common_KafkaFuture_then_apply(derived, function);
     TEST_ASSERT_NULL(kafka_common_KafkaFuture_get(chained, &out));
     TEST_ASSERT_EQUAL_INT64(84, *(int64_t *)out);
     TEST_ASSERT_EQUAL_INT(2, doubler.calls);

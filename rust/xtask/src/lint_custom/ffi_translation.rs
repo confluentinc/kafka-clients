@@ -3439,7 +3439,7 @@ mod tests {
                 #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
                 pub struct KafkaFuture<T>(T);
                 impl<T> KafkaFuture<T> {
-                    pub fn then_apply<R, F: Fn(T) -> R>(&self, function: F) -> KafkaFuture<R> { unimplemented!() }
+                    pub fn then_apply<R, F: Fn(T) -> Result<R, Error>>(&self, function: F) -> KafkaFuture<R> { unimplemented!() }
                 }
             }
         "#;

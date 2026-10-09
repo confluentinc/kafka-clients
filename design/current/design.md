@@ -639,8 +639,9 @@ the background task.
 `KafkaFuture<T>` (`common/kafka_future.rs:64`) is the type that makes this
 work:
 - The public view is `Clone` and can be awaited more than once. Its methods
-  are `get`, `get_with_timeout`, `is_done`, `all_of`, `then_apply`,
-  `then_apply_try`, `join_map` and `join_map_results`.
+  are `get`, `get_with_timeout`, `is_done`, `all_of` and `then_apply`, whose
+  transform returns a `Result` as Java's `BaseFunction` may throw; the
+  crate-internal `join_map` combines keyed futures into a map.
 - The completable handle is the crate-internal `KafkaFutureImpl<T>`
   (`common/internals/kafka_future_impl.rs:150`), with `complete`,
   `complete_with_error`, `when_complete` and `future()`.
@@ -1029,8 +1030,8 @@ symbols), plus the package-less helpers:
 The conventions, each enforced by `cargo xtask lint-custom check-ffi-translation`
 (`xtask/src/lint_custom/ffi_translation.rs`, which derives the expected C
 shape of every public Rust item from its signature and compares it with the
-`#[unsafe(no_mangle)]` exports; `xtask/ffi-baseline.txt` holds the seven
-by-design gaps, all closures or tuples that have no C shape):
+`#[unsafe(no_mangle)]` exports; `xtask/ffi-baseline.txt` holds the five
+by-design gaps, all closure parameters whose C shape the lint cannot derive):
 
 - **Error slot.** A fallible function returns `*mut kafka_common_Error_t`
   (null = success) and delivers its value through a trailing `out_<name>`

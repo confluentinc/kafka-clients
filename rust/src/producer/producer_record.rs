@@ -399,10 +399,10 @@ impl<K, V> ProducerRecord<K, V> {
         self.partition
     }
 
-    /// Consume this record and return its parts.
-    // moves the fields out without copying them (CLAUDE.md §14)
-    #[doc(alias = "rust-only")]
-    pub fn into_parts(self) -> (String, Option<i32>, Option<i64>, RecordHeaders, Option<K>, Option<V>) {
+    /// Consume this record and return its parts, moving the fields out
+    /// without copying them (CLAUDE.md §14). Crate-private: a fixed tuple would
+    /// have to change shape whenever Java adds a field to `ProducerRecord`.
+    pub(crate) fn into_parts(self) -> (String, Option<i32>, Option<i64>, RecordHeaders, Option<K>, Option<V>) {
         (self.topic, self.partition, self.timestamp, self.headers, self.key, self.value)
     }
 }

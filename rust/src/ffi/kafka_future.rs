@@ -124,7 +124,7 @@ pub(crate) fn map_future<T>(future: &KafkaFuture<T>) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,
 {
-    future.then_apply(FfiValue::owned)
+    future.then_apply(|value| Ok(FfiValue::owned(value)))
 }
 
 /// Maps a typed future to the C handle `boxer` builds from its value when it
@@ -135,12 +135,12 @@ where
     T: Clone + Send + Sync + 'static,
     F: Fn(T) -> *mut c_void + Send + Sync + 'static,
 {
-    future.then_apply(move |value| FfiValue::handle(boxer(value), destroy))
+    future.then_apply(move |value| Ok(FfiValue::handle(boxer(value), destroy)))
 }
 
 /// Maps a `Void` future to the `NULL` it delivers.
 pub(crate) fn map_void_future(future: &KafkaFuture<()>) -> FfiFuture {
-    future.then_apply(|()| FfiValue::null())
+    future.then_apply(|()| Ok(FfiValue::null()))
 }
 
 // ---------------------------------------------------------------------------
@@ -561,46 +561,20 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
     }
 }
 
-/// The derived future of `then_apply`: the source's value mapped through a C
-/// `BaseFunction`, run once.
-///
-/// Java runs the function exactly once per derived future. The Rust
-/// `then_apply` re-evaluates its closure on every `get` of the derived future
-/// (it is a pure view over the source); a C function may have side effects,
-/// so the first outcome is memoized here and every later evaluation answers
-/// it. The source value is borrowed for the call only; the result is a C-owned
-/// pointer Rust never frees.
-///
-/// # Safety
-///
-/// `function` must be a valid function handle.
-unsafe fn then_apply(
-    self_: *const kafka_common_KafkaFuture_t,
-    function: *const kafka_common_KafkaFuture_BaseFunction_t,
-) -> *mut kafka_common_KafkaFuture_t {
-    let inner = unsafe { future_ref(self_) };
-    let registration = unsafe { base_function_ref(function) };
-    let function = BaseFunctionInner { self_: registration.self_, apply: registration.apply };
-    let memo: Mutex<Option<Result<Arc<FfiValue>, Error>>> = Mutex::new(None);
-    let derived = inner.future.then_apply_try(move |source: Arc<FfiValue>| {
-        let mut memo = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        memo.get_or_insert_with(|| function.apply(source.ptr()).map(FfiValue::borrowed))
-            .clone()
-    });
-    box_future(derived, inner.runtime.clone(), inner.queue.clone())
-}
-
 /// `KafkaFuture.thenApply(function)`: a new future that, when this one
 /// completes normally, resolves to `function.apply(value)`, or fails with
 /// the error `apply` returned; a failure of this future propagates unchanged.
 ///
 /// The function runs once, on the thread that first resolves the derived
-/// future: the caller of its `get`, or a runtime task for a `_cb`. The value
-/// it produces is a `void *` owned by the C side and never freed by Rust; the
-/// source value is borrowed for the call only (module docs). `function` is
-/// borrowed: the derived future keeps its own copy of the registration, so the
-/// handle may be destroyed right after this returns, while the `self` it was
-/// built with must outlive the derived future. The result is owned, freed with
+/// future: the caller of its `get`, or a runtime task for a `_cb`. (The Rust
+/// `then_apply` re-evaluates its closure on every `get`, being a pure view
+/// over the source; a C function may have side effects, so its first outcome
+/// is memoized, as Java runs it once.) The value it produces is a `void *`
+/// owned by the C side and never freed by Rust; the source value is borrowed
+/// for the call only (module docs). `function` is borrowed: the derived future
+/// keeps its own copy of the registration, so the handle may be destroyed right
+/// after this returns, while the `self` it was built with must outlive the
+/// derived future. The result is owned, freed with
 /// [`kafka_common_KafkaFuture_destroy`], and belongs to the same client as
 /// this future.
 ///
@@ -613,24 +587,16 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
     self_: *const kafka_common_KafkaFuture_t,
     function: *const kafka_common_KafkaFuture_BaseFunction_t,
 ) -> *mut kafka_common_KafkaFuture_t {
-    unsafe { then_apply(self_, function) }
-}
-
-/// The fallible `then_apply` the Rust API adds beside Java's (`then_apply_try`,
-/// `rust-only`): in C the two coincide, because every `apply` already carries
-/// the error slot. It exists so that the C surface names every public Rust
-/// method; see [`kafka_common_KafkaFuture_then_apply`] for the contract.
-///
-/// # Safety
-///
-/// `self_` must be a valid future handle and `function` a valid function
-/// handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply_try(
-    self_: *const kafka_common_KafkaFuture_t,
-    function: *const kafka_common_KafkaFuture_BaseFunction_t,
-) -> *mut kafka_common_KafkaFuture_t {
-    unsafe { then_apply(self_, function) }
+    let inner = unsafe { future_ref(self_) };
+    let registration = unsafe { base_function_ref(function) };
+    let function = BaseFunctionInner { self_: registration.self_, apply: registration.apply };
+    let memo: Mutex<Option<Result<Arc<FfiValue>, Error>>> = Mutex::new(None);
+    let derived = inner.future.then_apply(move |source: Arc<FfiValue>| {
+        let mut memo = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        memo.get_or_insert_with(|| function.apply(source.ptr()).map(FfiValue::borrowed))
+            .clone()
+    });
+    box_future(derived, inner.runtime.clone(), inner.queue.clone())
 }
 
 /// Frees the handle. The value `get` returned becomes invalid, unless a `_cb`
@@ -687,7 +653,7 @@ mod tests {
         let f = box_future(map_future(&typed), None, None);
         // `map_future` boxes an `i64`; use a counted type for the drop check.
         let counted = KafkaFuture::completed_future(Ok(Arc::new(Mutex::new(0))));
-        let f2 = box_future(counted.then_apply(|_| FfiValue::owned(Counted(7))), None, None);
+        let f2 = box_future(counted.then_apply(|_| Ok(FfiValue::owned(Counted(7)))), None, None);
 
         assert_eq!(unsafe { kafka_common_KafkaFuture_is_done(f) }, 1);
         let first = unsafe { get(f) }.unwrap();
@@ -952,10 +918,10 @@ mod tests {
         assert_eq!(unsafe { get(derived) }.unwrap(), first);
         assert_eq!(doubler.calls.load(Ordering::SeqCst), 1, "Java runs the function once");
 
-        // Chaining through `then_apply_try` runs the next step on the first's
+        // Chaining through `then_apply` runs the next step on the first's
         // result; the source is left untouched.
         let again = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
-        let chained = unsafe { kafka_common_KafkaFuture_then_apply_try(derived, again) };
+        let chained = unsafe { kafka_common_KafkaFuture_then_apply(derived, again) };
         assert_eq!(unsafe { *(get(chained).unwrap() as *const i64) }, 84);
         assert_eq!(doubler.calls.load(Ordering::SeqCst), 2);
         assert_eq!(unsafe { *(get(source).unwrap() as *const i64) }, 21);

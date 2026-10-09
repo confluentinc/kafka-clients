@@ -424,7 +424,9 @@ impl FutureCtx {
     /// A future resolving to a `String`, delivered as a `char *` owned by the
     /// future.
     pub(crate) fn string_future(&self, future: &KafkaFuture<String>) -> *mut kafka_common_KafkaFuture_t {
-        self.boxed(future.then_apply(|s| FfiValue::handle(into_c_string(&s) as *mut c_void, destroy_string_element)))
+        self.boxed(
+            future.then_apply(|s| Ok(FfiValue::handle(into_c_string(&s) as *mut c_void, destroy_string_element))),
+        )
     }
 
     /// Java's `Map<String, KafkaFuture<T>>`: an owned map of owned `char *`

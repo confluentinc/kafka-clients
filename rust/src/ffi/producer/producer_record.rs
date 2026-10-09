@@ -35,7 +35,7 @@ use std::ffi::{CString, c_char, c_void};
 use crate::common::Error;
 use crate::common::header::RecordHeaders;
 use crate::ffi::common::header::internals::record_headers::{
-    RecordHeadersInner, box_record_headers, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
+    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::util::{GenericValue, c_str_to_string, into_c_string, owned_c_string};
@@ -333,49 +333,6 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_to_string(
     self_: *const kafka_producer_ProducerRecord_t,
 ) -> *mut c_char {
     into_c_string(&unsafe { producer_record_ref(self_) }.to_string())
-}
-
-/// `ProducerRecord::into_parts`: consumes the record, delivering each part
-/// through its slot (`NULL` slots are skipped). `out_topic` is owned by the
-/// caller (`kafka_string_destroy`), `out_headers` too
-/// (`kafka_common_header_internals_RecordHeaders_destroy`); `out_partition`
-/// and `out_timestamp` receive `-1` for `null`. The handle is freed.
-///
-/// # Safety
-///
-/// `self_` must be a live handle; every non-null slot must be valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_ProducerRecord_into_parts(
-    self_: *mut kafka_producer_ProducerRecord_t,
-    out_topic: *mut *mut c_char,
-    out_partition: *mut i32,
-    out_timestamp: *mut i64,
-    out_headers: *mut *mut kafka_common_header_internals_RecordHeaders_t,
-    out_key: *mut *mut c_void,
-    out_value: *mut *mut c_void,
-) {
-    let inner = unsafe { Box::from_raw(self_ as *mut ProducerRecordInner) };
-    let (topic, partition, timestamp, headers, key, value) = inner.record.into_parts();
-    unsafe {
-        if !out_topic.is_null() {
-            *out_topic = into_c_string(&topic);
-        }
-        if !out_partition.is_null() {
-            *out_partition = partition.unwrap_or(-1);
-        }
-        if !out_timestamp.is_null() {
-            *out_timestamp = timestamp.unwrap_or(-1);
-        }
-        if !out_headers.is_null() {
-            *out_headers = box_record_headers(headers);
-        }
-        if !out_key.is_null() {
-            *out_key = generic_ptr(key.as_ref());
-        }
-        if !out_value.is_null() {
-            *out_value = generic_ptr(value.as_ref());
-        }
-    }
 }
 
 /// Frees the handle; null is a no-op. The key and value pointers are the
@@ -716,29 +673,14 @@ mod tests {
             kafka_producer_ProducerRecordOptions_destroy(options);
             kafka_producer_ProducerRecordOptions_destroy(std::ptr::null_mut());
 
-            let mut out_topic = std::ptr::null_mut();
-            let mut out_partition = 0;
-            let mut out_timestamp = 0;
-            let mut out_headers = std::ptr::null_mut();
-            let mut out_key = std::ptr::null_mut();
-            let mut out_value = std::ptr::null_mut();
-            kafka_producer_ProducerRecord_into_parts(
-                record,
-                &raw mut out_topic,
-                &raw mut out_partition,
-                &raw mut out_timestamp,
-                &raw mut out_headers,
-                &raw mut out_key,
-                &raw mut out_value,
+            assert_eq!(c_str_to_string(kafka_producer_ProducerRecord_topic(record)), "topic");
+            assert!(
+                record_headers_ref(kafka_producer_ProducerRecord_headers(record))
+                    .to_array()
+                    .is_empty()
             );
-            assert_eq!(c_str_to_string(out_topic), "topic");
-            assert_eq!(out_partition, 1);
-            assert_eq!(out_timestamp, 7);
-            assert!(record_headers_ref(out_headers).to_array().is_empty());
-            assert!(out_key.is_null());
-            assert_eq!(out_value, &value as *const i32 as *mut c_void);
-            kafka_string_destroy(out_topic);
-            kafka_common_header_internals_RecordHeaders_destroy(out_headers);
+            assert!(kafka_producer_ProducerRecord_key(record).is_null());
+            kafka_producer_ProducerRecord_destroy(record);
         }
     }
 }

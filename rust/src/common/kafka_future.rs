@@ -147,26 +147,6 @@ impl<T: Send + 'static> KafkaFuture<T> {
         KafkaFuture::new(Arc::new(AllOfFuture { futures }))
     }
 
-    /// Returns a new `KafkaFuture` that, when this future completes normally,
-    /// is completed with the result of applying `function` to this future's
-    /// value. If this future completes exceptionally, the returned future
-    /// completes with the same exception.
-    ///
-    /// Translated from `org.apache.kafka.common.KafkaFuture.thenApply`, for the
-    /// common case where the transform cannot fail.
-    #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
-    pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
-    where
-        T: Clone + Sync,
-        R: Clone + Send + Sync + 'static,
-        F: Fn(T) -> R + Send + Sync + 'static,
-    {
-        KafkaFuture::new(Arc::new(ThenApplyFuture {
-            source: self.clone(),
-            function: Arc::new(move |value| Ok(function(value))),
-        }))
-    }
-
     /// Returns a future that completes when all the given keyed futures
     /// complete, yielding a map from each key to its resolved value. If any
     /// future completes exceptionally, the returned future yields that error.
@@ -184,15 +164,18 @@ impl<T: Send + 'static> KafkaFuture<T> {
         KafkaFuture::new(Arc::new(JoinMapFuture { entries }))
     }
 
-    /// Like [`then_apply`](Self::then_apply) but the transform may fail. If
-    /// `function` returns `Err`, the returned future completes with that error.
+    /// Returns a new `KafkaFuture` that, when this future completes normally,
+    /// is completed with the result of applying `function` to this future's
+    /// value. If this future completes exceptionally, the returned future
+    /// completes with the same exception.
     ///
-    /// This models the Java `thenApply` cases whose `BaseFunction` throws — for
-    /// example `CreateTopicsResult.TopicMetadataAndConfig` accessors that call
-    /// `ensureSuccess()` and rethrow a stored exception.
-    // the fallible thenApply variant (admin-client.md §4)
-    #[doc(alias = "rust-only")]
-    pub fn then_apply_try<R, F>(&self, function: F) -> KafkaFuture<R>
+    /// Java's `BaseFunction.apply` may throw, failing the returned future; here
+    /// `function` returns `Err` instead (e.g. the
+    /// `CreateTopicsResult.TopicMetadataAndConfig` accessors, which call
+    /// `ensureSuccess()` and rethrow a stored exception). A transform that
+    /// cannot fail returns `Ok`.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
+    pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
     where
         T: Clone + Sync,
         R: Clone + Send + Sync + 'static,
@@ -285,8 +268,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
     }
 }
 
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::then_apply`] /
-/// [`KafkaFuture::then_apply_try`].
+/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::then_apply`].
 struct ThenApplyFuture<T, R>
 where
     T: Clone + Send + Sync + 'static,
@@ -516,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn then_apply_transforms_value() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let mapped = handle.future().then_apply(|v| v * 2);
+        let mapped = handle.future().then_apply(|v| Ok(v * 2));
         handle.complete(21);
         assert_eq!(mapped.get().await.unwrap(), 42);
     }
@@ -524,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn then_apply_propagates_source_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
-        let mapped = handle.future().then_apply(|v| v * 2);
+        let mapped = handle.future().then_apply(|v| Ok(v * 2));
         handle.complete_with_error(Error::local_illegal_argument("src".to_string()));
         assert!(matches!(mapped.get().await, Err(Error::LocalIllegalArgument(_))));
     }
@@ -570,11 +552,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn then_apply_try_can_fail() {
+    async fn then_apply_can_fail() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle
             .future()
-            .then_apply_try(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
+            .then_apply(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
         handle.complete(1);
         assert!(matches!(mapped.get().await, Err(Error::LocalIllegalState(_))));
     }

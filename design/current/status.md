@@ -22,7 +22,7 @@
 >   `__set_callbacks_notify` instead of a dispatcher thread, `kafka_List_t` /
 >   `kafka_Map_t` / `kafka_Bytes_t`, enum singletons, `__as_<Interface>`
 >   views. `cargo xtask lint-custom check-ffi-translation` enforces it; the
->   baseline `xtask/ffi-baseline.txt` holds 7 by-design closure/tuple gaps.
+>   baseline `xtask/ffi-baseline.txt` holds 5 by-design closure gaps.
 > - **The admin client supports security.** `AdminClientConfig` carries
 >   `security.protocol` and the SSL / SASL settings, and
 >   `KafkaAdminClient::new` builds its channel builder from them
