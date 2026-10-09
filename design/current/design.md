@@ -1054,7 +1054,16 @@ by-design gaps, all closures or tuples that have no C shape):
 - **Traits** C implements are interfaces: `<Interface>_new(void *self, <method>_fn_t ...)`
   with the caller owning `self`; a method that is `async fn` in Rust returns
   `void`, takes an `int64_t callback_id` and reports through
-  `kafka_consumer_Consumer__set_callback_result`. A Rust class implementing a
+  `kafka_consumer_Consumer__set_callback_result`. A binding whose callback
+  raised one of its own language's errors reports
+  `kafka_common_Error_local_callback(message, opaque)`: `LocalCallbackError`
+  (no Java class) sits outside the Kafka hierarchy, so the client wraps it as
+  Java wraps a listener's foreign `Throwable` and it comes back as the cause,
+  where `kafka_common_LocalCallbackError_opaque` returns the pointer as given.
+  Rust never dereferences, frees or retains it; the Python binding passes the
+  exception object, keeps it in a per-operation stash, and swaps it back in
+  (the same instance for a `KafkaError` or `KeyboardInterrupt`, Java's
+  unwrapped `KafkaException`; otherwise as the wrapper's `__cause__`). A Rust class implementing a
   trait exposes a borrowed `<Class>__as_<Interface>()` view (48 of them: the
   three mocks, `KafkaProducer`, the built-in serdes and partitioner, the
   metrics stats).

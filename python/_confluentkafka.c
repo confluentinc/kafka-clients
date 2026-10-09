@@ -377,8 +377,24 @@ static inline Producer* producer_from_handle(unsigned long long ptr) {
 
 // ---- error / metadata -> Python tuples -------------------------------------
 
+// The opaque pointer of the first foreign callback error in `e`'s cause chain,
+// `e` included, or NULL. A Python callback that raised reports its exception
+// object as that pointer (see `callback_error_from_py_exception`); the client
+// wraps the error as Java wraps a listener's foreign Throwable, so it usually
+// comes back as the cause.
+static void* callback_opaque_of(const kafka_common_Error_t* e) {
+    for (const kafka_common_Error_t* cur = e; cur != NULL; cur = kafka_common_Error_source(cur)) {
+        const kafka_common_LocalCallbackError_t* cb = kafka_common_Error_local_callback_error(cur);
+        if (cb != NULL) return kafka_common_LocalCallbackError_opaque(cb);
+    }
+    return NULL;
+}
+
 // Mirrors KafkaError._from_c field for field, from a BORROWED error:
-// (code, message | None, is_retriable, is_fatal, txn_requires_abort).
+// (code, message | None, is_retriable, is_fatal, txn_requires_abort,
+//  callback_opaque | None). `callback_opaque` is the address of the Python
+// exception a callback raised (`callback_opaque_of`), which the consumer swaps
+// back in; it is only compared, never turned back into an object.
 // `error_is_fatal` (defined with the KafkaError accessors below) composes
 // RequestUtils.isFatalException from the exported predicates.
 static int error_is_fatal(const kafka_common_Error_t* e);
@@ -387,12 +403,16 @@ static PyObject* error_to_py(const kafka_common_Error_t* e) {
     const char* msg = kafka_common_Error_message(e);
     PyObject* py_msg = msg ? PyUnicode_FromString(msg) : (Py_INCREF(Py_None), Py_None);
     if (py_msg == NULL) return NULL;
-    return Py_BuildValue("(iNOOO)",
+    void* opaque = callback_opaque_of(e);
+    PyObject* py_opaque = opaque ? PyLong_FromVoidPtr(opaque) : (Py_INCREF(Py_None), Py_None);
+    if (py_opaque == NULL) { Py_DECREF(py_msg); return NULL; }
+    return Py_BuildValue("(iNOOON)",
                          (int)kafka_common_Error_code(e),
                          py_msg,
                          kafka_common_Error_is_retriable_error(e) ? Py_True : Py_False,
                          error_is_fatal(e) ? Py_True : Py_False,
-                         kafka_common_Error_is_transaction_abortable_error(e) ? Py_True : Py_False);
+                         kafka_common_Error_is_transaction_abortable_error(e) ? Py_True : Py_False,
+                         py_opaque);
 }
 
 // Same, consuming an OWNED error.
@@ -1752,6 +1772,33 @@ static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
     return err;
 }
 
+// A foreign callback error for an exception object: its str() as the message,
+// for the client's logs, and the object itself as the opaque pointer. Rust never
+// dereferences the pointer; the consumer keeps the object alive (its stash of
+// callback errors) for as long as the address may be compared.
+static kafka_common_Error_t* callback_error_from_py(PyObject* exc) {
+    PyObject* text = PyObject_Str(exc);
+    const char* msg = text ? PyUnicode_AsUTF8(text) : NULL;
+    if (msg == NULL) PyErr_Clear();
+    kafka_common_Error_t* err = kafka_common_Error_local_callback(msg ? msg : "callback raised an exception", (void*)exc);
+    Py_XDECREF(text);
+    return err;
+}
+
+// Convert the currently set Python exception, raised by a callback, into a
+// foreign callback error (`callback_error_from_py`), clearing the indicator. The
+// GIL must be held.
+static kafka_common_Error_t* callback_error_from_py_exception(void) {
+    PyObject *type = NULL, *value = NULL, *tb = NULL;
+    PyErr_Fetch(&type, &value, &tb);  // clears the indicator
+    PyErr_NormalizeException(&type, &value, &tb);
+    kafka_common_Error_t* err = value ? callback_error_from_py(value)
+                                      : kafka_common_Error_kafka_message("callback raised an exception");
+    Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+    PyErr_Clear();  // defensive: NormalizeException / PyObject_Str may re-set it
+    return err;
+}
+
 // NULL -> None; an owned error -> its tuple (the error is destroyed).
 static PyObject* err_result(kafka_common_Error_t* err) {
     if (err == NULL) Py_RETURN_NONE;
@@ -2432,8 +2479,10 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 //   * None  -> the listener returned: report success now;
 //   * True  -> the adapter deferred (coroutine scheduled on the loop) and will
 //              report through Consumer__set_callback_result itself;
-//   * raise -> report the exception's message as a KafkaException, like a Java
-//              listener throwing out of onPartitions*.
+//   * raise -> report the exception as a foreign callback error carrying the
+//              exception object (stashed by the adapter); the client wraps it
+//              like a Java listener's Throwable and the consumer swaps the
+//              original back in when the operation fails with it.
 static void listener_fire(const char* method, void* self_, const kafka_List_t* partitions, int64_t callback_id) {
     ListenerCtx* ctx = (ListenerCtx*)self_;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -2446,7 +2495,7 @@ static void listener_fire(const char* method, void* self_, const kafka_List_t* p
         PyObject* r = PyObject_CallMethod(ctx->adapter, method, "OL", py_parts, (long long)callback_id);
         Py_DECREF(py_parts);
         if (r == NULL) {
-            err = error_from_py_exception("rebalance listener raised an exception");
+            err = callback_error_from_py_exception();
         } else {
             deferred = (r == Py_True);
             Py_DECREF(r);
@@ -2554,15 +2603,19 @@ static PyObject* py_Consumer_execute_callbacks(PyObject* self, PyObject* args) {
     return PyLong_FromLong((long)n);
 }
 
-// Consumer__set_callback_result(handle, callback_id, message | None): the
-// deferred report of a listener invocation (None = success, str = the
-// exception message, reported as a KafkaException).
+// Consumer__set_callback_result(handle, callback_id, result): the deferred
+// report of a listener invocation. None = success; an exception object = the
+// exception the listener raised, reported as a foreign callback error carrying
+// it (the caller has stashed it); a str = a message, reported as a
+// KafkaException.
 static PyObject* py_Consumer__set_callback_result(PyObject* self, PyObject* args) {
-    unsigned long long h; long long callback_id; PyObject* message;
-    if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &message)) return NULL;
+    unsigned long long h; long long callback_id; PyObject* result;
+    if (!PyArg_ParseTuple(args, "KLO", &h, &callback_id, &result)) return NULL;
     kafka_common_Error_t* err = NULL;
-    if (message != Py_None) {
-        const char* msg = PyUnicode_AsUTF8(message);
+    if (PyExceptionInstance_Check(result)) {
+        err = callback_error_from_py(result);
+    } else if (result != Py_None) {
+        const char* msg = PyUnicode_AsUTF8(result);
         if (msg == NULL) return NULL;
         err = kafka_common_Error_kafka_message(msg);
     }
@@ -7920,7 +7973,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_wakeup", py_Consumer_wakeup, METH_VARARGS, "Wake up a blocked operation"},
     {"Consumer_execute_callbacks", py_Consumer_execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
     {"Consumer_set_callbacks_notify", py_Consumer_set_callbacks_notify, METH_VARARGS, "Register the callable fired when callbacks become pending"},
-    {"Consumer__set_callback_result", py_Consumer__set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, message | None)"},
+    {"Consumer__set_callback_result", py_Consumer__set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, exception | message | None)"},
     {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "Current assignment as list[(topic, partition)]"},
     {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "Current subscription as list[str]"},
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},

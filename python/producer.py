@@ -42,12 +42,13 @@ class KafkaError(Exception):
         ret._is_retriable = _lib.KafkaError_is_retriable(_id)
         ret._is_fatal = _lib.KafkaError_is_fatal(_id)
         ret._txn_requires_abort = _lib.KafkaError_txn_requires_abort(_id)
+        ret._callback_opaque = None
         _lib.KafkaError_destroy(_id)
         return ret
 
     @staticmethod
     def _from_parts(code: int, message, is_retriable: int, is_fatal: int,
-                    txn_requires_abort: int = False):
+                    txn_requires_abort: int = False, callback_opaque=None):
         """Build a KafkaError from already-copied fields.
 
         The producer binding never hands an error handle to Python: the C layer
@@ -56,6 +57,11 @@ class KafkaError(Exception):
         tuple and frees / leaves the handle itself. The admin binding does the
         same for the *borrowed* per-key errors inside a result handle (those die
         with their parent handle), passing only the first four fields.
+
+        ``callback_opaque`` is the address of the Python exception a callback
+        raised, when the error's cause chain holds the foreign callback error
+        reporting it; the consumer swaps that exception back in (see
+        ``consumer._raise_if_error``). Private plumbing, never exposed.
         """
         ret = KafkaError.__new__(KafkaError)
         ret._code = code
@@ -63,6 +69,7 @@ class KafkaError(Exception):
         ret._is_retriable = bool(is_retriable)
         ret._is_fatal = bool(is_fatal)
         ret._txn_requires_abort = bool(txn_requires_abort)
+        ret._callback_opaque = callback_opaque
         return ret
 
     @staticmethod

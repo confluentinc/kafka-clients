@@ -45,6 +45,7 @@
 #![expect(unnameable_types)]
 
 use std::collections::HashSet;
+use std::ffi::c_void;
 // Imported unqualified so that `#[delegate(Display)]` on `Error` resolves to
 // the std trait; the `#[delegatable_trait_remote]` stub below only registers
 // the signature with ambassador, it does not define a trait.
@@ -55,6 +56,7 @@ use ambassador::{Delegate, delegatable_trait, delegatable_trait_remote};
 use super::protocol::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::KafkaError;
+use crate::common::LocalCallbackError;
 use crate::common::LocalConcurrentModificationError;
 use crate::common::LocalIllegalArgumentError;
 use crate::common::LocalIllegalStateError;
@@ -167,7 +169,9 @@ pub(crate) trait ErrorHierarchy {
     /// `false` for exactly the generic `java.lang` / `java.util` runtime
     /// exceptions, which are siblings of `KafkaException` rather than
     /// subclasses (`common/KafkaException.java:22`): [`LocalIllegalArgumentError`],
-    /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`].
+    /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`],
+    /// [`LocalTimeoutError`] — and [`LocalCallbackError`], which has no Java class
+    /// but stands in for a foreign callback's `Throwable`.
     ///
     /// Two call sites depend on this: `ConsumerUtils.maybeWrapAsKafkaException`
     /// (a Kafka error passes through unchanged, a generic one gets wrapped),
@@ -332,6 +336,12 @@ pub(crate) trait ErrorHierarchy {
 
     /// Whether this error's Java class is, or extends, `java.util.concurrent.TimeoutException`.
     fn is_local_timeout_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this is an error raised by a callback written in another
+    /// language ([`LocalCallbackError`]; no Java class).
+    fn is_local_callback_error(&self) -> bool {
         false
     }
 
@@ -1542,6 +1552,9 @@ impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     fn is_local_timeout_error(&self) -> bool {
         (**self).is_local_timeout_error()
     }
+    fn is_local_callback_error(&self) -> bool {
+        (**self).is_local_callback_error()
+    }
     fn is_authorizer_not_ready_error(&self) -> bool {
         (**self).is_authorizer_not_ready_error()
     }
@@ -2180,6 +2193,7 @@ error_name_impl! {
     ConsumerNoOffsetForPartitionError,
     ConsumerOffsetOutOfRangeError,
     ConsumerRetriableCommitFailedError,
+    LocalCallbackError,
 }
 
 // `IllegalArgumentException`, `IllegalStateException`,
@@ -2205,6 +2219,13 @@ impl ErrorHierarchy for LocalConcurrentModificationError {
 }
 impl ErrorHierarchy for LocalTimeoutError {
     fn is_local_timeout_error(&self) -> bool {
+        true
+    }
+}
+// Beside `KafkaException` like the four above: a foreign callback's error is
+// not a Kafka error, so the client wraps it as Java wraps a foreign `Throwable`.
+impl ErrorHierarchy for LocalCallbackError {
+    fn is_local_callback_error(&self) -> bool {
         true
     }
 }
@@ -2294,6 +2315,14 @@ pub enum Error {
     /// `RetriableException`. This one sits beside `KafkaException`, so it is
     /// never retriable, never an api error and carries no wire code.
     LocalTimeout(LocalTimeoutError),
+    /// An error raised by a callback written in another language.
+    ///
+    /// No Java class: it stands in for the foreign error, which cannot cross
+    /// the FFI boundary, and carries an opaque pointer the binding uses to find
+    /// the original again. Outside the Kafka hierarchy, like
+    /// [`LocalIllegalState`](Self::LocalIllegalState), so the client wraps it
+    /// as Java wraps a listener's foreign `Throwable`.
+    LocalCallback(LocalCallbackError),
 
     // One variant per Java exception class, each carrying the struct that
     // declares its own `extends` chain. Delegation does the rest.
@@ -2943,6 +2972,14 @@ impl Error {
         Self::LocalTimeout(LocalTimeoutError::new(message))
     }
 
+    /// Create the error a callback written in another language reports when
+    /// it raised one of that language's errors: `message` is its text, for the
+    /// client's logs, and `opaque` the binding's pointer to it, never
+    /// dereferenced by Rust. See [`LocalCallbackError`].
+    pub fn local_callback(message: impl Into<String>, opaque: *mut c_void) -> Self {
+        Self::LocalCallback(LocalCallbackError::new(message, opaque))
+    }
+
     /// Create a transaction aborted error with Java's default message.
     ///
     /// Corresponds to Java's no-arg `TransactionAbortedException()`
@@ -3059,8 +3096,11 @@ impl Error {
     /// Returns `false` for exactly the generic variants — the ones raised by
     /// misuse of the client rather than by Kafka itself:
     /// [`LocalIllegalArgument`](Self::LocalIllegalArgument),
-    /// [`LocalIllegalState`](Self::LocalIllegalState) and
-    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification).
+    /// [`LocalIllegalState`](Self::LocalIllegalState),
+    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification) and
+    /// [`LocalTimeout`](Self::LocalTimeout), plus
+    /// [`LocalCallback`](Self::LocalCallback), a foreign callback's error, which
+    /// the client wraps as Java wraps a listener's foreign `Throwable`.
     ///
     /// Everything else returns `true`: the `ApiException` subtypes,
     /// [`Serialization`](Self::Serialization), [`Wakeup`](Self::Wakeup) and the
@@ -3385,6 +3425,16 @@ impl Error {
     /// the subclasses a later Java release may add.
     pub fn is_local_timeout_error(&self) -> bool {
         ErrorHierarchy::is_local_timeout_error(self)
+    }
+
+    /// Whether this is an error raised by a callback written in another
+    /// language ([`Error::LocalCallback`](Self::LocalCallback); no Java class).
+    ///
+    /// Covers exactly that variant. Like the `java.lang` runtime errors it is
+    /// outside the Kafka hierarchy: [`is_kafka_error`](Self::is_kafka_error) and
+    /// every other predicate answer `false` for it.
+    pub fn is_local_callback_error(&self) -> bool {
+        ErrorHierarchy::is_local_callback_error(self)
     }
 
     /// Whether this error's Java class is, or extends,
@@ -5095,6 +5145,16 @@ mod tests {
             (
                 "LocalTimeout",
                 Error::local_timeout("timed out"),
+                [
+                    false, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // A foreign callback's error: no Java class, outside the hierarchy
+            // like the runtime exceptions above.
+            (
+                "LocalCallback",
+                Error::local_callback("ValueError: bad", std::ptr::null_mut()),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,

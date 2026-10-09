@@ -39,6 +39,7 @@ mod invalid_record_error;
 mod isolation_level;
 mod kafka_error;
 mod kafka_future;
+mod local_callback_error;
 mod local_concurrent_modification_error;
 mod local_illegal_argument_error;
 mod local_illegal_state_error;
@@ -92,6 +93,8 @@ pub use local_concurrent_modification_error::LocalConcurrentModificationError;
 pub use local_illegal_argument_error::LocalIllegalArgumentError;
 pub use local_illegal_state_error::LocalIllegalStateError;
 pub use local_timeout_error::LocalTimeoutError;
+// A binding's foreign callback error; no Java class (see its module doc).
+pub use local_callback_error::LocalCallbackError;
 pub use metric::{Metric, MetricValue};
 pub use metric_name::MetricName;
 pub use metric_name_template::MetricNameTemplate;

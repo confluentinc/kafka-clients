@@ -1043,6 +1043,33 @@ static void test_listener_error_propagates(void) {
     fixture_destroy(&f);
 }
 
+// A binding's foreign callback error comes back with its opaque pointer
+// unchanged: the mock, like Java's `MockConsumer.rebalance`, does not wrap the
+// listener's error, so it is the rebalance's result itself.
+static void test_listener_local_callback_error_keeps_its_opaque(void) {
+    fixture_t f;
+    fixture_init(&f);
+    listener_probe_t probe;
+    probe_init(&probe, f.consumer, 1);
+    int marker = 7;
+    probe.assigned_error = kafka_common_Error_local_callback("ValueError: bad", &marker);
+    subscribe_probe(&f, "t", &probe);
+
+    kafka_common_Error_t *err = rebalance_to(&f, "t", 1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_callback_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
+    TEST_ASSERT_EQUAL_INT(kafka_common_ErrorCode_LOCAL_CALLBACK, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_STRING("ValueError: bad", kafka_common_Error_message(err));
+    const kafka_common_LocalCallbackError_t *view = kafka_common_Error_local_callback_error(err);
+    TEST_ASSERT_NOT_NULL(view);
+    TEST_ASSERT_EQUAL_PTR(&marker, kafka_common_LocalCallbackError_opaque(view));
+    TEST_ASSERT_EQUAL_STRING("ValueError: bad", kafka_common_LocalCallbackError_message(view));
+    kafka_common_Error_destroy(err);
+    TEST_ASSERT_EQUAL_INT(7, marker);
+    fixture_destroy(&f);
+}
+
 // `subscribe_with_topics_listener_cb` completes through the pump and the
 // registered listener then serves the blocking rebalance.
 static void test_subscribe_with_topics_listener_cb(void) {
@@ -1124,6 +1151,7 @@ int main(void) {
     RUN_TEST(test_subscribe_with_listener_on_manually_assigned_consumer_fails);
     RUN_TEST(test_listener_calls_consumer_handle_no_deadlock);
     RUN_TEST(test_listener_error_propagates);
+    RUN_TEST(test_listener_local_callback_error_keeps_its_opaque);
     RUN_TEST(test_subscribe_with_topics_listener_cb);
     RUN_TEST(test_destroy_runs_pending_rebalance_cb_listener_and_completion_once);
     return UNITY_END();

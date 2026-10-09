@@ -81,7 +81,7 @@ use std::sync::OnceLock;
 use crate::common::Error;
 use crate::common::protocol::Errors;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
-// The 162 enumerators are spelled out in full (see
+// The 163 enumerators are spelled out in full (see
 // [`kafka_common_ErrorCode_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_ErrorCode_e::*;
@@ -577,6 +577,28 @@ pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char
     box_error(Error::local_timeout(unsafe { c_str_to_string(message) }))
 }
 
+/// The error a callback written in another language reports, from an
+/// interface method through `<Client>__set_callback_result`, when it raised one
+/// of that language's errors: `message` is its text, kept for the client's
+/// logs, and `opaque` the binding's pointer to it. No Java class. The client
+/// treats it as Java treats a listener's foreign `Throwable` (it wraps it, so
+/// it comes back as the cause of the operation's error), and
+/// `kafka_common_Error_local_callback_error` reads the pointer back. Rust never
+/// dereferences, frees or retains `opaque`.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+// a binding's foreign callback error, no Java class (DoD #7)
+#[doc(alias = "rust-only")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_callback(
+    message: *const c_char,
+    opaque: *mut std::ffi::c_void,
+) -> *mut kafka_common_Error_t {
+    box_error(Error::local_callback(unsafe { c_str_to_string(message) }, opaque))
+}
+
 /// `new TransactionAbortedException()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_Error_t {
@@ -678,7 +700,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 162 values are pairwise distinct — the code alone identifies the class,
+/// The 163 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
@@ -887,6 +909,8 @@ pub enum kafka_common_ErrorCode_e {
     kafka_common_ErrorCode_RECORD_DESERIALIZATION = -27,
     // Code owned by a superclass (`BufferExhaustedException extends TimeoutException`).
     kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED = -28,
+    // A binding's foreign callback error (no Java class).
+    kafka_common_ErrorCode_LOCAL_CALLBACK = -29,
 }
 
 /// The [`kafka_common_ErrorCode_e`] of the class that owns a protocol code.
@@ -944,6 +968,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_e {
         Error::LocalIllegalState(_) => kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
         Error::LocalConcurrentModification(_) => kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION,
         Error::LocalTimeout(_) => kafka_common_ErrorCode_LOCAL_TIMEOUT,
+        Error::LocalCallback(_) => kafka_common_ErrorCode_LOCAL_CALLBACK,
         Error::Api(_) => kafka_common_ErrorCode_API,
         Error::Authentication(_) => kafka_common_ErrorCode_AUTHENTICATION,
         Error::Authorization(_) => kafka_common_ErrorCode_AUTHORIZATION,
@@ -1243,7 +1268,7 @@ mod tests {
     const FIRST_CODE: i16 = -1;
     const LAST_CODE: i16 = 133;
 
-    /// The 27 classes that own no Java code, each paired with the enumerator it
+    /// The 28 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
@@ -1366,6 +1391,12 @@ mod tests {
                 kafka_common_ErrorCode_PRODUCER_BUFFER_EXHAUSTED,
                 -28,
             ),
+            // -29: a binding's foreign callback error.
+            (
+                Error::local_callback("m", std::ptr::null_mut()),
+                kafka_common_ErrorCode_LOCAL_CALLBACK,
+                -29,
+            ),
         ]
     }
 
@@ -1420,7 +1451,7 @@ mod tests {
         );
     }
 
-    /// The 162 values are pairwise distinct, so the code alone identifies the
+    /// The 163 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -1449,10 +1480,10 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 162, "expected 162 distinct error codes");
+        assert_eq!(seen.len(), 163, "expected 163 distinct error codes");
     }
 
-    /// One instance of each of the 162 error classes: the owner of every Java code,
+    /// One instance of each of the 163 error classes: the owner of every Java code,
     /// the client-side classes, and the bare `KafkaException`, which reports
     /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
     /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
@@ -1521,7 +1552,7 @@ mod tests {
             .into_iter()
             .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
             .collect();
-        assert_eq!(errors.len(), 162, "expected one error per class");
+        assert_eq!(errors.len(), 163, "expected one error per class");
 
         let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
         assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
@@ -1565,7 +1596,7 @@ mod tests {
         }
     }
 
-    /// The 27 Rust-local negatives keep the values they were published with, and
+    /// The 28 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
     /// These values are ABI (see [`kafka_common_ErrorCode_e`]): a new class
@@ -1574,7 +1605,7 @@ mod tests {
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 27, "expected 27 classes with no Java code");
+        assert_eq!(classes.len(), 28, "expected 28 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");

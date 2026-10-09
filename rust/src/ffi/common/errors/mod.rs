@@ -42,6 +42,7 @@ pub(crate) mod consumer_retriable_commit_failed_error;
 pub(crate) mod duplicate_resource_error;
 pub(crate) mod group_authorization_error;
 pub(crate) mod invalid_topic_error;
+pub(crate) mod local_callback_error;
 pub(crate) mod quota_violation_error;
 pub(crate) mod record_deserialization_error;
 pub(crate) mod record_too_large_error;

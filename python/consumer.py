@@ -315,9 +315,35 @@ def _concurrent_kafka_error():
                                   _CONCURRENT_MESSAGE, False, False)
 
 
-def _raise_if_error(err_tuple):
-    if err_tuple is not None:
-        raise KafkaError._from_tuple(err_tuple)
+def _raise_if_error(err_tuple, callback_errors=None):
+    """Raise the error an operation completed with, if any.
+
+    ``callback_errors`` maps ``id(exc)`` to each exception a rebalance listener
+    raised during the operation (the consumer's stash, holding them alive).
+    When the error's cause chain holds the foreign callback error reporting one
+    of them, the original is swapped back in, as Java would surface it:
+
+    * reported as is -- the client did not wrap it (``MockConsumer.rebalance``
+      lets a listener's exception propagate, as Java's does): the original;
+    * wrapped -- the client applied ``maybeWrapAsKafkaException(e, "User
+      rebalance callback throws an error")``, which it has to since it cannot
+      classify a Python exception. Java leaves a ``KafkaException`` (and so
+      ``InterruptException``) unwrapped: a :class:`KafkaError` or
+      ``KeyboardInterrupt`` is raised as the same instance; anything else as
+      the wrapping :class:`KafkaError`, with the original as ``__cause__``
+      (Java's ``getCause()``).
+    """
+    if err_tuple is None:
+        return
+    error = KafkaError._from_tuple(err_tuple)
+    original = None
+    if callback_errors and error._callback_opaque is not None:
+        original = callback_errors.get(error._callback_opaque)
+    if original is None:
+        raise error
+    if error.code == _ec.LOCAL_CALLBACK or isinstance(original, (KafkaError, KeyboardInterrupt)):
+        raise original
+    raise error from original
 
 
 def _running_loop():
@@ -383,20 +409,21 @@ class _ListenerAdapter:
       client right away;
     * ``True`` -- the listener method returned an awaitable (a coroutine
       listener on an :class:`AsyncConsumer`): it has been scheduled on the
-      consumer's event loop and ``report(callback_id, message | None)`` will be
+      consumer's event loop and ``report(callback_id, exception | None)`` will be
       called when it finishes. The rebalance does not advance before that.
-    * raise -- the trampoline reports the exception's message as a
-      ``KafkaException``; the rebalance, and the operation that drove it, fail
-      with that message, like a Java listener that throws.
+    * raise -- the exception is stashed on the consumer and the trampoline
+      reports it as a foreign callback error carrying the object; the
+      rebalance, and the operation that drove it, fail like a Java listener
+      that throws, with the original swapped back in (``_raise_if_error``).
 
     On the synchronous :class:`Consumer` there is no event loop, so a listener
     method returning an awaitable is an error (``RuntimeError``, reported like
     any other exception).
     """
 
-    __slots__ = ("_listener", "_loop", "_report")
+    __slots__ = ("_listener", "_loop", "_report", "_stash")
 
-    def __init__(self, listener, loop=None, report=None):
+    def __init__(self, listener, loop=None, report=None, stash=None):
         for name in ("on_partitions_revoked", "on_partitions_assigned"):
             if not callable(getattr(listener, name, None)):
                 raise TypeError(
@@ -409,6 +436,11 @@ class _ListenerAdapter:
         # is closed.
         self._loop = loop
         self._report = weakref.WeakMethod(report) if report is not None else None
+        # A weak reference to the consumer method keeping each exception a
+        # listener method raises alive until the operation that drove the
+        # rebalance completes, so it can be swapped back in (see
+        # `_raise_if_error`). Weak for the same reason as `_report`.
+        self._stash = weakref.WeakMethod(stash) if stash is not None else None
 
     # ---- called from the C trampolines ------------------------------------
     def _on_revoked(self, raw_partitions, callback_id):
@@ -424,7 +456,21 @@ class _ListenerAdapter:
             method = self._listener.on_partitions_revoked
         return self._invoke(method, raw_partitions, callback_id)
 
+    def _stash_error(self, exc):
+        stash = self._stash() if self._stash is not None else None
+        if stash is not None:  # the consumer may be gone meanwhile
+            stash(exc)
+
     def _invoke(self, method, raw_partitions, callback_id):
+        try:
+            return self._invoke_method(method, raw_partitions, callback_id)
+        except BaseException as exc:
+            # The trampoline reports it as a foreign callback error carrying
+            # this very object; the stash keeps it alive until it comes back.
+            self._stash_error(exc)
+            raise
+
+    def _invoke_method(self, method, raw_partitions, callback_id):
         partitions = [TopicPartition(t, p) for (t, p) in raw_partitions]
         result = method(partitions)
         if not inspect.isawaitable(result):
@@ -438,9 +484,11 @@ class _ListenerAdapter:
         report_ref = self._report
 
         def on_done(exc):
+            if exc is not None:
+                self._stash_error(exc)
             report = report_ref()
             if report is not None:  # the consumer may be gone meanwhile
-                report(callback_id, None if exc is None else (str(exc) or repr(exc)))
+                report(callback_id, exc)
 
         _schedule(result, self._loop, on_done)
         return True
@@ -748,6 +796,9 @@ class _ConsumerBase:
     def __init__(self):
         self._h = None
         self.closed = False
+        # The exceptions rebalance listeners raised during the operation in
+        # flight, by id(), held alive until it completes (see `_raise_if_error`).
+        self._callback_errors = {}
 
     def _init_mock(self, auto_offset_reset="earliest"):
         self._h = _lib.Consumer_MockConsumer_new(auto_offset_reset)
@@ -781,18 +832,34 @@ class _ConsumerBase:
             _lib.Consumer_destroy(self._h)
             self._h = None
 
-    def _report_listener_result(self, callback_id, message):
-        """Deliver a deferred listener outcome to the client (``None`` =
-        success). A consumer destroyed meanwhile has no one to report to."""
+    def _report_listener_result(self, callback_id, exc):
+        """Deliver a deferred listener outcome to the client: ``None`` for
+        success, else the exception it raised (already stashed). A consumer
+        destroyed meanwhile has no one to report to."""
         if self._h is not None:
-            _lib.Consumer__set_callback_result(self._h, callback_id, message)
+            _lib.Consumer__set_callback_result(self._h, callback_id, exc)
+
+    def _stash_callback_error(self, exc):
+        """Keep an exception a listener raised alive until the operation in
+        flight completes, so its address -- what the client carries -- can be
+        matched and the original swapped back in."""
+        self._callback_errors[id(exc)] = exc
+
+    def _take_callback_errors(self):
+        """The stashed listener exceptions, emptying the stash: called once
+        the operation that drove the listeners has completed. A listener error
+        the client did not surface from that operation (Java keeps only the
+        first) is dropped with it."""
+        stashed = self._callback_errors
+        self._callback_errors = {}
+        return stashed
 
     def _listener_adapter(self, listener):
         if listener is None:
             return None
         loop = self._listener_loop()
         report = None if loop is None else self._report_listener_result
-        return _ListenerAdapter(listener, loop, report)
+        return _ListenerAdapter(listener, loop, report, self._stash_callback_error)
 
     def _commit_adapter(self, callback):
         if callback is None:
@@ -892,8 +959,9 @@ class _MockConsumerMixin:
         ``on_partitions_lost`` is never fired by the mock.
 
         Requires a topic subscription; a manually assigned consumer fails with
-        "manual assignment in use". A listener exception surfaces here as a
-        :class:`KafkaError` carrying its message.
+        "manual assignment in use". A listener exception surfaces here as
+        itself -- the very instance raised -- like Java's
+        ``MockConsumer.rebalance``, which does not wrap it.
 
         This is the one operation the synchronous mock drives through the
         blocking entry point (``MockConsumer_rebalance``) rather than a ``_cb``
@@ -903,7 +971,8 @@ class _MockConsumerMixin:
         the consumer's callback pump free for other threads meanwhile.
         """
         self._check_closed()
-        _raise_if_error(_lib.MockConsumer_rebalance(self._h, _tp_to_spec(partitions)))
+        err = _lib.MockConsumer_rebalance(self._h, _tp_to_spec(partitions))
+        _raise_if_error(err, self._take_callback_errors())
 
     def add_record(self, topic, partition, offset, key=None, value=None):
         """Queue a record for the next ``poll`` (Java ``addRecord``). ``key`` and
@@ -1079,13 +1148,13 @@ class Consumer(_ConsumerBase):
         """A void op: ``fn(h, *args, cb)`` with ``cb(err | None)``. A
         ``KeyboardInterrupt`` while waiting wakes the consumer up once."""
         (err,) = self._run(lambda cb: fn(self._h, *args, cb), self.wakeup)
-        _raise_if_error(err)
+        _raise_if_error(err, self._take_callback_errors())
 
     def _value(self, fn, *args):
         """A value op: ``fn(h, *args, cb)`` with ``cb(value, err | None)``;
         the same interrupt handling as :meth:`_void`."""
         value, err = self._run(lambda cb: fn(self._h, *args, cb), self.wakeup)
-        _raise_if_error(err)
+        _raise_if_error(err, self._take_callback_errors())
         return value
 
     def poll(self, timeout):
@@ -1241,7 +1310,7 @@ class Consumer(_ConsumerBase):
             (err,) = self._waiter.run(
                 lambda cb: _lib.Consumer_close_cb(self._h, _ms(timeout), cb),
                 on_interrupt=None)
-            _raise_if_error(err)
+            _raise_if_error(err, self._take_callback_errors())
         finally:
             self._destroy()
 
@@ -1344,12 +1413,12 @@ class AsyncConsumer(_ConsumerBase):
     async def _void(self, fn, *args):
         self._check_closed()
         (err,) = await self._run_cb(lambda cb: fn(self._h, *args, cb))
-        _raise_if_error(err)
+        _raise_if_error(err, self._take_callback_errors())
 
     async def _value(self, fn, *args):
         self._check_closed()
         value, err = await self._run_cb(lambda cb: fn(self._h, *args, cb))
-        _raise_if_error(err)
+        _raise_if_error(err, self._take_callback_errors())
         return value
 
     async def poll(self, timeout):
@@ -1474,7 +1543,7 @@ class AsyncConsumer(_ConsumerBase):
         try:
             (err,) = await self._run_cb(
                 lambda cb: _lib.Consumer_close_cb(self._h, _ms(timeout), cb))
-            _raise_if_error(err)
+            _raise_if_error(err, self._take_callback_errors())
         finally:
             self._destroy()
 
@@ -1491,7 +1560,7 @@ class _AsyncMockConsumerMixin(_MockConsumerMixin):
         self._check_closed()
         (err,) = await self._run_cb(
             lambda cb: _lib.MockConsumer_rebalance_cb(self._h, _tp_to_spec(partitions), cb))
-        _raise_if_error(err)
+        _raise_if_error(err, self._take_callback_errors())
 
 
 # --------------------------------------------------------------------------

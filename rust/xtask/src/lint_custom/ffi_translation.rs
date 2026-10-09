@@ -408,6 +408,9 @@ impl Mapper<'_> {
             syn::Type::ImplTrait(it) => self.map_bounds(&it.bounds, dir, owned, mut_ref),
             syn::Type::TraitObject(to) => self.map_bounds(&to.bounds, dir, owned, mut_ref),
             syn::Type::Path(p) => self.map_path(p, ty, dir, owned, mut_ref),
+            // A raw `c_void` pointer in the Rust API (a binding's opaque value,
+            // `LocalCallbackError::opaque`) is already a C type: it crosses as is.
+            syn::Type::Ptr(p) if is_ident(&p.elem, "c_void") => Ok(CType::Void { mutable: p.mutability.is_some() }),
             other => Err(format!("`{}`", compact(other))),
         }
     }
@@ -2763,6 +2766,60 @@ mod tests {
     fn test_complete_struct_passes() {
         let findings = run("complete", TOPIC_PARTITION, TOPIC_PARTITION_FFI);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A raw `c_void` pointer in the Rust API (`LocalCallbackError::opaque`) is
+    /// already a C type: it maps to itself, keeping its constness.
+    #[test]
+    fn test_raw_c_void_pointer_crosses_as_is() {
+        let rust = TOPIC_PARTITION
+            .replace("pub mod common {", "pub mod common {\n use std::ffi::c_void;")
+            .replace(
+                "pub fn partition(&self) -> i32 { 0 }",
+                "pub fn partition(&self) -> i32 { 0 }
+                pub fn opaque(&self) -> *mut c_void { std::ptr::null_mut() }
+                pub fn same(&self, opaque: *const c_void) -> i32 { 0 }",
+            );
+        let findings = run("c-void", &rust, TOPIC_PARTITION_FFI);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_common_TopicPartition_opaque",
+                "missing kafka_common_TopicPartition_same"
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_TopicPartition_opaque"),
+            "expected `fn(self: *const kafka_common_TopicPartition_t) -> *mut c_void`"
+        );
+        assert_eq!(
+            detail(&findings, "missing kafka_common_TopicPartition_same"),
+            "expected `fn(self: *const kafka_common_TopicPartition_t, opaque: *const c_void) -> i32`"
+        );
+
+        let ffi = format!(
+            "{TOPIC_PARTITION_FFI}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicPartition_opaque(this: *const kafka_common_TopicPartition_t) -> *mut c_void {{ std::ptr::null_mut() }}
+            #[unsafe(no_mangle)] pub unsafe extern \"C\" fn kafka_common_TopicPartition_same(this: *const kafka_common_TopicPartition_t, opaque: *const c_void) -> i32 {{ 0 }}"
+        );
+        let findings = run("c-void-ok", &rust, &ffi);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// Only the bare `c_void` the crate imports is recognized; a qualified path
+    /// is reported as unmapped rather than guessed.
+    #[test]
+    fn test_qualified_c_void_pointer_is_unmapped() {
+        let rust = TOPIC_PARTITION.replace(
+            "pub fn partition(&self) -> i32 { 0 }",
+            "pub fn partition(&self) -> i32 { 0 }
+                pub fn opaque(&self) -> *mut std::ffi::c_void { std::ptr::null_mut() }",
+        );
+        let findings = run("c-void-qualified", &rust, TOPIC_PARTITION_FFI);
+        assert!(
+            keys(&findings).contains(&"unmapped kafka_common_TopicPartition_opaque"),
+            "{findings:?}"
+        );
     }
 
     #[test]

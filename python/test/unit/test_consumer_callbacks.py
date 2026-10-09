@@ -169,7 +169,8 @@ def test_listener_lost_defaults_to_revoked():
 def test_coroutine_listener_is_rejected_on_the_sync_consumer():
     """The synchronous consumer has no event loop to run a coroutine listener
     on, so an ``async def`` listener method fails the rebalance (reported to the
-    client like any listener exception) instead of being silently dropped."""
+    client like any listener exception, and so surfacing as itself) instead of
+    being silently dropped."""
 
     class CoroListener:
         async def on_partitions_revoked(self, partitions):
@@ -180,27 +181,52 @@ def test_coroutine_listener_is_rejected_on_the_sync_consumer():
 
     with MockConsumer("earliest") as c:
         c.subscribe(["t"], CoroListener())
-        with pytest.raises(KafkaError, match="requires an AsyncConsumer"):
+        with pytest.raises(RuntimeError, match="requires an AsyncConsumer"):
             c.rebalance([TopicPartition("t", 0)])
 
 
 # -- rebalance listener: error propagation -----------------------------------
 
-def test_listener_exception_propagates_as_kafka_error():
-    class Boom:
-        def on_partitions_revoked(self, partitions):
-            pass
+class _RaisingListener:
+    """Raises ``exc`` from ``on_partitions_assigned``."""
 
-        def on_partitions_assigned(self, partitions):
-            raise ValueError("boom-from-listener")
+    def __init__(self, exc):
+        self.exc = exc
 
+    def on_partitions_revoked(self, partitions):
+        pass
+
+    def on_partitions_assigned(self, partitions):
+        raise self.exc
+
+
+def test_listener_exception_propagates_as_itself():
+    # Java's MockConsumer.rebalance lets a listener's exception propagate
+    # unwrapped: the very instance the listener raised comes back.
+    exc = ValueError("boom-from-listener")
     with MockConsumer("earliest") as c:
-        c.subscribe(["t"], Boom())
-        with pytest.raises(KafkaError) as exc_info:
+        c.subscribe(["t"], _RaisingListener(exc))
+        with pytest.raises(ValueError) as exc_info:
             c.rebalance([TopicPartition("t", 0)])
-        # The exception text propagates verbatim, like a throwing Java listener.
-        assert str(exc_info.value) == "boom-from-listener"
-        assert exc_info.value.code == UNKNOWN_SERVER_ERROR
+        assert exc_info.value is exc
+        # The stash holding it alive is emptied with the operation.
+        assert c._callback_errors == {}
+        # The consumer is usable again.
+        c.subscribe(["t"], RecordingListener())
+        c.rebalance([TopicPartition("t", 0)])
+
+
+@pytest.mark.parametrize("make", [
+    lambda: KafkaError._from_parts(-1, "kafka-from-listener", False, False),
+    lambda: KeyboardInterrupt(),
+], ids=["KafkaError", "KeyboardInterrupt"])
+def test_listener_kafka_error_and_interrupt_propagate_as_themselves(make):
+    exc = make()
+    with MockConsumer("earliest") as c:
+        c.subscribe(["t"], _RaisingListener(exc))
+        with pytest.raises(type(exc)) as exc_info:
+            c.rebalance([TopicPartition("t", 0)])
+        assert exc_info.value is exc
 
 
 def test_listener_exception_in_revoked_propagates():
@@ -211,9 +237,53 @@ def test_listener_exception_in_revoked_propagates():
     with MockConsumer("earliest") as c:
         c.subscribe(["t"], BoomOnRevoke())
         c.rebalance([TopicPartition("t", 0)])  # nothing revoked yet
-        with pytest.raises(KafkaError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             c.rebalance([TopicPartition("t", 1)])
         assert str(exc_info.value) == "revoke-boom"
+
+
+# -- swapping a wrapped listener exception back in ---------------------------
+#
+# The real consumer wraps a listener's error as Java's
+# maybeWrapAsKafkaException(e, "User rebalance callback throws an error") does:
+# the foreign callback error comes back as the cause, which the mock never
+# produces, so `_raise_if_error` is driven with the tuple the C layer builds.
+
+WRAP_MESSAGE = "User rebalance callback throws an error"
+
+
+def _wrapped_tuple(exc):
+    return (UNKNOWN_SERVER_ERROR, WRAP_MESSAGE, False, False, False, id(exc))
+
+
+def test_wrapped_foreign_exception_becomes_the_cause():
+    exc = ValueError("bad")
+    with pytest.raises(KafkaError) as exc_info:
+        kc._raise_if_error(_wrapped_tuple(exc), {id(exc): exc})
+    assert str(exc_info.value) == WRAP_MESSAGE
+    assert exc_info.value.code == UNKNOWN_SERVER_ERROR
+    assert exc_info.value.__cause__ is exc
+
+
+@pytest.mark.parametrize("make", [
+    lambda: KafkaError._from_parts(-1, "kafka", False, False),
+    lambda: KeyboardInterrupt(),
+], ids=["KafkaError", "KeyboardInterrupt"])
+def test_wrapped_kafka_error_and_interrupt_are_unwrapped(make):
+    # Java leaves a KafkaException (InterruptException included) unwrapped;
+    # the client wraps only because it cannot classify a Python exception.
+    exc = make()
+    with pytest.raises(type(exc)) as exc_info:
+        kc._raise_if_error(_wrapped_tuple(exc), {id(exc): exc})
+    assert exc_info.value is exc
+
+
+def test_unmatched_callback_opaque_raises_the_client_error():
+    exc = ValueError("gone")
+    with pytest.raises(KafkaError) as exc_info:
+        kc._raise_if_error(_wrapped_tuple(exc), {})
+    assert str(exc_info.value) == WRAP_MESSAGE
+    assert exc_info.value.__cause__ is None
 
 
 # -- rebalance listener: ordering guarantee (consumer-threading.md §31 #2) ----
@@ -836,10 +906,10 @@ async def test_async_coroutine_listener_exception_propagates():
             raise ValueError("coro-boom")
 
     await c.subscribe(["t"], CoroBoom())
-    with pytest.raises(KafkaError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         await c.rebalance([TopicPartition("t", 0)])
     assert str(exc_info.value) == "coro-boom"
-    assert exc_info.value.code == UNKNOWN_SERVER_ERROR
+    assert c._callback_errors == {}
     await c.close()
 
 

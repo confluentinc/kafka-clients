@@ -477,6 +477,30 @@ pub unsafe extern "C" fn kafka_common_Error_is_local_timeout_error(error: *const
     i8::from(unsafe { error_ref(error) }.error.is_local_timeout_error())
 }
 
+/// Whether this is an error raised by a callback written in another language
+/// (`Error::LocalCallback`; no Java class).
+///
+/// Mirrors `Error::is_local_callback_error`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_local_callback_error(error: *const kafka_common_Error_t) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    i8::from(unsafe { error_ref(error) }.error.is_local_callback_error())
+}
+
 /// Whether this error's Java class is, or extends,
 /// `org.apache.kafka.common.errors.AuthorizerNotReadyException`.
 ///
@@ -4159,6 +4183,7 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
         kafka_common_Error_is_local_concurrent_modification_error,
     ),
     ("is_local_timeout_error", kafka_common_Error_is_local_timeout_error),
+    ("is_local_callback_error", kafka_common_Error_is_local_callback_error),
     (
         "is_authorizer_not_ready_error",
         kafka_common_Error_is_authorizer_not_ready_error,
