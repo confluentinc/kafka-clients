@@ -197,6 +197,7 @@ public sealed class ChaosServiceTests
         // The drain ran to the end before the handler returned: final commit, close, dispose.
         IReadOnlyList<string> calls = harness.Consumer.Calls;
         Assert.Equal(new[] { "Commit", "Close", "Dispose" }, calls.Skip(calls.Count - 3));
+        Assert.Equal(flavour == ChaosFlavour.Async, harness.Consumer.DisposedAsync);
         Assert.False(await harness.Mark("c-cancel", 1), "the cancelled workload is still registered");
         Assert.Empty(EventAssert.OfKind(call.Stream.Events, Proto.WorkloadEvent.EventOneofCase.Failed));
         Assert.Equal(0, call.Stream.OverlappingWrites);

@@ -22,8 +22,8 @@ namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
 /// Drives the consumer behind the factory seam, stated once for every flavour: the test queues
-/// mock steps here and each flavour's double (<see cref="SyncScriptedConsumer"/>, and from S3 the
-/// async one) applies them <b>on the workload's own loop</b>, at the start of its next poll.
+/// mock steps here and each flavour's double (<see cref="SyncScriptedConsumer"/> and
+/// <see cref="AsyncScriptedConsumer"/>) applies them <b>on the workload's own loop</b>, at the start of its next poll.
 /// </summary>
 /// <remarks>
 /// The consumer is single-owner: the core rejects a <c>Rebalance</c> / <c>AddRecord</c> issued
@@ -38,6 +38,7 @@ internal sealed class ConsumerScript
     private readonly ConcurrentQueue<Exception> _stepFailures = new ConcurrentQueue<Exception>();
     private readonly List<string> _calls = new List<string>();
     private int _polls;
+    private bool _disposedAsync;
 
     /// <summary>The config the factory was called with.</summary>
     internal IReadOnlyDictionary<string, string>? Config { get; set; }
@@ -47,6 +48,16 @@ internal sealed class ConsumerScript
 
     /// <summary>Whether that handle still worked when <c>Close</c> was entered (null = not closed yet).</summary>
     internal bool? HandleUsableAtClose { get; set; }
+
+    /// <summary>Whether the consumer was disposed through <c>DisposeAsync</c> (the async flavour's close sequence).</summary>
+    internal bool DisposedAsync
+    {
+        get => Volatile.Read(ref _disposedAsync);
+        set => Volatile.Write(ref _disposedAsync, value);
+    }
+
+    /// <summary>The tokens the async servicer passed to the consumer (T12).</summary>
+    internal TokenLog Tokens { get; } = new TokenLog();
 
     /// <summary>How many polls the loop has made.</summary>
     internal int Polls => Volatile.Read(ref _polls);

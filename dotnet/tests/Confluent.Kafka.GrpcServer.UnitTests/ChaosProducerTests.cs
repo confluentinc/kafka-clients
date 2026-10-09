@@ -76,6 +76,7 @@ public sealed class ChaosProducerTests
         Assert.Equal(request.Config.OrderBy(kv => kv.Key), harness.Producer.Config!.OrderBy(kv => kv.Key));
         Assert.Equal(1, harness.Producer.CloseCalls);
         Assert.Equal(1, harness.Producer.DisposeCalls);
+        Assert.Equal(flavour == ChaosFlavour.Async ? 1 : 0, harness.Producer.DisposeAsyncCalls);
         Assert.Equal(1, call.Stream.HeaderWrites);
         Assert.Equal(0, call.Stream.HeaderPosition);
         Assert.Equal(0, call.Stream.OverlappingWrites);
@@ -159,7 +160,10 @@ public sealed class ChaosProducerTests
     {
         using ManualResetEventSlim closeGate = new ManualResetEventSlim();
         using ChaosHarness harness = ChaosHarness.Create(flavour, new TestProducerBehaviour { HoldClose = closeGate });
-        using RunningCall call = harness.RunProducer(ChaosHarness.ProducerRequest("p-held"));
+
+        // A low rate keeps the loop almost always inside its rate wait, which is where a stop that
+        // resumed its waiter inline would run the async drain on the stopping thread.
+        using RunningCall call = harness.RunProducer(ChaosHarness.ProducerRequest("p-held", rps: 20));
         try
         {
             call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Delivered, 3);
@@ -198,6 +202,7 @@ public sealed class ChaosProducerTests
 
         Assert.Equal(1, harness.Producer.CloseCalls);
         Assert.Equal(1, harness.Producer.DisposeCalls);
+        Assert.Equal(flavour == ChaosFlavour.Async ? 1 : 0, harness.Producer.DisposeAsyncCalls);
         Assert.False(await harness.Mark("p-cancel", 1), "the cancelled workload is still registered");
         Assert.Empty(EventAssert.OfKind(call.Stream.Events, Proto.WorkloadEvent.EventOneofCase.Failed));
     }
@@ -218,14 +223,98 @@ public sealed class ChaosProducerTests
         Assert.DoesNotContain(surface.SelectMany(t => t.GetMethods()).SelectMany(m => m.GetParameters()), p => IsToken(p.ParameterType));
     }
 
+    // ---- T12 (async: at runtime) ----
+
+    [Fact]
+    public async Task Async_NoTokenThatCanFireReachesTheProducer_AtRuntime()
+    {
+        // D6: the async client surface does take a token, so the check is what the servicer
+        // actually passed. The double records every token by whether it CAN fire, so the check does
+        // not depend on a stop happening to land inside a call. One workload ends through
+        // StopWorkload and one through the call's cancellation: neither path may reach the client.
+        // Flush is listed in D6 but the loop never calls it (Close flushes), so it is not asserted.
+        using ChaosHarness stopped = ChaosHarness.Create(ChaosFlavour.Async);
+        using RunningCall stoppedCall = stopped.RunProducer(ChaosHarness.ProducerRequest("p-tokens-stop"));
+        stoppedCall.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Delivered, 3);
+        await stopped.Stop("p-tokens-stop");
+        EventAssert.EndsFinished(await stoppedCall.Completed());
+
+        using ChaosHarness cancelled = ChaosHarness.Create(ChaosFlavour.Async);
+        using RunningCall cancelledCall = cancelled.RunProducer(ChaosHarness.ProducerRequest("p-tokens-cancel"));
+        cancelledCall.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Delivered, 3);
+        cancelledCall.Context.Cancel();
+        await cancelledCall.Handler.WaitAsync(RecordingStreamWriter.DefaultTimeout);
+
+        foreach (ProducerProbe probe in new[] { stopped.Producer, cancelled.Producer })
+        {
+            Assert.Empty(probe.Tokens.Cancelable);
+            Assert.Contains(nameof(IAsyncProducer<byte[], byte[]>.Send), probe.Tokens.Operations);
+            Assert.Contains(nameof(IAsyncProducer<byte[], byte[]>.Close), probe.Tokens.Operations);
+            Assert.Equal(1, probe.CloseCalls);
+        }
+    }
+
+    [Fact]
+    public async Task Async_AStopDuringAHeldAdmission_TakesEffectAfterIt_AndTheRecordSettlesOnceAsDelivered()
+    {
+        // The behavioural half of T12. The real AsyncMockProducer cannot be held at admission from
+        // this project (its admission bound and batch-thread hooks are internal to the library), so
+        // the double holds the stage over a send the real mock has already accepted, with the real
+        // Send's contract: a token that fires while it is held ends the stage with an
+        // OperationCanceledException although the record is still sent (M11/P3.5 D2 (c)). Had the
+        // servicer passed a stop token, the stop below would surface the held record as SendFailed
+        // and its delivery would follow: the double settle D6 exists to prevent.
+        const ulong Held = 2;
+        TaskCompletionSource gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ChaosHarness harness = ChaosHarness.Create(
+            ChaosFlavour.Async,
+            new TestProducerBehaviour { HoldAdmissionOf = Held, AdmissionGate = gate });
+        using RunningCall call = harness.RunProducer(ChaosHarness.ProducerRequest("p-admission"));
+        try
+        {
+            Assert.True(harness.Producer.AdmissionHeld.Wait(RecordingStreamWriter.DefaultTimeout), "the admission was never held");
+            await harness.Stop("p-admission");
+
+            // The stop is pending until the admission completes: the loop is still inside Send.
+            await Task.Delay(s_settleWindow);
+            Assert.False(call.Handler.IsCompleted, "the handler returned while a send's admission was still held");
+            Assert.False(harness.Producer.CloseEntered.IsSet, "the drain began while a send's admission was still held");
+            Assert.Empty(EventAssert.OfKind(call.Stream.Events, Proto.WorkloadEvent.EventOneofCase.ProducerStats));
+        }
+        finally
+        {
+            // Released on every path, so a failed assertion cannot leave the workload parked.
+            gate.TrySetResult();
+        }
+
+        IReadOnlyList<Proto.WorkloadEvent> events = await call.Completed();
+        await Task.Delay(s_settleWindow);
+
+        EventAssert.EndsFinished(events);
+        Assert.Empty(EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.SendFailed));
+
+        // No send after the held one: the stop took effect as soon as its admission completed.
+        List<ulong> sent = EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.Sent).Select(e => e.Sent.Index).ToList();
+        Assert.Equal(new ulong[] { 0, 1, Held }, sent);
+        Assert.Equal(sent, EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.Delivered).Select(e => e.Delivered.Index).OrderBy(i => i));
+        Assert.Equal(sent, harness.Producer.CallbackFires.Keys.OrderBy(i => i));
+        Assert.All(harness.Producer.CallbackFires, kv => Assert.Equal(1, kv.Value));
+        Assert.Empty(harness.Producer.Tokens.Cancelable);
+        Assert.Equal(1, harness.Producer.CloseCalls);
+    }
+
     // ---- T20 (producer side) ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task ARealClientThatCannotBeBuilt_EndsTheWorkloadFailed_WithItsKafkaException(ChaosFlavour flavour)
     {
-        KafkaException expected = Assert.Throws<KafkaException>(
-            () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray));
+        // The flavour's own real client, built the way its servicer builds it.
+        KafkaException expected = flavour == ChaosFlavour.Async
+            ? Assert.Throws<KafkaException>(
+                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray))
+            : Assert.Throws<KafkaException>(
+                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunProducerRequest request = ChaosHarness.ProducerRequest("p-real");
         request.Config.Clear();

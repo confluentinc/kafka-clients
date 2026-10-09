@@ -28,7 +28,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The consumer workload (PLAN §3.4, §5.6; §7.1 T14–T16, T18–T20) over the flavour's mock
+/// The consumer workload (PLAN §3.4, §5.6; §7.1 T12, T14–T16, T18–T20) over the flavour's mock
 /// consumer behind the factory seam, driven by steps applied on the workload's own loop.
 /// </summary>
 public sealed class ChaosConsumerTests
@@ -181,6 +181,7 @@ public sealed class ChaosConsumerTests
 
         // The loop's commit after the poll, then the drain: final commit, its read-back, close, dispose.
         Assert.Equal(new[] { "Commit", "Commit", "Committed", "Close", "Dispose" }, harness.Consumer.Calls);
+        Assert.Equal(flavour == ChaosFlavour.Async, harness.Consumer.DisposedAsync);
 
         // The handle outlived the close (the close-time revoke may still commit through it) and
         // was disposed once the workload ended.
@@ -296,14 +297,64 @@ public sealed class ChaosConsumerTests
         Assert.DoesNotContain("Committed", harness.Consumer.Calls);
     }
 
+    // ---- T12 (async: at runtime, consumer side) ----
+
+    [Fact]
+    public async Task Async_NoTokenThatCanFireReachesTheConsumer_AtRuntime()
+    {
+        // D7: no token that can fire on Subscribe / Poll / Commit / Committed / Close. A sync-commit
+        // workload with a read-back interval reaches all five, and the poll-error and revoke paths
+        // too. One workload ends through StopWorkload and one through the call's cancellation; the
+        // double records each token by whether it CAN fire (T12).
+        using ChaosHarness stopped = ChaosHarness.Create(ChaosFlavour.Async);
+        using RunningCall stoppedCall = RunToCommittedReadBack(stopped, "c-tokens-stop");
+        await stopped.Stop("c-tokens-stop");
+        EventAssert.EndsFinished(await stoppedCall.Completed());
+
+        using ChaosHarness cancelled = ChaosHarness.Create(ChaosFlavour.Async);
+        using RunningCall cancelledCall = RunToCommittedReadBack(cancelled, "c-tokens-cancel");
+        cancelledCall.Context.Cancel();
+        await cancelledCall.Handler.WaitAsync(RecordingStreamWriter.DefaultTimeout);
+
+        foreach (ConsumerScript script in new[] { stopped.Consumer, cancelled.Consumer })
+        {
+            Assert.Empty(script.StepFailures);
+            Assert.Empty(script.Tokens.Cancelable);
+            Assert.Subset(
+                new HashSet<string> { "Subscribe", "Poll", "Commit", "Committed", "Close" },
+                new HashSet<string>(script.Tokens.Operations));
+            Assert.Equal("Close", script.Calls[^2]);
+        }
+
+        static RunningCall RunToCommittedReadBack(ChaosHarness harness, string id)
+        {
+            RunningCall call = harness.RunConsumer(ChaosHarness.ConsumerRequest(id, commitCheckIntervalMs: 1));
+            harness.Consumer.Rebalance(new TopicPartition(Topic, 0));
+
+            // The record comes a poll later, so the read-back interval has elapsed by its commit (T19).
+            call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Rebalance, 1);
+            harness.Consumer.AddRecord(Topic, 0, 0, ChaosEvents.Key(0), ChaosEvents.Value(0, MsgSize));
+            call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Committed, 1);
+            harness.Consumer.SetPollError("injected poll failure");
+            call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.ConsumerError, 1);
+            harness.Consumer.Rebalance(new TopicPartition(Topic, 1));
+            call.Stream.WaitFor(e => e.Any(x => x.ConsumerError?.Op == Proto.ConsumerOp.RevokeCommit), "the revoke-time commit's error");
+            return call;
+        }
+    }
+
     // ---- T20 (consumer side) ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task ARealClientThatCannotBeBuilt_EndsTheWorkloadFailed_WithItsKafkaException(ChaosFlavour flavour)
     {
-        KafkaException expected = Assert.Throws<KafkaException>(
-            () => new KafkaConsumer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray));
+        // The flavour's own real client, built the way its servicer builds it.
+        KafkaException expected = flavour == ChaosFlavour.Async
+            ? Assert.Throws<KafkaException>(
+                () => new AsyncKafkaConsumer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray))
+            : Assert.Throws<KafkaException>(
+                () => new KafkaConsumer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunConsumerRequest request = ChaosHarness.ConsumerRequest("c-real");
         request.Config.Clear();

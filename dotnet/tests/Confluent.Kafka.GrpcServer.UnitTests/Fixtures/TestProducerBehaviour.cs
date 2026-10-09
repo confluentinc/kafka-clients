@@ -16,23 +16,27 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
 /// What the producer behind the factory seam does, stated once for every flavour (each flavour's
-/// double — <see cref="SyncTestProducer"/>, and from S3 the async one — interprets it over its
-/// own mock). The default is a plain auto-completing mock.
+/// double — <see cref="SyncTestProducer"/> and <see cref="AsyncTestProducer"/> — interprets it
+/// over its own mock). The default is a plain auto-completing mock.
 /// </summary>
 internal sealed class TestProducerBehaviour
 {
     /// <summary>
     /// When set, every record fails through its delivery callback with this code and message
-    /// (<c>ErrorNext</c> right after each <c>Send</c> on a non-auto-completing mock, T9).
+    /// (<c>ErrorNext</c> after each <c>Send</c> on a non-auto-completing mock, T9).
     /// </summary>
     internal (int Code, string Message)? FailEach { get; init; }
 
-    /// <summary>When set, <c>Close</c> blocks until this is set (T6b).</summary>
+    /// <summary>
+    /// When set, <c>Close</c> blocks its <b>calling thread</b> until this is set (T6b): blocking,
+    /// not awaiting, so a drain that a stop ran inline would hold the stopping call too.
+    /// </summary>
     internal ManualResetEventSlim? HoldClose { get; init; }
 
     /// <summary>
@@ -40,6 +44,17 @@ internal sealed class TestProducerBehaviour
     /// every later send throw (T11).
     /// </summary>
     internal int? DisposeAfterSends { get; init; }
+
+    /// <summary>
+    /// Async flavour only (T12): the send of this record index is accepted by the mock at once,
+    /// but its admission stage is held until <see cref="AdmissionGate"/> completes. A token that
+    /// fires while it is held ends the stage with an <see cref="OperationCanceledException"/>
+    /// although the record is still sent — the real <c>Send</c>'s contract (M11/P3.5 D2 (c)).
+    /// </summary>
+    internal ulong? HoldAdmissionOf { get; init; }
+
+    /// <summary>Releases the admission stage <see cref="HoldAdmissionOf"/> holds.</summary>
+    internal TaskCompletionSource? AdmissionGate { get; init; }
 }
 
 /// <summary>What a test producer observed, from whichever thread observed it.</summary>
@@ -47,6 +62,7 @@ internal sealed class ProducerProbe
 {
     private int _closeCalls;
     private int _disposeCalls;
+    private int _disposeAsyncCalls;
 
     /// <summary>Delivery-callback invocations per record index.</summary>
     internal ConcurrentDictionary<ulong, int> CallbackFires { get; } = new ConcurrentDictionary<ulong, int>();
@@ -63,12 +79,27 @@ internal sealed class ProducerProbe
     /// <summary>How many times <c>Close</c> returned.</summary>
     internal int CloseCalls => Volatile.Read(ref _closeCalls);
 
-    /// <summary>How many times <c>Dispose</c> ran.</summary>
+    /// <summary>How many times the producer was disposed, by <c>Dispose</c> or <c>DisposeAsync</c>.</summary>
     internal int DisposeCalls => Volatile.Read(ref _disposeCalls);
+
+    /// <summary>How many of <see cref="DisposeCalls"/> were <c>DisposeAsync</c> (the async flavour's).</summary>
+    internal int DisposeAsyncCalls => Volatile.Read(ref _disposeAsyncCalls);
+
+    /// <summary>Set when the async double starts holding an admission stage (<see cref="TestProducerBehaviour.HoldAdmissionOf"/>).</summary>
+    internal ManualResetEventSlim AdmissionHeld { get; } = new ManualResetEventSlim();
+
+    /// <summary>The tokens the async servicer passed to the producer (T12).</summary>
+    internal TokenLog Tokens { get; } = new TokenLog();
 
     internal void OnClosed() => Interlocked.Increment(ref _closeCalls);
 
     internal void OnDisposed() => Interlocked.Increment(ref _disposeCalls);
+
+    internal void OnDisposedAsync()
+    {
+        Interlocked.Increment(ref _disposeAsyncCalls);
+        OnDisposed();
+    }
 
     internal void OnCallback(ulong index) => CallbackFires.AddOrUpdate(index, 1, static (_, n) => n + 1);
 

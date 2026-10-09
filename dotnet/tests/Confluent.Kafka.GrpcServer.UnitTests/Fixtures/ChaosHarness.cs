@@ -27,13 +27,16 @@ public enum ChaosFlavour
 {
     /// <summary><see cref="ChaosWorkloadServiceImpl"/> over the sync clients (the <c>dotnet</c> backend).</summary>
     Sync,
+
+    /// <summary><see cref="AsyncChaosWorkloadServiceImpl"/> over the async clients (the <c>dotnet-async</c> backend).</summary>
+    Async,
 }
 
-/// <summary>The <c>[Theory]</c> rows for the flavours; S3 adds the async row here and nowhere else.</summary>
+/// <summary>The <c>[Theory]</c> rows for the flavours: every flavour theory runs once per row.</summary>
 public static class ChaosFlavours
 {
     /// <summary>Every flavour.</summary>
-    public static TheoryData<ChaosFlavour> All => new TheoryData<ChaosFlavour> { ChaosFlavour.Sync };
+    public static TheoryData<ChaosFlavour> All => new TheoryData<ChaosFlavour> { ChaosFlavour.Sync, ChaosFlavour.Async };
 }
 
 /// <summary>
@@ -86,6 +89,17 @@ internal sealed class ChaosHarness : IDisposable
                     script.Config = config;
                     return new SyncScriptedConsumer(script);
                 }),
+            ChaosFlavour.Async => new AsyncChaosWorkloadServiceImpl(
+                config =>
+                {
+                    probe.Config = config;
+                    return new AsyncTestProducer(behaviour, probe);
+                },
+                config =>
+                {
+                    script.Config = config;
+                    return new AsyncScriptedConsumer(script);
+                }),
             _ => throw new ArgumentOutOfRangeException(nameof(flavour), flavour, "unknown flavour"),
         };
         return new ChaosHarness(service, probe, script);
@@ -97,6 +111,7 @@ internal sealed class ChaosHarness : IDisposable
         Proto.ChaosWorkloadService.ChaosWorkloadServiceBase service = flavour switch
         {
             ChaosFlavour.Sync => new ChaosWorkloadServiceImpl(),
+            ChaosFlavour.Async => new AsyncChaosWorkloadServiceImpl(),
             _ => throw new ArgumentOutOfRangeException(nameof(flavour), flavour, "unknown flavour"),
         };
         return new ChaosHarness(service, new ProducerProbe(), new ConsumerScript());
