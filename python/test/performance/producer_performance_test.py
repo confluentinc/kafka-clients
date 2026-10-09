@@ -7,18 +7,19 @@ import random
 import signal
 import queue
 import gc
-import uuid
 from threading import Thread
 
+# This directory, for performance_common / librdkafka_helpers / conftest when
+# pytest collects this file on its own (the script run has it as sys.path[0]).
+# Not python/: its confluent_kafka/ source tree would shadow the PyPI
+# package of the same name in the CLIENT_VERSION=2 baseline venv.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
+import librdkafka_helpers  # noqa: E402
 from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic
 from concurrent.futures import CancelledError, Future
-from producer import (KafkaProducer, AsyncKafkaProducer, ProducerRecord,
-                      RecordMetadata)
-from confluent_kafka import (Producer as CKProducer, Message as CKMessage,
-                             Consumer, TopicPartition)
-from confluent_kafka.aio.producer import AIOProducer as CKAIOProducer
-from partitioner import partition_for_key
 
 
 def message_generator(topic, key_size=100, value_size=1024,
@@ -64,6 +65,22 @@ if 'VALUE_SIZE' in os.environ:
 if limit_rps is not None:
     limit_rps = int(limit_rps)
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
+# The two backends are different packages sharing the top-level import name
+# ``confluent_kafka``, so each runs in its own venv (see librdkafka_helpers):
+# CLIENT_VERSION=2 is the PyPI confluent-kafka (librdkafka) baseline,
+# CLIENT_VERSION=3 this repo's package. Import only the selected one.
+if v2:
+    from collections import namedtuple
+
+    from confluent_kafka import Producer as CKProducer, Message as CKMessage
+    from confluent_kafka.aio.producer import AIOProducer as CKAIOProducer
+
+    # librdkafka has no record type; the Compatible*Producer wrappers read
+    # these three attributes.
+    ProducerRecord = namedtuple("ProducerRecord", "topic key value")
+else:
+    from confluent_kafka.producer import (AsyncKafkaProducer, KafkaProducer,
+                                          ProducerRecord, RecordMetadata)
 run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
 use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
@@ -97,14 +114,16 @@ def _is_queue_full(exc):
     """True if `exc` is a librdkafka / confluent-kafka QUEUE_FULL delivery error
     (local producer queue overflow), e.g.
     KafkaError{code=_QUEUE_FULL,val=-184,...}. Handles both the confluent-kafka
-    (v2) and Rust-binding (v3) backends."""
-    try:
-        from confluent_kafka import KafkaError
-        arg = exc.args[0] if getattr(exc, "args", None) else None
-        if arg is not None and hasattr(arg, "code") and arg.code() == KafkaError._QUEUE_FULL:
-            return True
-    except Exception:
-        pass
+    (v2) and Rust-binding (v3) backends: librdkafka's KafkaError exists only in
+    the v2 venv, and both fall back to the message."""
+    if v2:
+        try:
+            from confluent_kafka import KafkaError
+            arg = exc.args[0] if getattr(exc, "args", None) else None
+            if arg is not None and hasattr(arg, "code") and arg.code() == KafkaError._QUEUE_FULL:
+                return True
+        except Exception:
+            pass
     s = str(exc).lower()
     return "queue_full" in s or "queue full" in s
 
@@ -147,7 +166,7 @@ class CompatibleProducer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def send(self, record):
+    def send(self, *, record):
         fut = Future()
 
         def delivery_report(err, msg):
@@ -205,7 +224,7 @@ class AsyncCompatibleProducer:
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.close()
 
-    async def send(self, record):
+    async def send(self, *, record):
         # AIOProducer.produce is a coroutine that returns the delivery future;
         # the recorder task awaits that future for the Message.
         return await self._producer.produce(
@@ -346,165 +365,11 @@ def print_configuration(conf):
         else:
             print(f"  {key}: {value}")
 
-def _verifier_consumer_config(bootstrap_servers, group_id):
-    conf = {
-        'bootstrap.servers': bootstrap_servers,
-        'group.id': group_id,
-        'enable.auto.commit': 'false',
-        'auto.offset.reset': 'earliest',
-        'session.timeout.ms': '10000',
-        'check.crcs': 'true'
-    }
-    conf.update(sasl_config_from_env(v2=True))
-    return conf
-
-
-def get_topic_end_offsets(bootstrap_servers, topic):
-    """Returns {partition_id: high_watermark} for `topic`.
-
-    Captures pre-existing topic state before the test starts so the end-of-run
-    consumer can resume from these offsets and only see messages produced in
-    this run. Returns {} if the topic does not yet exist (treated as "all
-    partitions start at 0"); raises only on transport/auth failures.
-    """
-    consumer = Consumer(_verifier_consumer_config(
-        bootstrap_servers, f"perf-baseline-{uuid.uuid4()}"))
-    try:
-        md = consumer.list_topics(topic, timeout=10)
-        topic_md = md.topics.get(topic)
-        if topic_md is None or topic_md.error is not None or not topic_md.partitions:
-            return {}
-        partitions = sorted(topic_md.partitions.keys())
-        end_offsets = {}
-        for p in partitions:
-            _, high = consumer.get_watermark_offsets(
-                TopicPartition(topic, p), timeout=10)
-            end_offsets[p] = high
-        return end_offsets
-    finally:
-        consumer.close()
-
-
-def verify_consumed_messages(bootstrap_servers, topic, baseline, expected_count, has_keys):
-    """Consume `topic` starting at `baseline` per-partition offsets, count
-    messages, and (if has_keys) check every message landed in the partition
-    the default CRC-32 partitioner would have chosen (see partition_for_key).
-
-    `baseline` is {partition_id: starting_offset} captured before this test ran;
-    starting from those offsets means the consumer only sees messages produced
-    in this test, so `expected_count` is just the produced total (no need to
-    add pre-existing). Missing partitions are assumed to start at 0.
-
-    Returns 0 on success, 1 on any verification failure.
-    """
-    consumer = Consumer(_verifier_consumer_config(
-        bootstrap_servers, f"perf-verify-{uuid.uuid4()}"))
-    consumed_count = 0
-    mismatch_count = 0
-    sample_mismatches = []
-    try:
-        md = consumer.list_topics(topic, timeout=10)
-        if topic not in md.topics or md.topics[topic].error is not None:
-            print(f"Verification: cannot read metadata for {topic}")
-            return 1
-        partitions = sorted(md.topics[topic].partitions.keys())
-        num_partitions = len(partitions)
-        if num_partitions == 0:
-            print(f"Verification: topic {topic} has no partitions")
-            return 1
-
-        targets = {}
-        assignment = []
-        for p in partitions:
-            low, high = consumer.get_watermark_offsets(
-                TopicPartition(topic, p), timeout=10)
-            # Start from the baseline; if log retention has trimmed past it
-            # since baseline capture, fall back to current low watermark.
-            start = max(low, baseline.get(p, 0))
-            targets[p] = high
-            assignment.append(TopicPartition(topic, p, start))
-        consumer.assign(assignment)
-
-        current = {tp.partition: tp.offset for tp in assignment}
-
-        # Each partition can stop independently when its end watermark is hit.
-        # Allow up to ~60s of empty polls in a row before giving up — the
-        # measured run can take minutes, but post-flush the topic is fully
-        # readable so empty polls really do mean "we're caught up or stuck".
-        empty_budget_s = 60.0
-        last_progress_ns = time.time_ns()
-        progress_print_at = 0
-        progress_print_step = max(10000, expected_count // 20 if expected_count else 10000)
-
-        def caught_up():
-            return all(current[p] >= targets[p] for p in partitions)
-
-        while not caught_up():
-            msgs = consumer.consume(num_messages=1000, timeout=2.0)
-            if not msgs:
-                if (time.time_ns() - last_progress_ns) / 1e9 > empty_budget_s:
-                    break
-                continue
-            saw_data = False
-            for msg in msgs:
-                err = msg.error()
-                if err is not None:
-                    print(f"Verification consume error: {err}")
-                    continue
-                saw_data = True
-                consumed_count += 1
-                p = msg.partition()
-                current[p] = max(current[p], msg.offset() + 1)
-                if has_keys:
-                    key = msg.key()
-                    if key is None:
-                        mismatch_count += 1
-                        if len(sample_mismatches) < 5:
-                            sample_mismatches.append(
-                                f"partition={p} offset={msg.offset()} "
-                                "key=None (expected non-null)")
-                        continue
-                    expected_p = partition_for_key(bytes(key), num_partitions)
-                    if expected_p != p:
-                        mismatch_count += 1
-                        if len(sample_mismatches) < 5:
-                            sample_mismatches.append(
-                                f"partition={p} expected={expected_p} "
-                                f"offset={msg.offset()}")
-                if consumed_count >= progress_print_at:
-                    print(f"Verification: consumed {consumed_count} messages so far",
-                          end='\r')
-                    progress_print_at = consumed_count + progress_print_step
-            if saw_data:
-                last_progress_ns = time.time_ns()
-    finally:
-        consumer.close()
-
-    print()
-    count_ok = (consumed_count == expected_count)
-    partitions_ok = (not has_keys) or (mismatch_count == 0)
-
-    print(f"Consumer verification: consumed={consumed_count} "
-          f"expected={expected_count} "
-          f"(count_ok={count_ok})")
-    if has_keys:
-        print(f"Partition verification: mismatches={mismatch_count}/{consumed_count} "
-              f"(partitions_ok={partitions_ok})")
-        if sample_mismatches:
-            print("First mismatches:")
-            for s in sample_mismatches:
-                print(f"  {s}")
-    else:
-        print("Partition verification: skipped (no keys)")
-
-    return 0 if (count_ok and partitions_ok) else 1
-
-
 def v3_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=False)
     print_configuration(conf)
     conf = {k: str(v) for k, v in conf.items()}
-    return KafkaProducer(conf)
+    return KafkaProducer(configs=conf)
 
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
@@ -525,7 +390,7 @@ def v3_async_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=False)
     print_configuration(conf)
     conf = {k: str(v) for k, v in conf.items()}
-    return AsyncKafkaProducer(conf)
+    return AsyncKafkaProducer(configs=conf)
 
 
 def v2_async_producer(common_default_configuration):
@@ -618,7 +483,9 @@ def main(v2=False):
 
     if verify_consumed:
         try:
-            baseline_end_offsets = get_topic_end_offsets(bootstrap_servers, topic_name)
+            baseline_end_offsets = librdkafka_helpers.call(
+                "topic_end_offsets", bootstrap_servers=bootstrap_servers,
+                topic=topic_name, sasl_conf=sasl_config_from_env(v2=True))
             total_pre_existing = sum(baseline_end_offsets.values())
             print(f"Baseline: topic {topic_name} has {total_pre_existing} "
                   f"pre-existing messages across {len(baseline_end_offsets)} "
@@ -683,7 +550,7 @@ def main(v2=False):
                 while time.time_ns() < warmup_end_time:
                     message = generated_messages[i % generated_messages_len]
                     try:
-                        produce_call = producer.send(ProducerRecord(
+                        produce_call = producer.send(record=ProducerRecord(
                             topic=topic_name,
                             key=message[0],
                             value=message[1]
@@ -722,7 +589,7 @@ def main(v2=False):
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = producer.send(next_message)
+                    produce_call = producer.send(record=next_message)
                     produce_calls.put((produce_call, start_time))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
@@ -780,7 +647,7 @@ async def async_main():
     backpressure. Supports both async clients — the v3 Rust
     ``AsyncKafkaProducer`` and the v2 ``AsyncCompatibleProducer`` wrapping
     CKPy's ``AIOProducer`` — whose ``send`` coroutines both return the delivery
-    future (``produce_call = await producer.send(record)``).
+    future (``produce_call = await producer.send(record=record)``).
     """
     global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
     total_latency_ms = 0
@@ -807,7 +674,9 @@ async def async_main():
 
     if verify_consumed:
         try:
-            baseline_end_offsets = get_topic_end_offsets(bootstrap_servers, topic_name)
+            baseline_end_offsets = librdkafka_helpers.call(
+                "topic_end_offsets", bootstrap_servers=bootstrap_servers,
+                topic=topic_name, sasl_conf=sasl_config_from_env(v2=True))
             total_pre_existing = sum(baseline_end_offsets.values())
             print(f"Baseline: topic {topic_name} has {total_pre_existing} "
                   f"pre-existing messages across {len(baseline_end_offsets)} "
@@ -868,7 +737,7 @@ async def async_main():
                 while time.time_ns() < warmup_end_time:
                     message = generated_messages[i % generated_messages_len]
                     try:
-                        produce_call = await producer.send(ProducerRecord(
+                        produce_call = await producer.send(record=ProducerRecord(
                             topic=topic_name,
                             key=message[0],
                             value=message[1]
@@ -908,7 +777,7 @@ async def async_main():
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = await producer.send(next_message)
+                    produce_call = await producer.send(record=next_message)
                     await produce_calls.put((produce_call, start_time))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
@@ -1075,9 +944,11 @@ if __name__ == "__main__":
               f"(expected = {warmup_sent} warmup + {measured_sent} measured "
               f"= {expected})")
         try:
-            exit_code = verify_consumed_messages(
-                bootstrap_servers, topic_name,
-                baseline_end_offsets, expected, key_size > 0)
+            exit_code = librdkafka_helpers.call(
+                "verify_consumed_messages", bootstrap_servers=bootstrap_servers,
+                topic=topic_name, baseline=baseline_end_offsets,
+                expected_count=expected, has_keys=key_size > 0,
+                sasl_conf=sasl_config_from_env(v2=True))
         except Exception as e:
             print(f"Verification failed with exception: {e}")
             exit_code = 1

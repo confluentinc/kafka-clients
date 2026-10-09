@@ -54,8 +54,10 @@ from admin import (
     _to_partition_info,
     _close_ms, _ms,
 )
-import producer
-from producer import KafkaError
+# The admin binding is paused and keeps its flat ``KafkaError`` (code /
+# is_retriable / is_fatal). It now lives in the private package shim that
+# replaced the retired top-level ``producer.py``.
+from confluent_kafka._legacy_compat import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
 UNKNOWN_TOPIC_OR_PARTITION = 3
@@ -1819,7 +1821,8 @@ def test_to_error_derives_txn_requires_abort_from_code():
     derived from the code instead. `txn_requires_abort` must be a bool (not raise
     AttributeError), True only for TRANSACTION_ABORTABLE (120).
 
-    `test_producer.py:993-1024` separately covers the live-handle `_from_c` path.
+    The live-handle `_from_c` path reads the flag from the Rust predicate
+    (`KafkaError_txn_requires_abort`) instead.
     """
     abortable = _to_error((120, "aborted", 0, 0))
     assert abortable.txn_requires_abort is True
@@ -1830,14 +1833,6 @@ def test_to_error_derives_txn_requires_abort_from_code():
     assert not_abortable.txn_requires_abort is False
     assert not_abortable.code == 69
     assert not_abortable.message == "nope"
-
-
-def test_txn_abortable_constant_matches_generated_error_code():
-    """Drift guard: producer._TRANSACTION_ABORTABLE is duplicated from the
-    generated `_error_code.py` (not shipped, so not importable at runtime) and
-    must stay in lock-step with `kafka_common_ErrorCode_t`."""
-    import _error_code as ec
-    assert producer._TRANSACTION_ABORTABLE == ec.TRANSACTION_ABORTABLE
 
 
 def test_describe_missing_topic_per_key_error_has_txn_requires_abort():

@@ -1943,6 +1943,41 @@ impl RecordAccumulator {
         }
     }
 
+    /// The headers of every record queued for `tp`, as `(key, value)` pairs per
+    /// record, in queue and append order.
+    ///
+    /// Test-only, like [`Self::base_sequences_for_test`]: it builds each queued
+    /// batch's records (Java's `ProducerBatch.records()`) to read them back, so a
+    /// producer-level test can see what a send appended.
+    #[cfg(test)]
+    pub(crate) fn record_headers_for_test(&self, tp: &TopicPartition) -> Vec<Vec<(String, Option<Vec<u8>>)>> {
+        use crate::common::header::Header;
+        use crate::common::record::internal::Record;
+
+        let Some(topic_info) = self.topic_info_map.get(tp.topic()).map(|ti| Arc::clone(ti.value())) else {
+            return Vec::new();
+        };
+        let Some(deque) = topic_info.batches.get(&tp.partition()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for batch in deque.lock().unwrap().iter_mut() {
+            let records = batch.records();
+            for record_batch in records.batches() {
+                for record in record_batch.iter_records().unwrap() {
+                    out.push(
+                        record
+                            .headers()
+                            .iter()
+                            .map(|h| (h.key().to_string(), h.value().map(<[u8]>::to_vec)))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
     /// Whether adaptive partitioning is enabled on this accumulator.
     ///
     /// Test-only. `KafkaProducer` disables adaptive partitioning whenever a custom
