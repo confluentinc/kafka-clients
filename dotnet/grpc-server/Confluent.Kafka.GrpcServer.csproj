@@ -95,4 +95,15 @@
     <ProjectReference Include="../src/Confluent.Kafka/Confluent.Kafka.csproj" />
   </ItemGroup>
 
+  <!--
+    M18/P1 S2: the gRPC-server unit tests (dotnet/tests/Confluent.Kafka.GrpcServer.UnitTests,
+    a local gate outside the solution) drive the internal chaos servicer through its internal
+    client-factory constructor (PLAN §5.1 D10). Every assembly here is strong-named
+    (Directory.Build.props), so the grant carries the shared public key, as in the soak and
+    library projects.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Confluent.Kafka.GrpcServer.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+  </ItemGroup>
+
 </Project>

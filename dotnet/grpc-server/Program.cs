@@ -33,12 +33,14 @@ namespace Confluent.Kafka.GrpcServer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Flavor selector (M8/P2; producer M12/P1).</b> <c>CONSUMER_FLAVOR=async</c> hosts the
-/// asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c>
-/// + <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c>); anything else
-/// (including unset, the sync default) hosts the synchronous servicers
-/// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/> +
-/// <see cref="AdminServiceImpl"/>; admin is sync-only, M15/P12 D1). Each image bakes its
+/// <b>Flavor selector (M8/P2; producer M12/P1; chaos M18/P1).</b> <c>CONSUMER_FLAVOR=async</c>
+/// hosts the asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over
+/// <c>AsyncKafkaProducer</c> + <see cref="AsyncConsumerServiceImpl"/> over
+/// <c>AsyncKafkaConsumer</c>); anything else (including unset, the sync default) hosts the
+/// synchronous servicers (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/> +
+/// <see cref="AdminServiceImpl"/>; admin is sync-only, M15/P12 D1). The chaos-harness service
+/// follows the flavor too: the sync flavor hosts <see cref="ChaosWorkloadServiceImpl"/> over the
+/// synchronous clients (the <c>dotnet</c> workload backend). Each image bakes its
 /// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
 /// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
 /// the harness sets it explicitly for each backend kind instead (backend_pool.rs
@@ -116,6 +118,10 @@ internal static class Program
             // IAsyncAdmin, so an async arm would drive the same AdminServiceImpl over the
             // same single IAdmin — byte-identical managed code for zero extra coverage.
             builder.Services.AddSingleton<AdminServiceImpl>();
+
+            // The chaos service (M18/P1) is a singleton for the same reason: its workload
+            // registry is how StopWorkload / MarkWorkload find a running RunProducer / RunConsumer.
+            builder.Services.AddSingleton<ChaosWorkloadServiceImpl>();
         }
 
         WebApplication app = builder.Build();
@@ -129,6 +135,7 @@ internal static class Program
             app.MapGrpcService<ProducerServiceImpl>();
             app.MapGrpcService<ConsumerServiceImpl>();
             app.MapGrpcService<AdminServiceImpl>();
+            app.MapGrpcService<ChaosWorkloadServiceImpl>();
         }
 
         app.Start();
@@ -209,6 +216,9 @@ internal static class Program
                 app.Services.GetRequiredService<ConsumerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<ProducerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<AdminServiceImpl>().Dispose();
+
+                // Stops every chaos workload and waits, bounded, for their drains (PLAN §5.8).
+                app.Services.GetRequiredService<ChaosWorkloadServiceImpl>().Dispose();
             }
         }
         catch (Exception ex)
