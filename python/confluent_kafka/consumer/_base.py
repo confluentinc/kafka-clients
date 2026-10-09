@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._async import Undelivered
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error, to_ffi_id
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
@@ -370,6 +371,8 @@ class _ConsumerState:
         # is registered once per consumer, so a call the guard rejects cannot
         # take it from the call in flight.
         self._async_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+        # The awaiting calls' results on their way to their loop (AsyncConsumer).
+        self._undelivered = Undelivered()
         # The thread running commit_nowait()'s synchronous FFI call while a
         # listener is registered (each call hands its commit callbacks back to
         # its own caller through a _Forward).
@@ -482,6 +485,8 @@ class _ConsumerState:
             handle, self._h = self._h, 0
             reentrant, self._reentrant_handle = self._reentrant_handle, 0
             helper, self._commit_helper = self._commit_helper, None
+        # What is left for an event loop that has closed is freed.
+        self._undelivered.free_closed()
         if helper is not None:
             helper.shutdown(wait=False)
         if reentrant:
@@ -773,7 +778,11 @@ class _ConsumerState:
         and re-raises ``CancelledError``.
 
         It first lets a ``commit_nowait()`` still awaiting a coroutine listener
-        finish (``after_commit_nowait``), and raises that commit's failure."""
+        finish (``after_commit_nowait``), and raises that commit's failure.
+
+        The results of earlier calls left for an event loop that has closed are
+        freed first (see :class:`~confluent_kafka._async.Undelivered`)."""
+        self._undelivered.free_closed()
         if after_commit_nowait and not self._in_callback():
             await self._await_commit_continuation()
         loop = asyncio.get_running_loop()
@@ -790,10 +799,7 @@ class _ConsumerState:
             pending.set()
 
         def cb(*payload: Any) -> None:
-            if loop.is_closed():
-                free(payload)
-                return
-            loop.call_soon_threadsafe(deliver, payload)
+            self._undelivered.hand_over(loop, deliver, payload, free)
 
         cancelled: asyncio.CancelledError | None = None
         with self._use() as h:

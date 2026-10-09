@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import UNSET
-from confluent_kafka._async import await_to_end
+from confluent_kafka._async import Undelivered, await_to_end
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -108,6 +108,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # on that loop in one scheduled call.
         self._pending: dict[asyncio.AbstractEventLoop, list[_Pending]] = {}
         self._pending_lock = threading.Lock()
+        # The results of the other async operations on their way to their loop.
+        self._undelivered = Undelivered()
 
     async def init_transactions(self) -> None:
         """See :meth:`Producer.init_transactions`."""
@@ -212,7 +214,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                     pending = self._pending[loop] = []
                 pending.append((future, callback, topic, partition, result, error))
             if schedule:
-                loop.call_soon_threadsafe(self._complete_pending, loop)
+                try:
+                    loop.call_soon_threadsafe(self._complete_pending, loop)
+                except RuntimeError:  # the loop closed since the check
+                    with self._pending_lock:
+                        refused = self._pending.pop(loop, [])
+                    self._drop(refused)
 
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
@@ -295,13 +302,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         loop has closed never completes: it is untracked instead of waited for,
         and its completion is dropped with :func:`_drop_completion`'s warning,
         when it arrives (see ``send``) or, if it arrived while the loop was
-        open but was left for the loop to run, here."""
-        with self._pending_lock:
-            closed_loops = [loop for loop in self._pending if loop.is_closed()]
-            stranded = [item for loop in closed_loops for item in self._pending.pop(loop)]
-        for future, _callback, topic, partition, result, error in stranded:
-            _drop_completion(topic, partition, result, error)
-            self._futures.discard(future)
+        open but was left for the loop to run, here (and in ``close()``)."""
+        self._drop_stranded()
         completable: list[Any] = []
         for future in sent:
             if future.get_loop().is_closed():
@@ -309,6 +311,21 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             else:
                 completable.append(future)
         return completable
+
+    def _drop_stranded(self) -> None:
+        """Drop the completions left for event loops that have closed: the
+        scheduled call that would resolve them on the loop never runs."""
+        with self._pending_lock:
+            closed_loops = [loop for loop in self._pending if loop.is_closed()]
+            stranded = [item for loop in closed_loops for item in self._pending.pop(loop)]
+        self._drop(stranded)
+
+    def _drop(self, items: list[_Pending]) -> None:
+        """Drop completions whose event loop has closed, untracking their
+        futures (see :func:`_drop_completion`)."""
+        for future, _callback, topic, partition, result, error in items:
+            _drop_completion(topic, partition, result, error)
+            self._futures.discard(future)
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
         """See :meth:`Producer.partitions_for`."""
@@ -371,6 +388,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                 await await_to_end(teardown)
             finally:
                 self._close_serializers()
+                # What is left for an event loop that has closed is freed.
+                self._undelivered.free_closed()
+                self._drop_stranded()
 
     def _teardown(self, c_producer: int, force: bool) -> None:
         if force:
@@ -419,21 +439,23 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """Submit an ``_async`` FFI operation and await its completion payload
         on the loop. The completion runs on the producer's dispatcher thread and
         hops onto the loop via ``call_soon_threadsafe``; a payload nobody awaits
-        any more (a cancelled task) has its handles freed."""
+        any more (a cancelled task, a closed loop) has its handles freed (see
+        :class:`~confluent_kafka._async.Undelivered`)."""
+        self._undelivered.free_closed()
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
 
+        def free(payload: tuple[Any, ...]) -> None:
+            free_payload(payload, partitions)
+
         def deliver(payload: tuple[Any, ...]) -> None:
             if fut.done():
-                free_payload(payload, partitions)
+                free(payload)
                 return
             fut.set_result(payload)
 
         def cb(*payload: Any) -> None:
-            if loop.is_closed():
-                free_payload(payload, partitions)
-                return
-            loop.call_soon_threadsafe(deliver, payload)
+            self._undelivered.hand_over(loop, deliver, payload, free)
 
         submit(cb)
         return await fut

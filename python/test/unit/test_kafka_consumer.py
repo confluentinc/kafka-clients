@@ -1323,6 +1323,54 @@ def test_cancelling_an_async_poll_wakes_the_consumer_and_lets_it_end() -> None:
     asyncio.run(main())
 
 
+def test_an_async_result_its_closing_loop_refuses_is_freed(
+        hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
+        capfd: pytest.CaptureFixture[str]) -> None:
+    # The awaiting call's task waits on a loop that stopped; the loop is open
+    # when the call's result (position()'s error for a partition not assigned)
+    # checks it, then closes before call_soon_threadsafe. The result is freed
+    # on the dispatcher thread instead of the RuntimeError reaching the C
+    # trampoline, which printed it and left the result's handles allocated.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_async")
+    stopped_loop.start(consumer.position(partition=TP0))
+    assert held.submitted.is_set()
+    loop = stopped_loop.loop
+    loop.close()
+    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+    capfd.readouterr()
+    held.release.set()
+    assert held.delivered.wait(WAIT)
+    del loop.is_closed
+    ((_, error),) = held.payloads
+    assert error
+    assert held.raised == []
+    assert capfd.readouterr().err == ""
+    assert freed_errors == [error]
+    stopped_loop.abandon()  # the call's task gives its use of the consumer back
+    asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+
+
+def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
+        hold_completion: Any, freed_errors: list[int], stopped_loop: Any) -> None:
+    # The result reaches its loop while the loop is stopped, and the loop then
+    # closes, which discards the queued delivery: the consumer's next awaiting
+    # call, from another loop, frees it.
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    held = hold_completion("Consumer_position_async")
+    stopped_loop.start(consumer.position(partition=TP0))
+    held.release.set()
+    assert held.delivered.wait(WAIT)
+    stopped_loop.loop.close()
+    ((_, error),) = held.payloads
+    assert error
+    assert freed_errors == []
+    asyncio.run(consumer.assign(partitions=[TP0]))
+    assert freed_errors == [error]
+    stopped_loop.abandon()  # the call's task gives its use of the consumer back
+    asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+
+
 def test_wakeup_before_poll_raises_once() -> None:
     with new_consumer() as consumer:
         consumer.subscribe(topics=[TOPIC])

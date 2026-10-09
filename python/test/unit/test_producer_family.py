@@ -1798,6 +1798,116 @@ def test_a_completion_left_for_a_closed_loop_is_dropped_by_the_next_flush(
     assert _dropped(caplog) == [DROPPED]
 
 
+def test_a_completion_its_closing_loop_refuses_is_dropped(
+        hold_completion: Any, caplog: pytest.LogCaptureFixture,
+        capfd: pytest.CaptureFixture[str]) -> None:
+    # The loop is open when the completion checks it, then closes before
+    # call_soon_threadsafe, which raises RuntimeError on the C completion
+    # thread: the completion is dropped there, with one warning, instead of the
+    # error reaching the C trampoline (which printed it) and the completion
+    # waiting for a later flush().
+    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    held = hold_completion("Producer_send")
+    ran: list[Exception | None] = []
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.run_until_complete(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+    finally:
+        loop.close()
+    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+    capfd.readouterr()
+    held.release.set()
+    assert held.delivered.wait(30)
+    del loop.is_closed
+    assert held.raised == []
+    assert capfd.readouterr().err == ""
+    assert loop not in p._pending  # noqa: SLF001
+    assert future not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.done()
+    assert _dropped(caplog) == [DROPPED]
+    asyncio.run(p.close())
+
+
+def test_a_completion_left_for_a_closed_loop_is_dropped_by_close(
+        hold_completion: Any, caplog: pytest.LogCaptureFixture) -> None:
+    # As by the next flush(), with no flush(): close() drops it, with one
+    # warning.
+    caplog.set_level(logging.WARNING, logger="confluent_kafka.producer")
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    held = hold_completion("Producer_send")
+    ran: list[Exception | None] = []
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.run_until_complete(
+            p.send(record=RECORD, callback=lambda md, e: ran.append(e)))
+        held.release.set()
+        assert held.delivered.wait(30)
+        assert loop in p._pending  # noqa: SLF001
+    finally:
+        loop.close()
+    asyncio.run(asyncio.wait_for(p.close(), 10))
+    assert loop not in p._pending  # noqa: SLF001
+    assert future not in p._futures  # noqa: SLF001
+    assert ran == []
+    assert not future.done()
+    assert _dropped(caplog) == [DROPPED]
+
+
+def test_an_operation_result_its_closing_loop_refuses_is_freed(
+        hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
+        capfd: pytest.CaptureFixture[str]) -> None:
+    # The same race for the result of an operation (begin_transaction()'s
+    # error on a non-transactional producer), whose task waits on a loop that
+    # stopped: the loop is open when the result checks it, then closes before
+    # call_soon_threadsafe. The result is freed on the dispatcher thread
+    # instead of the RuntimeError reaching the C trampoline, which printed it
+    # and left the result's handles allocated.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    held = hold_completion("Producer_begin_transaction_async")
+    stopped_loop.start(p.begin_transaction())
+    assert held.submitted.is_set()
+    loop = stopped_loop.loop
+    loop.close()
+    loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
+    capfd.readouterr()
+    held.release.set()
+    assert held.delivered.wait(30)
+    del loop.is_closed
+    ((error,),) = held.payloads
+    assert error
+    assert held.raised == []
+    assert capfd.readouterr().err == ""
+    assert freed_errors == [error]
+    asyncio.run(p.close())
+
+
+@pytest.mark.parametrize("call", ["flush", "close"])
+def test_an_operation_result_left_for_a_closed_loop_is_freed_by_the_next_call(
+        call: str, hold_completion: Any, freed_errors: list[int], stopped_loop: Any) -> None:
+    # The result reaches its loop while the loop is stopped, and the loop then
+    # closes, which discards the queued delivery: the next operation of the
+    # producer, from another loop, frees it.
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    held = hold_completion("Producer_begin_transaction_async")
+    stopped_loop.start(p.begin_transaction())
+    held.release.set()
+    assert held.delivered.wait(30)
+    stopped_loop.loop.close()
+    ((error,),) = held.payloads
+    assert error
+    assert freed_errors == []
+
+    async def next_call_then_close() -> None:
+        await asyncio.wait_for(getattr(p, call)(), 10)
+        await asyncio.wait_for(p.close(), 10)
+
+    asyncio.run(next_call_then_close())
+    assert freed_errors == [error]
+
+
 async def test_async_begin_transaction_is_a_coroutine_and_does_not_block_the_loop() -> None:
     # Its entry point has an _async form, so begin_transaction() is a
     # coroutine (Class family). Critic 75 N1: a record still waiting for its
