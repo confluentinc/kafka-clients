@@ -508,9 +508,11 @@ impl ProducerConfig {
                     config.max_block_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::ACKS_CONFIG => {
-                    // `in("all", "-1", "0", "1")`: `ConfigDef.ValidString` matches
-                    // the trimmed value exactly (case-sensitive) before `parseAcks`
-                    // runs.
+                    // `in("all", "-1", "0", "1")` (`ProducerConfig.java:391-394`):
+                    // `ConfigDef.ValidString.ensureValid` (`ConfigDef.java:1114`)
+                    // matches the trimmed value exactly (case-sensitive) before
+                    // `parseAcks` runs, so ` all ` is accepted, `ALL`/`2` are not,
+                    // and the error prints the trimmed value.
                     let trimmed = value.trim();
                     if !Self::ACKS_VALID_STRINGS.contains(&trimmed) {
                         return Err(Error::config_name_value_message(
@@ -638,10 +640,12 @@ impl ProducerConfig {
                     config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    // `new ConfigDef.NonEmptyString()` on the trimmed value
-                    // (`ConfigDef.parseType` trims a `STRING`): an empty id is
-                    // rejected, not read as "no transactional id". An absent key is
-                    // Java's `null` default.
+                    // `new ConfigDef.NonEmptyString()` (`ProducerConfig.java:537-540`
+                    // → `ConfigDef.java:1223-1231`) on the trimmed value
+                    // (`ConfigDef.parseType` trims a `STRING`): an empty or blank id
+                    // is rejected, not read as "no transactional id", and the error
+                    // prints the trimmed (empty) value; ` my-txn ` is stored as
+                    // `my-txn`. An absent key is Java's `null` default.
                     let trimmed = value.trim();
                     if trimmed.is_empty() {
                         return Err(Error::config_name_value_message(key, trimmed, "String must be non-empty"));
@@ -942,7 +946,7 @@ impl ProducerConfig {
     }
 
     /// The `in("all", "-1", "0", "1")` validator of `acks`
-    /// (`ProducerConfig.java:392-397`).
+    /// (`ProducerConfig.java:391-394`).
     const ACKS_VALID_STRINGS: [&'static str; 4] = ["all", "-1", "0", "1"];
 
     /// Java's `ConfigDef.Range.atLeast(min)`: a `value` below `min` is rejected
@@ -970,11 +974,23 @@ impl ProducerConfig {
     }
 
     /// Parses a string value as `bool`.
+    ///
+    /// Java's `ConfigDef.parseType(BOOLEAN)` (`ConfigDef.java:701-735`) trims the
+    /// value, then accepts `equalsIgnoreCase("true")` / `("false")`; anything else
+    /// throws `ConfigException(name, value, "Expected value to be either true or
+    /// false")`, where `value` is the **original, untrimmed** string.
     fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
-        match value.trim() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(Error::config_name_value(key, value)),
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("true") {
+            Ok(true)
+        } else if trimmed.eq_ignore_ascii_case("false") {
+            Ok(false)
+        } else {
+            Err(Error::config_name_value_message(
+                key,
+                value,
+                "Expected value to be either true or false",
+            ))
         }
     }
 
@@ -985,6 +1001,12 @@ impl ProducerConfig {
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
+    ///
+    /// [`from_properties`](Self::from_properties) applies the
+    /// `in("all", "-1", "0", "1")` validator first (as Java's `ConfigDef` runs
+    /// `ConfigDef.ValidString` before `parseAcks`), so the numeric-parse error
+    /// branch below is unreachable through that path — it fires only when
+    /// `parse_acks` is called directly, exactly as in Java.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
     pub(crate) fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
@@ -1405,23 +1427,37 @@ mod tests {
 
     #[test]
     fn test_new_transactional_id() {
-        let mut props = base_props();
-        props.insert("transactional.id".to_string(), "my-txn".to_string());
-        let config = ProducerConfig::new(&props).unwrap();
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", "my-txn")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Java's `NonEmptyString` validator rejects an empty (or blank, after the
-        // `STRING` trim) id; only an absent key means "no transactional id".
-        for empty in ["", "  "] {
-            let mut props = base_props();
-            props.insert("transactional.id".to_string(), empty.to_string());
-            let error = ProducerConfig::new(&props).expect_err("an empty transactional.id is rejected");
-            assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        // Java trims before validating (`ConfigDef.parseType(STRING)`), so a padded
+        // id is stored trimmed.
+        let config = ProducerConfig::new(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
+        assert_eq!(config.transactional_id, Some("my-txn".to_string()));
+
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:537-540`
+        // → `ConfigDef.java:1223-1231`) rejects an empty string; a whitespace-only
+        // id trims to empty and is rejected the same way. The error prints the
+        // trimmed (empty) value, so "Invalid value " is followed by two spaces.
+        for raw in ["", "   "] {
+            let error = ProducerConfig::new(&props_with(&[("transactional.id", raw)]))
+                .expect_err("an empty transactional.id must be rejected");
             assert_eq!(
                 error.message(),
-                "Invalid value  for configuration transactional.id: String must be non-empty"
+                "Invalid value  for configuration transactional.id: String must be non-empty",
+                "for transactional.id={raw:?}"
+            );
+            assert!(
+                matches!(error, Error::Config(_)),
+                "for transactional.id={raw:?}: expected Error::Config, got {error:?}"
+            );
+            assert!(
+                error.is_kafka_error(),
+                "for transactional.id={raw:?}: a config error is a Kafka error"
             );
         }
+
+        // Only an absent key means "no transactional id" (Java's `null` default).
         assert_eq!(ProducerConfig::new(&base_props()).unwrap().transactional_id, None);
     }
 
@@ -1469,21 +1505,28 @@ mod tests {
         }
     }
 
-    /// `acks` is `in("all", "-1", "0", "1")`, matched exactly on the trimmed value
-    /// (`ConfigDef.ValidString`), before `parseAcks`.
+    /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
+    /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
+    /// "0", "1")` (`ProducerConfig.java:391-394`, `ConfigDef.java:1114`), which
+    /// runs before `parseAcks`. The error names the trimmed value because the
+    /// validator runs on the parsed (trimmed) value; the check is exact-match, so
+    /// `ALL` and `2` are rejected while a padded ` all ` is accepted.
     #[test]
     fn test_acks_valid_strings() {
         for (acks, expected) in [("all", -1), (" all ", -1), ("-1", -1), ("0", 0), ("1", 1)] {
             let props = props_with(&[("acks", acks), ("enable.idempotence", "false")]);
             assert_eq!(ProducerConfig::new(&props).unwrap().acks, expected, "acks={acks:?}");
         }
-        for acks in ["ALL", "2", "invalid"] {
+        // Rejected: wrong case, out-of-range numbers and non-numbers. Each is a
+        // `ConfigException` (a Kafka error) naming the value.
+        for acks in ["ALL", "2", "-2", "100", "invalid"] {
             let error = ProducerConfig::new(&props_with(&[("acks", acks)])).expect_err("rejected");
             assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
             assert_eq!(
                 error.message(),
                 format!("Invalid value {acks} for configuration acks: String must be one of: all, -1, 0, 1"),
             );
+            assert!(error.is_kafka_error(), "for acks={acks}: a config error is a Kafka error");
         }
     }
 
@@ -1505,16 +1548,47 @@ mod tests {
         assert!(error.is_kafka_error());
     }
 
+    /// Boolean config values are parsed case-insensitively after trimming, and an
+    /// unparseable value is rejected with Java's message and the original,
+    /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
+    /// (`ConfigDef.java:701-735`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// `ConfigException(name, value, "Expected value to be either true or false")`.
+    #[test]
+    fn test_parse_bool_matches_java_boolean() {
+        // Accepted regardless of case, and after trimming surrounding whitespace.
+        for raw in ["true", "True", "TRUE"] {
+            let config = ProducerConfig::new(&props_with(&[("enable.idempotence", raw)]))
+                .unwrap_or_else(|e| panic!("enable.idempotence={raw} should be valid: {e:?}"));
+            assert!(config.enable_idempotence, "for enable.idempotence={raw}");
+        }
+        for raw in ["false", "False", " false "] {
+            let config = ProducerConfig::new(&props_with(&[("enable.idempotence", raw)]))
+                .unwrap_or_else(|e| panic!("enable.idempotence={raw} should be valid: {e:?}"));
+            assert!(!config.enable_idempotence, "for enable.idempotence={raw}");
+        }
+
+        // Rejected: a non-boolean string. Java prints the original (untrimmed) value.
+        let error = ProducerConfig::new(&props_with(&[("enable.idempotence", "yes")]))
+            .expect_err("a non-boolean enable.idempotence must be rejected");
+        assert_eq!(
+            error.message(),
+            "Invalid value yes for configuration enable.idempotence: Expected value to be either true or false",
+        );
+        assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        assert!(error.is_kafka_error());
+    }
+
     /// Every `ConfigException` this config raises must answer `true` to
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
-    /// The six sites are the `acks` validator (`ConfigDef.ValidString`, which runs
-    /// before Java's `parseAcks` at `ProducerConfig.java:657`) and the five throws
-    /// in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`, `:621`,
-    /// `:635`, `:645`). They all used to be `IllegalArgumentException`,
-    /// which sits *beside* `KafkaException` rather than below it, so
-    /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
-    /// that a bad `linger.ms` did not.
+    /// The six sites are the `acks` `ConfigDef.ValidString` validator
+    /// (`ProducerConfig.java:391-394` → `ConfigDef.java:1114`, which runs before
+    /// Java's `parseAcks` at `:657`) and the five throws in
+    /// `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`, `:621`, `:635`,
+    /// `:645`). They all used to be `IllegalArgumentException`, which sits
+    /// *beside* `KafkaException` rather than below it, so `is_kafka_error()`
+    /// answered `false` and a bad `acks` slipped past a caller that a bad
+    /// `linger.ms` did not.
     #[test]
     fn config_errors_are_inside_the_kafka_error_hierarchy() {
         let cases: [(&[(&str, &str)], &str); 6] = [
