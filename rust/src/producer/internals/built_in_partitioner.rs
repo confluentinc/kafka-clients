@@ -309,15 +309,20 @@ impl BuiltInPartitioner {
             return;
         }
 
+        // Java performs this arithmetic on `int` (`addAndGet`, `stickyBatchSize * 2`),
+        // which wraps on overflow. The wrapping operations preserve that behavior.
         let produced_bytes = {
             let info = self.sticky_partition_info.as_ref().unwrap();
-            info.produced_bytes.fetch_add(appended_bytes, Ordering::Relaxed) + appended_bytes
+            info.produced_bytes
+                .fetch_add(appended_bytes, Ordering::Relaxed)
+                .wrapping_add(appended_bytes)
         };
+        let twice_sticky_batch_size = self.sticky_batch_size.wrapping_mul(2);
 
         // We're trying to switch partition once we produce sticky_batch_size bytes to a partition
         // but doing so may hinder batching because partition switch may happen while batch isn't
         // ready to send.
-        if produced_bytes >= self.sticky_batch_size * 2 {
+        if produced_bytes >= twice_sticky_batch_size {
             kafka_trace!(
                 self.log_context,
                 "Produced {} bytes, exceeding twice the batch size of {} bytes, with switching set to {}",
@@ -327,7 +332,7 @@ impl BuiltInPartitioner {
             );
         }
 
-        if (produced_bytes >= self.sticky_batch_size && enable_switch) || produced_bytes >= self.sticky_batch_size * 2 {
+        if (produced_bytes >= self.sticky_batch_size && enable_switch) || produced_bytes >= twice_sticky_batch_size {
             // We've produced enough to this partition, switch to next.
             let new_partition = self.next_partition(cluster);
             self.sticky_partition_info = Some(StickyPartitionInfo::new(new_partition));
@@ -499,11 +504,13 @@ mod tests {
 
             let produced_bytes = {
                 let info = self.inner.sticky_partition_info.as_ref().unwrap();
-                info.produced_bytes.fetch_add(appended_bytes, Ordering::Relaxed) + appended_bytes
+                info.produced_bytes
+                    .fetch_add(appended_bytes, Ordering::Relaxed)
+                    .wrapping_add(appended_bytes)
             };
 
             if (produced_bytes >= self.inner.sticky_batch_size && enable_switch)
-                || produced_bytes >= self.inner.sticky_batch_size * 2
+                || produced_bytes >= self.inner.sticky_batch_size.wrapping_mul(2)
             {
                 let new_partition = self.next_partition(cluster);
                 self.inner.sticky_partition_info = Some(StickyPartitionInfo::new(new_partition));
@@ -724,6 +731,55 @@ mod tests {
                 frequencies[i]
             );
         }
+    }
+
+    /// A sticky batch size of 2^30 or more makes `stickyBatchSize * 2` wrap to a
+    /// negative value, so each append switches the partition, including when
+    /// switching is disabled. This matches Java.
+    #[test]
+    fn test_sticky_batch_size_doubled_wraps_as_in_java() {
+        let nodes = make_nodes();
+        let partitions = vec![
+            PartitionInfo::new(TOPIC_A.to_string(), 0, Some(nodes[0].clone()), nodes.clone(), nodes.clone()),
+            PartitionInfo::new(TOPIC_A.to_string(), 1, Some(nodes[1].clone()), nodes.clone(), nodes.clone()),
+        ];
+        let cluster = make_cluster(&nodes, partitions);
+
+        let mut partitioner = BuiltInPartitioner::new(&topic_arc(TOPIC_A), 1 << 30);
+        partitioner.peek_current_partition_info(&cluster);
+        partitioner.update_partition_info_with_switch(1, &cluster, false);
+
+        let info = partitioner
+            .sticky_partition_info
+            .as_ref()
+            .expect("a new sticky partition is chosen");
+        assert_eq!(
+            0,
+            info.produced_bytes.load(Ordering::Relaxed),
+            "the sticky partition was replaced, as in Java"
+        );
+    }
+
+    /// The produced byte count wraps past `i32::MAX`, as with Java's `addAndGet`. The
+    /// wrapped count is below `stickyBatchSize * 2`, so the partition is retained
+    /// when switching is disabled.
+    #[test]
+    fn test_produced_bytes_wraps_as_in_java() {
+        let nodes = make_nodes();
+        let partitions = vec![
+            PartitionInfo::new(TOPIC_A.to_string(), 0, Some(nodes[0].clone()), nodes.clone(), nodes.clone()),
+            PartitionInfo::new(TOPIC_A.to_string(), 1, Some(nodes[1].clone()), nodes.clone(), nodes.clone()),
+        ];
+        let cluster = make_cluster(&nodes, partitions);
+
+        let mut partitioner = BuiltInPartitioner::new(&topic_arc(TOPIC_A), (1 << 30) - 1);
+        let partition = partitioner.peek_current_partition_info(&cluster).partition();
+        partitioner.update_partition_info_with_switch(1 << 30, &cluster, false);
+        partitioner.update_partition_info_with_switch(1 << 30, &cluster, false);
+
+        let info = partitioner.sticky_partition_info.as_ref().expect("sticky partition is set");
+        assert_eq!(partition, info.partition(), "the partition is not switched");
+        assert_eq!(i32::MIN, info.produced_bytes.load(Ordering::Relaxed));
     }
 
     /// Translated from `BuiltInPartitionerTest.testStickyBatchSizeMoreThatZero`.

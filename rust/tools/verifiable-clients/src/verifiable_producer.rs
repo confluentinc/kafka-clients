@@ -297,9 +297,11 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
         match self.repeating_keys {
             Some(repeating_keys) => {
                 // Java uses post-increment: the key is the current counter, then
-                // it advances and wraps back to 0 on reaching `repeatingKeys`.
+                // it advances and wraps back to 0 on reaching `repeatingKeys`. The
+                // increment wraps on overflow, as Java's `int` does; this applies when
+                // `repeatingKeys` is not positive.
                 let key = self.key_counter.to_string();
-                self.key_counter += 1;
+                self.key_counter = self.key_counter.wrapping_add(1);
                 if self.key_counter == repeating_keys {
                     self.key_counter = 0;
                 }
@@ -731,6 +733,16 @@ mod tests {
         assert_eq!(producer.get_key().as_deref(), Some("2"));
         assert_eq!(producer.get_key().as_deref(), Some("0"));
         assert_eq!(producer.get_key().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn get_key_counter_wraps_on_overflow() {
+        // A non-positive `repeatingKeys` is never reached, so the counter wraps
+        // past `i32::MAX`, as Java's `int` does.
+        let mut producer = verifiable_with(None, Some(0));
+        producer.key_counter = i32::MAX;
+        assert_eq!(producer.get_key().as_deref(), Some("2147483647"));
+        assert_eq!(producer.get_key().as_deref(), Some("-2147483648"));
     }
 
     // ---- send / callback obligation ----------------------------------------
