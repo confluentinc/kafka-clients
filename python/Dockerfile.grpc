@@ -46,6 +46,7 @@ COPY python/admin.py /workspace/python/admin.py
 COPY rust/multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
 COPY rust/multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
 COPY rust/multilanguage-test-server/proto/admin_service.proto /workspace/proto/admin_service.proto
+COPY rust/multilanguage-test-server/proto/chaos_service.proto /workspace/proto/chaos_service.proto
 
 # Build _confluentkafka.so. setup.py reads CONFLUENT_KAFKA_LIB_DIR for
 # the Rust shared lib location.
@@ -64,7 +65,8 @@ RUN pip install --no-cache-dir -r /workspace/python/requirements-grpc-tools.txt 
         -Iproto \
         --python_out=/workspace/python \
         --grpc_python_out=/workspace/python \
-        proto/producer_service.proto proto/consumer_service.proto proto/admin_service.proto
+        proto/producer_service.proto proto/consumer_service.proto proto/admin_service.proto \
+        proto/chaos_service.proto
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
@@ -91,8 +93,12 @@ COPY --from=builder /workspace/python/consumer_service_pb2.py /app/consumer_serv
 COPY --from=builder /workspace/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
 COPY --from=builder /workspace/python/admin_service_pb2.py /app/admin_service_pb2.py
 COPY --from=builder /workspace/python/admin_service_pb2_grpc.py /app/admin_service_pb2_grpc.py
+COPY --from=builder /workspace/python/chaos_service_pb2.py /app/chaos_service_pb2.py
+COPY --from=builder /workspace/python/chaos_service_pb2_grpc.py /app/chaos_service_pb2_grpc.py
 # grpc_server.py imports the shared translation helpers from grpc_translate.py.
 COPY python/grpc_translate.py /app/grpc_translate.py
+# ChaosWorkloadService (chaos-harness workloads), shared by both Python servers.
+COPY python/grpc_chaos.py /app/grpc_chaos.py
 # _error_code.py is generated from kafka_common_ErrorCode_t by
 # `python tools/generate_error_code.py`; grpc_translate.py and the servicers
 # import it to stamp real codes on their own synthetic errors.
