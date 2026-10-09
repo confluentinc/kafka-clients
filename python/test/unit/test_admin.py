@@ -22,6 +22,7 @@ import threading
 import time
 
 import pytest
+import _confluentkafka as _lib
 from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
     NewTopic, NewPartitions, RecordsToDelete, DeletedRecords,
@@ -1054,33 +1055,93 @@ def test_handle_survives_gc_of_intermediate_objects():
         assert listings["gc-topic"].topic_id == described.topic_id
 
 
+def test_run_sync_raises_a_submit_error_before_resolving_anything():
+    """``_run_sync`` is the shared waiter behind every sync RPC: ``submit()``
+    issues the C call and returns ``(job, error)``. An owned error handle means a
+    typed constructor rejected an argument before anything was sent, so it is
+    raised as a :class:`KafkaError` and the converter never runs -- there is no
+    job to resolve.
+    """
+    with MockAdminClient(1) as admin:
+        _created(admin, "before-submit-error")
+
+        def submit():
+            # An empty member list is rejected by
+            # RemoveMembersFromConsumerGroupOptions.with_members itself.
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
+
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
+
+        with pytest.raises(KafkaError) as excinfo:
+            admin._run_sync(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
+
+        # The client is still usable afterwards.
+        assert "before-submit-error" in admin.list_topics(list_internal=True)
+
+
+def test_sync_client_uses_the_cb_twins_not_the_blocking_entry_points(monkeypatch):
+    """The sync client must never park the thread inside a native block
+    (``Admin_resolve`` / ``Admin_close``): every RPC is resolved through
+    ``Admin_resolve_cb`` and ``close`` through ``Admin_close_cb``, with the
+    completion drained by the waiter on the calling thread. Making the blocking
+    entry points fail proves no sync path reaches them."""
+    def forbidden(*args):
+        raise AssertionError("the sync client must not call a blocking entry point")
+
+    monkeypatch.setattr(_lib, "Admin_resolve", forbidden)
+    monkeypatch.setattr(_lib, "Admin_close", forbidden)
+
+    drained = []
+    admin = MockAdminClient(1)
+    real_drain = admin._execute_callbacks
+
+    def counting_drain():
+        n = real_drain()
+        drained.append(n)
+        return n
+
+    admin._waiter._execute_callbacks = counting_drain
+    _created(admin, "cb-twin")
+    listings = admin.list_topics(list_internal=True)
+    assert "cb-twin" in listings
+    # The completions were delivered through the waiter's drain, on this thread.
+    assert sum(drained) >= 2
+    # A whole-call failure still raises from the `_cb` payload's `exc` slot.
+    with pytest.raises(KafkaError) as exc:
+        admin.elect_leaders(ElectionType.PREFERRED, [("cb-twin", 0)])
+    assert str(exc.value) == "Not implemented yet"
+    admin.close(timeout=_dt.timedelta(seconds=5))
+    assert admin.closed
+    assert admin._h is None
+
+
 def test_sigint_while_waiting_drains_callback_then_reraises():
     """A SIGINT delivered while a sync call is waiting must raise
-    KeyboardInterrupt *after* the in-flight callback has been drained, so the
-    result handles are freed rather than leaked, and the client stays usable.
+    KeyboardInterrupt *after* the in-flight completion has been drained, so the
+    result is freed rather than leaked, and the client stays usable.
 
-    ``_run_sync`` is the shared waiter behind every sync RPC. It is driven here
-    with a deliberately slow submit because the mock resolves every real RPC
-    instantly, leaving no window for the signal to land inside the wait.
+    The waiter (``admin._waiter.run``) is the shared mechanism behind every
+    sync RPC and ``close``. It is driven here with a deliberately slow submit
+    because the mock resolves every real RPC instantly, leaving no window for
+    the signal to land inside the wait.
     """
     with MockAdminClient(1) as admin:
         _created(admin, "before-sigint")
 
-        freed = []
         callback_fired = threading.Event()
+        payload_seen = []
 
         def submit(cb):
             def fire():
                 time.sleep(0.5)
                 callback_fired.set()
-                cb(0)  # payload shape of a void op: (error_int,)
+                # Payload shape of `Admin_resolve_cb`: cb(payload, None).
+                payload_seen.append(("payload", None))
+                cb("payload", None)
             threading.Thread(target=fire, daemon=True).start()
-
-        def resolve(payload):
-            raise AssertionError("resolve must not run after an interrupt")
-
-        def free(payload):
-            freed.append(payload)
 
         def raise_sigint():
             time.sleep(0.15)
@@ -1088,17 +1149,71 @@ def test_sigint_while_waiting_drains_callback_then_reraises():
 
         th = threading.Thread(target=raise_sigint)
         th.start()
+        started = time.monotonic()
+        # No `on_interrupt`: there is no admin wakeup(), the operation finishes.
         with pytest.raises(KeyboardInterrupt):
-            admin._run_sync(submit, resolve, free)
+            admin._waiter.run(submit, on_interrupt=None)
+        elapsed = time.monotonic() - started
         th.join()
 
-        # The interrupt was deferred until the callback arrived, and its payload
-        # was freed rather than leaked.
+        # The interrupt was deferred until the completion arrived (~0.5 s), not
+        # raised at 0.15 s and not delayed beyond the completion by much.
         assert callback_fired.is_set()
-        assert freed == [(0,)]
+        assert payload_seen == [("payload", None)]
+        assert 0.45 <= elapsed < 2.0
 
         # The client is still usable afterwards.
         assert "before-sigint" in admin.list_topics(list_internal=True)
+
+
+def test_sigint_during_close_finishes_the_close_then_reraises():
+    """``close`` waits through the same waiter. A SIGINT while it waits cannot
+    abort the close: the waiter finishes it, the client is freed, and the
+    interrupt is re-raised afterwards."""
+    admin = MockAdminClient(1)
+    real_close_cb = _lib.Admin_close_cb
+
+    def slow_close_cb(h, ms, cb):
+        # Delay the real completion so the signal lands inside the wait.
+        def fire():
+            time.sleep(0.5)
+            real_close_cb(h, ms, cb)
+        threading.Thread(target=fire, daemon=True).start()
+
+    def raise_sigint():
+        time.sleep(0.15)
+        signal.raise_signal(signal.SIGINT)
+
+    th = threading.Thread(target=raise_sigint)
+    th.start()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_lib, "Admin_close_cb", slow_close_cb)
+        with pytest.raises(KeyboardInterrupt):
+            admin.close()
+    th.join()
+    assert admin.closed
+    assert admin._h is None
+    admin.close()  # idempotent after the interrupted close
+
+
+async def test_run_async_raises_a_submit_error_before_resolving_anything():
+    """The asyncio mirror of the test above: a ``submit()`` error is raised
+    from the coroutine before any ``KafkaFuture`` callback is registered."""
+    admin = AsyncMockAdminClient(1)
+    try:
+        def submit():
+            return _lib.Admin_remove_members_from_consumer_group(
+                admin._h, "g", False, [], None, -1)
+
+        def convert(payload):
+            raise AssertionError("convert must not run when submit failed")
+
+        with pytest.raises(KafkaError) as excinfo:
+            await admin._run_async(submit, convert)
+        assert str(excinfo.value) == "Invalid empty members has been provided"
+        assert (await admin.describe_cluster()).controller.id == 0
+    finally:
+        await admin.close()
 
 
 # -- B3: elections, reassignments, offsets -----------------------------------

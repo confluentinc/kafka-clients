@@ -18,25 +18,37 @@
 //! allowing non-Rust code (C, C++, Python via ctypes, etc.) to use the Kafka
 //! client.
 //!
-//! All types exposed across the FFI boundary use fixed-width types (`i32`,
-//! `i64`, `bool`, pointers) for cross-platform portability. Lengths and counts
-//! use `i32`, and negative values (-1) signal "not set" for optional **scalar**
-//! fields and for out-of-range element accessors.
+//! Every scalar crossing the boundary is a fixed-width signed integer or a
+//! `double` (CLAUDE.md §4): `i8` for Java `byte` and `boolean`, `i16`, `i32`,
+//! `i64`; no `bool`, `usize` or unsigned type appears in a signature, and the
+//! only `u8` is the `data` pointer inside [`util::kafka_Bytes_t`]. Lengths and
+//! counts use `i32`, and negative values (-1) signal "not set" for optional
+//! **scalar** fields and for out-of-range element accessors.
 //!
-//! A `*_count` accessor is never negative in any of these modules: a count feeds
-//! straight into `malloc(count * n)` and into `for (size_t i = 0; i < count; i++)`
-//! on the C side, so an in-band sentinel there would be a memory-safety hazard.
-//! Where a Java collection is nullable and null must stay distinct from empty,
-//! the count reports 0 and a separate `*_has_<field>` predicate carries the
-//! presence bit — see the "Counts are never negative" section of `admin`.
+//! A fallible function returns `*mut kafka_common_Error_t` (null on success)
+//! and delivers its value through a trailing `out_<name>` parameter. Owned
+//! strings are freed with [`util::kafka_string_destroy`]; collections cross as
+//! the package-less [`util::kafka_List_t`] and [`util::kafka_Map_t`] of
+//! `void *`, byte buffers as [`util::kafka_Bytes_t`]. A Java `KafkaFuture<T>`
+//! is [`kafka_future::kafka_common_KafkaFuture_t`]; the callbacks a client
+//! queues for its `__execute_callbacks` live in [`callback_queue`].
+//!
+//! A nullable Java collection crosses as a null `kafka_List_t *` /
+//! `kafka_Map_t *` (distinct from an empty one); `kafka_List_size` and
+//! `kafka_Map_size` are never negative, since a size feeds straight into
+//! `malloc(size * n)` and `for (int32_t i = 0; i < size; i++)` on the C side.
+//! The first client created from C initializes the default `RUST_LOG` logger
+//! ([`common::init_default_logger`]).
 //!
 //! # Feature Gate
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
 
 pub(crate) mod admin;
+pub(crate) mod callback_queue;
 pub(crate) mod common;
 pub(crate) mod consumer;
-pub(crate) mod consumer_handle;
 mod error_predicates;
+pub(crate) mod kafka_future;
 pub(crate) mod producer;
+pub(crate) mod util;

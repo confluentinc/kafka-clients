@@ -134,14 +134,15 @@ fn main() {
 
         let config = cbindgen::Config::from_file("cbindgen.toml").expect("Failed to read cbindgen.toml");
 
-        match cbindgen::Builder::new().with_crate(&crate_dir).with_config(config).generate() {
-            Ok(bindings) => {
-                bindings.write_to_file(&header_path);
-                eprintln!("C header generated: {}", header_path.display());
-            },
-            Err(e) => {
-                eprintln!("Warning: cbindgen failed: {}", e);
-            },
-        }
+        // The header is the C API: a binding compiled against a stale one
+        // fails at link time with no hint of why, so a cbindgen failure fails
+        // the build here instead.
+        let bindings = cbindgen::Builder::new()
+            .with_crate(&crate_dir)
+            .with_config(config)
+            .generate()
+            .unwrap_or_else(|e| panic!("cbindgen failed to generate the C header: {e}"));
+        bindings.write_to_file(&header_path);
+        eprintln!("C header generated: {}", header_path.display());
     }
 }

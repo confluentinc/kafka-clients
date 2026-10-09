@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generates ``_error_code.py`` from ``kafka_common_ErrorCode_t``.
+"""Generates ``_error_code.py`` from ``kafka_common_ErrorCode_e``.
 
-``rust/src/ffi/common.rs``'s ``kafka_common_ErrorCode_t`` is the one place the
+``rust/src/ffi/common.rs``'s ``kafka_common_ErrorCode_e`` is the one place the
 error codes are declared. The C extension sees them through the
 cbindgen-generated header; the pure-Python modules cannot include that header,
 so they get a generated copy of the values. Copies are what drift, so
@@ -51,7 +51,7 @@ _HEADER = '''\
 
 """Error-code constants -- GENERATED, DO NOT EDIT.
 
-Generated from kafka_common_ErrorCode_t in rust/src/ffi/common.rs by
+Generated from kafka_common_ErrorCode_e in rust/src/ffi/common.rs by
 `python tools/generate_error_code.py`, and checked for staleness by
 test/static/test_error_code_generated.py.
 
@@ -73,13 +73,13 @@ _ENUMERATOR = re.compile(r"^kafka_common_ErrorCode_(\w+) = (-?\d+),?$")
 
 def parse_error_codes(source=None):
     """Returns ``(name, value)`` for every enumerator of
-    ``kafka_common_ErrorCode_t``, in declaration order."""
+    ``kafka_common_ErrorCode_e``, in declaration order."""
     if source is None:
         source = ERROR_CODE_SOURCE.read_text(encoding="utf-8")
-    _, found, body = source.partition("pub enum kafka_common_ErrorCode_t {")
+    _, found, body = source.partition("pub enum kafka_common_ErrorCode_e {")
     if not found:
         raise ValueError(
-            f"{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found")
+            f"{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e not found")
     # The enum is the only item declared before the next top-level `}`.
     body = body.split("\n}", 1)[0]
 
@@ -90,7 +90,7 @@ def parse_error_codes(source=None):
             codes.append((m.group(1), int(m.group(2))))
     if not codes:
         raise ValueError(
-            f"{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators")
+            f"{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e has no enumerators")
     return codes
 
 

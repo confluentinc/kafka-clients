@@ -90,7 +90,7 @@ def _kafka_error_to_proto(err):
     proto KafkaError.
 
     `code` is the only discriminator the proto carries, and that is enough:
-    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    it is the FFI error code (kafka_common_ErrorCode_e), which is injective
     over the client's error classes, so the Rust client derives the class from
     it. This is what retired `_guess_variant`, which substring-matched the
     message text to recover a class the code could not carry back when several
@@ -141,12 +141,11 @@ def _record_metadata_to_proto(meta):
     return pb.RecordMetadata(
         offset=meta.offset(),
         timestamp=meta.timestamp(),
-        # producer.py's RecordMetadata doesn't expose serialized sizes
-        # today; the C FFI carries them but the Python wrapper drops
-        # them. Surface -1 so RecordMetadata::new on the Rust side still
-        # constructs validly.
-        serialized_key_size=-1,
-        serialized_value_size=-1,
+        # The C API's RecordMetadata carries the serialized sizes (-1 for a
+        # null key / value) and producer.py now copies them out, like the
+        # C++ server does.
+        serialized_key_size=meta.serialized_key_size(),
+        serialized_value_size=meta.serialized_value_size(),
         topic=meta.topic(),
         partition=meta.partition(),
     )
@@ -387,11 +386,13 @@ class CallbackLog:
     """Thread-safe per-client log of user-callback invocations.
 
     One instance per service (producer or consumer), keyed by the server-local
-    client id. The lock is mandatory rather than defensive: consumer callbacks
-    are invoked from the Rust dispatcher thread and producer delivery callbacks
-    from the completion thread, while GetCallbackLog is served on a gRPC worker
-    thread — and in the async server the event loop is a *fourth* context. None
-    of those are the same thread, in either server.
+    client id. The lock is mandatory rather than defensive in the sync server:
+    consumer callbacks are invoked on whichever gRPC worker runs the consumer
+    call that triggers them (poll/commit/close) and producer delivery callbacks
+    inside poll() on whichever gRPC worker pumps the producer, while
+    GetCallbackLog is served on another gRPC worker thread. In the async server
+    everything is pumped on the event loop; the lock is kept there so the type
+    stays shared between the two servers.
     """
 
     def __init__(self):
@@ -443,12 +444,12 @@ def _callback_log_partition(p):
 class LoggingRebalanceListener:
     """A real rebalance listener that records each invocation in a CallbackLog.
 
-    The three methods are deliberately plain functions, not coroutines, in both
-    servers: a coroutine listener method must not await AsyncConsumer methods
-    (the dispatcher thread is parked in ``run_coroutine_threadsafe(...).result()``
-    waiting for the listener, so the awaited FFI call could never complete — a
-    deadlock). Nothing here needs to touch the consumer, so plain methods are
-    both correct and the safe choice.
+    The three methods are plain functions, not coroutines, so one class serves
+    both servers: the sync consumer invokes them on the thread driving the
+    rebalance and the async consumer's callback pump runs them on the event
+    loop (where a coroutine method would also be accepted and scheduled).
+    Nothing here needs to touch the consumer, so plain methods are the simple
+    choice.
 
     ``on_partitions_lost`` is implemented explicitly rather than left to the
     binding's Java-faithful "delegate to on_partitions_revoked" default, so a

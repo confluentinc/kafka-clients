@@ -482,8 +482,9 @@ Five traps, all encoded in the code rather than left to be rediscovered:
 3. **All config values must be `str`** — an int raises `TypeError` in the C
    extension. `stringify_config()` coerces.
 4. **`consumer.poll(timeout)` takes seconds** (float), not milliseconds.
-5. **`record.value` is a zero-copy `memoryview`** that dies with its batch.
-   `SoakRecord.deserialize()` copies with `bytes(...)` before parsing.
+5. **`record.value` is `bytes`** (`None` for a null value), copied out of the
+   fetch batch by the binding, so it outlives the `ConsumerRecords` batch.
+   `SoakRecord.deserialize()` still accepts any bytes-like object.
 
 ## Payload format (headers are not supported on produce)
 

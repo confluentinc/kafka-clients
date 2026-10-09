@@ -5,15 +5,24 @@
 > `tests/…`, `generator/…`, `xtask/…` — are relative to `rust/`; the bindings
 > formerly under `bindings/python/` and `bindings/c/` are now `python/` and `c/`.
 
-> **Current state (2026-09-27, re-verified against the tree):** several
+> **Current state (2026-10-08, re-verified against the tree):** several
 > statements further down this file were true when written and are now
 > false. The corrections:
 >
-> - **Admin bindings exist.** `src/ffi/admin.rs` exports 490 symbols (47 of
->   them `*_async`) around `kafka_admin_AdminClient_t`, and
->   `python/admin.py` provides `Admin` / `AdminClient` / `MockAdminClient`
->   and their `Async*` twins. Every "C FFI / Python bindings deferred" line
->   below is historical.
+> - **Admin bindings exist.** `src/ffi/admin/` (130 files) exports 844
+>   symbols around `kafka_admin_Admin_t` / `kafka_admin_MockAdminClient_t`,
+>   with one `<Rpc>Options_t` and one per-key-`KafkaFuture_t` `<Rpc>Result_t`
+>   per Java class, and `python/admin.py` provides `Admin` / `AdminClient` /
+>   `MockAdminClient` and their `Async*` twins. Every "C FFI / Python
+>   bindings deferred" line below is historical.
+> - **The C FFI follows CLAUDE.md §4 one-to-one** (2026-10-08 refactor, see
+>   `design.md` → C FFI): one file per Java class under `src/ffi/`
+>   (265 files, 2299 exports), error slot + trailing `out_` parameters, `_cb`
+>   twins only for Rust `async fn`s, per-client `__execute_callbacks` /
+>   `__set_callbacks_notify` instead of a dispatcher thread, `kafka_List_t` /
+>   `kafka_Map_t` / `kafka_Bytes_t`, enum singletons, `__as_<Interface>`
+>   views. `cargo xtask lint-custom check-ffi-translation` enforces it; the
+>   baseline `xtask/ffi-baseline.txt` holds 7 by-design closure/tuple gaps.
 > - **The admin client supports security.** `AdminClientConfig` carries
 >   `security.protocol` and the SSL / SASL settings, and
 >   `KafkaAdminClient::new` builds its channel builder from them
@@ -27,15 +36,16 @@
 >   `src/admin/mod.rs:240` declares 94 sync `fn`s (44 of them required) plus
 >   `async fn close` / `close_with_timeout`, and the naming uses
 >   `_with_options` (e.g. `create_topics_with_options`).
-> - **Lib tests: 4144** (`cargo test --lib -- --list`), **4361 with
+> - **Lib tests: 4211** (`cargo test --lib -- --list`), **4464 with
 >   `--features ffi`**. Integration: 27 files, 109 `#[tokio::test]`s. The
 >   cargo test targets are `producer`, `consumer`, `integration` and the
 >   opt-in `performance`; the `common` target (`tests/main.rs`) is gone, its
 >   message/protocol tests now in-crate under `src/common/message/`.
-> - **Crate size:** 777 files, ~334,000 lines under `src/`.
-> - **The FFI dispatcher** (`CompletionJob`, `spawn_dispatcher`,
->   `enqueue_or_run_inline`) is at `src/ffi/common.rs:1922-1949`, not
->   `:214-241`.
+> - **Crate size:** 1040 files, ~375,000 lines under `src/`.
+> - **There is no FFI dispatcher any more.** `CompletionJob`,
+>   `spawn_dispatcher` and `enqueue_or_run_inline` were deleted on
+>   2026-10-08; completions go through `src/ffi/callback_queue.rs` and are
+>   run by the caller's `<Client>__execute_callbacks()`.
 > - **Error model:** `KafkaGenericError` and the 13-variant `KafkaError` enum
 >   are gone. The error type is `common::Error` (162 variants), with Java's
 >   `KafkaException` as the embedded `KafkaError` struct; see `design.md` →
@@ -52,7 +62,8 @@
 > (`kafka_common_TopicPartition*`, `kafka_common_acl_AclBinding*`,
 > `kafka_common_KafkaFuture_RecordMetadata*`, ...) and the
 > `CorrelationIdMismatchError` binding was removed. See
-> `structure.md` → "Public surface".
+> `structure.md` → "Public surface". (The typed future was itself replaced
+> by the generic `kafka_common_KafkaFuture_t` on 2026-10-08.)
 
 > **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
 > 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
@@ -88,13 +99,13 @@
 >
 > **On the "C FFI / Python bindings deferred" scope line repeated throughout
 > this file:** when this banner was written it was still true *for Admin*.
-> It no longer is — see the 2026-09-27 banner at the top. It was already
-> untrue of the client as a whole: `src/ffi/producer.rs`,
-> `src/ffi/consumer.rs` and `src/ffi/common.rs` all exist (Milestones 4, 9,
+> It no longer is — see the 2026-10-08 banner at the top. It was already
+> untrue of the client as a whole: `src/ffi/producer/`,
+> `src/ffi/consumer/` and `src/ffi/common/` all exist (Milestones 4, 9,
 > 10), as do `python/{producer,consumer}.py` and the C test suite
 > under `c/tests/`. The "async dispatcher in PR #116" that the
-> deferral notes point at is now in-tree at `src/ffi/common.rs:1922-1949`
-> (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`).
+> deferral notes point at was in-tree until 2026-10-08 and was then replaced
+> by the `_cb` / `__execute_callbacks` model (`src/ffi/callback_queue.rs`).
 >
 > The sections immediately below (Milestone 1 / Milestone 3) are **historical and
 > stale** — they predate the Producer, Consumer and Admin milestones and are left
@@ -1002,10 +1013,10 @@ groups/KIP-932, KRaft raft-voter admin (`addRaftVoter`/`removeRaftVoter`/
 `describeMetadataQuorum`/`unregisterBroker`), and `ForwardingAdmin` (broker-plugin
 delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 
-> **Status of that first deferral, as of 2026-09-27:** **closed.**
-> `src/ffi/admin.rs` (490 exported symbols) and `python/admin.py` now exist.
-> The dispatcher they use is in-tree at `src/ffi/common.rs:1922-1949`. Tier 4
-> remains untouched: no
+> **Status of that first deferral, as of 2026-10-08:** **closed.**
+> `src/ffi/admin/` (844 exported symbols) and `python/admin.py` now exist;
+> there is no dispatcher, completions are pumped by
+> `kafka_admin_Admin__execute_callbacks`. Tier 4 remains untouched: no
 > `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
 > `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
 

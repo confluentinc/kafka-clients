@@ -30,16 +30,19 @@ The server listens on GRPC_HOST:GRPC_PORT (default 127.0.0.1:50051; the
 Docker image sets GRPC_HOST=0.0.0.0 and the test pool maps 50051 to a
 random host port via testcontainers). GRPC_PORT=0 binds an ephemeral port.
 
-Sync grpc.server + thread pool is used because producer.py's underlying
-ctypes library is thread-based — futures are completed by background
-threads from the Rust send task, and concurrent.futures.Future.result()
-blocks the calling thread until the future fires.
+Sync grpc.server + thread pool is used because producer.py's sync API
+blocks the calling thread: send() blocks until the record is buffered and a
+send future's result() blocks (GIL released) until the record is
+acknowledged. Delivery callbacks are queued by the client and run only
+inside producer.poll() / flush() / close(), on the thread that calls them,
+so the Send handler pumps poll() after a with_callback send.
 """
 
 import logging
 import os
 import sys
 import threading
+import time
 from concurrent import futures
 
 import grpc
@@ -56,7 +59,7 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
-# Error codes generated from kafka_common_ErrorCode_t
+# Error codes generated from kafka_common_ErrorCode_e
 # (python tools/generate_error_code.py). Private plumbing: the servicers stamp the
 # real code on errors of their own making, so the Rust client can tell those
 # apart from an error the client actually reported.
@@ -164,8 +167,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         self._next_id = 1
         self._lock = threading.Lock()
         # Delivery-callback log, keyed by producer_id. Has its own lock inside
-        # (callbacks fire on the producer's completion thread, GetCallbackLog on
-        # a gRPC worker).
+        # (callbacks run inside poll() on whichever gRPC worker pumps the
+        # producer, GetCallbackLog on another worker).
         self._callback_log = CallbackLog()
 
     def _take_producer(self, producer_id):
@@ -207,25 +210,34 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # with_callback => register a *real* on_delivery through producer.py, so
         # the Rust harness can assert on what the binding's callback actually saw
         # (via GetCallbackLog). The Rust client-side closure only proves its own
-        # plumbing.
+        # plumbing. The sync producer runs delivery callbacks only inside
+        # poll() / flush() / close(), so the handler pumps poll() until the
+        # callback has fired before answering -- GetCallbackLog may follow at once.
         on_delivery = None
+        fired = None
         if request.with_callback:
-            on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
+            log_cb = make_logging_delivery_callback(self._callback_log, request.producer_id)
+            fired = threading.Event()
+
+            def on_delivery(metadata, exception, _log_cb=log_cb, _fired=fired):
+                _log_cb(metadata, exception)
+                _fired.set()
         try:
             future = producer.send(record, on_delivery=on_delivery)
         except kp.KafkaError as e:
+            # A rejected record never fires its callback (Java's send() throws).
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Block this gRPC worker thread until the producer future fires.
-        # producer.py futures are concurrent.futures.Future instances
-        # completed by Rust background tasks, so .result() is safe here.
+        # Block this gRPC worker thread until the record is acknowledged:
+        # result() waits on the client's KafkaFuture with the GIL released.
         try:
             metadata = future.result(timeout=120)
+            response = pb.SendResponse(metadata=_record_metadata_to_proto(metadata))
         except kp.KafkaError as e:
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
+            response = pb.SendResponse(error=_kafka_error_to_proto(e))
         except futures.TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
                 code=ec.REQUEST_TIMED_OUT,
@@ -233,7 +245,21 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("future.result raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
-        return pb.SendResponse(metadata=_record_metadata_to_proto(metadata))
+        if fired is not None:
+            self._pump_until(producer, fired)
+        return response
+
+    @staticmethod
+    def _pump_until(producer, fired, timeout=30.0):
+        """Run the producer's queued delivery callbacks on this worker until
+        ``fired`` is set (another worker's poll() may run it first -- the pump
+        drains every queued callback, not only this record's)."""
+        deadline = time.monotonic() + timeout
+        while not fired.is_set() and time.monotonic() < deadline:
+            try:
+                producer.poll(0.05)
+            except RuntimeError:
+                return  # producer closed concurrently; close() ran the callbacks
 
     # ---- Transactions (Milestone 11) ----
     # Each maps to the same-named KafkaProducer method; the Flush handler below
@@ -381,8 +407,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Maps ConsumerService RPCs onto python/consumer.py. The sync
-    consumer API blocks the gRPC worker thread on its threading.Event, which
-    is fine in the thread-pool server."""
+    consumer API makes blocking C calls (GIL released) on the gRPC worker
+    thread, which is fine in the thread-pool server."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
@@ -391,8 +417,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         self._next_id = 1
         self._lock = threading.Lock()
         # Rebalance-listener / commit-callback log, keyed by consumer_id. Both
-        # callback families are invoked from the Rust dispatcher thread, never
-        # the gRPC worker that serves GetCallbackLog — hence CallbackLog's lock.
+        # callback families are invoked on the gRPC worker thread inside the
+        # consumer call that triggers them (poll/commit/close), never the
+        # worker that serves GetCallbackLog — hence CallbackLog's lock.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -483,9 +510,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
 
         def do(c):
-            # commit_async is non-blocking in both clients (a local op on the
-            # shared _ConsumerBase, not a coroutine) — the callback fires on a
-            # later poll/commit/close, exactly as in Java.
+            # commit_async only *initiates* the commit (a blocking call that
+            # awaits the Rust background task enqueueing it) — the callback
+            # fires inside a later poll/commit/close, exactly as in Java.
             c.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
         return self._run_status(request.consumer_id, do)
 

@@ -1,15 +1,23 @@
 import asyncio
 import logging
-import threading
+import time
 import _confluentkafka as _lib
 from _confluentkafka import ProducerRecord
-from concurrent.futures import (Future)
+from _sync_wait import SyncWaiter, _SLICE_SECONDS
+from concurrent.futures import CancelledError, TimeoutError as FutureTimeoutError
 
 _log = logging.getLogger(__name__)
 
+# The sync producer waits in slices of this many milliseconds (one
+# ``Producer_poll`` call per slice, GIL released inside) so a pending
+# ``KeyboardInterrupt`` is raised between two slices.
+_SLICE_MS = int(_SLICE_SECONDS * 1000)
 
-# ProducerRecord is a C extension type imported from _confluentkafka module
-# It stores kafka_producer_ProducerRecord_t internally for optimized performance
+
+# ProducerRecord is a C extension type imported from _confluentkafka module.
+# It holds the topic, partition, timestamp and the key / value bytes objects;
+# the C extension builds the kafka_producer_ProducerRecord_t over those bytes
+# (zero-copy) for the duration of each send.
 
 
 class KafkaError(Exception):
@@ -19,33 +27,57 @@ class KafkaError(Exception):
         raise NotImplementedError()
 
     def __str__(self):
-        return self._message
+        return self._message if self._message is not None else ""
 
     @staticmethod
     def _from_c(_id: int):
+        """Build a KafkaError from an OWNED C error handle and destroy it.
+
+        Used by the admin binding, whose completion trampolines still hand
+        error handles to Python as ints; the producer and consumer bindings
+        hand error tuples (see :meth:`_from_tuple`)."""
         ret = KafkaError.__new__(KafkaError)
         ret._code = _lib.KafkaError_code(_id)
         ret._message = _lib.KafkaError_message(_id)
         ret._is_retriable = _lib.KafkaError_is_retriable(_id)
         ret._is_fatal = _lib.KafkaError_is_fatal(_id)
         ret._txn_requires_abort = _lib.KafkaError_txn_requires_abort(_id)
+        ret._callback_opaque = None
         _lib.KafkaError_destroy(_id)
         return ret
 
     @staticmethod
-    def _from_parts(code: int, message: str, is_retriable: int, is_fatal: int):
+    def _from_parts(code: int, message, is_retriable: int, is_fatal: int,
+                    txn_requires_abort: int = False, callback_opaque=None):
         """Build a KafkaError from already-copied fields.
 
-        Used for *borrowed* per-key errors inside an admin result handle: those
-        die with their parent handle, so the C layer copies their fields out
-        before destroying it and there is nothing left to ``KafkaError_destroy``.
+        The producer binding never hands an error handle to Python: the C layer
+        copies the fields out of the (owned or borrowed) ``kafka_common_Error_t``
+        into a ``(code, message, is_retriable, is_fatal, txn_requires_abort)``
+        tuple and frees / leaves the handle itself. The admin binding does the
+        same for the *borrowed* per-key errors inside a result handle (those die
+        with their parent handle), passing only the first four fields.
+
+        ``callback_opaque`` is the address of the Python exception a callback
+        raised, when the error's cause chain holds the foreign callback error
+        reporting it; the consumer swaps that exception back in (see
+        ``consumer._raise_if_error``). Private plumbing, never exposed.
         """
         ret = KafkaError.__new__(KafkaError)
         ret._code = code
         ret._message = message
         ret._is_retriable = bool(is_retriable)
         ret._is_fatal = bool(is_fatal)
+        ret._txn_requires_abort = bool(txn_requires_abort)
+        ret._callback_opaque = callback_opaque
         return ret
+
+    @staticmethod
+    def _from_tuple(parts):
+        """``None`` -> ``None``; an error tuple from the C layer -> KafkaError."""
+        if parts is None:
+            return None
+        return KafkaError._from_parts(*parts)
 
     @property
     def code(self):
@@ -79,66 +111,78 @@ class KafkaError(Exception):
 
 
 class RecordMetadata:
-    def __init__(self):
-        raise NotImplementedError()
+    """The metadata of a record acknowledged by the server (Java
+    ``RecordMetadata``).
 
-    def _set_attributes_from_c(self, offset: int, partition: int,
-                               topic: str, timestamp: int):
-        self._offset = offset
-        self._partition = partition
+    Plain, eagerly-copied fields: the C layer copies them out of the
+    ``kafka_producer_RecordMetadata_t`` -- which it only ever *borrows* from the
+    future or the delivery callback -- so there is no native handle to manage.
+    ``offset()`` / ``timestamp()`` are ``-1`` when the broker reported none
+    (Java ``hasOffset()`` / ``hasTimestamp()`` false), and the whole object is
+    the Java "null metadata" placeholder (partition and offset ``-1``) when it
+    accompanies a delivery error.
+    """
+
+    def __init__(self, topic, partition, offset, timestamp,
+                 serialized_key_size=-1, serialized_value_size=-1):
         self._topic = topic
+        self._partition = partition
+        self._offset = offset
         self._timestamp = timestamp
-
-    def __del__(self):
-        if not self._populated and self._id != 0:
-            _lib.RecordMetadata_destroy(self._id)
-
-    def _get_record_metadata(self):
-        if not self._populated:
-            self._populated = True
-            _lib.RecordMetadata_copy(
-                self._id,
-                self._set_attributes_from_c)
-        return self
+        self._serialized_key_size = serialized_key_size
+        self._serialized_value_size = serialized_value_size
 
     @staticmethod
-    def _from_c(_id: int):
-        self = RecordMetadata.__new__(RecordMetadata)
-        self._id = _id
-        self._populated = False
-        self._topic = None
-        self._offset = None
-        self._partition = None
-        self._timestamp = None
-        return self
+    def _from_tuple(t):
+        """``None`` -> ``None``; the C layer's ``(topic, partition, offset,
+        timestamp, serialized_key_size, serialized_value_size)`` -> metadata."""
+        if t is None:
+            return None
+        return RecordMetadata(*t)
 
     def offset(self):
-        return self._get_record_metadata()._offset
+        return self._offset
+
+    def has_offset(self):
+        return self._offset >= 0
 
     def topic(self):
-        return self._get_record_metadata()._topic
+        return self._topic
 
     def partition(self):
-        return self._get_record_metadata()._partition
+        return self._partition
 
     def timestamp(self):
-        return self._get_record_metadata()._timestamp
+        return self._timestamp
+
+    def has_timestamp(self):
+        return self._timestamp >= 0
+
+    def serialized_key_size(self):
+        return self._serialized_key_size
+
+    def serialized_value_size(self):
+        return self._serialized_value_size
+
+    def __repr__(self):
+        return (f"RecordMetadata(topic={self._topic!r}, partition={self._partition}, "
+                f"offset={self._offset}, timestamp={self._timestamp})")
 
 
 def _invoke_on_delivery(on_delivery, metadata, exception):
     """Invoke a user delivery callback, shielding the C caller from it.
 
-    Mirrors Java's ``Callback.onCompletion(RecordMetadata, Exception)``: exactly
-    one of the two arguments is meaningful (``metadata`` on success,
-    ``exception`` on failure) and the callback returns nothing. Java's contract
-    is that the callback fires exactly once per record, so it is invoked here on
-    *every* completion path — including one whose ``Future`` was already
-    cancelled or resolved, where the future itself is left untouched.
+    Mirrors Java's ``Callback.onCompletion(RecordMetadata, Exception)``: on
+    success ``metadata`` is set and ``exception`` is ``None``; on failure
+    ``exception`` is a :class:`KafkaError` and ``metadata`` is Java's "null
+    metadata" placeholder (partition and offset ``-1``) or ``None``. Java's
+    contract is that the callback fires exactly once per record, so it is
+    invoked here on *every* completion path — including one whose future was
+    already cancelled or resolved, where the future itself is left untouched.
 
     An exception raised by the callback is logged and swallowed. It must not
-    propagate: the caller is a C completion thread, where the only handling
-    available is ``PyErr_Print``, and the record's ``Future`` has already been
-    resolved by then."""
+    propagate: the caller is the C callback pump, where the only handling
+    available is ``PyErr_WriteUnraisable``."""
     if on_delivery is None:
         return
     try:
@@ -147,51 +191,141 @@ def _invoke_on_delivery(on_delivery, metadata, exception):
         _log.exception("Error in on_delivery callback")
 
 
-def _completion_to_python(result, error):
-    """Convert the raw C completion handles into owned Python objects.
+def _completion_to_python(meta_tuple, err_tuple):
+    """Convert a C completion ``(meta_tuple | None, err_tuple | None)`` into
+    ``(RecordMetadata | None, KafkaError | None)``."""
+    return RecordMetadata._from_tuple(meta_tuple), KafkaError._from_tuple(err_tuple)
 
-    Called exactly once per completion, before any branching, so ownership of
-    both handles is transferred into Python objects that free themselves —
-    :meth:`KafkaError._from_c` destroys the error handle immediately, and
-    :class:`RecordMetadata` owns the metadata handle until it is copied or
-    garbage collected. Every downstream branch (future cancelled, future
-    already done, ``on_delivery`` invocation) can then simply use or ignore the
-    objects with no double-free or leak to reason about."""
-    metadata = RecordMetadata._from_c(result) if result != 0 else None
-    exception = KafkaError._from_c(error) if error != 0 else None
-    return metadata, exception
+
+def _ms(timeout):
+    """Seconds (float, ``None`` or negative = forever) -> int64 milliseconds
+    (``-1`` = forever) for the C pump."""
+    if timeout is None or timeout < 0:
+        return -1
+    return int(float(timeout) * 1000)
+
+
+class SendFuture:
+    """The future returned by the sync :meth:`Producer.send` -- Java's
+    ``Future<RecordMetadata>``.
+
+    Wraps the owned ``KafkaFuture<RecordMetadata>`` the Rust producer returned
+    for the record, with the ``concurrent.futures.Future`` surface the previous
+    implementation exposed: ``result(timeout)``, ``exception(timeout)``,
+    ``done()``, ``cancel()`` and ``cancelled()``.
+
+    :meth:`result` / :meth:`exception` never block in a native ``get``: the
+    first wait registers the queued ``KafkaFuture.get_cb`` on the handle, whose
+    completion the producer's callback pump delivers on the *waiting* thread,
+    and then waits in 100 ms slices of ``Producer_poll`` (see
+    :class:`_ProducerWaiter`), so
+
+    * a ``KeyboardInterrupt`` is raised between two slices (``Ctrl-C`` is
+      honoured promptly; the registration stays, the future remains pending
+      and a later ``result()`` picks the completion up);
+    * the delivery callbacks the client queued meanwhile -- including this
+      record's own ``on_delivery`` once it completed -- run on the waiting
+      thread, like from :meth:`Producer.poll`. This is a deliberate
+      divergence from Java, where ``get()`` never runs the I/O thread's
+      callbacks: in this binding the calling thread is the only thread that
+      ever runs them.
+
+    ``cancel()`` cannot un-send the record (Java's ``FutureRecordMetadata``
+    does not support cancellation either): it only marks the future cancelled
+    so that :meth:`result` raises :class:`concurrent.futures.CancelledError`
+    instead of waiting. ``on_delivery`` still fires for the record.
+    """
+
+    __slots__ = ("_handle", "_waiter", "_box", "_outcome", "_cancelled")
+
+    def __init__(self, handle, waiter):
+        self._handle = handle          # _lib.KafkaFuture
+        self._waiter = waiter          # the producer's _ProducerWaiter
+        self._box = None               # [(meta_tuple, err_tuple)] once get_cb ran
+        self._outcome = None           # (RecordMetadata | None, KafkaError | None)
+        self._cancelled = False
+
+    def _wait(self, timeout):
+        if self._cancelled:
+            raise CancelledError()
+        if self._outcome is None:
+            if self._box is None:
+                box = []
+                # get_cb's completion is queued on the producer's callbacks
+                # vector; the slices below drain it on this thread.
+                self._handle.get_cb(lambda meta, err: box.append((meta, err)))
+                self._box = box
+            deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+            while not self._box:
+                if deadline is None:
+                    slice_s = _SLICE_SECONDS
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise FutureTimeoutError()
+                    slice_s = min(_SLICE_SECONDS, remaining)
+                self._waiter.wait_slice(slice_s)
+            self._outcome = _completion_to_python(*self._box[0])
+        return self._outcome
+
+    def result(self, timeout=None):
+        """Wait up to ``timeout`` seconds (``None`` = forever) and return the
+        :class:`RecordMetadata`; raises the :class:`KafkaError` the record
+        failed with, :class:`concurrent.futures.TimeoutError` when the wait
+        elapses first and :class:`concurrent.futures.CancelledError` after
+        :meth:`cancel`."""
+        metadata, exception = self._wait(timeout)
+        if exception is not None:
+            raise exception
+        return metadata
+
+    def exception(self, timeout=None):
+        """Wait like :meth:`result` and return the record's :class:`KafkaError`
+        (``None`` on success) instead of raising it."""
+        return self._wait(timeout)[1]
+
+    def done(self):
+        return (self._cancelled or self._outcome is not None or bool(self._box)
+                or self._handle.is_done())
+
+    def cancel(self):
+        if self.done():
+            return False
+        self._cancelled = True
+        return True
+
+    def cancelled(self):
+        return self._cancelled
 
 
 class _ProducerBase:
     """State and helpers shared by the sync and async producers.
 
-    The C extension (`_confluentkafka.c`) owns all the asynchronous work:
-    two background threads batch records and poll their completion futures,
-    then invoke a Python callback ``cb(result, error)`` with the GIL held.
-    Both the sync :class:`Producer` and the async :class:`AsyncProducer`
-    reuse the same C entry points and differ only in the future type the
-    callback resolves and how (see their respective ``send``).
+    The C extension (`_confluentkafka.c`) is a thin layer over the C API of
+    the Rust client and owns no threads of its own. Both producers drive the
+    C API's queued (``_cb``) entry points: delivery callbacks and the
+    completions of the queued operations are *queued* by Rust on the
+    producer's callback vector and run only when the producer's callback pump
+    is driven -- on the calling thread, inside the sliced waits of
+    :class:`Producer` (see :class:`_ProducerWaiter`), and on the event loop
+    for :class:`AsyncProducer`, whose Python notify hook schedules the pump
+    once each time the vector goes from empty to non-empty.
     """
 
     def __init__(self):
-        self.futures = set()
         self.closed = False
         self.c_producer = None
 
     def _init_mock(self, auto_complete=True):
-        self.c_producer = _lib.Producer_new(auto_complete, self)
+        self.c_producer = _lib.MockProducer_new(auto_complete, self._notify_callable())
 
     def _init_kafka(self, config):
-        self.c_producer = _lib.KafkaProducer_new(config, self)
+        self.c_producer = _lib.KafkaProducer_new(config, self._notify_callable())
 
-    def _remove_future(self, future):
-        if future in self.futures:
-            self.futures.remove(future)
-
-    def _add_future(self, future):
-        self.futures.add(future)
-        future.add_done_callback(self._remove_future)
-        return future
+    def _notify_callable(self):
+        """The Python callable the C notify hook invokes (``None`` for the sync
+        producer, which waits on the C condition variable instead)."""
+        return None
 
     def _check_closed(self):
         if self.closed:
@@ -230,6 +364,28 @@ class _ProducerBase:
             raise TypeError(
                 "producer_record must be an instance of ProducerRecord")
 
+    @staticmethod
+    def _delivery_callable(on_delivery):
+        """Wrap a user ``on_delivery`` into the ``callable(meta_tuple | None,
+        err_tuple | None)`` the C delivery callback invokes, or ``None``."""
+        if on_delivery is None:
+            return None
+
+        def cb(meta_tuple, err_tuple):
+            metadata, exception = _completion_to_python(meta_tuple, err_tuple)
+            _invoke_on_delivery(on_delivery, metadata, exception)
+        return cb
+
+    @staticmethod
+    def _raise_if_error(err_tuple):
+        if err_tuple is not None:
+            raise KafkaError._from_parts(*err_tuple)
+
+    @staticmethod
+    def _partitions_to_python(raw):
+        import consumer as _kc
+        return [_kc._to_partition_info(t) for t in raw]
+
     # ---- transaction helpers (shared by the sync + async families) ----------
     @staticmethod
     def _offsets_to_spec(offsets):
@@ -243,44 +399,6 @@ class _ProducerBase:
                  oam.leader_epoch if oam.leader_epoch is not None else -1,
                  oam.metadata if oam.metadata is not None else "")
                 for tp, oam in offsets.items()]
-
-    # ---- resolve / free pairs for the async-FFI ops (flush, partitions_for) --
-    # These drive Producer_flush_async / Producer_partitions_for_async, whose
-    # trampolines deliver the raw C handles as Python ints (see the consumer's
-    # _ConsumerBase for the same pattern). ``resolve`` runs on completion and
-    # consumes the handles (drain frees the PartitionInfoList, ``_from_c`` frees
-    # the error); ``free`` runs only when the event loop is gone before delivery.
-    @staticmethod
-    def _resolve_void(payload):
-        (error,) = payload
-        if error:
-            raise KafkaError._from_c(error)
-        return None
-
-    @staticmethod
-    def _free_void(payload):
-        (error,) = payload
-        if error:
-            _lib.KafkaError_destroy(error)
-
-    @staticmethod
-    def _resolve_partitions(payload):
-        list_handle, error = payload
-        if error:
-            if list_handle:
-                _lib.PartitionInfoList_drain(list_handle)  # drain frees the handle
-            raise KafkaError._from_c(error)
-        import consumer as _kc
-        raw = _lib.PartitionInfoList_drain(list_handle)
-        return [_kc._to_partition_info(t) for t in raw]
-
-    @staticmethod
-    def _free_partitions(payload):
-        list_handle, error = payload
-        if error:
-            _lib.KafkaError_destroy(error)
-        if list_handle:
-            _lib.PartitionInfoList_drain(list_handle)
 
 
 class _MockProducerMixin:
@@ -298,8 +416,16 @@ class _MockProducerMixin:
     def error_next(self, error_code, error_message=None):
         """Complete the next pending send with an error.
 
+        The error is built with the C API's typed ``kafka_common_Error_*``
+        factory for ``error_code``, so only the codes the binding maps are
+        accepted: -5 (local timeout), -4 (local illegal state), -3 (local
+        illegal argument), -2 (local concurrent modification), 7
+        (REQUEST_TIMED_OUT), 10 (MESSAGE_TOO_LARGE), 18 (RECORD_LIST_TOO_LARGE),
+        24 (INVALID_GROUP_ID), 35 (UNSUPPORTED_VERSION) and 89
+        (THROTTLING_QUOTA_EXCEEDED). Any other code raises ``ValueError``.
+
         Args:
-            error_code: Kafka error code
+            error_code: Kafka error code (one of the mapped codes above)
             error_message: Optional error message
 
         Returns:
@@ -317,7 +443,65 @@ class _MockProducerMixin:
         _lib.MockProducer_clear(self.c_producer)
 
 
+class _ProducerWaiter(SyncWaiter):
+    """The sync :class:`Producer`'s :class:`SyncWaiter`.
+
+    The producer's C layer has its own wake-up primitive: the notify hook
+    installed by the extension broadcasts a condition variable that
+    ``Producer_poll`` waits on (GIL released). So the sync producer registers
+    NO Python notify callable -- the inherited :meth:`notify` is never
+    installed and never fires for this client -- and :meth:`wait_slice` is one
+    bounded ``Producer_poll`` call instead of a wait on the Python event:
+    drain, wait up to the slice for the condvar, drain again. The 100 ms slice
+    keeps the wait interruptible (``Ctrl-C`` is raised between two slices);
+    :meth:`drain` is ``Producer__execute_callbacks``.
+    """
+
+    __slots__ = ("_producer",)
+
+    def __init__(self, producer):
+        super().__init__(producer._execute_callbacks)
+        self._producer = producer
+
+    def wait_slice(self, timeout=_SLICE_SECONDS):
+        """One ``Producer_poll`` slice (``timeout`` seconds at most); returns how
+        many callbacks ran. Returns ``0`` once the native producer is gone."""
+        return self._producer._poll_slice(int(timeout * 1000))
+
+
 class Producer(_ProducerBase):
+    """The synchronous producer.
+
+    Every operation that blocks in Java (:meth:`send` while the record is
+    buffered, :meth:`flush`, :meth:`partitions_for`, the transaction control
+    ops, :meth:`close`) is submitted through the C API's queued ``_cb`` entry
+    point and waited for in Python, in 100 ms slices driven by the C condvar
+    pump ``Producer_poll`` (see :class:`_ProducerWaiter`), never through a
+    blocking C entry point. Hence
+
+    * ``Ctrl-C`` is honoured promptly: a ``KeyboardInterrupt`` is raised
+      between two slices. The in-flight operation is let finish first (so the
+      client stays consistent and usable), then the interrupt is re-raised
+      and the operation's result is dropped.
+    * Delivery callbacks (``on_delivery``) are queued by the client and run
+      on the *calling* thread only -- inside :meth:`poll`, :meth:`flush`,
+      :meth:`commit_transaction`, :meth:`abort_transaction`, :meth:`close`,
+      and inside the waits of :meth:`send` and :meth:`SendFuture.result`.
+      This is Java's "sender thread callbacks" model moved onto the caller.
+      An application that registers callbacks and only ever calls
+      :meth:`send` should still call :meth:`poll` regularly (``poll(0)`` in
+      its produce loop is typical) to run them promptly.
+
+    Do not call these blocking methods from inside an ``on_delivery``
+    callback: the callback already runs inside the pump of this thread, so a
+    nested wait could never drain its own completion (Java's ``Callback``
+    contract likewise forbids blocking in the callback).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._pending = set()  # SendFutures not yet known to be done
+        self._waiter = _ProducerWaiter(self)
 
     def __enter__(self):
         return self
@@ -325,174 +509,195 @@ class Producer(_ProducerBase):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def _track(self, future):
+        self._pending.add(future)
+        if len(self._pending) > 1024:
+            self._pending = {f for f in self._pending if not f.done()}
+        return future
+
     def _cancel(self):
-        while len(self.futures) > 0:
-            for future in list(self.futures):
-                self._remove_future(future)
+        for future in self._pending:
+            if not future.done():
                 future.cancel()
+        self._pending.clear()
+
+    # ---- the callback pump (all on the calling thread) ----------------------
+
+    def _execute_callbacks(self):
+        """One ``Producer__execute_callbacks`` pass; ``0`` once destroyed."""
+        if self.c_producer is None:
+            return 0
+        return _lib.Producer__execute_callbacks(self.c_producer)
+
+    def _pump(self):
+        """Run every queued callback on this thread; returns how many ran."""
+        return self._waiter.drain()
+
+    def _poll_slice(self, timeout_ms):
+        """One ``Producer_poll`` slice: drain, wait up to ``timeout_ms`` on the
+        notify condvar when nothing was queued, drain again. Returns how many
+        callbacks ran; ``0`` once the native producer is gone."""
+        if self.c_producer is None:
+            return 0
+        n = _lib.Producer_poll(self.c_producer, timeout_ms)
+        if n > 0:
+            n += self._waiter.drain()
+        return n
+
+    def _run_void(self, submit):
+        """Submit a void ``_cb`` op (``cb(err_tuple | None)``), wait for its
+        completion in slices and raise its error, if any. A
+        ``KeyboardInterrupt`` while waiting lets the op finish first."""
+        (err_tuple,) = self._waiter.run(submit)
+        self._raise_if_error(err_tuple)
 
     def send(self, producer_record: ProducerRecord,
-             on_delivery=None) -> Future[RecordMetadata]:
-        """Send a record; returns a ``Future`` resolving to its metadata.
+             on_delivery=None) -> SendFuture:
+        """Send a record; returns a :class:`SendFuture` resolving to its metadata.
+
+        Blocks only as long as Java's ``send()`` does -- until the record is
+        appended to the client's buffer (up to ``max.block.ms`` when the buffer
+        is full or metadata is missing) -- then returns a future for its
+        acknowledgement. The wait is sliced (``Producer_send_cb`` + the
+        waiter), so ``Ctrl-C`` is honoured while a full buffer blocks the
+        send. The key and value bytes are passed to the client without
+        copying.
 
         Args:
             producer_record: the :class:`ProducerRecord` to send.
             on_delivery: optional ``callback(metadata, exception)`` invoked once
                 the record completes — Java's ``Callback`` argument to
-                ``send(record, callback)``. Exactly one argument is meaningful:
-                ``metadata`` is a :class:`RecordMetadata` on success and
-                ``exception`` a :class:`KafkaError` on failure. It is invoked
-                exactly once per record, even if the returned ``Future`` was
-                cancelled or already resolved; exceptions it raises are logged
-                and swallowed.
+                ``send(record, callback)``. On success ``metadata`` is a
+                :class:`RecordMetadata` and ``exception`` is ``None``; on
+                failure ``exception`` is a :class:`KafkaError` and
+                ``metadata`` is the placeholder Java passes beside it
+                (partition and offset ``-1``). It is invoked exactly once per
+                record, even if the returned future was cancelled or already
+                resolved; exceptions it raises are logged and swallowed.
 
-        .. warning::
-           ``on_delivery`` runs on the producer's completion thread, not on the
-           caller's — the same contract as Java, where the callback executes on
-           the producer's I/O thread. (This differs from
-           ``confluent-kafka-python``, which defers callbacks until the
-           application calls ``poll()``.) Keep it short and do not block in it.
+        .. note::
+           ``on_delivery`` does not run on a background thread: the client
+           queues it and it runs on the calling thread inside :meth:`poll`,
+           :meth:`flush`, :meth:`commit_transaction`, :meth:`abort_transaction`,
+           :meth:`close` or the wait of a later :meth:`send` /
+           :meth:`SendFuture.result`.
+
+        Raises:
+            KafkaError: when the client rejects the record before buffering
+                it (Java's ``send()`` throws for these; a failure of a
+                buffered record is reported through the future instead).
         """
         self._check_closed()
         self._validate_record(producer_record)
-        ret = Future()
+        delivery = self._delivery_callable(on_delivery)
+        # resolve(KafkaFuture | None, err_tuple | None) runs from the pump once
+        # the record is registered (or rejected).
+        handle, err_tuple = self._waiter.run(
+            lambda cb: _lib.Producer_send_cb(
+                self.c_producer, producer_record, delivery, cb))
+        self._raise_if_error(err_tuple)
+        return self._track(SendFuture(handle, self._waiter))
 
-        def cb(result, error):
-            # Runs on the C completion thread with the GIL held. Convert the
-            # handles once up front, then resolve the future (unless the caller
-            # cancelled it or it is already done) and honor the callback
-            # obligation on every path.
-            metadata, exception = _completion_to_python(result, error)
-            if not ret.cancelled() and not ret.done():
-                if exception is not None:
-                    ret.set_exception(exception)
-                else:
-                    ret.set_result(metadata)
-            _invoke_on_delivery(on_delivery, metadata, exception)
+    def poll(self, timeout=0.0):
+        """Run the pending delivery callbacks on the calling thread.
 
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
-        fut = self._add_future(ret)
-        if full:
-            # Buffer is full: block until the send task frees capacity so a
-            # fast producer cannot accumulate records without bound. Mirrors
-            # Java's send() blocking when buffer.memory is exhausted.
-            # concurrent.futures.Future.result() releases the GIL while waiting,
-            # so the C send task can still run the space callback.
-            space = Future()
-            if not _lib.Producer_on_space_available(
-                    self.c_producer, lambda: space.set_result(None)):
-                space.result()
-        return fut
-
-    def _run_sync(self, submit, resolve):
-        """Submit an async FFI op and wait on an interruptible event.
-
-        Mirrors the sync Consumer's ``_run_sync``: the calling thread never
-        parks inside a native ``block_on`` — it waits on a ``threading.Event``
-        (which releases the GIL so the producer's dispatcher thread can run the
-        completion callback). The producer has no ``wakeup``, so there is no
-        abort path; we simply wait for the callback to fire."""
-        box = {}
-        done = threading.Event()
-
-        def cb(*payload):
-            box["payload"] = payload
-            done.set()
-
-        submit(cb)
-        done.wait()
-        return resolve(box["payload"])
+        Waits up to ``timeout`` seconds (``0`` = run what is queued and return
+        at once; ``None`` or negative = until at least one callback ran) for a
+        completion when none is queued. The wait is sliced (100 ms
+        ``Producer_poll`` calls), so ``Ctrl-C`` interrupts an unbounded wait
+        promptly. Returns the number of callbacks run.
+        """
+        self._check_closed()
+        ms = _ms(timeout)
+        if ms == 0:
+            return self._poll_slice(0)
+        deadline = None if ms < 0 else time.monotonic() + ms / 1000.0
+        while True:
+            if deadline is None:
+                slice_ms = _SLICE_MS
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return 0
+                slice_ms = max(1, min(_SLICE_MS, int(remaining * 1000)))
+            n = self._poll_slice(slice_ms)
+            if n > 0:
+                return n
 
     def flush(self):
-        """Flush all pending records."""
-        self._run_sync(
-            lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
-            self._resolve_void,
-        )
+        """Flush all pending records (Java ``flush()``): waits until every
+        previously sent record is acknowledged, running their delivery
+        callbacks on the calling thread as they complete."""
+        self._check_closed()
+        try:
+            self._run_void(lambda cb: _lib.Producer_flush_cb(self.c_producer, cb))
+        finally:
+            self._pump()
 
     def partitions_for(self, topic):
         """Return partition metadata for ``topic`` as a list of PartitionInfo.
 
-        Reuses the consumer binding's PartitionInfoList drain + conversion
-        (the FFI returns the same shared handle type)."""
-        return self._run_sync(
-            lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
-            self._resolve_partitions,
-        )
+        Reuses the consumer binding's PartitionInfo conversion (the C API
+        returns the same ``kafka_common_PartitionInfo_t`` type)."""
+        self._check_closed()
+        raw, err_tuple = self._waiter.run(
+            lambda cb: _lib.Producer_partitions_for_cb(self.c_producer, topic, cb))
+        self._raise_if_error(err_tuple)
+        return self._partitions_to_python(raw)
 
     # ---- transaction control (sync; Java KafkaProducer transaction API) -----
     #
-    # Async-first: every op drives the *_async FFI variant through _run_sync
-    # (like flush() / close()), so the calling thread waits on an interruptible
-    # threading.Event with the GIL released -- it never parks inside a native
-    # block_on, and a stuck transaction op stays responsive to SIGTERM /
-    # KeyboardInterrupt on the main thread. _resolve_void raises KafkaError on a
-    # non-null completion error (0 = success).
-    #
-    # Records produced inside a transaction use send(): Python's send() calls
-    # the synchronous send FFI, which registers the record before it returns, so
-    # every record produced between begin_transaction() and commit/abort is part
-    # of the transaction (committed on commit, discarded on abort). Python does
-    # not expose an async/outbox send path.
+    # Each op submits its `_cb` twin and waits for the completion in slices
+    # (KafkaError raised on a non-NULL error); begin_transaction has no `_cb`
+    # twin in Rust (a non-waiting state transition) and stays the direct call.
+    # The queued sends of the C API (`send_async`, used by the AsyncProducer)
+    # that had RETURNED before a control call are drained into it -- committed
+    # on commit, discarded on abort -- exactly as flush/close drain them
+    # (producer-transactions.md §13); the sync send() returns only once the
+    # record is registered, so it is always part of the open transaction.
 
     def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
 
         Call exactly once, before any other transactional method, when
         ``transactional.id`` is configured. Waits until the transaction
-        coordinator is ready; a timeout error is safe to retry. Driven through
-        the async FFI so the wait stays interruptible on the main thread.
-
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        coordinator is ready; a timeout error is safe to retry.
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
-        self._run_sync(
-            lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
-            self._resolve_void,
-        )
+        self._run_void(
+            lambda cb: _lib.Producer_init_transactions_cb(self.c_producer, cb))
 
     def begin_transaction(self):
         """Begin a new transaction (Java ``beginTransaction()``).
 
         A state transition that does not wait; :meth:`init_transactions` must
-        have completed successfully first. Routed through the async FFI (like
-        the other four control ops) for a uniform, interruptible path.
-
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        have completed successfully first. Records sent with :meth:`send`
+        between this call and :meth:`commit_transaction` /
+        :meth:`abort_transaction` are part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
-        self._run_sync(
-            lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-        )
+        self._raise_if_error(_lib.Producer_begin_transaction(self.c_producer))
 
     def send_offsets_to_transaction(self, offsets, group_metadata):
         """Send consumer-group offsets to the coordinator as part of the ongoing
         transaction (Java ``sendOffsetsToTransaction(offsets, groupMetadata)``).
 
         The producer half of consume-transform-produce: the offsets commit only
-        if the transaction commits. Waits until the coordinator acknowledges,
-        driven through the async FFI so the wait stays interruptible.
+        if the transaction commits. Waits until the coordinator acknowledges.
 
         Args:
             offsets: a ``{TopicPartition: OffsetAndMetadata}`` mapping (each
                 offset is the offset of the *next* record to consume). An empty
                 mapping stages nothing.
             group_metadata: the :class:`ConsumerGroupMetadata` from
-                ``consumer.group_metadata()`` (it owns the live handle the FFI
-                needs).
-
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+                ``consumer.group_metadata()`` (it owns the live handle the C
+                API needs).
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -501,22 +706,17 @@ class Producer(_ProducerBase):
         """
         self._check_closed()
         spec = self._offsets_to_spec(offsets)
-        self._run_sync(
-            lambda cb: _lib.Producer_send_offsets_to_transaction_async(
-                self.c_producer, spec, group_metadata, cb),
-            self._resolve_void,
-        )
+        self._run_void(
+            lambda cb: _lib.Producer_send_offsets_to_transaction_cb(
+                self.c_producer, spec, group_metadata, cb))
 
     def commit_transaction(self):
         """Commit the ongoing transaction (Java ``commitTransaction()``).
 
-        Flushes any pending records, then waits until the transaction is
-        committed. Driven through the async FFI so the wait stays interruptible
-        on the main thread.
-
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Flushes the transaction's records (every record whose :meth:`send`
+        returned, plus any queued send that had returned), waits until the
+        transaction is committed, running the delivery callbacks of the
+        flushed records on the calling thread as they complete.
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -524,46 +724,52 @@ class Producer(_ProducerBase):
                 :meth:`abort_transaction`; a timeout error is safe to retry.
         """
         self._check_closed()
-        self._run_sync(
-            lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-        )
+        try:
+            self._run_void(
+                lambda cb: _lib.Producer_commit_transaction_cb(self.c_producer, cb))
+        finally:
+            self._pump()
 
     def abort_transaction(self):
         """Abort the ongoing transaction (Java ``abortTransaction()``).
 
-        Discards the transaction's records and staged offsets, then waits until
-        the abort completes. Driven through the async FFI so the wait stays
-        interruptible on the main thread.
-
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Discards the transaction's records (including queued sends that had
+        returned) and staged offsets, waits until the abort completes, running
+        the delivery callbacks of the discarded records on the calling thread
+        as they complete.
 
         Raises:
             KafkaError: if the abort fails.
         """
         self._check_closed()
-        self._run_sync(
-            lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-        )
+        try:
+            self._run_void(
+                lambda cb: _lib.Producer_abort_transaction_cb(self.c_producer, cb))
+        finally:
+            self._pump()
 
     def close(self):
+        """Close the producer (Java ``close()``): waits until the in-flight
+        records are delivered, running their delivery callbacks on the calling
+        thread, then frees the native producer. Futures still pending are
+        cancelled. Idempotent.
+
+        A ``KeyboardInterrupt`` while closing cannot abort the close: the
+        operation is let finish, the native producer is freed and the
+        interrupt is then re-raised."""
         if self.closed:
             return
         self.closed = True
         self._cancel()
-        # Split teardown (see _confluentkafka.c): join the C batching threads,
-        # then drive the Rust-side close through the interruptible _run_sync
-        # path (same as flush), then free. Keeping the Rust close in _run_sync
-        # means a stuck close stays responsive to KeyboardInterrupt on the main
-        # thread rather than blocking in a native wait.
-        _lib.Producer_shutdown(self.c_producer)
-        self._run_sync(
-            lambda cb: _lib.Producer_close_async(self.c_producer, cb),
-            self._resolve_void,
-        )
-        _lib.Producer_destroy(self.c_producer)
+        try:
+            self._run_void(lambda cb: _lib.Producer_close_cb(self.c_producer, cb))
+        finally:
+            self._pump()
+            # Destroying the native handle runs every still-pending callback
+            # exactly once (on this thread) before freeing. The handle is
+            # dropped first so a pump racing the destroy sees it gone.
+            handle, self.c_producer = self.c_producer, None
+            _lib.Producer_destroy(handle)
 
 
 class AsyncProducer(_ProducerBase):
@@ -571,33 +777,53 @@ class AsyncProducer(_ProducerBase):
 
     ``send`` is a coroutine that returns an :class:`asyncio.Future` resolving
     to a :class:`RecordMetadata` (``fut = await producer.send(rec)``; then
-    ``await fut`` for the result). It is a coroutine — rather than a plain
-    method like the sync :class:`Producer` — so it can suspend on backpressure
-    (``await``-ing buffer capacity when the producer is full); the produce
-    itself is non-blocking. That same suspension yields the event loop to the
-    completion drain, so a flooding ``await producer.send(...)`` loop does not
-    starve completions.
+    ``await fut`` for the result). It drives the C API's *queued* send: the
+    record is handed to the client's submission task and the coroutine
+    suspends until the client reports it registered (or rejected), so the
+    event loop is never blocked by a full buffer -- Java's ``send()`` would
+    block the caller there.
 
-    Completions from the C background thread are marshalled back onto the event
-    loop (an ``asyncio.Future`` is not thread-safe).
-
-    Completions are *coalesced*: the C poll task invokes the callback once per
-    record, but rather than waking the event loop once per record (one
-    ``call_soon_threadsafe`` each), each callback buffers its
-    ``(future, result, error)`` and schedules a single drain only when one is
-    not already pending. The drain then resolves the whole accumulated batch in
-    one event-loop wakeup. This keeps the per-record cross-thread signalling
-    cost — the bottleneck under high produce rates — off the hot path.
+    Every completion -- registration of a queued send, delivery of a record,
+    the end of a queued ``flush`` / transaction op / ``close`` -- is queued by
+    the client and run by the producer's callback pump. The client's notify
+    hook fires once each time that queue goes from empty to non-empty and
+    schedules the pump on the event loop (``call_soon_threadsafe``), which
+    runs every queued callback on the loop thread. So ``on_delivery`` always
+    runs on the event loop and may touch loop state; it must not block.
     """
 
     def __init__(self):
         super().__init__()
-        # Completions buffered by the C poll task (producer thread), drained on
-        # the event loop. Guarded by a lock since the two run on different
-        # threads; the critical sections are tiny (append / list swap).
-        self._pending = []
-        self._drain_scheduled = False
-        self._pending_lock = threading.Lock()
+        self._loop = None
+        self._pending = set()
+
+    def _notify_callable(self):
+        return self._on_notify
+
+    def _on_notify(self):
+        """The C notify hook: runs on whichever thread queued the first
+        callback (a Rust task, or the loop thread for a synchronous
+        completion). It only schedules; never runs callbacks."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._pump)
+        except RuntimeError:
+            pass  # loop closed between the check and the call
+
+    def _pump(self):
+        """Run every queued callback on the event loop thread."""
+        if self.c_producer is None:
+            return
+        while _lib.Producer__execute_callbacks(self.c_producer) > 0:
+            pass
+
+    def _bind_loop(self):
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        return loop
 
     async def __aenter__(self):
         return self
@@ -605,14 +831,81 @@ class AsyncProducer(_ProducerBase):
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.close()
 
+    def _track(self, future):
+        self._pending.add(future)
+        future.add_done_callback(self._pending.discard)
+        return future
+
+    def _cancel(self):
+        for future in list(self._pending):
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
+
+    def _deliver(self, loop, fn, *args):
+        """Run ``fn(*args)`` on the loop thread. Callbacks normally already run
+        there (the pump is scheduled on the loop) but ``Producer_destroy`` runs
+        the still-pending ones on the executor thread that destroys the
+        handle, so always hop through ``call_soon_threadsafe``."""
+        if loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(fn, *args)
+        except RuntimeError:
+            pass
+
+    async def send(self, producer_record: ProducerRecord,
+                   on_delivery=None) -> "asyncio.Future[RecordMetadata]":
+        """Send a record; returns an ``asyncio.Future`` resolving to its metadata.
+
+        Suspends until the client has registered the record (the queued send's
+        completion), then returns the future for its acknowledgement.
+
+        ``on_delivery`` is the asyncio counterpart of the sync
+        :meth:`Producer.send` argument — a plain (non-coroutine)
+        ``callback(metadata, exception)`` invoked exactly once per record, on
+        the event loop thread, after the returned future is resolved. On
+        failure ``metadata`` is the placeholder Java passes beside the error
+        (partition and offset ``-1``).
+
+        Raises:
+            KafkaError: when the client rejects the record before buffering it.
+        """
+        self._check_closed()
+        self._validate_record(producer_record)
+        loop = self._bind_loop()
+        ret = loop.create_future()
+        registered = loop.create_future()
+
+        def resolve_registered(kafka_future, err_tuple):
+            # kafka_future (the owned KafkaFuture handle) is not needed: the
+            # record's completion arrives through on_completion below.
+            self._deliver(loop, self._set_registered, registered, err_tuple)
+
+        def on_completion(meta_tuple, err_tuple):
+            self._deliver(loop, self._resolve_future, ret, on_delivery,
+                          meta_tuple, err_tuple)
+
+        _lib.Producer_send_cb(self.c_producer, producer_record, on_completion,
+                              resolve_registered)
+        self._track(ret)
+        err_tuple = await registered
+        if err_tuple is not None:
+            self._pending.discard(ret)
+            raise KafkaError._from_parts(*err_tuple)
+        return ret
+
     @staticmethod
-    def _resolve_future(ret, on_delivery, result, error):
-        """Resolve a single future from C completion handles. Runs on the event
-        loop thread, so it is safe to mutate the asyncio.Future. Ownership of
-        the ``result`` / ``error`` C handles transfers here and is always
-        freed. ``on_delivery`` (if given) is invoked here too — on the loop
-        thread, and on every path, per the callback obligation."""
-        metadata, exception = _completion_to_python(result, error)
+    def _set_registered(registered, err_tuple):
+        if not registered.done():
+            registered.set_result(err_tuple)
+
+    @staticmethod
+    def _resolve_future(ret, on_delivery, meta_tuple, err_tuple):
+        """Resolve a single record future. Runs on the event loop thread.
+        ``on_delivery`` (if given) is invoked here too — on every path, per
+        the callback obligation."""
+        metadata, exception = _completion_to_python(meta_tuple, err_tuple)
         if not ret.cancelled() and not ret.done():
             if exception is not None:
                 ret.set_exception(exception)
@@ -620,193 +913,90 @@ class AsyncProducer(_ProducerBase):
                 ret.set_result(metadata)
         _invoke_on_delivery(on_delivery, metadata, exception)
 
-    @staticmethod
-    def _resolve_space(space):
-        """Resolve a space-available future. Runs on the event loop thread
-        (scheduled via call_soon_threadsafe from the C send task)."""
-        if not space.done():
-            space.set_result(None)
+    async def _run_cb(self, submit):
+        """Submit a queued (``_cb``) op and ``await`` its completion.
 
-    def _drain(self):
-        """Resolve all buffered completions. Runs on the event loop thread."""
-        with self._pending_lock:
-            items = self._pending
-            self._pending = []
-            self._drain_scheduled = False
-        for ret, on_delivery, result, error in items:
-            self._resolve_future(ret, on_delivery, result, error)
-
-    def _cancel(self):
-        # asyncio.Future done-callbacks are scheduled, not run inline, so
-        # `_remove_future` will not shrink `self.futures` synchronously here.
-        # Cancel each future once and clear the set ourselves — the sync
-        # producer's `while len(...)` loop would spin forever on asyncio
-        # futures.
-        for future in list(self.futures):
-            if not future.done():
-                future.cancel()
-        self.futures.clear()
-
-    async def send(self, producer_record: ProducerRecord,
-                   on_delivery=None) -> "asyncio.Future[RecordMetadata]":
-        """Send a record; returns an ``asyncio.Future`` resolving to its metadata.
-
-        ``on_delivery`` is the asyncio counterpart of the sync
-        :meth:`Producer.send` argument — a plain (non-coroutine)
-        ``callback(metadata, exception)`` invoked exactly once per record. It
-        runs **on the event loop thread** (inside the completion drain), not on
-        the C completion thread, so it may safely touch loop state; it must not
-        block the loop.
-        """
-        self._check_closed()
-        self._validate_record(producer_record)
-        loop = asyncio.get_running_loop()
-        ret = loop.create_future()
-
-        # Runs on the C background (poll) thread with the GIL held. asyncio
-        # futures must only be mutated on the loop thread, so buffer the
-        # completion and wake the loop once per drain (coalescing) rather than
-        # once per record. If the loop is already closed we can't schedule
-        # anything — convert (and thereby free) the C handles here, and still
-        # honor the callback obligation, noting that in this teardown case
-        # on_delivery necessarily runs on the completion thread.
-        def cb(result, error):
-            if loop.is_closed():
-                metadata, exception = _completion_to_python(result, error)
-                _invoke_on_delivery(on_delivery, metadata, exception)
-                return
-            with self._pending_lock:
-                self._pending.append((ret, on_delivery, result, error))
-                if self._drain_scheduled:
-                    return
-                self._drain_scheduled = True
-                loop.call_soon_threadsafe(self._drain)
-
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
-        self._add_future(ret)
-        if full:
-            # Buffer is full: await (yielding the loop, non-blocking) until the
-            # send task frees capacity, bounding accumulation — Java's send()
-            # blocks on buffer.memory here. Awaiting also yields to the
-            # completion drain. The space callback runs on the C send task, so
-            # it hops onto the loop via call_soon_threadsafe.
-            space = loop.create_future()
-
-            def space_cb():
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(self._resolve_space, space)
-
-            if not _lib.Producer_on_space_available(self.c_producer, space_cb):
-                await space
-        return ret
-
-    async def _run_async(self, submit, resolve, free):
-        """Submit an async FFI op and ``await`` its completion on the event loop.
-
-        Mirrors the async Consumer's ``_run_async``: the completion callback runs
-        on the producer's dispatcher thread and hops onto the loop via
-        ``call_soon_threadsafe`` (asyncio futures are not thread-safe). The C
-        handles the payload carries are owned here and freed on every path --
-        ``resolve`` consumes them on normal completion; ``free`` consumes them
-        when we cannot deliver: the loop is already closed, or the awaiting task
-        was cancelled (e.g. under ``asyncio.wait_for``) so ``fut`` is already done
-        by the time the late callback lands. Dropping a payload that carries a
-        non-null ``KafkaError`` handle would leak it, unbounded under a
-        retry/cancel loop."""
-        loop = asyncio.get_running_loop()
+        ``submit(cb)`` registers ``cb(payload...)``, which the pump runs on the
+        loop thread once the op completes; the payload is handed to the
+        awaiting coroutine through an asyncio future. A late completion for an
+        awaiter that was cancelled (e.g. under ``asyncio.wait_for``) is simply
+        dropped -- the payload holds no native handles, only copied tuples."""
+        loop = self._bind_loop()
         fut = loop.create_future()
 
         def deliver(payload):
-            # Runs on the event loop thread.
-            if fut.cancelled() or fut.done():
-                free(payload)
-                return
-            fut.set_result(payload)
+            if not fut.done():
+                fut.set_result(payload)
 
         def cb(*payload):
-            if loop.is_closed():
-                free(payload)
-                return
-            loop.call_soon_threadsafe(deliver, payload)
+            self._deliver(loop, deliver, payload)
 
         submit(cb)
-        payload = await fut
-        return resolve(payload)
+        return await fut
+
+    async def _run_void_cb(self, submit):
+        (err_tuple,) = await self._run_cb(submit)
+        self._raise_if_error(err_tuple)
 
     async def flush(self):
-        """Flush all pending records."""
-        await self._run_async(
-            lambda cb: _lib.Producer_flush_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        """Flush all pending records (Java ``flush()``): awaits the
+        acknowledgement of every record sent so far. Their delivery callbacks
+        run on the loop as the completions arrive."""
+        self._check_closed()
+        await self._run_void_cb(
+            lambda cb: _lib.Producer_flush_cb(self.c_producer, cb))
 
     async def partitions_for(self, topic):
         """Return partition metadata for ``topic`` as a list of PartitionInfo."""
-        return await self._run_async(
-            lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
-            self._resolve_partitions,
-            self._free_partitions,
-        )
+        self._check_closed()
+        raw, err_tuple = await self._run_cb(
+            lambda cb: _lib.Producer_partitions_for_cb(self.c_producer, topic, cb))
+        self._raise_if_error(err_tuple)
+        return self._partitions_to_python(raw)
 
     # ---- transaction control (async; Java KafkaProducer transaction API) ----
     #
-    # Genuinely async: all five ops drive the *_async FFI variant through
-    # _run_async (like flush() / close()). The completion callback runs on the
-    # producer's dispatcher thread and hops onto the loop via
-    # call_soon_threadsafe; the coroutine simply ``await``s it. Nothing runs on a
-    # run_in_executor thread and nothing parks inside a native block_on, so the
-    # op is cancellable and the event loop is never frozen -- a strict
-    # improvement over the old executor façade (DoD #11). _resolve_void raises
-    # KafkaError on a non-null completion error; _free_void frees the error
-    # handle if the loop is gone before delivery.
-    #
-    # Records produced inside a transaction use send() (``await
-    # producer.send(rec)``): Python's send() calls the synchronous send FFI,
-    # which registers the record before it returns, so every record produced
-    # between begin_transaction() and commit/abort is part of the transaction
-    # (committed on commit, discarded on abort). Python does not expose an
-    # async/outbox send path.
+    # init / send_offsets / commit / abort drive the C API's queued `_cb`
+    # variants and await their completion on the loop; begin_transaction is a
+    # non-waiting state transition with no `_cb` twin and runs on the default
+    # executor so a slow lock never blocks the loop. The queued sends this
+    # producer issues (`send_async` in the C API) that had RETURNED -- i.e.
+    # whose ``await producer.send(...)`` completed -- before a control call are
+    # drained into it: committed on commit, discarded on abort, exactly as
+    # flush / close drain them (producer-transactions.md §13). A send still
+    # suspended in ``await producer.send(...)`` when the control call starts is
+    # not ordered against it.
 
     async def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
 
         Call exactly once, before any other transactional method, when
         ``transactional.id`` is configured. Awaits the coordinator handshake on
-        the event loop (no executor thread); a timeout error is safe to retry.
-
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        the event loop; a timeout error is safe to retry.
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
-        await self._run_async(
-            lambda cb: _lib.Producer_init_transactions_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        await self._run_void_cb(
+            lambda cb: _lib.Producer_init_transactions_cb(self.c_producer, cb))
 
     async def begin_transaction(self):
         """Begin a new transaction (Java ``beginTransaction()``).
 
         A state transition that does not wait; :meth:`init_transactions` must
-        have completed first. Awaited through the async FFI (like the other four
-        control ops) for a uniform, cancellable path.
-
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        have completed first. Records whose ``await producer.send(...)``
+        returned between this call and :meth:`commit_transaction` /
+        :meth:`abort_transaction` are part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
         """
         self._check_closed()
-        await self._run_async(
-            lambda cb: _lib.Producer_begin_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        loop = self._bind_loop()
+        err_tuple = await loop.run_in_executor(
+            None, _lib.Producer_begin_transaction, self.c_producer)
+        self._raise_if_error(err_tuple)
 
     async def send_offsets_to_transaction(self, offsets, group_metadata):
         """Send consumer-group offsets to the coordinator as part of the ongoing
@@ -814,19 +1004,15 @@ class AsyncProducer(_ProducerBase):
 
         The producer half of consume-transform-produce: the offsets commit only
         if the transaction commits. Awaits the coordinator call on the event
-        loop (no executor thread).
+        loop.
 
         Args:
             offsets: a ``{TopicPartition: OffsetAndMetadata}`` mapping (each
                 offset is the offset of the *next* record to consume). An empty
                 mapping stages nothing.
             group_metadata: the :class:`ConsumerGroupMetadata` from
-                ``consumer.group_metadata()`` (it owns the live handle the FFI
-                needs).
-
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+                ``consumer.group_metadata()`` (it owns the live handle the C
+                API needs).
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -835,23 +1021,15 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         spec = self._offsets_to_spec(offsets)
-        await self._run_async(
-            lambda cb: _lib.Producer_send_offsets_to_transaction_async(
-                self.c_producer, spec, group_metadata, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        await self._run_void_cb(
+            lambda cb: _lib.Producer_send_offsets_to_transaction_cb(
+                self.c_producer, spec, group_metadata, cb))
 
     async def commit_transaction(self):
         """Commit the ongoing transaction (Java ``commitTransaction()``).
 
-        Flushes any pending records, then awaits the commit on the event loop
-        (no executor thread), so the coroutine is cancellable and the loop is
-        never frozen.
-
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Flushes the transaction's records -- every send that had returned,
+        including queued ones -- then awaits the commit on the event loop.
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -859,56 +1037,49 @@ class AsyncProducer(_ProducerBase):
                 :meth:`abort_transaction`; a timeout error is safe to retry.
         """
         self._check_closed()
-        await self._run_async(
-            lambda cb: _lib.Producer_commit_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        await self._run_void_cb(
+            lambda cb: _lib.Producer_commit_transaction_cb(self.c_producer, cb))
 
     async def abort_transaction(self):
         """Abort the ongoing transaction (Java ``abortTransaction()``).
 
-        Discards the transaction's records and staged offsets, then awaits the
-        abort on the event loop (no executor thread).
-
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Discards the transaction's records (every send that had returned,
+        including queued ones) and staged offsets, then awaits the abort on the
+        event loop.
 
         Raises:
             KafkaError: if the abort fails.
         """
         self._check_closed()
-        await self._run_async(
-            lambda cb: _lib.Producer_abort_transaction_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
+        await self._run_void_cb(
+            lambda cb: _lib.Producer_abort_transaction_cb(self.c_producer, cb))
 
     async def close(self):
+        """Close the producer (Java ``close()``): awaits the delivery of the
+        in-flight records (their callbacks run on the loop), then frees the
+        native producer off the loop. Pending futures are cancelled.
+        Idempotent."""
         if self.closed:
             return
         self.closed = True
         self._cancel()
-        loop = asyncio.get_running_loop()
-        # Split teardown (see _confluentkafka.c): the C batching-thread join and
-        # the final free are blocking C calls, so run them off the event loop;
-        # the Rust-side close is awaited via the async FFI (_run_async) so it is
-        # cooperative with the loop and cancellable, like flush.
-        await loop.run_in_executor(None, _lib.Producer_shutdown, self.c_producer)
-        await self._run_async(
-            lambda cb: _lib.Producer_close_async(self.c_producer, cb),
-            self._resolve_void,
-            self._free_void,
-        )
-        await loop.run_in_executor(None, _lib.Producer_destroy, self.c_producer)
+        loop = self._bind_loop()
+        (err_tuple,) = await self._run_cb(
+            lambda cb: _lib.Producer_close_cb(self.c_producer, cb))
+        # Destroying the native handle blocks (it waits for the client's
+        # tasks and runs every still-pending callback), so run it off the
+        # loop; the callbacks it runs hop back onto the loop via _deliver.
+        handle, self.c_producer = self.c_producer, None
+        await loop.run_in_executor(None, _lib.Producer_destroy, handle)
+        self._raise_if_error(err_tuple)
 
 
 class KafkaProducer(Producer):
     """A Kafka producer connected to a real cluster.
 
     Args:
-        config: A dict of configuration properties. At minimum,
-            ``bootstrap.servers`` must be provided.
+        config: A dict of configuration properties (string keys and values).
+            At minimum, ``bootstrap.servers`` must be provided.
     """
 
     def __init__(self, config):
@@ -929,8 +1100,8 @@ class AsyncKafkaProducer(AsyncProducer):
     """An asyncio-native Kafka producer connected to a real cluster.
 
     Args:
-        config: A dict of configuration properties. At minimum,
-            ``bootstrap.servers`` must be provided.
+        config: A dict of configuration properties (string keys and values).
+            At minimum, ``bootstrap.servers`` must be provided.
     """
 
     def __init__(self, config):

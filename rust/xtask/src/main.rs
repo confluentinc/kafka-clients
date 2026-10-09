@@ -31,7 +31,8 @@ fn main() -> anyhow::Result<()> {
         Some("generate-error-predicates") => error_predicates::generate_error_predicates()?,
         Some("java-deprecated") => java_deprecated()?,
         Some("fetch-java-refs") => fetch_java_refs()?,
-        Some("lint-custom") => lint_custom::lint_custom()?,
+        Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -147,10 +148,10 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 }
 
 // ---------------------------------------------------------------------------
-// Error-code constants generated from `kafka_common_ErrorCode_t`
+// Error-code constants generated from `kafka_common_ErrorCode_e`
 // ---------------------------------------------------------------------------
 //
-// `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
+// `src/ffi/common.rs`'s `kafka_common_ErrorCode_e` is the one place the error
 // codes are declared. C sees them through the cbindgen-generated header, so it
 // needs nothing here. `tests/common/error_code.rs` cannot include that header
 // and needs a copy of the values, and copies are what drift: the multilanguage
@@ -169,13 +170,13 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
 const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
 
-/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
+/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_e`.
 fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
     let source = fs::read_to_string(ERROR_CODE_SOURCE)?;
     let body = source
-        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .split_once("pub enum kafka_common_ErrorCode_e {")
         .map(|(_, rest)| rest)
-        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e not found"))?;
     // The enum is the only item declared before the next top-level `}`.
     let body = body.split_once("\n}").map(|(body, _)| body).unwrap_or(body);
 
@@ -192,7 +193,7 @@ fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
         codes.push((name.to_string(), value));
     }
     if codes.is_empty() {
-        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_e has no enumerators");
     }
     Ok(codes)
 }
@@ -216,7 +217,7 @@ fn error_codes_rust(codes: &[(String, i32)], classes: &[(String, String)]) -> an
 
 //! Error-code constants -- GENERATED, DO NOT EDIT.
 //!
-//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! Generated from `kafka_common_ErrorCode_e` in `src/ffi/common.rs` by
 //! `cargo xtask generate-error-codes`, and checked for staleness by
 //! `cargo xtask check-generated`.
 //!
@@ -312,7 +313,7 @@ const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
 /// `Errors::error_with_message` that yields an error.
 ///
 /// Each arm is `Self::<Variant> => Some(<expr>)`; the enumerator name is the
-/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_t`
+/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_e`
 /// spells Java's `Errors` constants. An arm naming no enumerator is an error, so
 /// the two tables cannot drift apart silently.
 fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, String)>> {
@@ -438,7 +439,7 @@ fn lint() -> anyhow::Result<()> {
     // before paying for three full clippy passes. It covers what clippy cannot:
     // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
     // of its variants and the visibility of public structs' fields.
-    lint_custom::lint_custom()?;
+    lint_custom::lint_custom(&[])?;
 
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
@@ -1101,6 +1102,16 @@ fn print_help() {
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
                     check-no-public-field                 public structs have no `pub` field
+                    check-no-fixed-size-array             no fixed-size array in a public signature
+                    check-java-name                       every public item names the Java API it translates
+                    check-no-deprecated-translation       no deprecated Java API is translated
+                    check-public-audience                 public items are public in Java
+                    check-dyn-compatible                  public traits are dyn-compatible
+                    check-error-predicate                 every Error class has its predicate
+                    check-ffi-translation                 every public Rust item has its C counterpart
+                  With a rule name only that rule runs; `--no-baseline` ignores
+                  xtask/ffi-baseline.txt so every FFI finding is shown
+  ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -1118,7 +1129,8 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
-  cargo xtask lint-custom
+  cargo xtask lint-custom [rule-name] [--no-baseline]
+  cargo xtask ffi-baseline
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix

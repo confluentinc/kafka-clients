@@ -53,7 +53,10 @@ enable_testing()
 # Test executables
 add_executable(test_mock_producer tests/test_mock_producer.c)
 target_include_directories(test_mock_producer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The callback pump (test_support.h) waits on a pthread condition variable and
+# one test pumps from a helper thread, so pthread is needed explicitly in
+# addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_kafka_producer tests/test_kafka_producer.c)
 target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})
@@ -63,7 +66,10 @@ target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUS
 
 add_executable(test_mock_consumer tests/test_mock_consumer.c)
 target_include_directories(test_mock_consumer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_mock_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The `_cb` tests pump the callbacks vector through the condvar helper in
+# tests/test_support.h, so pthread is needed explicitly in addition to
+# ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_mock_consumer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_kafka_consumer tests/test_kafka_consumer.c)
 target_include_directories(test_kafka_consumer PRIVATE ${RUST_INCLUDE_DIR})
@@ -85,6 +91,14 @@ add_executable(test_kafka_admin tests/test_kafka_admin.c)
 target_include_directories(test_kafka_admin PRIVATE ${RUST_INCLUDE_DIR})
 target_link_libraries(test_kafka_admin unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
+add_executable(test_serialization tests/test_serialization.c)
+target_include_directories(test_serialization PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_serialization unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
+add_executable(test_kafka_future tests/test_kafka_future.c)
+target_include_directories(test_kafka_future PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_kafka_future unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
 # Register tests with CTest
 add_test(NAME mock_producer COMMAND test_mock_producer)
 add_test(NAME kafka_producer COMMAND test_kafka_producer)
@@ -93,6 +107,8 @@ add_test(NAME kafka_consumer COMMAND test_kafka_consumer)
 add_test(NAME consumer_callbacks COMMAND test_consumer_callbacks)
 add_test(NAME mock_admin COMMAND test_mock_admin)
 add_test(NAME kafka_admin COMMAND test_kafka_admin)
+add_test(NAME serialization COMMAND test_serialization)
+add_test(NAME kafka_future COMMAND test_kafka_future)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).

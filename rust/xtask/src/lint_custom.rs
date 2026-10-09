@@ -19,9 +19,12 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod ffi_translation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
@@ -30,6 +33,17 @@ use crate::java::{self, same_name, squash, JavaIndex};
 
 /// A module path from the crate root, e.g. `["producer", "producer_record"]`.
 type ModPath = Vec<String>;
+
+/// What every rule is built from: the Java index, loaded once, and the
+/// options of this run.
+struct Context {
+    java: Rc<JavaIndex>,
+    /// The `check-ffi-translation` baseline to apply; `None` shows every finding.
+    ffi_baseline: Option<PathBuf>,
+    /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
+    /// the C enumerators are spelled; `None` skips that check.
+    cbindgen_config: Option<PathBuf>,
+}
 
 /// One source-level rule run by `lint-custom`.
 trait Rule {
@@ -52,22 +66,46 @@ trait Rule {
 }
 
 /// The rules `lint-custom` runs, in order.
-fn rules() -> Vec<Box<dyn Rule>> {
+fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(NoDataCarryingEnumVariants),
         Box::new(NoPublicField),
         Box::new(NoFixedSizeArray),
-        Box::new(JavaName::new()),
-        Box::new(NoDeprecatedTranslation::new()),
-        Box::new(PublicAudience::new()),
+        Box::new(JavaName::new(ctx)),
+        Box::new(NoDeprecatedTranslation::new(ctx)),
+        Box::new(PublicAudience::new(ctx)),
         Box::new(DynCompatible),
         Box::new(ErrorPredicate),
+        Box::new(ffi_translation::FfiTranslation::new(ctx)),
     ]
 }
 
-/// Runs every rule and fails if any of them reports a finding.
-pub fn lint_custom() -> anyhow::Result<()> {
+/// Runs every rule — or the one `args` names — and fails if any of them
+/// reports a finding. `--no-baseline` shows the `check-ffi-translation`
+/// findings the baseline waives.
+pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
+    let mut only: Option<&str> = None;
+    let mut baseline = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-baseline" => baseline = false,
+            name if name.starts_with("check-") && only.is_none() => only = Some(name),
+            other => {
+                anyhow::bail!("unknown lint-custom argument `{other}`; usage: lint-custom [rule-name] [--no-baseline]")
+            },
+        }
+    }
     println!("🔍 Running custom lint rules...");
+
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
+    if let Some(name) = only.filter(|_| rules.is_empty()) {
+        anyhow::bail!("no custom lint rule named `{name}`");
+    }
 
     let krate = Crate::load(Path::new("src/lib.rs"))?;
     let mut failed = 0usize;
@@ -83,7 +121,7 @@ pub fn lint_custom() -> anyhow::Result<()> {
         failed += krate.parse_errors.len();
     }
 
-    for rule in rules() {
+    for rule in rules {
         if let Some(reason) = rule.skip_reason() {
             eprintln!("\n❌ {}: cannot run, {reason}", rule.name());
             failed += 1;
@@ -107,6 +145,47 @@ pub fn lint_custom() -> anyhow::Result<()> {
     if failed > 0 {
         anyhow::bail!("{failed} custom lint finding(s)");
     }
+    Ok(())
+}
+
+/// `cargo xtask ffi-baseline`: rewrites [`ffi_translation::FFI_BASELINE`] with
+/// every current `check-ffi-translation` finding, so the C FFI refactor can
+/// burn it down phase by phase (CLAUDE.md §4).
+pub fn write_ffi_baseline() -> anyhow::Result<()> {
+    println!("🔧 Writing the check-ffi-translation baseline...");
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: None,
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rule = ffi_translation::FfiTranslation::new(&ctx);
+    if let Some(reason) = rule.skip_reason() {
+        anyhow::bail!("cannot run check-ffi-translation: {reason}");
+    }
+    let krate = Crate::load(Path::new("src/lib.rs"))?;
+    if !krate.parse_errors.is_empty() {
+        anyhow::bail!(
+            "{} file(s) could not be parsed: {}",
+            krate.parse_errors.len(),
+            krate.parse_errors.join("; ")
+        );
+    }
+    let (findings, _) = rule.findings(&krate);
+    let mut out = String::from(
+        "# check-ffi-translation findings the C FFI refactor has not reached yet (CLAUDE.md §4).\n\
+         # One `<kind> <symbol>` per line, or `prefix:<C prefix>` to waive every symbol under it.\n\
+         # A line matching no finding any more is itself a finding: delete it. Rewrite with\n\
+         # `cargo xtask ffi-baseline`; see everything with\n\
+         # `cargo xtask lint-custom check-ffi-translation --no-baseline`.\n",
+    );
+    let mut keys: Vec<String> = findings.iter().map(ffi_translation::Finding::key).collect();
+    keys.dedup();
+    for key in &keys {
+        out.push_str(key);
+        out.push('\n');
+    }
+    fs::write(ffi_translation::FFI_BASELINE, out)?;
+    println!("✅ Wrote {} finding(s) to {}", keys.len(), ffi_translation::FFI_BASELINE);
     Ok(())
 }
 
@@ -709,7 +788,8 @@ impl<'ast> syn::visit::Visit<'ast> for Arrays {
 ///     `throw` → `return`, an optional dropped `get`, `_with_<params>` for an
 ///     overload, `new` / `with_<params>` for a constructor.
 ///
-/// The C FFI (`src/ffi`) is excluded for now.
+/// The C FFI (`src/ffi`) is out of scope: its symbols derive from the Rust
+/// items they bind, which `check-ffi-translation` checks name by name.
 ///
 /// Every public method carries a method marker: a `pub fn` of an inherent
 /// `impl` of a public type, a public trait's method, or a `pub fn` of a
@@ -752,8 +832,8 @@ struct JavaName {
 }
 
 impl JavaName {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let mut package_modules = BTreeSet::new();
         for class in &index.classes {
             for len in 0..=class.module.len() {
@@ -1519,8 +1599,8 @@ struct NoDeprecatedTranslation {
 }
 
 impl NoDeprecatedTranslation {
-    fn new() -> Self {
-        let mut index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let mut index = (*ctx.java).clone();
         let list = fs::read_to_string(java::DEPRECATED_LIST).unwrap_or_default();
         index.merge_deprecation_list(&list);
         let baseline = fs::read_to_string(DEPRECATED_BASELINE)
@@ -1846,8 +1926,8 @@ struct PublicAudience {
 }
 
 impl PublicAudience {
-    fn new() -> Self {
-        let index = JavaIndex::load();
+    fn new(ctx: &Context) -> Self {
+        let index = (*ctx.java).clone();
         let public = parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default());
         // Read at the ref, never from the working tree: the tree is the
         // translated source (4.3.1), not the release whose disclaimers count.
@@ -1986,6 +2066,11 @@ impl PublicAudience {
     /// (possibly nested) marker and its top-level marker; `None` if it names
     /// none.
     fn resolve_ffi_class(&self, pkg: &[&str], class: &str) -> Option<(String, String)> {
+        if pkg.is_empty() {
+            // A package-less `kafka_<Type>_…` stands for a JDK type (`kafka_List_t`,
+            // CLAUDE.md §4), never a Kafka class; its `rust-only` tag admits it.
+            return None;
+        }
         let dotted = pkg.join(".");
         let packages = [format!("clients.{dotted}"), dotted];
         let mut names = vec![class.to_string()];
@@ -2216,20 +2301,31 @@ fn is_no_mangle(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.meta.to_token_stream().to_string().contains("no_mangle"))
 }
 
-/// The prefix C `symbol` is reported under: `kafka_<pkg>_<Class>`, or the whole
-/// symbol when it names no class.
+/// The prefix C `symbol` is reported under: `kafka_<pkg>_<Class>` (`kafka_<Class>`
+/// for a package-less helper), or the whole symbol when it names no class.
 fn ffi_prefix(symbol: &str) -> String {
-    ffi_class(symbol).map_or_else(|| symbol.to_string(), |(pkg, class)| format!("kafka_{}_{class}", pkg.join("_")))
+    ffi_class(symbol).map_or_else(
+        || symbol.to_string(),
+        |(pkg, class)| {
+            if pkg.is_empty() {
+                format!("kafka_{class}")
+            } else {
+                format!("kafka_{}_{class}", pkg.join("_"))
+            }
+        },
+    )
 }
 
-/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); `None`
-/// when it has no lower-case package segment followed by a PascalCase class.
+/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); the
+/// segments are empty for a package-less `kafka_<Class>_…` helper standing for
+/// a JDK type (`kafka_List_t`, CLAUDE.md §4). `None` when no PascalCase class
+/// follows the lower-case segments.
 fn ffi_class(symbol: &str) -> Option<(Vec<&str>, &str)> {
     let rest = symbol.strip_prefix("kafka_")?;
     let mut pkg = Vec::new();
     for seg in rest.split('_') {
         if seg.starts_with(|c: char| c.is_ascii_uppercase()) {
-            return (!pkg.is_empty()).then_some((pkg, seg));
+            return Some((pkg, seg));
         }
         if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
             return None;
@@ -3139,7 +3235,10 @@ mod tests {
             Some((vec!["common", "acl"], "AclBinding"))
         );
         assert_eq!(ffi_class("kafka_consumer_string_destroy"), None);
-        assert_eq!(ffi_class("kafka_Error_t"), None);
+        // A package-less helper standing for a JDK type.
+        assert_eq!(ffi_class("kafka_List_t"), Some((vec![], "List")));
+        assert_eq!(ffi_prefix("kafka_List_add"), "kafka_List");
+        assert_eq!(ffi_class("kafka_string_destroy"), None);
         assert_eq!(ffi_class("other_Thing"), None);
     }
 

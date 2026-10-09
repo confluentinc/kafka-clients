@@ -1,0 +1,12 @@
+# check-ffi-translation findings the C FFI refactor has not reached yet (CLAUDE.md §4).
+# One `<kind> <symbol>` per line, or `prefix:<C prefix>` to waive every symbol under it.
+# A line matching no finding any more is itself a finding: delete it. Rewrite with
+# `cargo xtask ffi-baseline`; see everything with
+# `cargo xtask lint-custom check-ffi-translation --no-baseline`.
+missing kafka_consumer_MockConsumer_schedule_poll_task
+unmapped kafka_common_KafkaFuture_then_apply
+unmapped kafka_common_KafkaFuture_then_apply_try
+unmapped kafka_consumer_MockConsumer_schedule_poll_task
+unmapped kafka_producer_KafkaProducer_send
+unmapped kafka_producer_ProducerRecord_into_parts
+unmapped kafka_producer_Producer_send_with_callback

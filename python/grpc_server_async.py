@@ -24,8 +24,9 @@ Python client. It exercises the async API through the full integration matrix
 against a real broker (the sync server covers the sync client).
 
 Uses grpc.aio (asyncio server) rather than a thread pool: the async client's
-completions already marshal onto the event loop (loop.call_soon_threadsafe from
-the C dispatcher thread), so awaiting the coroutines is the natural fit. All RPC
+completions already run on the event loop (the client's notify hook schedules
+the callback pump with loop.call_soon_threadsafe), so awaiting the coroutines
+is the natural fit. All RPC
 handlers run as tasks on a single event loop, so the producer/consumer id maps
 need no lock — id allocation and dict pops happen without an intervening await.
 
@@ -55,7 +56,7 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
-# Error codes generated from kafka_common_ErrorCode_t
+# Error codes generated from kafka_common_ErrorCode_e
 # (python tools/generate_error_code.py). Private plumbing: the servicers stamp the
 # real code on errors of their own making, so the Rust client can tell those
 # apart from an error the client actually reported.
@@ -161,8 +162,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # GroupMetadataStore shared with the other service.
         self._group_metadata = group_metadata
         self._next_id = 1
-        # AsyncProducer invokes on_delivery on the loop (inside its completion
-        # drain), so this log is in fact only touched from the loop; CallbackLog
+        # AsyncProducer invokes on_delivery on the loop (inside its callback
+        # pump), so this log is in fact only touched from the loop; CallbackLog
         # locks anyway, which is what the consumer service genuinely needs.
         self._callback_log = CallbackLog()
 
@@ -202,7 +203,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
         # with_callback => register a real on_delivery through producer.py so the
         # Rust harness can read back (via GetCallbackLog) what the binding's own
-        # callback saw. On AsyncProducer it fires on the event loop.
+        # callback saw. On AsyncProducer it fires on the event loop, in the same
+        # pump step that resolves the record future, so it has run by the time
+        # the await below resumes.
         on_delivery = None
         if request.with_callback:
             on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
@@ -215,8 +218,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Await the record future on the event loop; completions hop onto the
-        # loop from the C dispatcher thread. Bounded like the sync server's 120s.
+        # Await the record future on the event loop; the client's notify hook
+        # schedules the callback pump that resolves it. Bounded like the sync
+        # server's 120s.
         try:
             metadata = await asyncio.wait_for(future, timeout=120)
         except kp.KafkaError as e:
@@ -370,19 +374,20 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
     Ops that block in the Rust consumer are coroutines and are awaited (seek
-    included: it awaits the background task, which may run a rebalance listener);
-    the non-blocking state reads (assignment/subscription/paused/wakeup) live on
-    the shared _ConsumerBase and are sync — called directly, never awaited."""
+    and commit_async included: both await the background task, and seek may run
+    a rebalance listener); the non-blocking state reads
+    (assignment/subscription/paused/wakeup) live on the shared _ConsumerBase and
+    are sync — called directly, never awaited."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
         # GroupMetadataStore shared with the other service.
         self._group_metadata = group_metadata
         self._next_id = 1
-        # This one genuinely needs CallbackLog's lock: rebalance-listener and
-        # commit callbacks fire on the Rust dispatcher thread (the listener
-        # methods are plain, so they run there directly, never on the loop),
-        # while GetCallbackLog is served on the loop.
+        # Rebalance-listener and commit callbacks are pumped on the event loop
+        # (the consumer's notify hook schedules Consumer__execute_callbacks with
+        # call_soon_threadsafe), the same loop GetCallbackLog is served on. The
+        # lock is kept so CallbackLog stays identical between the two servers.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -430,9 +435,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     async def Subscribe(self, request, context):
         # with_listener => a real ConsumerRebalanceListener whose invocations
         # land in the callback log. LoggingRebalanceListener's methods are plain
-        # functions on purpose: a *coroutine* listener method must not await
-        # AsyncConsumer FFI ops (the dispatcher thread is parked in
-        # run_coroutine_threadsafe(...).result() waiting for it — deadlock).
+        # functions (shared with the sync server); the binding would also accept
+        # coroutine methods here, scheduled on the loop by the callback pump.
         listener = None
         if request.with_listener:
             listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
@@ -471,9 +475,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
-        # commit_async is a sync local op on the shared _ConsumerBase in both
-        # clients (it only *initiates* the commit), so it is called directly
-        # rather than awaited. The callback fires on a later poll/commit/close.
+        # commit_async only *initiates* the commit, but the Rust consumer awaits
+        # its background task to enqueue it, so on the async client it is a
+        # coroutine driven through the `_cb` twin. The callback fires on a later
+        # poll/commit/close, pumped on the event loop.
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -481,7 +486,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if request.with_callback:
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
         try:
-            consumer.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
+            await consumer.commit_async(_proto_offsets_to_dict(request.offsets) or None,
+                                        callback=callback)
             return pb.StatusResponse()
         except kc.KafkaError as e:
             return self._status_err(e)

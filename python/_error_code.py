@@ -14,7 +14,7 @@
 
 """Error-code constants -- GENERATED, DO NOT EDIT.
 
-Generated from kafka_common_ErrorCode_t in rust/src/ffi/common.rs by
+Generated from kafka_common_ErrorCode_e in rust/src/ffi/common.rs by
 `python tools/generate_error_code.py`, and checked for staleness by
 test/static/test_error_code_generated.py.
 
@@ -191,3 +191,4 @@ INVALID_RECEIVE = -25
 QUOTA_VIOLATION = -26
 RECORD_DESERIALIZATION = -27
 PRODUCER_BUFFER_EXHAUSTED = -28
+LOCAL_CALLBACK = -29

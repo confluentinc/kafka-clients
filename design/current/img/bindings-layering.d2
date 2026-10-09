@@ -3,37 +3,42 @@
 # Source of truth for design/current/img/bindings-layering.svg.
 # Render with: make -C design/current d2
 #
-# The point of this diagram: every blocking operation crosses the C ABI in
-# two shapes -- a sync entry point that block_on's on the handle's own
-# runtime, and an *_async entry point whose result reaches the caller on a
-# dispatcher thread -- and both bindings are thin layers over those two.
+# The point of this diagram: the C API mirrors the Rust (and so the Java)
+# surface one-to-one under CLAUDE.md §4 -- a blocking entry point per Rust
+# `async fn` plus a `_cb` twin whose completion is queued on the client's
+# callbacks vector and run by `__execute_callbacks` on a caller thread; a
+# sync Rust `fn` crosses once. No Rust thread ever runs a user callback.
+# Both bindings are thin layers over that surface.
 
 direction: down
 
-py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / Admin (sync, concurrent.futures.Future)\nAsyncProducer / AsyncConsumer / AsyncAdmin (asyncio coroutines)" {
+py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / AdminClient (sync: _cb entry points, sliced wait in Python via SyncWaiter)\nAsync* twins (asyncio: _cb entry points + set_callbacks_notify -> call_soon_threadsafe(execute_callbacks))" {
   style.fill: "#eef6ff"
 }
 pyext: "_confluentkafka.c — hand-written CPython extension"
 c: "C callers / c/tests (Unity) / c/grpc_server"
 
-header: "rust/target/include/confluent_kafka.h\n(cbindgen, feature ffi)" {
+header: "rust/target/include/confluent_kafka.h\n(cbindgen, feature ffi; checked by cargo xtask lint-custom check-ffi-translation)" {
   style.fill: "#f3f0ff"
 }
 
-ffi: "rust/src/ffi/ — admin.rs, producer.rs, consumer.rs,\nconsumer_handle.rs, common.rs" {
+ffi: "rust/src/ffi/ — one file per Java class under common/, producer/, consumer/, admin/\n+ util.rs (kafka_List_t, kafka_Map_t, kafka_Bytes_t), kafka_future.rs, callback_queue.rs" {
   style.fill: "#fff7e6"
 
-  sync: "sync entry point\nruntime.block_on(api(...))\nreturns *mut kafka_common_Error_t (NULL = ok)"
-  async: "*_async entry point\nspawn on the handle's runtime;\nresult -> CompletionJob -> dispatcher thread\n-> *_callback_t(user_data, ...)"
+  sync: "blocking entry point (one per Rust method)\nruntime.block_on(api(...)) for an async fn\nfallible: returns *mut kafka_common_Error_t (NULL = ok),\nvalue through trailing out_<name>"
+  cb: "_cb twin (only for an async Rust fn)\nspawn on the client's runtime;\ncompletion -> CallbackQueue -> <Client>__execute_callbacks()\n-> <fn>_cb_t(value, error, opaque) on the pumping thread"
+  iface: "interfaces (traits C implements)\n<Interface>_new(void *self, <method>_fn_t ...)\nasync method -> callback_id + <Client>__set_callback_result\nclass handles bridge with <Class>__as_<Interface>()"
 }
 
-core: "Rust public API — Producer / Consumer / Admin\n(async fn, KafkaFuture<T>)" {
+core: "Rust public API — Producer / Consumer / Admin\n(async fn, sync fn, KafkaFuture<T> -> kafka_common_KafkaFuture_t)" {
   style.fill: "#e8f5e9"
 }
 
 py -> pyext -> header
 c -> header
 header -> ffi.sync
-header -> ffi.async
+header -> ffi.cb
+header -> ffi.iface
 ffi.sync -> core
-ffi.async -> core
+ffi.cb -> core
+core -> ffi.iface: "calls back"
