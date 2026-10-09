@@ -406,6 +406,16 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
     }
 
+    /// Sets the time after which an unanswered metadata attempt makes the
+    /// client rebootstrap. Java passes `rebootstrapTriggerMs` to the full
+    /// `NetworkClient` constructor, which also takes a `MetadataUpdater`
+    /// (`NetworkClient.java:296-316`); [`with_metadata_updater`](Self::with_metadata_updater)
+    /// mirrors the shorter constructor that defaults it to `Long.MAX_VALUE`, so
+    /// it is set after construction here, like the clock below.
+    pub(crate) fn set_rebootstrap_trigger_ms(&mut self, rebootstrap_trigger_ms: i64) {
+        self.rebootstrap_trigger_ms = rebootstrap_trigger_ms;
+    }
+
     /// Replaces the clock, which defaults to [`SystemTime`]. Java passes the
     /// `Time` to the `NetworkClient` constructor; it is set after construction
     /// here, like the throttle-time sensor below.
@@ -2238,6 +2248,125 @@ mod tests {
         let least_loaded_node = client.least_loaded_node(now);
         assert!(!least_loaded_node.has_node_available_or_connection_ready());
         assert!(least_loaded_node.node().is_none(), "There should be NO leastloadednode");
+    }
+
+    /// The admin client builds its `NetworkClient` with one in-flight request per
+    /// connection (`KafkaAdminClient.java:561`), so a connected node that already
+    /// has a request in flight cannot take another one and `leastLoadedNode`
+    /// prefers a node it can connect to (`NetworkClient.java` `leastLoadedNode`:
+    /// `canSendRequest` is false, `canConnect` is true). With a larger limit the
+    /// busy node would be returned as the "ready" candidate instead.
+    #[tokio::test]
+    async fn test_admin_least_loaded_node_skips_node_with_in_flight_request() {
+        let node0 = Node::new(0, "localhost".to_string(), 9092);
+        let node1 = Node::new(1, "localhost".to_string(), 9093);
+        let mut props = std::collections::HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let config = crate::admin::AdminClientConfig::new(&props).unwrap();
+        let mut client = crate::admin::KafkaAdminClient::create_network_client(
+            &config,
+            MockSelector::new(),
+            Box::new(TestMetadataUpdater::new(vec![node0.clone(), node1.clone()])),
+            "admin",
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            LogContext::empty(),
+        );
+        client.set_mock_time();
+        let now = 0_i64;
+
+        client.ready(&node0, now).await;
+        await_ready(&mut client, &node0).await;
+        client.poll(1, now).await;
+        assert!(client.is_ready(&node0, now), "node 0 should be ready");
+
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let request = client.new_client_request(node0.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        client.poll(1, now).await;
+        assert_eq!(1, client.in_flight_request_count_for_node(node0.id_string()));
+
+        // `leastLoadedNode` starts at a random offset; the choice must not depend on it.
+        for _ in 0..10 {
+            let least_loaded_node = client.least_loaded_node(now);
+            assert_eq!(
+                least_loaded_node.node().map(|n| n.id()),
+                Some(node1.id()),
+                "node 0 is busy, so the not-yet-connected node 1 is the least loaded"
+            );
+            assert!(
+                least_loaded_node.has_node_available_or_connection_ready(),
+                "node 0's connection is ready, so a node is available"
+            );
+        }
+    }
+
+    /// The admin client builds its `NetworkClient` with a one-hour default request
+    /// timeout (`KafkaAdminClient.java:562`), not `request.timeout.ms`. The
+    /// `ApiVersions` handshake is sent with that default
+    /// (`NetworkClient.handleInitiateApiVersionRequests`), so a broker that answers
+    /// it after `request.timeout.ms` is waited for and the node becomes ready; the
+    /// handshake is cut off only after the hour. With `request.timeout.ms` as the
+    /// default the node was disconnected at 5 s and every reconnect hit the same
+    /// slow answer.
+    #[tokio::test]
+    async fn test_admin_api_versions_handshake_waits_past_request_timeout_ms() {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let mut props = std::collections::HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "5000".to_string());
+        let config = crate::admin::AdminClientConfig::new(&props).unwrap();
+        let new_client = || {
+            let mut client = crate::admin::KafkaAdminClient::create_network_client(
+                &config,
+                MockSelector::new(),
+                Box::new(TestMetadataUpdater::new(vec![node.clone()])),
+                "admin",
+                Arc::new(ApiVersions::new()),
+                TestHostResolver::new(),
+                LogContext::empty(),
+            );
+            client.set_mock_time();
+            client
+        };
+
+        // The broker answers the handshake 8 s after it was sent.
+        let mut client = new_client();
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        assert!(client.has_in_flight_requests_for_node(node.id_string()), "ApiVersions sent");
+
+        client.poll(0, 5_001).await;
+        assert!(
+            client.has_in_flight_requests_for_node(node.id_string()),
+            "the handshake is still awaited after request.timeout.ms"
+        );
+        assert!(!client.connection_failed(&node), "the node is not disconnected");
+
+        let mut response = default_api_versions_response();
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &mut response,
+        );
+        client.poll(0, 8_000).await;
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.is_ready(&node, 8_000), "the late answer makes the node ready");
+
+        // A handshake that is never answered is cut off after the hour.
+        let mut client = new_client();
+        client.ready(&node, 0).await;
+        client.poll(0, 0).await;
+        client.poll(0, 3_600_000).await;
+        assert!(
+            client.has_in_flight_requests_for_node(node.id_string()),
+            "not past the hour yet"
+        );
+        client.poll(0, 3_600_001).await;
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.connection_failed(&node), "disconnected once the hour has passed");
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelay`.
