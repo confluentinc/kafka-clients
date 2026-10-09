@@ -2425,15 +2425,18 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
-        let (record_topic, partition, timestamp, _headers, key, value) = record.into_parts();
+        let (record_topic, partition, timestamp, record_headers, key, value) = record.into_parts();
 
+        // Java's `doSend` appends `record.headers().toArray()`
+        // (`KafkaProducer.java:1020`, `:1029-1030`); the header bytes are
+        // written straight into the batch buffer, as on the typed path.
         self.do_send_bytes(
             &record_topic,
             partition,
             timestamp,
             key,
             value,
-            RecordBatch::EMPTY_HEADERS,
+            record_headers.to_array(),
             callback,
             now_ms,
             remaining_wait_ms,
@@ -4466,6 +4469,63 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_ok(), "Send with headers should succeed");
         assert!(accumulator.has_undrained(), "Accumulator should have batches");
+        assert_eq!(
+            accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
+            vec![vec![("test".to_string(), Some(b"header-value".to_vec()))]]
+        );
+    }
+
+    /// The borrowed byte-slice `send`, the path of the C FFI's `send_batch` and
+    /// single-record sends (so of the C and Python `KafkaProducer`), appends the
+    /// record's headers as Java's `doSend` does (`KafkaProducer.java:1020`,
+    /// `:1029-1030`), in order, with an empty and a null value kept apart. It
+    /// used to append none.
+    #[tokio::test]
+    async fn test_borrowed_send_appends_the_record_headers() {
+        use crate::common::header::Headers;
+        use crate::common::header::RecordHeaders;
+        use crate::common::serialization::ByteArraySerializer;
+
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::with_options(
+            KafkaProducerOptionsBuilder::new()
+                .set_config(&ProducerConfig::default())
+                .set_key_serializer(Box::new(ByteArraySerializer))
+                .set_value_serializer(Box::new(ByteArraySerializer))
+                .set_metadata(metadata)
+                .set_accumulator(Arc::clone(&accumulator))
+                .set_time(default_time())
+                .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
+                .build()
+                .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
+        );
+
+        let mut headers = RecordHeaders::new();
+        headers.add_key_value("trace", Some(b"abc")).unwrap();
+        headers.add_key_value("empty", Some(b"")).unwrap();
+        headers.add_key_value("null", None).unwrap();
+        let record = ProducerRecord::with_partition_key_headers(
+            TOPIC.to_string(),
+            Some(0),
+            Some(b"key".as_slice()),
+            Some(b"value".as_slice()),
+            headers,
+        )
+        .unwrap();
+
+        producer
+            .send(record, None)
+            .await
+            .expect("the borrowed send should append the record");
+        assert_eq!(
+            accumulator.record_headers_for_test(&TopicPartition::new(TOPIC.to_string(), 0)),
+            vec![vec![
+                ("trace".to_string(), Some(b"abc".to_vec())),
+                ("empty".to_string(), Some(Vec::new())),
+                ("null".to_string(), None),
+            ]]
+        );
     }
 
     /// Translated from `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`.
