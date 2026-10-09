@@ -17,8 +17,8 @@ the multilanguage tests.
   blocking function and a `*_cb` variant that takes a `*_cb_t` plus an opaque
   pointer and returns at once. No Rust thread ever runs a C callback: `_cb`
   completions and delivery callbacks are queued on the client, and
-  `<Client>_execute_callbacks` runs the pending ones on the calling thread;
-  `<Client>_set_callbacks_notify` installs a hook fired once each time the
+  `<Client>__execute_callbacks` runs the pending ones on the calling thread;
+  `<Client>__set_callbacks_notify` installs a hook fired once each time the
   queue goes from empty to non-empty, which may only schedule a pump, never
   run callbacks. `_destroy` runs whatever is still pending, exactly once.
 

@@ -829,8 +829,8 @@ mod tests {
         kafka_producer_RecordMetadata_offset, kafka_producer_RecordMetadata_t,
     };
     use crate::ffi::producer::{
-        kafka_producer_Producer_begin_transaction, kafka_producer_Producer_commit_transaction,
-        kafka_producer_Producer_execute_callbacks, kafka_producer_Producer_flush,
+        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_begin_transaction,
+        kafka_producer_Producer_commit_transaction, kafka_producer_Producer_flush,
         kafka_producer_Producer_init_transactions, kafka_producer_Producer_send, kafka_producer_Producer_send_cb,
         kafka_producer_Producer_send_with_callback,
     };
@@ -894,9 +894,9 @@ mod tests {
             kafka_List_destroy(history);
 
             // Nothing fired yet: the mock holds the completion.
-            assert_eq!(kafka_producer_Producer_execute_callbacks(view), 0);
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
-            assert_eq!(kafka_producer_Producer_execute_callbacks(view), 1);
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
             assert_eq!(seen.completions.load(Ordering::SeqCst), 1);
             assert_eq!(seen.last_offset.load(Ordering::SeqCst), 0);
             assert_eq!(kafka_producer_MockProducer_complete_next(mock), 0);
@@ -953,7 +953,7 @@ mod tests {
 
             assert!(kafka_producer_Producer_flush(view).is_null());
             assert_eq!(kafka_producer_MockProducer_flushed(mock), 1);
-            assert_eq!(kafka_producer_Producer_execute_callbacks(view), 3);
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 3);
             assert_eq!(seen.sends.load(Ordering::SeqCst), 3);
             assert_eq!(kafka_producer_MockProducer_commit_count(mock), 1);
 

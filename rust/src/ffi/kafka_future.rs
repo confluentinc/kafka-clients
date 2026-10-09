@@ -39,7 +39,7 @@
 //! (`completed_future`, `all_of` over such futures) is driven on a small
 //! process-wide runtime, so `get` works outside any client. `get_cb` queues its
 //! callback on the owning client's callbacks vector (drained by that client's
-//! `_execute_callbacks`); a future with no client invokes the callback inline,
+//! `__execute_callbacks`); a future with no client invokes the callback inline,
 //! on the calling thread, before `get_cb` returns.
 
 // FFI type names follow the kafka_<TypeName>_<method> convention with PascalCase
@@ -361,7 +361,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
 }
 
 /// The non-blocking form of [`kafka_common_KafkaFuture_get`]: `cb` receives
-/// the value or the error through the owning client's `_execute_callbacks`,
+/// the value or the error through the owning client's `__execute_callbacks`,
 /// or inline before this returns when the future belongs to no client.
 ///
 /// # Safety

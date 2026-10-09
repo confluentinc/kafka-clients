@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The per-client callbacks vector behind `_execute_callbacks` /
-//! `_set_callbacks_notify` (CLAUDE.md §4, "Async variants of blocking
+//! The per-client callbacks vector behind `__execute_callbacks` /
+//! `__set_callbacks_notify` (CLAUDE.md §4, "Async variants of blocking
 //! methods").
 //!
 //! No Rust thread ever runs a user callback. A `_cb` entry point, or a Rust
 //! background task with something to deliver, pushes a closure onto the
 //! client's [`CallbackQueue`]; the C caller drains it with the client's
-//! `_execute_callbacks`, on whichever thread it chooses, and learns that there
+//! `__execute_callbacks`, on whichever thread it chooses, and learns that there
 //! is something to drain through the notify hook it registered with
-//! `_set_callbacks_notify`. The hook fires once each time the vector goes from
+//! `__set_callbacks_notify`. The hook fires once each time the vector goes from
 //! empty to non-empty and may only *schedule* the drain (`call_soon_threadsafe`,
 //! `uv_async_send`, a condition-variable signal), never run callbacks itself:
 //! it is called from a Rust task.

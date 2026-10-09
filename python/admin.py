@@ -2966,7 +2966,7 @@ class Admin(_AdminBase):
     resolves its ``KafkaFuture`` handles through the queued ``_cb`` twin
     (``Admin_resolve_cb``), waiting on the calling thread in short slices
     (:class:`_sync_wait.SyncWaiter`) and draining the completion with
-    ``Admin_execute_callbacks`` -- the result is delivered on the caller's
+    ``Admin__execute_callbacks`` -- the result is delivered on the caller's
     thread, as for a Java caller blocking in ``KafkaFuture.get()``, while
     ``Ctrl-C`` is honoured between slices. The request itself cannot be
     interrupted (there is no admin ``wakeup()``): on ``KeyboardInterrupt`` the
@@ -2979,11 +2979,11 @@ class Admin(_AdminBase):
 
     def _init_mock(self, num_brokers=1):
         super()._init_mock(num_brokers)
-        _lib.Admin_set_callbacks_notify(self._h, self._waiter.notify)
+        _lib.Admin__set_callbacks_notify(self._h, self._waiter.notify)
 
     def _init_kafka(self, config):
         super()._init_kafka(config)
-        _lib.Admin_set_callbacks_notify(self._h, self._waiter.notify)
+        _lib.Admin__set_callbacks_notify(self._h, self._waiter.notify)
 
     def __enter__(self):
         return self
@@ -2998,7 +2998,7 @@ class Admin(_AdminBase):
         h = self._h
         if h is None:
             return 0
-        return _lib.Admin_execute_callbacks(h)
+        return _lib.Admin__execute_callbacks(h)
 
     def _run_sync(self, submit, convert):
         job = self._submit(submit())
@@ -3537,11 +3537,11 @@ class AsyncAdmin(_AdminBase):
 
     def _init_mock(self, num_brokers=1):
         super()._init_mock(num_brokers)
-        _lib.Admin_set_callbacks_notify(self._h, self._on_callbacks_notify)
+        _lib.Admin__set_callbacks_notify(self._h, self._on_callbacks_notify)
 
     def _init_kafka(self, config):
         super()._init_kafka(config)
-        _lib.Admin_set_callbacks_notify(self._h, self._on_callbacks_notify)
+        _lib.Admin__set_callbacks_notify(self._h, self._on_callbacks_notify)
 
     async def __aenter__(self):
         return self
@@ -3568,7 +3568,7 @@ class AsyncAdmin(_AdminBase):
         h = self._h
         if h is None:
             return  # destroyed: `Admin_destroy` already ran what was pending
-        while _lib.Admin_execute_callbacks(h) > 0:
+        while _lib.Admin__execute_callbacks(h) > 0:
             pass
 
     @staticmethod
@@ -3589,7 +3589,7 @@ class AsyncAdmin(_AdminBase):
 
         def cb(payload, exc):
             # Runs either inline (a future that already completed, or belongs
-            # to no client) or on the loop thread from `_execute_callbacks`;
+            # to no client) or on the loop thread from `__execute_callbacks`;
             # asyncio futures are touched only through the loop either way.
             if loop.is_closed():
                 return
@@ -3862,7 +3862,7 @@ class AsyncAdmin(_AdminBase):
             fut = loop.create_future()
 
             def cb():
-                # Runs on the loop thread from `_execute_callbacks`, or from
+                # Runs on the loop thread from `__execute_callbacks`, or from
                 # `Admin_destroy` draining the still-pending callbacks after a
                 # cancellation; the future is touched only through the loop.
                 if loop.is_closed():

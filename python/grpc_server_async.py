@@ -385,7 +385,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         self._group_metadata = group_metadata
         self._next_id = 1
         # Rebalance-listener and commit callbacks are pumped on the event loop
-        # (the consumer's notify hook schedules Consumer_execute_callbacks with
+        # (the consumer's notify hook schedules Consumer__execute_callbacks with
         # call_soon_threadsafe), the same loop GetCallbackLog is served on. The
         # lock is kept so CallbackLog stays identical between the two servers.
         self._callback_log = CallbackLog()

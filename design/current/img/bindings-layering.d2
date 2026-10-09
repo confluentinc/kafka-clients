@@ -6,7 +6,7 @@
 # The point of this diagram: the C API mirrors the Rust (and so the Java)
 # surface one-to-one under CLAUDE.md §4 -- a blocking entry point per Rust
 # `async fn` plus a `_cb` twin whose completion is queued on the client's
-# callbacks vector and run by `_execute_callbacks` on a caller thread; a
+# callbacks vector and run by `__execute_callbacks` on a caller thread; a
 # sync Rust `fn` crosses once. No Rust thread ever runs a user callback.
 # Both bindings are thin layers over that surface.
 
@@ -26,7 +26,7 @@ ffi: "rust/src/ffi/ — one file per Java class under common/, producer/, consum
   style.fill: "#fff7e6"
 
   sync: "blocking entry point (one per Rust method)\nruntime.block_on(api(...)) for an async fn\nfallible: returns *mut kafka_common_Error_t (NULL = ok),\nvalue through trailing out_<name>"
-  cb: "_cb twin (only for an async Rust fn)\nspawn on the client's runtime;\ncompletion -> CallbackQueue -> <Client>_execute_callbacks()\n-> <fn>_cb_t(value, error, opaque) on the pumping thread"
+  cb: "_cb twin (only for an async Rust fn)\nspawn on the client's runtime;\ncompletion -> CallbackQueue -> <Client>__execute_callbacks()\n-> <fn>_cb_t(value, error, opaque) on the pumping thread"
   iface: "interfaces (traits C implements)\n<Interface>_new(void *self, <method>_fn_t ...)\nasync method -> callback_id + <Client>__set_callback_result\nclass handles bridge with <Class>__as_<Interface>()"
 }
 

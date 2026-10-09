@@ -161,7 +161,7 @@ pub type kafka_consumer_ConsumerHandle_assign_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -211,7 +211,7 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -263,7 +263,7 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -314,7 +314,7 @@ pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -363,7 +363,7 @@ pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -412,7 +412,7 @@ pub type kafka_consumer_ConsumerHandle_pause_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -461,7 +461,7 @@ pub type kafka_consumer_ConsumerHandle_resume_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -512,7 +512,7 @@ pub type kafka_consumer_ConsumerHandle_position_cb_t =
     unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -565,7 +565,7 @@ pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
     unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -620,7 +620,7 @@ pub type kafka_consumer_ConsumerHandle_committed_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -673,7 +673,7 @@ pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -726,7 +726,7 @@ pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -781,7 +781,7 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -831,7 +831,7 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -880,7 +880,7 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -927,7 +927,7 @@ pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -974,7 +974,7 @@ pub type kafka_consumer_ConsumerHandle_commit_async_offsets_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer_execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///

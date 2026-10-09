@@ -21,7 +21,7 @@
 //! later from any thread. How a consumer reaches the implementation depends
 //! on the entry point that triggered the rebalance (module docs of
 //! `ffi::consumer`): directly on the calling thread for a blocking one,
-//! through `kafka_consumer_Consumer_execute_callbacks` for a `_cb` one. The
+//! through `kafka_consumer_Consumer__execute_callbacks` for a `_cb` one. The
 //! membership state machine does not advance until the result is reported
 //! (consumer-threading.md §31), exactly as Java waits for the listener to
 //! return.

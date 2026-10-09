@@ -352,7 +352,7 @@ rust/src/ffi/           # feature-gated: --features ffi; 265 files, 2299 exporte
 ├── error_predicates.rs # generated: 167 kafka_common_Error_is_*_error predicates
 ├── util.rs             # kafka_List_t, kafka_Map_t, kafka_Bytes_t, kafka_string_destroy (14)
 ├── kafka_future.rs     # kafka_common_KafkaFuture_t (13)
-├── callback_queue.rs   # CallbackQueue behind <Client>_execute_callbacks / _set_callbacks_notify
+├── callback_queue.rs   # CallbackQueue behind <Client>__execute_callbacks / __set_callbacks_notify
 ├── common/             # 104 files, 835 symbols: one file per Java class (acl/, config/,
 │                       # security/, serialization/, metrics/, ...)
 ├── producer/           # 9 files, 129 symbols: Producer_t, KafkaProducer_t, MockProducer_t,
@@ -397,8 +397,8 @@ The C surface mirrors the Rust surface one-to-one (CLAUDE.md §4, enforced by
 one C function with the Rust name, a fallible one returns
 `kafka_common_Error_t *` and fills a trailing `out_` parameter, and every Rust
 `async fn` additionally has a `_cb` twin whose completion is queued on the
-client's `CallbackQueue` and run by `<Client>_execute_callbacks()` on the
-caller's thread (`<Client>_set_callbacks_notify` only signals). Traits C can
+client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
+caller's thread (`<Client>__set_callbacks_notify` only signals). Traits C can
 implement are `<Interface>_new(void *self, fn_t...)` interfaces; Rust classes
 implementing them expose borrowed `<Class>__as_<Interface>()` views. The rest
 of the exported symbols are accessors, enum singletons and destructors.

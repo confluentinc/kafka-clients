@@ -69,7 +69,7 @@ class SyncWaiter:
     Args:
         execute_callbacks: ``callable() -> int`` running the client's queued
             callbacks on the calling thread and returning how many ran
-            (``<Client>_execute_callbacks``). It must tolerate being called
+            (``<Client>__execute_callbacks``). It must tolerate being called
             after the client was destroyed (return ``0``).
     """
 

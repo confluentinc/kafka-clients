@@ -46,8 +46,8 @@
 //! `Admin` trait, so they are the only ones with a `_cb` twin. Their
 //! completion carries no value and no error (Java's `close` is `void` and
 //! throws nothing), so the `_cb_t` takes only the opaque pointer.
-//! `kafka_admin_Admin_execute_callbacks` runs the queued callbacks serially
-//! on the calling thread and `kafka_admin_Admin_set_callbacks_notify`
+//! `kafka_admin_Admin__execute_callbacks` runs the queued callbacks serially
+//! on the calling thread and `kafka_admin_Admin__set_callbacks_notify`
 //! installs the hook fired once each time the vector goes from empty to
 //! non-empty. A blocking entry point drives the runtime from the calling
 //! thread with `block_on`, so it must not be called from a callback running
@@ -543,7 +543,7 @@ pub type kafka_admin_Admin_close_with_timeout_cb_t = unsafe extern "C" fn(opaque
 
 /// The hook fired once each time the callback vector goes from empty to
 /// non-empty, from a Rust task: it may only schedule a later
-/// [`kafka_admin_Admin_execute_callbacks`], never run callbacks.
+/// [`kafka_admin_Admin__execute_callbacks`], never run callbacks.
 pub type kafka_admin_Admin_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
 
 // ---------------------------------------------------------------------------
@@ -627,7 +627,7 @@ fn close_timeout(timeout: i64) -> Duration {
 ///
 /// `self_` must be a live handle or view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_execute_callbacks(self_: *const kafka_admin_Admin_t) -> i32 {
+pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafka_admin_Admin_t) -> i32 {
     unsafe { client_ref(self_) }.queue.execute()
 }
 
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_execute_callbacks(self_: *const kafka
 /// `self_` must be a live handle or view; `opaque` stays valid while the
 /// hook is installed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_set_callbacks_notify(
+pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
     self_: *const kafka_admin_Admin_t,
     notify: kafka_admin_Admin_callbacks_notify_fn_t,
     opaque: *mut c_void,

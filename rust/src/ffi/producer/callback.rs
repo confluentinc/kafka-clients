@@ -24,7 +24,7 @@
 //! when the producer completes, fails or aborts it.
 //!
 //! The callback is fired by the producer's background task, so it is always
-//! queued (§4 rule 5): `kafka_producer_Producer_execute_callbacks` invokes
+//! queued (§4 rule 5): `kafka_producer_Producer__execute_callbacks` invokes
 //! `on_completion(self, metadata, error)` on the pumping thread, exactly one
 //! of the two arguments being non-`NULL` the way Java hands exactly one
 //! non-`null` (a pre-accumulator rejection delivers the placeholder metadata

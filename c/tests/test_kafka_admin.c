@@ -164,16 +164,16 @@ static kafka_common_TopicPartition_t *tp_new(const char *topic, int32_t partitio
     return tp;
 }
 
-/* The callback pump (test_support.h) over `kafka_admin_Admin_execute_callbacks`:
+/* The callback pump (test_support.h) over `kafka_admin_Admin__execute_callbacks`:
  * the notify hook only records the wake-up, the test thread runs the queued
  * callbacks. */
 static int32_t callback_pump_execute_admin(const void *client) {
-    return kafka_admin_Admin_execute_callbacks((const kafka_admin_Admin_t *)client);
+    return kafka_admin_Admin__execute_callbacks((const kafka_admin_Admin_t *)client);
 }
 
 static void install_pump(callback_pump_t *pump, const kafka_admin_Admin_t *admin) {
     callback_pump_init(pump, admin, callback_pump_execute_admin);
-    kafka_admin_Admin_set_callbacks_notify(admin, callback_pump_notify, pump);
+    kafka_admin_Admin__set_callbacks_notify(admin, callback_pump_notify, pump);
 }
 
 typedef struct {

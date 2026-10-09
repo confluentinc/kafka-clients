@@ -454,7 +454,7 @@ class _ProducerWaiter(SyncWaiter):
     bounded ``Producer_poll`` call instead of a wait on the Python event:
     drain, wait up to the slice for the condvar, drain again. The 100 ms slice
     keeps the wait interruptible (``Ctrl-C`` is raised between two slices);
-    :meth:`drain` is ``Producer_execute_callbacks``.
+    :meth:`drain` is ``Producer__execute_callbacks``.
     """
 
     __slots__ = ("_producer",)
@@ -524,10 +524,10 @@ class Producer(_ProducerBase):
     # ---- the callback pump (all on the calling thread) ----------------------
 
     def _execute_callbacks(self):
-        """One ``Producer_execute_callbacks`` pass; ``0`` once destroyed."""
+        """One ``Producer__execute_callbacks`` pass; ``0`` once destroyed."""
         if self.c_producer is None:
             return 0
-        return _lib.Producer_execute_callbacks(self.c_producer)
+        return _lib.Producer__execute_callbacks(self.c_producer)
 
     def _pump(self):
         """Run every queued callback on this thread; returns how many ran."""
@@ -816,7 +816,7 @@ class AsyncProducer(_ProducerBase):
         """Run every queued callback on the event loop thread."""
         if self.c_producer is None:
             return
-        while _lib.Producer_execute_callbacks(self.c_producer) > 0:
+        while _lib.Producer__execute_callbacks(self.c_producer) > 0:
             pass
 
     def _bind_loop(self):

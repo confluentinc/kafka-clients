@@ -291,7 +291,7 @@ pub type kafka_consumer_MockConsumer_rebalance_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// Non-blocking `rebalance`: the listener's callbacks and `cb` are queued
-/// for `kafka_consumer_Consumer_execute_callbacks`.
+/// for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -400,9 +400,10 @@ mod tests {
         kafka_consumer_ConsumerRecords_records_with_partition,
     };
     use crate::ffi::consumer::{
-        kafka_consumer_Consumer__set_callback_result, kafka_consumer_Consumer_assign,
-        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_execute_callbacks, kafka_consumer_Consumer_poll,
-        kafka_consumer_Consumer_set_callbacks_notify, kafka_consumer_Consumer_subscribe_with_topics_listener,
+        kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer__set_callback_result,
+        kafka_consumer_Consumer__set_callbacks_notify, kafka_consumer_Consumer_assign,
+        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_poll,
+        kafka_consumer_Consumer_subscribe_with_topics_listener,
     };
     use crate::ffi::util::{
         kafka_Bytes_t, kafka_List_add, kafka_List_destroy, kafka_List_get, kafka_List_new, kafka_List_size,
@@ -542,7 +543,7 @@ mod tests {
         let (mock, consumer) = new_mock();
         let notifies = AtomicI32::new(0);
         unsafe {
-            kafka_consumer_Consumer_set_callbacks_notify(
+            kafka_consumer_Consumer__set_callbacks_notify(
                 consumer,
                 count_notify,
                 &notifies as *const AtomicI32 as *mut c_void,
@@ -564,7 +565,7 @@ mod tests {
         wait_until("the listener invocation to be queued", || notifies.load(SeqCst) >= 1);
         assert_eq!(probe.assigned.load(SeqCst), 0, "queued, not run, until the pump runs it");
 
-        assert_eq!(unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) }, 1);
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 1);
         assert_eq!(probe.assigned.load(SeqCst), 1);
         assert!(probe.ran_on_this_thread(), "the pump runs it on the pumping thread");
         assert_eq!(completed.load(SeqCst), 0, "the operation waits for the report");
@@ -577,9 +578,9 @@ mod tests {
         .join()
         .unwrap();
         wait_until("the completion to be queued", || notifies.load(SeqCst) >= 2);
-        assert_eq!(unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) }, 1);
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 1);
         assert_eq!(completed.load(SeqCst), 1);
-        assert_eq!(unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) }, 0);
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 0);
 
         unsafe {
             kafka_List_destroy(assignment);
@@ -698,13 +699,13 @@ mod tests {
         );
 
         wait_until("the listener invocation to run", || {
-            unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) };
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
             probe.pending_id.load(SeqCst) != 0
         });
         let id = probe.pending_id.load(SeqCst);
         unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut()) };
         wait_until("the completion to run", || {
-            unsafe { kafka_consumer_Consumer_execute_callbacks(consumer) };
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
             completed.load(SeqCst) == 1
         });
         assert!(unsafe { kafka_consumer_Consumer_commit_sync(consumer) }.is_null(), "free again");

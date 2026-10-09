@@ -97,11 +97,11 @@
 //!     `_new` parameter is always the bare typedef name (cbindgen does not
 //!     see through `Option<alias>` in a signature); an async method's
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`;
-//!   - a client trait ([`CLIENT_TRAITS`]): `_execute_callbacks`,
-//!     `_set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
+//!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
+//!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
 //!     `__set_callback_result` when it accepts an interface with an async
-//!     method (the double underscore: derived by convention, no Java
-//!     counterpart);
+//!     method (the double underscore on all three: derived by convention,
+//!     no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
 //!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
@@ -1578,7 +1578,7 @@ impl FfiTranslation {
                 if CLIENT_TRAITS.contains(&ty.name.as_str()) {
                     let self_ty = format!("*const {prefix}_t");
                     out.add(
-                        format!("{prefix}_execute_callbacks"),
+                        format!("{prefix}__execute_callbacks"),
                         Shape::Fn(Sig {
                             params: vec![Param::new("self", self_ty.clone())],
                             ret: Some("i32".to_string()),
@@ -1595,7 +1595,7 @@ impl FfiTranslation {
                         file,
                     );
                     out.add(
-                        format!("{prefix}_set_callbacks_notify"),
+                        format!("{prefix}__set_callbacks_notify"),
                         Shape::Fn(Sig {
                             params: vec![
                                 Param::new("self", self_ty.clone()),
@@ -2879,9 +2879,9 @@ mod tests {
             #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_flush(this: *const kafka_producer_Producer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_destroy(this: *mut kafka_producer_Producer_t) {}
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_execute_callbacks(this: *const kafka_producer_Producer_t) -> i32 { 0 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(this: *const kafka_producer_Producer_t) -> i32 { 0 }
             pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
-            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_set_callbacks_notify(this: *const kafka_producer_Producer_t, notify: kafka_producer_Producer_callbacks_notify_fn_t, opaque: *mut c_void) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(this: *const kafka_producer_Producer_t, notify: kafka_producer_Producer_callbacks_notify_fn_t, opaque: *mut c_void) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(bootstrap: *const c_char, out_producer: *mut *mut kafka_producer_Producer_t) -> *mut kafka_common_Error_t { std::ptr::null_mut() }
         "#;
         let findings = run("factory", rust, ffi);

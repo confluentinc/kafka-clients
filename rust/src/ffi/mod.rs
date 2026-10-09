@@ -31,7 +31,7 @@
 //! the package-less [`util::kafka_List_t`] and [`util::kafka_Map_t`] of
 //! `void *`, byte buffers as [`util::kafka_Bytes_t`]. A Java `KafkaFuture<T>`
 //! is [`kafka_future::kafka_common_KafkaFuture_t`]; the callbacks a client
-//! queues for its `_execute_callbacks` live in [`callback_queue`].
+//! queues for its `__execute_callbacks` live in [`callback_queue`].
 //!
 //! A nullable Java collection crosses as a null `kafka_List_t *` /
 //! `kafka_Map_t *` (distinct from an empty one); `kafka_List_size` and

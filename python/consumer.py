@@ -15,7 +15,7 @@ Design notes
   completion -- and every rebalance-listener / commit-callback invocation it
   triggers -- on the client's callback queue. The client's notify hook fires
   once each time that queue goes from empty to non-empty; it only signals.
-  What differs is who drains the queue (``Consumer_execute_callbacks``):
+  What differs is who drains the queue (``Consumer__execute_callbacks``):
 
   - the **synchronous consumer** waits in Python, in short slices, through
     :class:`_sync_wait.SyncWaiter`: the notify hook sets an event, the calling
@@ -565,7 +565,7 @@ class ConsumerHandle:
     client's runtime and waits for it. Unlike the synchronous :class:`Consumer`,
     the handle deliberately stays on the blocking ``ConsumerHandle_*`` entry
     points rather than their ``_cb`` twins: a callback runs on the calling
-    thread *inside* the consumer's callback pump (``Consumer_execute_callbacks``),
+    thread *inside* the consumer's callback pump (``Consumer__execute_callbacks``),
     and a completion queued from there could only be drained once the callback
     returned -- so a ``_cb`` wait would never end. The blocking call needs no
     pump: it runs on the caller's thread while the consumer's background task
@@ -802,15 +802,15 @@ class _ConsumerBase:
 
     def _init_mock(self, auto_offset_reset="earliest"):
         self._h = _lib.Consumer_MockConsumer_new(auto_offset_reset)
-        _lib.Consumer_set_callbacks_notify(self._h, self._notify_callable())
+        _lib.Consumer__set_callbacks_notify(self._h, self._notify_callable())
 
     def _init_kafka(self, config):
         self._h = _lib.Consumer_KafkaConsumer_new(config)
-        _lib.Consumer_set_callbacks_notify(self._h, self._notify_callable())
+        _lib.Consumer__set_callbacks_notify(self._h, self._notify_callable())
 
     def _notify_callable(self):
         """The Python callable the client's notify hook invokes, registered
-        with ``Consumer_set_callbacks_notify`` right after the handle is
+        with ``Consumer__set_callbacks_notify`` right after the handle is
         created: the synchronous consumer's waiter ``notify`` (sets an event),
         the asyncio consumer's ``_on_notify`` (schedules the pump on the loop).
         It must only signal, never run callbacks."""
@@ -1049,7 +1049,7 @@ class _ConsumerWaiter(SyncWaiter):
     called one of the consumer's own methods, the ``_cb`` twin would be
     rejected by the Rust single-owner guard -- but that rejection is queued on
     the very callbacks vector the thread is draining, and a nested
-    ``Consumer_execute_callbacks`` from inside a callback returns 0 by design,
+    ``Consumer__execute_callbacks`` from inside a callback returns 0 by design,
     so the wait could never end. :meth:`in_drain` lets the consumer raise the
     guard's error itself instead (:meth:`Consumer._check_not_in_callback`).
     """
@@ -1085,7 +1085,7 @@ class Consumer(_ConsumerBase):
     in 100 ms slices, through a :class:`_sync_wait.SyncWaiter` -- never through
     a blocking native call. The consumer's notify hook sets the waiter's event
     when the client queues a callback; the calling thread wakes, drains the
-    client's callbacks vector (``Consumer_execute_callbacks``) and so runs the
+    client's callbacks vector (``Consumer__execute_callbacks``) and so runs the
     completion itself. Rebalance listeners and commit callbacks are queued the
     same way, so they run on the calling thread, inside the call that triggers
     them, and that call does not return before they have -- Java's threading
@@ -1118,7 +1118,7 @@ class Consumer(_ConsumerBase):
         """The waiter's drain primitive: runs the queued callbacks on this
         thread; ``0`` once the handle is gone (nothing can be queued then)."""
         h = self._h
-        return 0 if h is None else _lib.Consumer_execute_callbacks(h)
+        return 0 if h is None else _lib.Consumer__execute_callbacks(h)
 
     def _notify_callable(self):
         return self._waiter.notify
@@ -1357,7 +1357,7 @@ class AsyncConsumer(_ConsumerBase):
         """Run every queued callback on the event loop thread."""
         if self._h is None:
             return
-        while _lib.Consumer_execute_callbacks(self._h) > 0:
+        while _lib.Consumer__execute_callbacks(self._h) > 0:
             pass
 
     def _bind_loop(self):

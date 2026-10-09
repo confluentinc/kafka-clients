@@ -37,7 +37,7 @@ void tearDown(void) {}
 //
 // No callback ever runs on a Rust thread: `_cb` completions and delivery
 // callbacks are queued on the producer's callback vector and run on the
-// thread that calls `kafka_producer_Producer_execute_callbacks`
+// thread that calls `kafka_producer_Producer__execute_callbacks`
 // (`callback_pump_t`, test_support.h).
 // ---------------------------------------------------------------------------
 
@@ -2057,7 +2057,7 @@ typedef struct {
 static void *pump_thread(void *arg) {
     pump_thread_t *p = (pump_thread_t *)arg;
     p->thread_id = pthread_self();
-    p->executed = kafka_producer_Producer_execute_callbacks(p->producer);
+    p->executed = kafka_producer_Producer__execute_callbacks(p->producer);
     return NULL;
 }
 

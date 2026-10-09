@@ -37,9 +37,9 @@
 //! Every method that is `async` in Rust has a blocking form, driven to
 //! completion on the calling thread, and a `_cb` twin that queues the
 //! completion onto the producer's callback vector:
-//! `kafka_producer_Producer_execute_callbacks` runs the queued callbacks
+//! `kafka_producer_Producer__execute_callbacks` runs the queued callbacks
 //! serially on the calling thread and
-//! `kafka_producer_Producer_set_callbacks_notify` installs the hook fired
+//! `kafka_producer_Producer__set_callbacks_notify` installs the hook fired
 //! once each time the vector goes from empty to non-empty. Delivery
 //! callbacks (`kafka_producer_Callback_t`) are fired by the producer's
 //! background task and are therefore always queued, whichever `send` form
@@ -565,7 +565,7 @@ pub type kafka_producer_Producer_partitions_for_cb_t =
 
 /// The hook fired once each time the callback vector goes from empty to
 /// non-empty, from a Rust task: it may only schedule a later
-/// [`kafka_producer_Producer_execute_callbacks`], never run callbacks.
+/// [`kafka_producer_Producer__execute_callbacks`], never run callbacks.
 pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
 
 // ---------------------------------------------------------------------------
@@ -1047,7 +1047,7 @@ fn close_timeout(timeout: i64) -> Result<Duration, Error> {
 ///
 /// `self_` must be a live view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_Producer_execute_callbacks(self_: *const kafka_producer_Producer_t) -> i32 {
+pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(self_: *const kafka_producer_Producer_t) -> i32 {
     unsafe { client_ref(self_) }.queue.execute()
 }
 
@@ -1060,7 +1060,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_execute_callbacks(self_: *const
 /// `self_` must be a live view; `opaque` stays valid while the hook is
 /// installed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_Producer_set_callbacks_notify(
+pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     self_: *const kafka_producer_Producer_t,
     notify: kafka_producer_Producer_callbacks_notify_fn_t,
     opaque: *mut c_void,

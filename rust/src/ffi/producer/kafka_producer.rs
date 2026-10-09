@@ -385,7 +385,9 @@ mod tests {
     use crate::ffi::producer::producer_record::{
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
     };
-    use crate::ffi::producer::{kafka_producer_Producer_close_with_timeout, kafka_producer_Producer_execute_callbacks};
+    use crate::ffi::producer::{
+        kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_with_timeout,
+    };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
     #[test]
@@ -441,7 +443,7 @@ mod tests {
             );
             kafka_common_Error_destroy(error);
             assert!(kafka_producer_Producer_close_with_timeout(view, 1_000).is_null());
-            assert_eq!(kafka_producer_Producer_execute_callbacks(view), 0);
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
             kafka_producer_KafkaProducer_destroy(producer);
             kafka_producer_KafkaProducer_destroy(std::ptr::null_mut());
         }

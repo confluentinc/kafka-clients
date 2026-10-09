@@ -1021,7 +1021,7 @@ symbols), plus the package-less helpers:
 | `error_predicates.rs` (generated) | 167 | `kafka_common_Error_is_<class>_error`, `kafka_common_ErrorCode_e` |
 | `util.rs` | 14 | `kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`, `kafka_string_destroy` |
 | `kafka_future.rs` | 13 | the one generic `kafka_common_KafkaFuture_t` (`get`, `get_cb`, `is_done`, `all_of`, `then_apply` through a `BaseFunction_t` interface, `completed_future`) |
-| `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `_execute_callbacks` / `_set_callbacks_notify` |
+| `callback_queue.rs` | 0 | `CallbackQueue`: the per-client callbacks vector behind `__execute_callbacks` / `__set_callbacks_notify` |
 | `producer/` (9 files) | 129 | `kafka_producer_Producer_t` interface, `KafkaProducer_t` / `MockProducer_t` with `__as_Producer`, `Callback_t`, `Partitioner_t`, `ProducerConfig_t`, records and metadata |
 | `consumer/` (16 files) | 297 | `kafka_consumer_Consumer_t`, `MockConsumer_t` with `__as_Consumer`, `ConsumerRebalanceListener_t` / `OffsetCommitCallback_t` (the `callback_id` protocol), `Deserializer_t`, `ConsumerHandle_t`, `ConsumerConfig_t`, records |
 | `admin/` (130 files; `options/` 44, `rpc.rs` 94 invokers) | 844 | `kafka_admin_Admin_t`, `AdminClient_create`, `MockAdminClient_t` with `__as_Admin`, one `<Rpc>Options_t` per Java options class, one `<Rpc>Result_t` per Java result class with per-key `KafkaFuture_t`s, every admin data class |
@@ -1042,8 +1042,8 @@ by-design gaps, all closures or tuples that have no C shape):
   `AdminClient_create`); `*OptionsBuilder` types get `_new` / `set_*` /
   `build`. A Rust `async fn` additionally gets a `_cb` twin taking
   `(<fn>_cb_t cb, void *opaque)` whose `cb(value, error, opaque)` is queued on
-  the client's `CallbackQueue` and run by `<Client>_execute_callbacks()` on the
-  pumping thread; `<Client>_set_callbacks_notify(fn, opaque)` fires once per
+  the client's `CallbackQueue` and run by `<Client>__execute_callbacks()` on the
+  pumping thread; `<Client>__set_callbacks_notify(fn, opaque)` fires once per
   empty→non-empty transition and may only schedule. There are 79 `_cb` twins
   and no `_async` functions; Java's `commitAsync` keeps its name.
 - **Fixed-width scalars only**: `int8_t` for `boolean` / `byte`, no `bool`,
@@ -1114,9 +1114,9 @@ Each module offers both shapes. Both drive the `_cb` entry points; they
 differ only in who waits for the completion:
 - A synchronous family that submits every blocking-in-Java operation through
   its `_cb` twin and waits in Python (`_sync_wait.py`, `SyncWaiter`) in short
-  slices: `<Client>_set_callbacks_notify` only sets a `threading.Event` (the
+  slices: `<Client>__set_callbacks_notify` only sets a `threading.Event` (the
   producer uses the condvar inside `Producer_poll`), and each slice drains
-  `<Client>_execute_callbacks` on the calling thread, so completions,
+  `<Client>__execute_callbacks` on the calling thread, so completions,
   delivery callbacks, rebalance listeners and commit callbacks run on the
   thread that made the call. Waiting in Python rather than in a native
   `block_on` keeps `Ctrl-C` prompt: on `KeyboardInterrupt` the consumer calls
@@ -1126,8 +1126,8 @@ differ only in who waits for the completion:
   are used only where the call cannot park (`begin_transaction`, the
   re-entrant `ConsumerHandle` inside a listener).
 - An async family whose methods are coroutines over the same `_cb` entry
-  points: `<Client>_set_callbacks_notify` is wired to
-  `loop.call_soon_threadsafe(<Client>_execute_callbacks)`, so every completion
+  points: `<Client>__set_callbacks_notify` is wired to
+  `loop.call_soon_threadsafe(<Client>__execute_callbacks)`, so every completion
   and every queued interface call runs on the event-loop thread.
 No extension thread exists any more; the old dispatcher thread and the
 producer's two helper threads went with the `_async` functions.

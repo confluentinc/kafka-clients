@@ -22,7 +22,7 @@
 // a blocking entry point (`MockConsumer_rebalance`, `commit_async_with_callback`)
 // invokes the interface methods directly on the calling thread; a `_cb` entry
 // point queues them on the consumer's callbacks vector, run by whoever calls
-// `kafka_consumer_Consumer_execute_callbacks`; `_destroy` runs what is still
+// `kafka_consumer_Consumer__execute_callbacks`; `_destroy` runs what is still
 // queued exactly once. An interface method reports its outcome through
 // `kafka_consumer_Consumer__set_callback_result`, inline or later from any
 // thread; the operation that invoked it does not complete until it does.

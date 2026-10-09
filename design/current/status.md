@@ -18,8 +18,8 @@
 > - **The C FFI follows CLAUDE.md §4 one-to-one** (2026-10-08 refactor, see
 >   `design.md` → C FFI): one file per Java class under `src/ffi/`
 >   (265 files, 2299 exports), error slot + trailing `out_` parameters, `_cb`
->   twins only for Rust `async fn`s, per-client `_execute_callbacks` /
->   `_set_callbacks_notify` instead of a dispatcher thread, `kafka_List_t` /
+>   twins only for Rust `async fn`s, per-client `__execute_callbacks` /
+>   `__set_callbacks_notify` instead of a dispatcher thread, `kafka_List_t` /
 >   `kafka_Map_t` / `kafka_Bytes_t`, enum singletons, `__as_<Interface>`
 >   views. `cargo xtask lint-custom check-ffi-translation` enforces it; the
 >   baseline `xtask/ffi-baseline.txt` holds 7 by-design closure/tuple gaps.
@@ -45,7 +45,7 @@
 > - **There is no FFI dispatcher any more.** `CompletionJob`,
 >   `spawn_dispatcher` and `enqueue_or_run_inline` were deleted on
 >   2026-10-08; completions go through `src/ffi/callback_queue.rs` and are
->   run by the caller's `<Client>_execute_callbacks()`.
+>   run by the caller's `<Client>__execute_callbacks()`.
 > - **Error model:** `KafkaGenericError` and the 13-variant `KafkaError` enum
 >   are gone. The error type is `common::Error` (162 variants), with Java's
 >   `KafkaException` as the embedded `KafkaError` struct; see `design.md` →
@@ -105,7 +105,7 @@
 > 10), as do `python/{producer,consumer}.py` and the C test suite
 > under `c/tests/`. The "async dispatcher in PR #116" that the
 > deferral notes point at was in-tree until 2026-10-08 and was then replaced
-> by the `_cb` / `_execute_callbacks` model (`src/ffi/callback_queue.rs`).
+> by the `_cb` / `__execute_callbacks` model (`src/ffi/callback_queue.rs`).
 >
 > The sections immediately below (Milestone 1 / Milestone 3) are **historical and
 > stale** — they predate the Producer, Consumer and Admin milestones and are left
@@ -1016,7 +1016,7 @@ delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 > **Status of that first deferral, as of 2026-10-08:** **closed.**
 > `src/ffi/admin/` (844 exported symbols) and `python/admin.py` now exist;
 > there is no dispatcher, completions are pumped by
-> `kafka_admin_Admin_execute_callbacks`. Tier 4 remains untouched: no
+> `kafka_admin_Admin__execute_callbacks`. Tier 4 remains untouched: no
 > `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
 > `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
 

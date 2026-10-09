@@ -38,7 +38,7 @@ and has no thread of its own:
   and every listener / commit-callback invocation it triggers -- on the
   client's callback queue. The client's notify hook fires once each time that
   queue goes from empty to non-empty, and the binding schedules the pump
-  (`Consumer_execute_callbacks`) on the event loop with
+  (`Consumer__execute_callbacks`) on the event loop with
   `call_soon_threadsafe`, so **every callback runs on the loop thread**.
   Listener methods and commit callbacks may therefore be coroutines: a
   coroutine listener method is scheduled as a task and the rebalance does not

@@ -309,8 +309,8 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // `Producer_flush`, ...) stay exported for completeness but neither Python
 // class calls them. Delivery completions and `_cb` completions are QUEUED by
 // Rust on the producer's callback vector and only run when this extension
-// calls `kafka_producer_Producer_execute_callbacks` (Producer_poll /
-// Producer_execute_callbacks), i.e. on the calling thread.
+// calls `kafka_producer_Producer__execute_callbacks` (Producer_poll /
+// Producer__execute_callbacks), i.e. on the calling thread.
 //
 //   * The sync `Producer` registers NO Python notify callable. It waits for a
 //     completion in 100 ms slices of `Producer_poll(handle, 100)` -- drain,
@@ -329,7 +329,7 @@ static PyTypeObject ConsumerGroupMetadataType = {
 //     nothing but `loop.call_soon_threadsafe(pump)`; the pump runs the queued
 //     callbacks on the event loop.
 //
-// The hook installed with `kafka_producer_Producer_set_callbacks_notify` fires
+// The hook installed with `kafka_producer_Producer__set_callbacks_notify` fires
 // from a Rust task once per empty->non-empty transition of that vector. It
 // only signals: it sets `notified` under `mtx` and broadcasts `cnd` (what the
 // sync producer's `Producer_poll` slices wait on) and, when one is set,
@@ -481,8 +481,8 @@ static void producer_orphan_delivery(Producer* p, DeliveryCtx* ctx) {
     p->orphans = ctx;
 }
 
-// Runs inside kafka_producer_Producer_execute_callbacks, i.e. on the thread
-// that called Producer_poll / Producer_execute_callbacks / Producer_destroy,
+// Runs inside kafka_producer_Producer__execute_callbacks, i.e. on the thread
+// that called Producer_poll / Producer__execute_callbacks / Producer_destroy,
 // with the GIL released by that wrapper. Both arguments are BORROWED; exactly
 // one is non-NULL except for a pre-accumulator rejection, which delivers the
 // placeholder metadata (offset/partition -1) beside the error, as Java's
@@ -556,7 +556,7 @@ static PyObject* py_MockProducer_new(PyObject* self, PyObject* args) {
     p->is_mock = 1;
     p->mp = kafka_producer_MockProducer_with_auto_complete((int8_t)(auto_complete ? 1 : 0));
     p->producer = kafka_producer_MockProducer__as_Producer(p->mp);
-    kafka_producer_Producer_set_callbacks_notify(p->producer, producer_callbacks_notify, p);
+    kafka_producer_Producer__set_callbacks_notify(p->producer, producer_callbacks_notify, p);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)p);
 }
 
@@ -614,7 +614,7 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
     }
     p->kp = kp;
     p->producer = kafka_producer_KafkaProducer__as_Producer(kp);
-    kafka_producer_Producer_set_callbacks_notify(p->producer, producer_callbacks_notify, p);
+    kafka_producer_Producer__set_callbacks_notify(p->producer, producer_callbacks_notify, p);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)p);
 }
 
@@ -659,16 +659,16 @@ static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
 
 // ---- callback pump ---------------------------------------------------------
 
-// Producer_execute_callbacks(handle) -> int: runs the queued callbacks on this
+// Producer__execute_callbacks(handle) -> int: runs the queued callbacks on this
 // thread (with the GIL released around the drain; each callback re-acquires
 // it) and returns how many ran.
-static PyObject* py_Producer_execute_callbacks(PyObject* self, PyObject* args) {
+static PyObject* py_Producer__execute_callbacks(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     Producer* p = producer_from_handle(ptr);
     int32_t n;
     Py_BEGIN_ALLOW_THREADS
-    n = kafka_producer_Producer_execute_callbacks(p->producer);
+    n = kafka_producer_Producer__execute_callbacks(p->producer);
     Py_END_ALLOW_THREADS
     return PyLong_FromLong((long)n);
 }
@@ -689,7 +689,7 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
     mtx_lock(&p->mtx);
     p->notified = 0;
     mtx_unlock(&p->mtx);
-    n = kafka_producer_Producer_execute_callbacks(p->producer);
+    n = kafka_producer_Producer__execute_callbacks(p->producer);
     if (n == 0 && timeout_ms != 0) {
         mtx_lock(&p->mtx);
         if (timeout_ms < 0) {
@@ -706,7 +706,7 @@ static PyObject* py_Producer_poll(PyObject* self, PyObject* args) {
         }
         p->notified = 0;
         mtx_unlock(&p->mtx);
-        n = kafka_producer_Producer_execute_callbacks(p->producer);
+        n = kafka_producer_Producer__execute_callbacks(p->producer);
     }
     Py_END_ALLOW_THREADS
     return PyLong_FromLong((long)n);
@@ -805,7 +805,7 @@ static void kafka_future_get_cb(void* value, kafka_common_Error_t* error, void* 
 
 // get_cb(cb) -> None: the queued twin of get(). `cb(metadata_tuple | None,
 // error_tuple | None)` runs from the owning producer's callback pump
-// (`Producer_execute_callbacks` / `Producer_poll`) once the record completed,
+// (`Producer__execute_callbacks` / `Producer_poll`) once the record completed,
 // or inline before this returns when the future belongs to no client. The
 // sync `SendFuture.result()` waits on it in slices, never in a native block.
 static PyObject* KafkaFuture_get_cb(KafkaFutureObject* self, PyObject* args) {
@@ -882,7 +882,7 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
 //   -> (KafkaFuture | None, err_tuple | None)
 // Blocks (GIL released) until the record is registered, as Java's send(). The
 // on_completion callable is registered as a kafka_producer_Callback_t and is
-// run by Producer_poll / Producer_execute_callbacks / Producer_destroy on the
+// run by Producer_poll / Producer__execute_callbacks / Producer_destroy on the
 // calling thread, exactly once; it receives (meta_tuple | None, err_tuple | None).
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -1672,8 +1672,8 @@ static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
 //   * `_cb` twins (`kafka_consumer_Consumer_<op>_cb`) return at once; the
 //     operation runs on the consumer's runtime and both the interface methods
 //     it triggers and the completion `cb` are queued on the consumer's callbacks
-//     vector, run only by `Consumer_execute_callbacks` (the asyncio pump).
-//     `Consumer_set_callbacks_notify` registers the Python callable the Rust
+//     vector, run only by `Consumer__execute_callbacks` (the asyncio pump).
+//     `Consumer__set_callbacks_notify` registers the Python callable the Rust
 //     notify hook fires once each time the vector goes from empty to non-empty
 //     (it may only schedule the pump, never run callbacks).
 //   * Interface methods carry an `int64_t callback_id` and are reported through
@@ -2473,7 +2473,7 @@ static void consumer_orphan_commit(Consumer* c, CommitCbCtx* ctx) {
 // ---- rebalance-listener trampolines ----------------------------------------
 //
 // Invoked by Rust on the calling thread (blocking entry point) or from
-// Consumer_execute_callbacks (`_cb` entry point), both with the GIL released by
+// Consumer__execute_callbacks (`_cb` entry point), both with the GIL released by
 // the wrapper. The adapter method receives the partitions as
 // list[(topic, partition)] plus the callback id and returns:
 //   * None  -> the listener returned: report success now;
@@ -2573,9 +2573,9 @@ static void consumer_callbacks_notify(void* opaque) {
     PyGILState_Release(g);
 }
 
-// Consumer_set_callbacks_notify(handle, callable | None): registers the Python
+// Consumer__set_callbacks_notify(handle, callable | None): registers the Python
 // callable the notify hook invokes. Call before the first `_cb` operation.
-static PyObject* py_Consumer_set_callbacks_notify(PyObject* self, PyObject* args) {
+static PyObject* py_Consumer__set_callbacks_notify(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KO", &h, &cb)) return NULL;
     Consumer* c = consumer_from_handle(h);
@@ -2590,15 +2590,15 @@ static PyObject* py_Consumer_set_callbacks_notify(PyObject* self, PyObject* args
     Py_RETURN_NONE;
 }
 
-// Consumer_execute_callbacks(handle) -> int: runs the queued callbacks on this
+// Consumer__execute_callbacks(handle) -> int: runs the queued callbacks on this
 // thread (GIL released around the drain; each callback re-acquires it).
-static PyObject* py_Consumer_execute_callbacks(PyObject* self, PyObject* args) {
+static PyObject* py_Consumer__execute_callbacks(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     kafka_consumer_Consumer_t* s = consumer_self(h);
     int32_t n;
     Py_BEGIN_ALLOW_THREADS
-    n = kafka_consumer_Consumer_execute_callbacks(s);
+    n = kafka_consumer_Consumer__execute_callbacks(s);
     Py_END_ALLOW_THREADS
     return PyLong_FromLong((long)n);
 }
@@ -2649,7 +2649,7 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
     }
     c->is_mock = 1;
     c->consumer = kafka_consumer_MockConsumer__as_Consumer(c->mc);  // borrowed view
-    kafka_consumer_Consumer_set_callbacks_notify(c->consumer, consumer_callbacks_notify, c);
+    kafka_consumer_Consumer__set_callbacks_notify(c->consumer, consumer_callbacks_notify, c);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)c);
 }
 
@@ -2696,7 +2696,7 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     Consumer* c = consumer_alloc();
     if (c == NULL) { kafka_consumer_Consumer_destroy(consumer); return NULL; }
     c->consumer = consumer;  // owned
-    kafka_consumer_Consumer_set_callbacks_notify(c->consumer, consumer_callbacks_notify, c);
+    kafka_consumer_Consumer__set_callbacks_notify(c->consumer, consumer_callbacks_notify, c);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)c);
 }
 
@@ -2800,7 +2800,7 @@ static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
 
 // ---- `_cb` completion trampolines ------------------------------------------
 //
-// Each runs from Consumer_execute_callbacks (GIL released by that wrapper), or
+// Each runs from Consumer__execute_callbacks (GIL released by that wrapper), or
 // inline from a ConsumerHandle `_cb` whose consumer is already destroyed, and
 // hands copied Python values to the registered callable. The void shape reuses
 // the producer's VoidCbCtx / producer_void_cb.
@@ -4011,9 +4011,9 @@ static PyObject* py_MockConsumer_last_poll_timeout(PyObject* self, PyObject* arg
 //
 //   * `Admin_resolve_cb(job, cb)` is what BOTH Python clients use:
 //     `kafka_common_KafkaFuture_get_cb` on every future; the callbacks arrive
-//     through `Admin_execute_callbacks`, which the Python side runs on the
+//     through `Admin__execute_callbacks`, which the Python side runs on the
 //     thread that waits for them. The asyncio client drains on the event-loop
-//     thread when the `Admin_set_callbacks_notify` hook fires
+//     thread when the `Admin__set_callbacks_notify` hook fires
 //     (`loop.call_soon_threadsafe`); the sync client's hook only sets a
 //     `threading.Event` that the calling thread waits on in 100 ms slices
 //     (`_sync_wait.SyncWaiter`), so a pending `KeyboardInterrupt` is raised
@@ -4122,7 +4122,7 @@ static PyObject* py_Admin_AdminClient_new(PyObject* self, PyObject* args) {
     if (a == NULL) { kafka_admin_Admin_destroy(client); return NULL; }
     a->owned = client;
     a->admin = client;
-    kafka_admin_Admin_set_callbacks_notify(a->admin, admin_callbacks_notify, a);
+    kafka_admin_Admin__set_callbacks_notify(a->admin, admin_callbacks_notify, a);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)a);
 }
 
@@ -4142,7 +4142,7 @@ static PyObject* py_Admin_MockAdminClient_new(PyObject* self, PyObject* args) {
     if (a == NULL) { kafka_admin_MockAdminClient_destroy(mock); return NULL; }
     a->mock = mock;
     a->admin = kafka_admin_MockAdminClient__as_Admin(mock);  // borrowed view
-    kafka_admin_Admin_set_callbacks_notify(a->admin, admin_callbacks_notify, a);
+    kafka_admin_Admin__set_callbacks_notify(a->admin, admin_callbacks_notify, a);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)a);
 }
 
@@ -4161,7 +4161,7 @@ static PyObject* py_Admin_close(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Completion of `Admin_close_cb`: `cb()` runs from `Admin_execute_callbacks`
+// Completion of `Admin_close_cb`: `cb()` runs from `Admin__execute_callbacks`
 // (or from `Admin_destroy`, which runs the still-pending callbacks). The C
 // API's close callback carries no error (`kafka_admin_Admin_close_cb_t` takes
 // only the opaque), so the Python callback takes no arguments. Reuses the
@@ -4217,11 +4217,11 @@ static PyObject* py_Admin_destroy(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Admin_set_callbacks_notify(handle, callable | None): the Python callable the
+// Admin__set_callbacks_notify(handle, callable | None): the Python callable the
 // notify hook invokes (from a Rust task). Call once, right after creation and
 // before the first `_cb` resolve: swapping it while a notification is in
 // flight is not synchronized against the hook.
-static PyObject* py_Admin_set_callbacks_notify(PyObject* self, PyObject* args) {
+static PyObject* py_Admin__set_callbacks_notify(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KO", &h, &cb)) return NULL;
     AdminHandle* a = admin_from_handle(h);
@@ -4236,15 +4236,15 @@ static PyObject* py_Admin_set_callbacks_notify(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Admin_execute_callbacks(handle) -> int: runs the queued callbacks on this
+// Admin__execute_callbacks(handle) -> int: runs the queued callbacks on this
 // thread (GIL released around the drain; each callback re-acquires it).
-static PyObject* py_Admin_execute_callbacks(PyObject* self, PyObject* args) {
+static PyObject* py_Admin__execute_callbacks(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     int32_t n;
     Py_BEGIN_ALLOW_THREADS
-    n = kafka_admin_Admin_execute_callbacks(a->admin);
+    n = kafka_admin_Admin__execute_callbacks(a->admin);
     Py_END_ALLOW_THREADS
     return PyLong_FromLong((long)n);
 }
@@ -4522,7 +4522,7 @@ static void job_finish_async(AdminJob* job) {
 // here are not used: the error is released and the slot re-reads the (now
 // completed) future with `get`, whose value stays valid until the future is
 // destroyed -- the same lifetime rule the sync path relies on. Runs on the
-// thread draining `Admin_execute_callbacks` (GIL released there), or inline
+// thread draining `Admin__execute_callbacks` (GIL released there), or inline
 // inside `get_cb` for a client-less future (GIL held); PyGILState_Ensure
 // covers both.
 static void admin_slot_cb(void* value, kafka_common_Error_t* error, void* opaque) {
@@ -4563,7 +4563,7 @@ static PyObject* py_Admin_resolve(PyObject* self, PyObject* args) {
 
 // Admin_resolve_cb(job, cb): both Python clients. cb(payload, None) /
 // cb(None, exception) once every future delivered, on the thread running
-// Admin_execute_callbacks (or inline, for a job with no futures or
+// Admin__execute_callbacks (or inline, for a job with no futures or
 // client-less ones).
 static PyObject* py_Admin_resolve_cb(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb;
@@ -7904,7 +7904,7 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Queued send(record, on_completion | None, resolve); resolve(KafkaFuture | None, error | None)"},
     {"Producer_poll", py_Producer_poll, METH_VARARGS,
      "poll(timeout_ms): run queued callbacks on this thread, waiting up to timeout_ms; returns count"},
-    {"Producer_execute_callbacks", py_Producer_execute_callbacks, METH_VARARGS,
+    {"Producer__execute_callbacks", py_Producer__execute_callbacks, METH_VARARGS,
      "Run the queued callbacks on this thread; returns count"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Blocking flush -> error | None"},
     {"Producer_flush_cb", py_Producer_flush_cb, METH_VARARGS, "Queued flush; cb(error | None)"},
@@ -7965,14 +7965,14 @@ static PyMethodDef ProducerNativeMethods[] = {
     // ---- Consumer ----
     //
     // Every blocking operation `X(h, ...)` has a `X_cb(h, ..., cb)` twin that
-    // queues its completion for Consumer_execute_callbacks; the callable then
+    // queues its completion for Consumer__execute_callbacks; the callable then
     // receives the same payload the blocking form returns.
     {"Consumer_MockConsumer_new", py_Consumer_MockConsumer_new, METH_VARARGS, "Create a MockConsumer; returns a handle"},
     {"Consumer_KafkaConsumer_new", py_Consumer_KafkaConsumer_new, METH_VARARGS, "Create a KafkaConsumer from a config dict; returns a handle"},
     {"Consumer_destroy", py_Consumer_destroy, METH_VARARGS, "Destroy a consumer handle (runs the still pending callbacks)"},
     {"Consumer_wakeup", py_Consumer_wakeup, METH_VARARGS, "Wake up a blocked operation"},
-    {"Consumer_execute_callbacks", py_Consumer_execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
-    {"Consumer_set_callbacks_notify", py_Consumer_set_callbacks_notify, METH_VARARGS, "Register the callable fired when callbacks become pending"},
+    {"Consumer__execute_callbacks", py_Consumer__execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
+    {"Consumer__set_callbacks_notify", py_Consumer__set_callbacks_notify, METH_VARARGS, "Register the callable fired when callbacks become pending"},
     {"Consumer__set_callback_result", py_Consumer__set_callback_result, METH_VARARGS, "Report a deferred listener result: (h, callback_id, exception | message | None)"},
     {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "Current assignment as list[(topic, partition)]"},
     {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "Current subscription as list[str]"},
@@ -8088,8 +8088,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin_destroy", py_Admin_destroy, METH_VARARGS, "Admin_destroy(handle): destroy the client (runs the still pending callbacks)"},
     {"Admin_close", py_Admin_close, METH_VARARGS, "Admin_close(handle, timeout_ms): blocking close, GIL released; -1 = Java's no-timeout close() (the Python clients use Admin_close_cb)"},
     {"Admin_close_cb", py_Admin_close_cb, METH_VARARGS, "Admin_close_cb(handle, timeout_ms, cb): close twin; cb() queued on the callbacks vector when the close completed; -1 = Java's no-timeout close()"},
-    {"Admin_set_callbacks_notify", py_Admin_set_callbacks_notify, METH_VARARGS, "Admin_set_callbacks_notify(handle, cb | None): cb() fires when the callback queue goes non-empty (schedule only)"},
-    {"Admin_execute_callbacks", py_Admin_execute_callbacks, METH_VARARGS, "Admin_execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
+    {"Admin__set_callbacks_notify", py_Admin__set_callbacks_notify, METH_VARARGS, "Admin__set_callbacks_notify(handle, cb | None): cb() fires when the callback queue goes non-empty (schedule only)"},
+    {"Admin__execute_callbacks", py_Admin__execute_callbacks, METH_VARARGS, "Admin__execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
     {"Admin_resolve", py_Admin_resolve, METH_VARARGS, "Admin_resolve(job) -> payload: block on every future (GIL released), convert, free the job"},
     {"Admin_resolve_cb", py_Admin_resolve_cb, METH_VARARGS, "Admin_resolve_cb(job, cb): cb(payload, None) / cb(None, exc) once every future delivered"},
     {"Admin_job_discard", py_Admin_job_discard, METH_VARARGS, "Admin_job_discard(job): free an unresolved job"},

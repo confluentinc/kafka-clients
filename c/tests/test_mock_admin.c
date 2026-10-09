@@ -35,7 +35,7 @@
 //
 // `_cb` completions (`kafka_common_KafkaFuture_get_cb`, `Admin_close_cb`)
 // are queued on the client's callback vector and run by
-// `kafka_admin_Admin_execute_callbacks` on the calling thread; the
+// `kafka_admin_Admin__execute_callbacks` on the calling thread; the
 // `callback_pump_t` of test_support.h drives that, installed on the mock's
 // `Admin` view by `admin_callback_pump_install` below.
 
@@ -61,12 +61,12 @@ void tearDown(void) {}
 /* test_support.h ships the producer and consumer pump installers; the admin
  * one lives here, binding the pump to the mock's `Admin` view. */
 static int32_t callback_pump_execute_admin(const void *client) {
-    return kafka_admin_Admin_execute_callbacks((const kafka_admin_Admin_t *)client);
+    return kafka_admin_Admin__execute_callbacks((const kafka_admin_Admin_t *)client);
 }
 
 static void admin_callback_pump_install(callback_pump_t *pump, const kafka_admin_Admin_t *admin) {
     callback_pump_init(pump, admin, callback_pump_execute_admin);
-    kafka_admin_Admin_set_callbacks_notify(admin, callback_pump_notify, pump);
+    kafka_admin_Admin__set_callbacks_notify(admin, callback_pump_notify, pump);
 }
 
 typedef struct {

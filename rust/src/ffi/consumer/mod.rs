@@ -45,7 +45,7 @@
 //! A blocking operation invokes the interface methods it triggers
 //! (`ConsumerRebalanceListener`, `OffsetCommitCallback`) directly on the
 //! calling thread, as Java does; a `_cb` operation queues them on the
-//! client's callbacks vector, which [`kafka_consumer_Consumer_execute_callbacks`]
+//! client's callbacks vector, which [`kafka_consumer_Consumer__execute_callbacks`]
 //! runs on the pumping thread, and queues its own completion the same way.
 //! Those interface methods are `async` in Rust, so their C functions return
 //! `void`, take a trailing `int64_t callback_id` and report through
@@ -353,7 +353,7 @@ impl ConsumerClassHandle {
     ///
     /// The queue is drained *while* the tasks are awaited: a `_cb` task may
     /// be waiting for the report of a listener or commit-callback invocation
-    /// that sits queued for `_execute_callbacks`, so awaiting it first would
+    /// that sits queued for `__execute_callbacks`, so awaiting it first would
     /// never return. Every pending callback thus fires exactly once, on the
     /// destroying thread (CLAUDE.md §4 rule 5).
     pub(crate) fn destroy(self) {
@@ -607,7 +607,7 @@ pub type kafka_consumer_Consumer_assign_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -659,7 +659,7 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -719,7 +719,7 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -773,7 +773,7 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -831,7 +831,7 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -883,7 +883,7 @@ pub type kafka_consumer_Consumer_unsubscribe_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -941,7 +941,7 @@ pub type kafka_consumer_Consumer_poll_cb_t = unsafe extern "C" fn(
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -998,7 +998,7 @@ pub type kafka_consumer_Consumer_commit_sync_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1049,7 +1049,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1104,7 +1104,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1159,7 +1159,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1208,7 +1208,7 @@ pub type kafka_consumer_Consumer_commit_async_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1263,7 +1263,7 @@ pub type kafka_consumer_Consumer_commit_async_with_callback_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1321,7 +1321,7 @@ pub type kafka_consumer_Consumer_commit_async_with_offsets_callback_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1383,7 +1383,7 @@ pub type kafka_consumer_Consumer_seek_with_offset_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1440,7 +1440,7 @@ pub type kafka_consumer_Consumer_seek_with_offset_and_metadata_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1492,7 +1492,7 @@ pub type kafka_consumer_Consumer_seek_to_beginning_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1542,7 +1542,7 @@ pub type kafka_consumer_Consumer_seek_to_end_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1592,7 +1592,7 @@ pub type kafka_consumer_Consumer_position_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1647,7 +1647,7 @@ pub type kafka_consumer_Consumer_position_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1700,7 +1700,7 @@ pub type kafka_consumer_Consumer_committed_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1757,7 +1757,7 @@ pub type kafka_consumer_Consumer_committed_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1833,7 +1833,7 @@ pub type kafka_consumer_Consumer_partitions_for_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1888,7 +1888,7 @@ pub type kafka_consumer_Consumer_partitions_for_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1938,7 +1938,7 @@ pub type kafka_consumer_Consumer_list_topics_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -1989,7 +1989,7 @@ pub type kafka_consumer_Consumer_list_topics_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2045,7 +2045,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2106,7 +2106,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2162,7 +2162,7 @@ pub type kafka_consumer_Consumer_beginning_offsets_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2223,7 +2223,7 @@ pub type kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2277,7 +2277,7 @@ pub type kafka_consumer_Consumer_end_offsets_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2338,7 +2338,7 @@ pub type kafka_consumer_Consumer_end_offsets_with_timeout_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2395,7 +2395,7 @@ pub type kafka_consumer_Consumer_pause_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2445,7 +2445,7 @@ pub type kafka_consumer_Consumer_resume_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2493,7 +2493,7 @@ pub type kafka_consumer_Consumer_enforce_rebalance_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2545,7 +2545,7 @@ pub type kafka_consumer_Consumer_enforce_rebalance_with_reason_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2594,7 +2594,7 @@ pub type kafka_consumer_Consumer_close_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2642,7 +2642,7 @@ pub type kafka_consumer_Consumer_close_with_options_cb_t =
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
-/// `cb` itself are queued for `kafka_consumer_Consumer_execute_callbacks`.
+/// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
 ///
 /// # Safety
 ///
@@ -2830,7 +2830,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
 
 /// Fired once, from a Rust task, each time the client's callbacks vector
 /// goes from empty to non-empty; it may only schedule a call to
-/// [`kafka_consumer_Consumer_execute_callbacks`], never run callbacks.
+/// [`kafka_consumer_Consumer__execute_callbacks`], never run callbacks.
 pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
 
 /// Runs every queued callback serially on the calling thread and returns
@@ -2841,7 +2841,7 @@ pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 ///
 /// `self_` must be a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 {
+pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 {
     unsafe { client_ref(self_) }.delivery.queue.execute()
 }
 
@@ -2854,7 +2854,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_execute_callbacks(self_: *const
 /// `self_` must be a live handle; `opaque` stays valid while the hook is
 /// installed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_set_callbacks_notify(
+pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
     self_: *const kafka_consumer_Consumer_t,
     notify: kafka_consumer_Consumer_callbacks_notify_fn_t,
     opaque: *mut c_void,

@@ -21,7 +21,7 @@
  * blocking methods"): the `_cb` completions, the delivery callbacks and the
  * interface methods a `_cb` operation triggers (a consumer's rebalance
  * listener, say) are queued on the client's callback vector, and
- * `<Client>_execute_callbacks` runs them on the thread that calls it. A test
+ * `<Client>__execute_callbacks` runs them on the thread that calls it. A test
  * therefore pumps the vector itself; `callback_pump_t` below does that, woken
  * by the notify hook the client fires once each time the vector goes from
  * empty to non-empty. The pump is client-agnostic: `callback_pump_install`
@@ -56,10 +56,10 @@ static inline int wait_for(atomic_int *flag, int expected) {
  * `callback_pump_install` / `consumer_callback_pump_install` only signals the
  * condition variable (the hook may schedule, never run callbacks);
  * `callback_pump_until` waits on it and drains the vector with the client's
- * `_execute_callbacks` on the calling thread. */
+ * `__execute_callbacks` on the calling thread. */
 typedef struct {
     const void *client;                        /* the producer or consumer handle */
-    int32_t (*execute)(const void *client);    /* its `_execute_callbacks` */
+    int32_t (*execute)(const void *client);    /* its `__execute_callbacks` */
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int signalled;        /* notify firings not yet consumed by a pump */
@@ -79,11 +79,11 @@ static inline void callback_pump_notify(void *opaque) {
 }
 
 static inline int32_t callback_pump_execute_producer(const void *client) {
-    return kafka_producer_Producer_execute_callbacks((const kafka_producer_Producer_t *)client);
+    return kafka_producer_Producer__execute_callbacks((const kafka_producer_Producer_t *)client);
 }
 
 static inline int32_t callback_pump_execute_consumer(const void *client) {
-    return kafka_consumer_Consumer_execute_callbacks((const kafka_consumer_Consumer_t *)client);
+    return kafka_consumer_Consumer__execute_callbacks((const kafka_consumer_Consumer_t *)client);
 }
 
 static inline void callback_pump_init(callback_pump_t *pump, const void *client,
@@ -102,7 +102,7 @@ static inline void callback_pump_init(callback_pump_t *pump, const void *client,
 static inline void callback_pump_install(callback_pump_t *pump,
                                          const kafka_producer_Producer_t *producer) {
     callback_pump_init(pump, producer, callback_pump_execute_producer);
-    kafka_producer_Producer_set_callbacks_notify(producer, callback_pump_notify, pump);
+    kafka_producer_Producer__set_callbacks_notify(producer, callback_pump_notify, pump);
 }
 
 /* The consumer twin of `callback_pump_install`: `consumer` is any
@@ -111,7 +111,7 @@ static inline void callback_pump_install(callback_pump_t *pump,
 static inline void consumer_callback_pump_install(callback_pump_t *pump,
                                                   const kafka_consumer_Consumer_t *consumer) {
     callback_pump_init(pump, consumer, callback_pump_execute_consumer);
-    kafka_consumer_Consumer_set_callbacks_notify(consumer, callback_pump_notify, pump);
+    kafka_consumer_Consumer__set_callbacks_notify(consumer, callback_pump_notify, pump);
 }
 
 static inline void callback_pump_destroy(callback_pump_t *pump) {

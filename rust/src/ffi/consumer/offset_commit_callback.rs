@@ -22,7 +22,7 @@
 //! consumer the callback finished. The consumer invokes it from the
 //! application thread during the next blocking-style call (`poll`,
 //! `commit_*`, ...; consumer-threading.md §31), on the calling thread for a
-//! blocking entry point and through `kafka_consumer_Consumer_execute_callbacks`
+//! blocking entry point and through `kafka_consumer_Consumer__execute_callbacks`
 //! for a `_cb` one.
 
 #![expect(non_camel_case_types)]

@@ -656,7 +656,7 @@ extern "C" void discard_commit_complete(void* self, const kafka_Map_t* /*offsets
 // with_callback; `self` is the producer's LogState. Both arguments are BORROWED
 // for the call (the FFI frees them after it returns), so nothing is destroyed
 // here. It runs on whichever gRPC worker thread pumps
-// kafka_producer_Producer_execute_callbacks (see pump_callbacks below), never
+// kafka_producer_Producer__execute_callbacks (see pump_callbacks below), never
 // on a Rust thread.
 extern "C" void log_delivery(void* self, const kafka_producer_RecordMetadata_t* metadata,
                              const kafka_common_Error_t* error) {
@@ -755,12 +755,12 @@ struct ProducerHandle {
 // Runs the producer's queued callbacks on this gRPC worker thread. Delivery
 // callbacks are always *queued* by the FFI (the producer's background task
 // fires them onto the callback vector) and only run when a caller pumps
-// `kafka_producer_Producer_execute_callbacks`; this server has no pump thread,
+// `kafka_producer_Producer__execute_callbacks`; this server has no pump thread,
 // so every RPC that can complete a record (Send after its future resolved,
 // Flush, Close) and GetCallbackLog itself pump here. Pumping is serialized
 // inside the FFI, so concurrent RPCs may call this freely.
 void pump_callbacks(const kafka_producer_Producer_t* producer) {
-  kafka_producer_Producer_execute_callbacks(producer);
+  kafka_producer_Producer__execute_callbacks(producer);
 }
 
 class ProducerServiceImpl final : public ProducerService::Service {

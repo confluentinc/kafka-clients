@@ -38,7 +38,7 @@ void tearDown(void) {}
 // No callback ever runs on a Rust thread: `_cb` completions and the listener
 // invocations a `_cb` operation triggers are queued on the consumer's callback
 // vector and run on the thread that calls
-// `kafka_consumer_Consumer_execute_callbacks` (`callback_pump_t`,
+// `kafka_consumer_Consumer__execute_callbacks` (`callback_pump_t`,
 // test_support.h). A blocking entry point runs everything on the calling
 // thread instead.
 // ---------------------------------------------------------------------------

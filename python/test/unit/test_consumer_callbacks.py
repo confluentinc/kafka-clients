@@ -714,7 +714,7 @@ def test_consumer_method_from_a_pumped_callback_is_rejected_without_hanging():
     callbacks vector (a `_cb` op queues the interface methods it triggers), so
     it runs *inside* the pump. A consumer method called from there cannot wait
     for the pump -- the Rust guard's rejection would be queued behind the very
-    callback that is running, and a nested ``Consumer_execute_callbacks``
+    callback that is running, and a nested ``Consumer__execute_callbacks``
     returns 0 -- so the consumer raises the guard's error itself, up front,
     rather than waiting forever. ``close`` is rejected the same way and must
     leave the consumer open (destroying the handle from inside a callback
