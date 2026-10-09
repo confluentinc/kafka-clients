@@ -36,8 +36,8 @@ pub struct kafka_admin_ScramMechanism_t {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_admin_ScramMechanism_e {
     kafka_admin_ScramMechanism_UNKNOWN,
-    kafka_admin_ScramMechanism_SCRAM_SHA256,
-    kafka_admin_ScramMechanism_SCRAM_SHA512,
+    kafka_admin_ScramMechanism_SCRAM_SHA_256,
+    kafka_admin_ScramMechanism_SCRAM_SHA_512,
 }
 
 /// One static instance per value, indexed by [`kafka_admin_ScramMechanism_e`].
@@ -57,8 +57,8 @@ static MECHANISM_NAMES: LazyLock<Vec<CString>> =
 fn enum_of(mechanism: ScramMechanism) -> kafka_admin_ScramMechanism_e {
     match mechanism {
         ScramMechanism::Unknown => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN,
-        ScramMechanism::ScramSha256 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA256,
-        ScramMechanism::ScramSha512 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA512,
+        ScramMechanism::ScramSha256 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA_256,
+        ScramMechanism::ScramSha512 => kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_SCRAM_SHA_512,
     }
 }
 
@@ -84,13 +84,13 @@ pub extern "C" fn kafka_admin_ScramMechanism_unknown() -> *const kafka_admin_Scr
 
 /// `ScramMechanism.SCRAM_SHA_256`.
 #[unsafe(no_mangle)]
-pub extern "C" fn kafka_admin_ScramMechanism_scram_sha256() -> *const kafka_admin_ScramMechanism_t {
+pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_256() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha256)
 }
 
 /// `ScramMechanism.SCRAM_SHA_512`.
 #[unsafe(no_mangle)]
-pub extern "C" fn kafka_admin_ScramMechanism_scram_sha512() -> *const kafka_admin_ScramMechanism_t {
+pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha512)
 }
 
@@ -173,7 +173,7 @@ mod tests {
             }
         }
         assert_eq!(
-            kafka_admin_ScramMechanism_scram_sha512(),
+            kafka_admin_ScramMechanism_scram_sha_512(),
             scram_mechanism_singleton(ScramMechanism::ScramSha512)
         );
         assert_eq!(kafka_admin_ScramMechanism_from_type(9), kafka_admin_ScramMechanism_unknown());
@@ -182,7 +182,7 @@ mod tests {
             kafka_admin_ScramMechanism_unknown()
         );
         assert_eq!(
-            unsafe { kafka_admin_ScramMechanism_type(kafka_admin_ScramMechanism_scram_sha256()) },
+            unsafe { kafka_admin_ScramMechanism_type(kafka_admin_ScramMechanism_scram_sha_256()) },
             1
         );
     }

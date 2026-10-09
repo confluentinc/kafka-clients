@@ -3652,13 +3652,13 @@ static void test_mock_admin_alter_client_quotas_async(void) {
 // ---------------------------------------------------------------------------
 
 static void test_mock_admin_scram_accessors(void) {
-    const kafka_admin_ScramMechanism_t *sha256 = kafka_admin_ScramMechanism_scram_sha256();
-    TEST_ASSERT_EQUAL_INT(kafka_admin_ScramMechanism_SCRAM_SHA256, kafka_admin_ScramMechanism__enum(sha256));
+    const kafka_admin_ScramMechanism_t *sha256 = kafka_admin_ScramMechanism_scram_sha_256();
+    TEST_ASSERT_EQUAL_INT(kafka_admin_ScramMechanism_SCRAM_SHA_256, kafka_admin_ScramMechanism__enum(sha256));
     TEST_ASSERT_EQUAL_STRING("SCRAM-SHA-256", kafka_admin_ScramMechanism_mechanism_name(sha256));
     TEST_ASSERT_EQUAL_INT8(1, kafka_admin_ScramMechanism_type(sha256));
-    TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_type(2) == kafka_admin_ScramMechanism_scram_sha512());
+    TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_type(2) == kafka_admin_ScramMechanism_scram_sha_512());
     TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_type(99) == kafka_admin_ScramMechanism_unknown());
-    TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_mechanism_name("SCRAM-SHA-512") == kafka_admin_ScramMechanism_scram_sha512());
+    TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_mechanism_name("SCRAM-SHA-512") == kafka_admin_ScramMechanism_scram_sha_512());
     TEST_ASSERT_TRUE(kafka_admin_ScramMechanism_from_mechanism_name("nope") == kafka_admin_ScramMechanism_unknown());
 
     kafka_admin_ScramCredentialInfo_t *info = kafka_admin_ScramCredentialInfo_new(sha256, 4096);
@@ -3685,9 +3685,9 @@ static void test_mock_admin_scram_accessors(void) {
     TEST_ASSERT_EQUAL_INT32(6, kafka_admin_UserScramCredentialUpsertion_password(up_str).len);
     /* The one-argument form generates a random salt. */
     TEST_ASSERT_TRUE(kafka_admin_UserScramCredentialUpsertion_salt(up_str).len > 0);
-    kafka_admin_UserScramCredentialDeletion_t *del = kafka_admin_UserScramCredentialDeletion_new("carol", kafka_admin_ScramMechanism_scram_sha512());
+    kafka_admin_UserScramCredentialDeletion_t *del = kafka_admin_UserScramCredentialDeletion_new("carol", kafka_admin_ScramMechanism_scram_sha_512());
     TEST_ASSERT_EQUAL_STRING("carol", kafka_admin_UserScramCredentialDeletion_user(del));
-    TEST_ASSERT_TRUE(kafka_admin_UserScramCredentialDeletion_mechanism(del) == kafka_admin_ScramMechanism_scram_sha512());
+    TEST_ASSERT_TRUE(kafka_admin_UserScramCredentialDeletion_mechanism(del) == kafka_admin_ScramMechanism_scram_sha_512());
     kafka_admin_UserScramCredentialAlteration_t *alt_up = kafka_admin_UserScramCredentialAlteration_upsertion(up);
     kafka_admin_UserScramCredentialAlteration_t *alt_del = kafka_admin_UserScramCredentialAlteration_deletion(del);
     TEST_ASSERT_EQUAL_INT(kafka_admin_UserScramCredentialAlteration_UPSERTION, kafka_admin_UserScramCredentialAlteration__enum(alt_up));
@@ -3707,9 +3707,9 @@ static void test_mock_admin_scram_accessors(void) {
 static void test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user(void) {
     fixture_t f;
     fixture_init(&f, 1);
-    kafka_admin_ScramCredentialInfo_t *info = kafka_admin_ScramCredentialInfo_new(kafka_admin_ScramMechanism_scram_sha256(), 8192);
+    kafka_admin_ScramCredentialInfo_t *info = kafka_admin_ScramCredentialInfo_new(kafka_admin_ScramMechanism_scram_sha_256(), 8192);
     kafka_admin_UserScramCredentialUpsertion_t *up = kafka_admin_UserScramCredentialUpsertion_with_str("scram-b", info, "");
-    kafka_admin_UserScramCredentialDeletion_t *del = kafka_admin_UserScramCredentialDeletion_new("scram-a", kafka_admin_ScramMechanism_scram_sha512());
+    kafka_admin_UserScramCredentialDeletion_t *del = kafka_admin_UserScramCredentialDeletion_new("scram-a", kafka_admin_ScramMechanism_scram_sha_512());
     kafka_admin_UserScramCredentialAlteration_t *alt_up = kafka_admin_UserScramCredentialAlteration_upsertion(up);
     kafka_admin_UserScramCredentialAlteration_t *alt_del = kafka_admin_UserScramCredentialAlteration_deletion(del);
     kafka_List_t *alterations = kafka_List_new();

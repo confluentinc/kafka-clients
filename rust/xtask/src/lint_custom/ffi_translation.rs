@@ -1506,7 +1506,7 @@ impl FfiTranslation {
                 }
                 for v in unit {
                     out.add(
-                        format!("{prefix}_{}", java::snake_case(v)),
+                        value_fn(prefix, v),
                         Shape::Fn(Sig { params: Vec::new(), ret: Some(format!("*const {prefix}_t")) }),
                         file,
                     );
@@ -2447,8 +2447,33 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
 /// `IsolationLevel::ReadCommitted` is `kafka_common_IsolationLevel_READ_COMMITTED`
 /// beside `kafka_common_IsolationLevel_read_committed()`.
 fn enumerator(prefix: &str, variant: &str) -> String {
+    if let Some((_, _, key)) = ENUMERATOR_EXCEPTIONS.iter().find(|(p, v, _)| *p == prefix && *v == variant) {
+        return format!("{prefix}_{key}");
+    }
     format!("{prefix}_{}", java::snake_case(variant).to_uppercase())
 }
+
+/// The per-value function `<prefix>_<value>()` of unit variant `variant`
+/// (CLAUDE.md §4 "Enums"): the snake-cased variant, or the lower-cased key of
+/// an [`ENUMERATOR_EXCEPTIONS`] entry, so the function and the enumerator
+/// spell the value alike (`scram_sha_256()` beside `SCRAM_SHA_256`).
+fn value_fn(prefix: &str, variant: &str) -> String {
+    if let Some((_, _, key)) = ENUMERATOR_EXCEPTIONS.iter().find(|(p, v, _)| *p == prefix && *v == variant) {
+        return format!("{prefix}_{}", key.to_lowercase());
+    }
+    format!("{prefix}_{}", java::snake_case(variant))
+}
+
+/// Enum value keys that do not follow the derivation in [`enumerator`] and
+/// [`value_fn`], as `(enum prefix, Rust variant, C key)`: the enumerator is
+/// `<prefix>_<key>` and the per-value function `<prefix>_<key lower-cased>`.
+/// They spell Java's constant names (`ScramMechanism.SCRAM_SHA_256`), where
+/// snake-casing the Rust variant `ScramSha256` would join the digits to the
+/// word (`SCRAM_SHA256`, `scram_sha256`).
+const ENUMERATOR_EXCEPTIONS: &[(&str, &str, &str)] = &[
+    ("kafka_admin_ScramMechanism", "ScramSha256", "SCRAM_SHA_256"),
+    ("kafka_admin_ScramMechanism", "ScramSha512", "SCRAM_SHA_512"),
+];
 
 /// Whether `key` is in constant case: upper-case letters and digits in
 /// `_`-separated words, none empty.
@@ -4076,5 +4101,53 @@ mod tests {
         let mut findings = Vec::new();
         cbindgen_enum_prefixing(&config, &mut findings);
         assert!(findings.is_empty());
+    }
+
+    /// `ScramMechanism`'s digit-bearing variants take Java's constant names
+    /// from `ENUMERATOR_EXCEPTIONS`, in the enumerator (`SCRAM_SHA_256`, not
+    /// the derived `SCRAM_SHA256`) and in the per-value function
+    /// (`scram_sha_256()`, not `scram_sha256()`).
+    #[test]
+    fn test_enumerator_exceptions_spell_java_constants() {
+        let rust = r#"
+            pub mod admin {
+                #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism")]
+                pub enum ScramMechanism { Unknown, ScramSha256, ScramSha512 }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_admin_ScramMechanism_t { _p: [u8; 0] }
+            #[repr(C)] pub enum kafka_admin_ScramMechanism_e { kafka_admin_ScramMechanism_UNKNOWN, kafka_admin_ScramMechanism_SCRAM_SHA_256, kafka_admin_ScramMechanism_SCRAM_SHA_512 }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(this: *const kafka_admin_ScramMechanism_t) -> kafka_admin_ScramMechanism_e { kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_ScramMechanism_unknown() -> *const kafka_admin_ScramMechanism_t { std::ptr::null() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_ScramMechanism_scram_sha_256() -> *const kafka_admin_ScramMechanism_t { std::ptr::null() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_admin_ScramMechanism_t { std::ptr::null() }
+        "#;
+        let findings = run("enumerator-exceptions", rust, ffi);
+        assert!(findings.is_empty(), "{findings:#?}");
+
+        let derived = ffi
+            .replace("SCRAM_SHA_256", "SCRAM_SHA256")
+            .replace("SCRAM_SHA_512", "SCRAM_SHA512")
+            .replace("scram_sha_256", "scram_sha256")
+            .replace("scram_sha_512", "scram_sha512");
+        let findings = run("enumerator-exceptions-derived", rust, &derived);
+        assert_eq!(
+            keys(&findings),
+            [
+                "missing kafka_admin_ScramMechanism_scram_sha_256",
+                "missing kafka_admin_ScramMechanism_scram_sha_512",
+                "shape kafka_admin_ScramMechanism_e",
+                "unexpected kafka_admin_ScramMechanism_scram_sha256",
+                "unexpected kafka_admin_ScramMechanism_scram_sha512",
+            ]
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_admin_ScramMechanism_e"),
+            "expected a `#[repr(C)]` enum with variants [kafka_admin_ScramMechanism_UNKNOWN, \
+             kafka_admin_ScramMechanism_SCRAM_SHA_256, kafka_admin_ScramMechanism_SCRAM_SHA_512], found \
+             [kafka_admin_ScramMechanism_UNKNOWN, kafka_admin_ScramMechanism_SCRAM_SHA256, \
+             kafka_admin_ScramMechanism_SCRAM_SHA512]"
+        );
     }
 }

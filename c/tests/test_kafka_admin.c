@@ -687,9 +687,9 @@ static void test_kafka_admin_scram_empty_batch_needs_no_broker(void) {
  * whole-call rejection would fail this outright. */
 static void test_kafka_admin_scram_empty_password_is_a_per_user_error(void) {
     kafka_admin_Admin_t *admin = create_admin();
-    kafka_admin_ScramCredentialInfo_t *info = kafka_admin_ScramCredentialInfo_new(kafka_admin_ScramMechanism_scram_sha256(), 4096);
+    kafka_admin_ScramCredentialInfo_t *info = kafka_admin_ScramCredentialInfo_new(kafka_admin_ScramMechanism_scram_sha_256(), 4096);
     kafka_admin_UserScramCredentialUpsertion_t *alice = kafka_admin_UserScramCredentialUpsertion_with_str("alice", info, "");
-    kafka_admin_UserScramCredentialDeletion_t *bob = kafka_admin_UserScramCredentialDeletion_new("bob", kafka_admin_ScramMechanism_scram_sha512());
+    kafka_admin_UserScramCredentialDeletion_t *bob = kafka_admin_UserScramCredentialDeletion_new("bob", kafka_admin_ScramMechanism_scram_sha_512());
     kafka_admin_UserScramCredentialAlteration_t *alice_alt = kafka_admin_UserScramCredentialAlteration_upsertion(alice);
     kafka_admin_UserScramCredentialAlteration_t *bob_alt = kafka_admin_UserScramCredentialAlteration_deletion(bob);
     kafka_List_t *alterations = kafka_List_new();
