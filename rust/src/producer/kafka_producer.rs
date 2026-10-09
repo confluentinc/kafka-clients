@@ -2547,10 +2547,21 @@ where
     ///
     /// If `timeout == 0`: force-closes immediately without draining.
     ///
+    /// A timeout whose length in milliseconds exceeds `i64::MAX`, such as
+    /// `Duration::MAX`, is clamped to `i64::MAX` ms, the value passed by `close()`.
+    /// The producer then closes gracefully and waits for the sender task to finish.
+    ///
     /// Note: Rust's `Duration` is unsigned, so the negative-timeout check from
     /// Java is omitted (impossible to construct a negative `Duration`).
     async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error> {
-        let timeout_ms = timeout.as_millis() as i64;
+        // Java: `long timeoutMs = timeout.toMillis()`. The millisecond count is
+        // clamped rather than cast with `as i64`, which truncates it to the low 64
+        // bits and can produce a negative or zero value that neither branch below
+        // handles as intended. Java's `toMillis()` throws `ArithmeticException` on
+        // overflow; clamping is preferred here because `Duration::MAX` is the
+        // conventional way to express an unbounded timeout in Rust.
+        // `AsyncKafkaConsumer` applies the same clamp on close.
+        let timeout_ms = timeout.as_millis().min(i64::MAX as u128) as i64;
         kafka_info!(
             self.log_context,
             "Closing the Kafka producer with timeoutMillis = {} ms.",
@@ -4594,6 +4605,51 @@ mod tests {
         // After force-close, the producer should not accept new sends
         let record2 = ProducerRecord::new(TOPIC.to_string(), Some("value2".to_string()));
         assert!(producer.send(record2).await.is_err());
+    }
+
+    /// Regression test with no Java counterpart: a timeout whose length in
+    /// milliseconds exceeds `i64::MAX` must result in a graceful close, as `close()`
+    /// does.
+    ///
+    /// Truncating these values with `as i64` yields -1 ms for `Duration::MAX` and
+    /// `Duration::from_millis(u64::MAX)`, -1000 ms for `Duration::from_secs(u64::MAX)`,
+    /// and 0 ms for `Duration::from_secs(1 << 61)` (125 × 2^64 ms). A negative value
+    /// matches neither branch of `close_with_timeout` and leaves the producer running;
+    /// 0 forces the close instead of waiting. Java cannot reach either state:
+    /// `Duration.toMillis()` throws on overflow and `close` rejects a negative timeout
+    /// (`KafkaProducer.java:1398-1400`).
+    #[tokio::test]
+    async fn test_close_with_timeout_beyond_i64_millis_closes_gracefully() {
+        for timeout in [
+            Duration::MAX,
+            Duration::from_millis(u64::MAX),
+            Duration::from_secs(u64::MAX),
+            Duration::from_secs(1 << 61),
+        ] {
+            let metadata = create_metadata_with_topic(TOPIC, 1);
+            let producer = create_producer(metadata, create_accumulator());
+
+            producer.close_with_timeout(timeout).await.expect("close");
+
+            assert!(
+                !producer.running.load(Ordering::Acquire),
+                "{:?}: close must stop the producer",
+                timeout
+            );
+            assert!(
+                !producer.force_close.load(Ordering::Acquire),
+                "{:?}: close must be graceful, not forced",
+                timeout
+            );
+            let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
+            let error = producer.send(record).await.expect_err("a closed producer rejects sends");
+            assert_eq!(
+                error.message(),
+                "Cannot perform operation after producer has been closed",
+                "{:?}",
+                timeout
+            );
+        }
     }
 
     /// Tests that the callback is invoked with error on invalid topic.
@@ -6867,6 +6923,59 @@ mod tests {
         );
 
         init.abort();
+    }
+
+    /// Regression test with no Java counterpart: `close_with_timeout(Duration::MAX)`
+    /// must deliver the records buffered in the accumulator before returning, as Java's
+    /// `close(Duration.ofMillis(Long.MAX_VALUE))` does (`KafkaProducer.java:1370`).
+    ///
+    /// A 30 s `linger.ms` with a frozen clock keeps the record buffered, so only a
+    /// graceful close can release it: `initiate_close` closes the accumulator, which
+    /// makes the batch ready, and the Sender's shutdown loop drains it before exiting
+    /// (`Sender.java:258`).
+    ///
+    /// The Sender runs on a dedicated thread and runtime, for the reason given in
+    /// [`spawned_transactional_producer_with_exit_hook`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_close_with_duration_max_delivers_buffered_records() {
+        // Idempotent (the default) rather than transactional: the Sender requires only
+        // a producer id before draining the batch.
+        let mut ctx = TxnProducerContext::new(&[("linger.ms", "30000")], 1);
+        ctx.sender
+            .client_mut()
+            .prepare_response(init_producer_id_response(Errors::None, PRODUCER_ID, EPOCH));
+        ctx.sender
+            .client_mut()
+            .prepare_response(produce_response(0, 1, Errors::None, 0));
+
+        let record = ProducerRecord::with_partition_key(
+            TOPIC.to_string(),
+            Some(0),
+            Some("key".to_string()),
+            Some("value".to_string()),
+        )
+        .expect("a valid partition");
+        let future = ctx.producer.send(record).await.expect("send");
+        assert!(!future.is_done(), "linger.ms keeps the record buffered until close");
+
+        let TxnProducerContext { producer, mut sender, .. } = ctx;
+        let sender_handle = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime for the Sender")
+                .block_on(sender.run());
+        });
+        *producer.sender_handle.lock().unwrap() = Some(sender_handle);
+
+        tokio::time::timeout(Duration::from_secs(10), producer.close_with_timeout(Duration::MAX))
+            .await
+            .expect("close returns once the buffered record is delivered")
+            .expect("close");
+
+        assert!(future.is_done(), "close returned before the buffered record completed");
+        let metadata = future.get().await.expect("the record is delivered, not aborted");
+        assert_eq!(metadata.offset(), 1);
     }
 
     /// Translated from `KafkaProducerTest.testTransactionalMethodThrowsWhenSenderClosed`
