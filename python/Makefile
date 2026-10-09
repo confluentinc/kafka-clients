@@ -170,7 +170,7 @@ grpc-native:
 	python -m grpc_tools.protoc -I$(GRPC_PROTO_DIR) \
 		--python_out=$(GRPC_NATIVE_DIR)/python --grpc_python_out=$(GRPC_NATIVE_DIR)/python \
 		$(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
-		$(GRPC_PROTO_DIR)/admin_service.proto
+		$(GRPC_PROTO_DIR)/admin_service.proto $(GRPC_PROTO_DIR)/chaos_service.proto
 
 clean:
 	rm -rf build *.egg-info __pycache__ *.so producer_service_pb2*.py

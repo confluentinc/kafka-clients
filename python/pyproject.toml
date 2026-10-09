@@ -34,7 +34,8 @@ dev = [
 # top-level ``producer.py`` / ``consumer.py`` / ``_error_code.py`` modules were
 # retired in P6 once the package covered their surface; the remaining top-level
 # modules are the PAUSED admin binding (``admin``) and the gRPC integration-test
-# servers (``grpc_server`` / ``grpc_server_async`` / ``grpc_translate``), which
+# servers (``grpc_server`` / ``grpc_server_async`` / ``grpc_translate``, and
+# ``grpc_chaos`` with the chaos-harness workloads both servers serve), which
 # now import the ``confluent_kafka`` package.
 packages = [
     "confluent_kafka",
@@ -50,7 +51,7 @@ packages = [
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ]
-py-modules = ["admin", "grpc_server", "grpc_server_async", "grpc_translate"]
+py-modules = ["admin", "grpc_chaos", "grpc_server", "grpc_server_async", "grpc_translate"]
 
 [tool.setuptools.package-data]
 # The generated error modules' .pyi stubs, and the PEP 561 marker: the package

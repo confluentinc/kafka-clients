@@ -64,6 +64,9 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
+import chaos_service_pb2_grpc as chpb_grpc  # noqa: E402  (generated)
+# ChaosWorkloadService: chaos-harness workloads run inside this server.
+from grpc_chaos import AsyncChaosWorkloadService  # noqa: E402
 
 # Proto<->Python translation helpers shared with the sync server (see
 # grpc_translate.py); client-agnostic, so reused verbatim.
@@ -1510,6 +1513,7 @@ async def serve():
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
+    chpb_grpc.add_ChaosWorkloadServiceServicer_to_server(AsyncChaosWorkloadService(), server)
     bound_port = server.add_insecure_port(f"{host}:{port}")
     await server.start()
     # The Rust BackendPool waits for "listening" on stderr and parses the bound
