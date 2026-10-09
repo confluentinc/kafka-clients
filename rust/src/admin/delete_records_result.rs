@@ -33,7 +33,7 @@ pub struct DeleteRecordsResult {
 impl DeleteRecordsResult {
     /// Creates a result from the per-partition futures.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult")]
-    pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
+    pub fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
         Self { futures }
     }
 

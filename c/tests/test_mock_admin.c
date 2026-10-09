@@ -1342,7 +1342,7 @@ static void test_mock_admin_describe_cluster_sync(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(result);
 
-    TEST_ASSERT_EQUAL_STRING("4A5xz_QZTB2CtL4wc0X0Jw",
+    TEST_ASSERT_EQUAL_STRING("I4ZmrWqfT2e-upky_4fdPA",
                              kafka_admin_DescribeClusterResult_cluster_id(result));
     TEST_ASSERT_EQUAL_INT32(3, kafka_admin_DescribeClusterResult_node_count(result));
 
