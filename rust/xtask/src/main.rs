@@ -664,7 +664,7 @@ fn chaos() -> anyhow::Result<()> {
         let env_vars = parse_chaos_flags(&raw)?;
         let feature = chaos_test_feature(&env_vars);
         if feature == "multilanguage-tests" {
-            println!("   python/c workload requested → building with `--features multilanguage-tests`");
+            println!("   gRPC (python/c/dotnet) workload requested → building with `--features multilanguage-tests`");
         }
         let args: Vec<String> = [
             "test",
@@ -770,7 +770,7 @@ only once (except --workload).
                          exactly its signature is labelled KNOWN DEFECT
   --unclean              SIGKILL instead of SIGTERM for broker roll
   --workload role:backend  repeatable; role=producer|consumer,
-                           backend=rust|python|python-async|c
+                           backend=rust|python|python-async|c|dotnet|dotnet-async
                            (default: producer:rust,consumer:rust)
   --consumers N          shorthand for 1 rust producer + N rust consumers
                          (librdkafka's --consumers; not usable with --workload)
@@ -865,14 +865,15 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
 }
 
 /// The cargo feature the chaos test must be built with for a run with these
-/// `CHAOS_*` settings. A python/c workload backend needs the gRPC bridge,
-/// which only compiles under `multilanguage-tests`, so that feature is picked
-/// whenever such a workload is requested and the user does not have to.
+/// `CHAOS_*` settings. A python/c/dotnet workload backend needs the gRPC
+/// bridge, which only compiles under `multilanguage-tests`, so that feature is
+/// picked whenever such a workload is requested and the user does not have to.
+/// `:dotnet` also covers `dotnet-async`.
 fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
     let needs_grpc = env_vars
         .iter()
         .find(|(k, _)| k == "CHAOS_WORKLOADS")
-        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c"));
+        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c") || v.contains(":dotnet"));
     if needs_grpc {
         "multilanguage-tests"
     } else {
@@ -2256,7 +2257,7 @@ version = "0.1.0"
     }
 
     #[test]
-    fn python_and_c_workloads_select_the_multilanguage_feature() {
+    fn python_and_c_workloads_select_the_multilanguage_feature_and_dotnet() {
         let env = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap();
         assert_eq!(chaos_test_feature(&env(&["--cycles", "1"])), "integration-tests");
         assert_eq!(
@@ -2268,5 +2269,13 @@ version = "0.1.0"
             "multilanguage-tests"
         );
         assert_eq!(chaos_test_feature(&env(&["--workload", "producer:c"])), "multilanguage-tests");
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:dotnet"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:dotnet-async"])),
+            "multilanguage-tests"
+        );
     }
 }

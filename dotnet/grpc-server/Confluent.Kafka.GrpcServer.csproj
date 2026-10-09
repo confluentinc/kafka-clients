@@ -78,6 +78,13 @@
       KafkaError / Node / StatusResponse / TopicPartition / StringList messages.
     -->
     <Protobuf Include="$(ProtoRoot)/admin_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
+    <!--
+      M18/P1 S1: chaos_service.proto (upstream #184's chaos-harness contract)
+      joins the others, same build-config-only line (proto CONTENT untouched).
+      It imports producer_service.proto for the shared messages, and emits the
+      ChaosWorkloadService server base.
+    -->
+    <Protobuf Include="$(ProtoRoot)/chaos_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
   </ItemGroup>
 
   <ItemGroup>
