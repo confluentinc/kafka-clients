@@ -204,4 +204,19 @@ internal sealed class ChaosWorkload
     /// </summary>
     /// <returns>Whether a stop was requested.</returns>
     internal bool WaitForStop(TimeSpan timeout) => _stopHandle.Wait(timeout);
+
+    /// <summary>
+    /// Waits, without holding a thread, for up to <paramref name="timeout"/>, completing early on
+    /// a stop (the async loops' rate wait and poll-error backoff).
+    /// </summary>
+    /// <remarks>
+    /// The early wake comes from <see cref="StopRequested"/>, whose continuations run
+    /// asynchronously, so a stop resumes the loop on the pool and never inside
+    /// <see cref="RequestStop"/> (§5.3 item 7; T6b). This is deliberately not
+    /// <c>Task.Delay(timeout, token)</c> over a source that <see cref="RequestStop"/> cancels: a
+    /// cancellation runs its callbacks inline on the cancelling thread. A delay that loses to the
+    /// stop is left to expire on its own, which costs at most one interval.
+    /// </remarks>
+    internal Task WaitForStopAsync(TimeSpan timeout) =>
+        IsStopRequested ? Task.CompletedTask : Task.WhenAny(Task.Delay(timeout), StopRequested);
 }

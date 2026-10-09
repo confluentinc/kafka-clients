@@ -40,7 +40,9 @@ namespace Confluent.Kafka.GrpcServer;
 /// synchronous servicers (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/> +
 /// <see cref="AdminServiceImpl"/>; admin is sync-only, M15/P12 D1). The chaos-harness service
 /// follows the flavor too: the sync flavor hosts <see cref="ChaosWorkloadServiceImpl"/> over the
-/// synchronous clients (the <c>dotnet</c> workload backend). Each image bakes its
+/// synchronous clients (the <c>dotnet</c> workload backend), and the async flavor hosts
+/// <see cref="AsyncChaosWorkloadServiceImpl"/> over the asynchronous ones (the
+/// <c>dotnet-async</c> workload backend). Each image bakes its
 /// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
 /// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
 /// the harness sets it explicitly for each backend kind instead (backend_pool.rs
@@ -108,6 +110,9 @@ internal static class Program
         {
             builder.Services.AddSingleton<AsyncProducerServiceImpl>();
             builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
+
+            // The chaos service (M18/P1), a singleton for its workload registry (see below).
+            builder.Services.AddSingleton<AsyncChaosWorkloadServiceImpl>();
         }
         else
         {
@@ -129,6 +134,7 @@ internal static class Program
         {
             app.MapGrpcService<AsyncProducerServiceImpl>();
             app.MapGrpcService<AsyncConsumerServiceImpl>();
+            app.MapGrpcService<AsyncChaosWorkloadServiceImpl>();
         }
         else
         {
@@ -210,6 +216,9 @@ internal static class Program
             {
                 app.Services.GetRequiredService<AsyncConsumerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<AsyncProducerServiceImpl>().Dispose();
+
+                // Stops every chaos workload and waits, bounded, for their drains (PLAN §5.8).
+                app.Services.GetRequiredService<AsyncChaosWorkloadServiceImpl>().Dispose();
             }
             else
             {

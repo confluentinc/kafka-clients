@@ -146,6 +146,53 @@ internal static class ChaosStream
     }
 
     /// <summary>
+    /// Starts <paramref name="loop"/> as one pool task (the async flavour, D8; PLAN §5.7) and
+    /// returns its completion, a <see cref="TaskCompletionSource"/> built with
+    /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>, like the sync flavour's.
+    /// </summary>
+    /// <remarks>
+    /// The loop's last await can complete on a binding thread — a client's completion callback
+    /// runs on the producer's pump or the consumer's dispatcher — and the loop then finishes
+    /// there. Completing a plain <see cref="Task.Run(Func{Task})"/> proxy at that point would run
+    /// the handler's <c>finally</c> continuation inline on that thread; the source keeps it on the
+    /// pool. The task <see cref="Task.Run(Func{Task})"/> returns is not observed because it cannot
+    /// fault: <see cref="RunGuardedAsync"/> catches everything the loop throws.
+    /// </remarks>
+    internal static Task StartTask(ChaosWorkload workload, Func<ChaosWorkload, Task> loop)
+    {
+        TaskCompletionSource done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RunGuardedAsync(workload, loop).ConfigureAwait(false);
+            }
+            finally
+            {
+                done.TrySetResult();
+            }
+        });
+        return done.Task;
+    }
+
+    /// <summary>
+    /// The async form of <see cref="RunGuarded"/> (Python's async <c>_guarded</c>): awaits
+    /// <paramref name="loop"/>, and turns anything that escapes it into <c>Failed</c>.
+    /// </summary>
+    internal static async Task RunGuardedAsync(ChaosWorkload workload, Func<ChaosWorkload, Task> loop)
+    {
+        try
+        {
+            await loop(workload).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            ChaosEvents.Log($"chaos workload {workload.Id} died: {e}");
+            workload.Emit(ChaosEvents.Failed(e));
+        }
+    }
+
+    /// <summary>
     /// Python <c>_guarded</c>: runs <paramref name="loop"/>, and turns anything that escapes it
     /// into <c>Failed</c>, so a dying loop never leaves the stream open.
     /// </summary>
