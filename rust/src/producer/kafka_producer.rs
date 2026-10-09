@@ -1017,7 +1017,7 @@ impl<K, V> KafkaProducer<K, V> {
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
-            config.linger_ms as i32,
+            Self::linger_ms(&config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             delivery_timeout_ms,
@@ -1256,6 +1256,17 @@ impl<K, V> KafkaProducer<K, V> {
         (metrics, producer_metrics)
     }
 
+    /// Returns `linger.ms` as the `i32` the accumulator works with.
+    ///
+    /// `linger.ms` is a long-typed config, so values above `i32::MAX` are clamped
+    /// to `i32::MAX` rather than cast with `as i32`, which keeps only the low 32
+    /// bits and can yield zero or a negative linger, making every batch ready
+    /// immediately.
+    #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#lingerMs")]
+    fn linger_ms(config: &ProducerConfig) -> i32 {
+        config.linger_ms.min(i32::MAX as i64) as i32
+    }
+
     /// Validate and optionally adjust `delivery.timeout.ms` against
     /// `linger.ms + request.timeout.ms`.
     ///
@@ -1275,7 +1286,7 @@ impl<K, V> KafkaProducer<K, V> {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#configureDeliveryTimeout")]
     fn configure_delivery_timeout(config: &ProducerConfig, log_context: &LogContext) -> Result<i32, Error> {
         let mut delivery_timeout_ms = config.delivery_timeout_ms;
-        let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
+        let linger_ms = Self::linger_ms(config);
         let request_timeout_ms = config.request_timeout_ms;
         let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
 
@@ -4111,6 +4122,55 @@ mod tests {
         assert_eq!(result.unwrap(), 30_010);
     }
 
+    /// `linger.ms` values above `i32::MAX` are clamped to `i32::MAX`, as Java's
+    /// `KafkaProducer.lingerMs` does, instead of being truncated to their low 32
+    /// bits. The clamped value also bounds `linger.ms + request.timeout.ms` in
+    /// `configure_delivery_timeout`.
+    #[test]
+    fn test_linger_ms_beyond_i32_max_is_clamped() {
+        let log_context = LogContext::new("[test] ".to_string());
+        let max = i32::MAX.to_string();
+        let i64_max = i64::MAX.to_string();
+        for (linger_ms, expected) in [
+            ("0", 0),
+            ("5", 5),
+            (max.as_str(), i32::MAX),
+            ("2147483648", i32::MAX),
+            ("3000000000", i32::MAX),
+            ("4294967296", i32::MAX),
+            (i64_max.as_str(), i32::MAX),
+        ] {
+            let config = ProducerConfig::new(&guard_props(&[("linger.ms", linger_ms)])).expect("valid config");
+            assert_eq!(
+                KafkaProducer::<String, String>::linger_ms(&config),
+                expected,
+                "linger.ms={linger_ms}"
+            );
+            if expected == i32::MAX {
+                assert_eq!(
+                    KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context).unwrap(),
+                    i32::MAX,
+                    "the default delivery.timeout.ms is raised to the clamped sum (linger.ms={linger_ms})"
+                );
+            }
+        }
+    }
+
+    /// The producer passes the clamped `linger.ms` to its accumulator, so a value
+    /// above `i32::MAX` keeps batches lingering instead of making them ready at once.
+    /// `#[tokio::test]`: `new` spawns the Sender task, which fails to reach
+    /// localhost:9999 harmlessly and is dropped with the test.
+    #[tokio::test]
+    async fn test_linger_ms_beyond_i32_max_reaches_accumulator_clamped() {
+        for linger_ms in ["3000000000", "4294967296"] {
+            let config = ProducerConfig::new(&guard_props(&[("linger.ms", linger_ms)])).expect("valid config");
+            let producer =
+                KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                    .expect("a large linger.ms is a valid configuration");
+            assert_eq!(producer.accumulator.linger_ms_for_test(), i32::MAX, "linger.ms={linger_ms}");
+        }
+    }
+
     /// Tests that `negativePartitionShouldThrow` from Java is already handled
     /// by `ProducerRecord` validation. Negative partition is rejected at record
     /// construction time.
@@ -5152,7 +5212,7 @@ mod tests {
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
                 Compression::of(config.compression_type).build(),
-                config.linger_ms as i32,
+                KafkaProducer::<String, String>::linger_ms(&config),
                 config.retry_backoff_ms,
                 config.retry_backoff_max_ms,
                 config.delivery_timeout_ms,
@@ -6751,7 +6811,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             Compression::of(config.compression_type).build(),
-            config.linger_ms as i32,
+            KafkaProducer::<String, String>::linger_ms(&config),
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
             config.delivery_timeout_ms,
