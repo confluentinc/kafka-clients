@@ -58,6 +58,7 @@ use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
+use crate::common::utils::SystemTime;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 
@@ -1249,6 +1250,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             RecordBatch::NO_TIMESTAMP,
             0,
             0,
+            &SystemTime,
         ));
 
         let offset = next_offset(&mut inner.offsets, &tp);
