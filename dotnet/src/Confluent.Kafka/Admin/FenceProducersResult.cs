@@ -72,7 +72,7 @@ public sealed class FenceProducersResult
 
     /// <summary>
     /// One payload-free future per requested transactional id — Java's
-    /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <c>KafkaFuture&lt;Void&gt;</c>.
+    /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <see cref="KafkaFuture"/>s, as here.
     /// </summary>
     public IReadOnlyDictionary<string, KafkaFuture> FencedProducers => _erasedValues;
 

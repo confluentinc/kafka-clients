@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeCluster"/> — the .NET realization of Java's
-/// <c>DescribeClusterResult</c>: four awaitables over the cluster's attributes, handed
+/// <c>DescribeClusterResult</c>: four futures over the cluster's attributes, handed
 /// back the moment the request is submitted
 /// (<c>DescribeClusterResult.java:49, :59, :66, :74</c>).
 /// </summary>
@@ -47,8 +47,8 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ <b>Four projections of ONE completion, not four requests</b> — and this is the
 /// recorded deviation (<c>definition-of-done.md</c> §7). Java holds four independent
 /// <c>KafkaFuture</c> fields which the client completes separately; the C ABI settles the
-/// whole result together and has no <c>KafkaFuture</c> type with which to express
-/// independent timing, so the four tasks here derive from one source. The consequence is
+/// whole result together and has no future type with which to express
+/// independent timing, so the four futures here derive from one source. The consequence is
 /// <em>stronger</em> than Java's, not weaker: four projections of one completion cannot
 /// report four different cluster states.
 /// </para>
@@ -123,7 +123,7 @@ public sealed class AsyncDescribeClusterResult
     /// </summary>
     /// <returns>A future yielding the controller or <see langword="null"/>.</returns>
     /// <remarks>
-    /// ⚠ <b>A null controller is a successful outcome, not a failure</b> — the task
+    /// ⚠ <b>A null controller is a successful outcome, not a failure</b> — the future
     /// completes with <see langword="null"/> rather than faulting.
     /// </remarks>
     public AsyncKafkaFuture<Node?> Controller() => new AsyncKafkaFuture<Node?>(_controller);
@@ -135,7 +135,7 @@ public sealed class AsyncDescribeClusterResult
     /// <returns>A future yielding the cluster id or <see langword="null"/>.</returns>
     /// <remarks>
     /// ⚠ <b>A null id is a successful outcome, not a failure</b>, and it is not the empty
-    /// string: the task completes with <see langword="null"/> when the answer came through the
+    /// string: the future completes with <see langword="null"/> when the answer came through the
     /// old-broker <c>Metadata</c> fallback without an id (see the type remarks).
     /// </remarks>
     public AsyncKafkaFuture<string?> ClusterId() => new AsyncKafkaFuture<string?>(_clusterId);
@@ -145,7 +145,7 @@ public sealed class AsyncDescribeClusterResult
     /// not supply them — Java's <c>authorizedOperations()</c> (<c>:74</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the operations, an <b>empty</b> collection when the broker reported
+    /// A future yielding the operations, an <b>empty</b> collection when the broker reported
     /// an empty set, or <see langword="null"/> when it reported nothing at all. The three
     /// are distinct; see the type remarks.
     /// </returns>

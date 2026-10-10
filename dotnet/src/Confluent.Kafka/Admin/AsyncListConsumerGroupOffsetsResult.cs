@@ -24,13 +24,13 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>listConsumerGroupOffsets</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>
-/// (<c>ListConsumerGroupOffsetsResult.java:36</c>): one awaitable <b>per group id</b>,
+/// (<c>ListConsumerGroupOffsetsResult.java:36</c>): one future <b>per group id</b>,
 /// each yielding that group's committed offsets keyed by partition.
 /// </summary>
 /// <remarks>
 /// <para>
 /// A group that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/>; a per-group failure
-/// is not a call failure. <see cref="All"/> is the aggregate over those per-group tasks and
+/// is not a call failure. <see cref="All"/> is the aggregate over those per-group futures and
 /// succeeds only if every one of them did.
 /// </para>
 /// <para>
@@ -65,7 +65,7 @@ public sealed class AsyncListConsumerGroupOffsetsResult
     private readonly IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per group id — Java's <b>package-private</b>
+    /// Wraps one future per group id — Java's <b>package-private</b>
     /// <c>ListConsumerGroupOffsetsResult(Map&lt;CoordinatorKey, KafkaFuture&lt;...&gt;&gt;)</c>
     /// (<c>:40</c>).
     /// </summary>
@@ -84,7 +84,7 @@ public sealed class AsyncListConsumerGroupOffsetsResult
     /// already keyed by group id.
     /// </para>
     /// </remarks>
-    /// <param name="futures">One awaitable per requested group id.</param>
+    /// <param name="futures">One future per requested group id.</param>
     internal AsyncListConsumerGroupOffsetsResult(
         IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
     {

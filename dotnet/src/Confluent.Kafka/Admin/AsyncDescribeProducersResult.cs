@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of a <c>describeProducers</c> call — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one awaitable
+/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one future
 /// per topic partition.
 /// </summary>
 /// <remarks>
@@ -34,8 +34,8 @@ public sealed class AsyncDescribeProducersResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> _futures;
 
-    /// <summary>Wraps one awaitable per topic partition.</summary>
-    /// <param name="futures">One awaitable per requested partition.</param>
+    /// <summary>Wraps one future per topic partition.</summary>
+    /// <param name="futures">One future per requested partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
     internal AsyncDescribeProducersResult(
         IReadOnlyDictionary<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> futures)
@@ -53,7 +53,7 @@ public sealed class AsyncDescribeProducersResult
 
     /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c> (<c>:36</c>).</summary>
     /// <param name="partition">A topic partition from the request.</param>
-    /// <returns>That partition's awaitable.</returns>
+    /// <returns>That partition's future.</returns>
     /// <exception cref="ArgumentException">
     /// The partition was not in the request — Java's <c>IllegalArgumentException</c>
     /// (<c>:39-40</c>), thrown <b>synchronously</b> because it is a usage error.

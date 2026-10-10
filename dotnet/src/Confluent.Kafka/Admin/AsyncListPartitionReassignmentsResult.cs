@@ -22,14 +22,14 @@ namespace Confluent.Kafka.Admin;
 /// The result of
 /// <see cref="IAsyncAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
 /// — the .NET realization of
-/// Java's <c>ListPartitionReassignmentsResult</c>: <b>one</b> awaitable over the whole
+/// Java's <c>ListPartitionReassignmentsResult</c>: <b>one</b> future over the whole
 /// listing (<c>ListPartitionReassignmentsResult.java:31, :40</c>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// ⚠ <b>The name is a false parallel with
 /// <see cref="AsyncAlterPartitionReassignmentsResult"/> — the shapes are different.</b> That one
-/// holds <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>, one awaitable per
+/// holds <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>, one future per
 /// partition with a per-partition error. This one holds a <b>single</b>
 /// <c>KafkaFuture&lt;Map&lt;TopicPartition, PartitionReassignment&gt;&gt;</c>
 /// (<c>:31</c>), and the ABI agrees: <c>kafka_admin_ListPartitionReassignmentsResult_t</c>
@@ -54,7 +54,7 @@ public sealed class AsyncListPartitionReassignmentsResult
     private readonly Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListPartitionReassignmentsResult(KafkaFuture&lt;Map&lt;…&gt;&gt;)</c>
     /// (<c>:33-35</c>).
     /// </summary>
@@ -77,7 +77,7 @@ public sealed class AsyncListPartitionReassignmentsResult
     /// (<c>:40</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the map, or faulting with the call's own
+    /// A future yielding the map, or faulting with the call's own
     /// <see cref="KafkaException"/>. Partitions with no ongoing reassignment are absent
     /// rather than present-and-empty.
     /// </returns>

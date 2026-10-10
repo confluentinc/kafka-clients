@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DeleteConsumerGroups"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsResult</c>: one awaitable
+/// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsResult</c>: one future
 /// <b>per group id</b>, handed back the moment the request is submitted.
 /// </summary>
 /// <remarks>
@@ -68,7 +68,7 @@ public sealed class AsyncDeleteConsumerGroupsResult
         new AsyncDeleteConsumerGroupsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested group id, keyed by group id — Java's <c>deletedGroups()</c>.
+    /// One future per requested group id, keyed by group id — Java's <c>deletedGroups()</c>.
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> DeletedGroups => _deletedGroups;
 

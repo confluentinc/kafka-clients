@@ -38,7 +38,7 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// Waiting for one of these tells you whether that partition's reassignment was
 /// <em>initiated</em> and hands back nothing — Java's per-partition future is
-/// <c>KafkaFuture&lt;Void&gt;</c>, and its javadoc lists the per-partition error codes
+/// a <see cref="KafkaFuture"/>, which carries no value, and its javadoc lists the per-partition error codes
 /// (<c>INVALID_REPLICA_ASSIGNMENT</c>, <c>NO_REASSIGNMENT_IN_PROGRESS</c>, …). The
 /// per-partition error is <b>owned</b>: it arrives with that partition's own callback and is
 /// freed once it has been copied into the <see cref="KafkaException"/>.
@@ -69,7 +69,7 @@ public sealed class AlterPartitionReassignmentsResult
     /// from an admin operation (M15/P14).
     /// </summary>
     /// <remarks>
-    /// Presents the bridge's <c>bool</c> latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the
+    /// Presents the bridge's <c>bool</c> latches as valueless <see cref="KafkaFuture"/>s: the <c>bool</c> is the
     /// void bridge's internal success token (result shape 2 — the ABI declares no <c>get_value</c> here, so a null
     /// per-partition error <em>is</em> the success value) and must not reach the public surface. Each void future is
     /// erased over its key's <b>same</b> latch — no second completion — with the bridge's own comparer, so the view

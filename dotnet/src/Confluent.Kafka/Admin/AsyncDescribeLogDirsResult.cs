@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeLogDirs"/> — the .NET realization of Java's
-/// <c>DescribeLogDirsResult</c>: one awaitable <b>per broker</b>, each yielding that
+/// <c>DescribeLogDirsResult</c>: one future <b>per broker</b>, each yielding that
 /// broker's log directories keyed by path (<c>DescribeLogDirsResult.java:41, :50</c>).
 /// </summary>
 /// <remarks>
@@ -30,9 +30,9 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// ⚠ <b>Two different errors live in this RPC and mean different things.</b> A broker whose
-/// query failed faults <em>its own</em> awaitable (the header: "a per-broker failure is not
+/// query failed faults <em>its own</em> future (the header: "a per-broker failure is not
 /// a call failure"). A <em>log directory</em> that is offline does <b>not</b> fault
-/// anything — the awaitable succeeds and the offending
+/// anything — the future succeeds and the offending
 /// <see cref="LogDirDescription.Error"/> is non-null. The two are also owned differently.
 /// The per-broker error is <b>owned</b>: it arrives with that broker's own callback and is
 /// freed once it has been copied into the <see cref="KafkaException"/>. The per-directory
@@ -47,7 +47,7 @@ public sealed class AsyncDescribeLogDirsResult
     private readonly IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> _futures;
 
     /// <summary>
-    /// Wraps the per-broker awaitables — Java's package-private
+    /// Wraps the per-broker futures — Java's package-private
     /// <c>DescribeLogDirsResult(Map&lt;Integer, KafkaFuture&lt;Map&lt;String, LogDirDescription&gt;&gt;&gt;)</c>
     /// (<c>:33</c>).
     /// </summary>
@@ -67,7 +67,7 @@ public sealed class AsyncDescribeLogDirsResult
         new AsyncDescribeLogDirsResult(operation.Tasks);
 
     /// <summary>
-    /// One awaitable per requested broker, each yielding that broker's log directories
+    /// One future per requested broker, each yielding that broker's log directories
     /// keyed by path — Java's <c>descriptions()</c> (<c>:41</c>).
     /// </summary>
     public IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions =>

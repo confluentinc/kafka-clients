@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.CreateAcls"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.CreateAclsResult</c>: one awaitable <b>per ACL
+/// <c>org.apache.kafka.clients.admin.CreateAclsResult</c>: one future <b>per ACL
 /// binding</b>, handed back the moment the request is submitted.
 /// </summary>
 /// <remarks>
@@ -72,7 +72,7 @@ public sealed class AsyncCreateAclsResult
         new AsyncCreateAclsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested binding, keyed by the binding — Java's <c>values()</c>.
+    /// One future per requested binding, keyed by the binding — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<AclBinding, AsyncKafkaFuture> Values => _values;
 

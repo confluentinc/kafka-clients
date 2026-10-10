@@ -71,7 +71,7 @@ public sealed class AlterClientQuotasResult
     /// from an admin operation (M15/P14).
     /// </summary>
     /// <remarks>
-    /// Presents the bridge's <c>bool</c> latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the
+    /// Presents the bridge's <c>bool</c> latches as valueless <see cref="KafkaFuture"/>s: the <c>bool</c> is the
     /// void bridge's internal success token (result shape 2 — the ABI has no <c>get_value</c> here, so a null
     /// per-key error <em>is</em> the success value) and must not reach the public surface. Each void future is erased
     /// over its key's <b>same</b> latch — no second completion — with the bridge's own comparer, so the view and the

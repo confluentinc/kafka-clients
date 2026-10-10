@@ -24,8 +24,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b><see cref="All"/> here is a bare <see cref="KafkaFuture"/></b> — Java's
-/// <c>KafkaFuture&lt;Void&gt;</c> — whereas <see cref="DescribeConfigsResult.All"/> yields
+/// ⚠ <b><see cref="All"/> here is a bare <see cref="KafkaFuture"/></b>, as in Java,
+/// whereas <see cref="DescribeConfigsResult.All"/> yields
 /// the whole map. The two results are otherwise the same shape.
 /// </para>
 /// <para>
@@ -68,7 +68,7 @@ public sealed class AlterConfigsResult
     /// from an admin operation (M15/P14).
     /// </summary>
     /// <remarks>
-    /// Presents the bridge's <c>bool</c> latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the
+    /// Presents the bridge's <c>bool</c> latches as valueless <see cref="KafkaFuture"/>s: the <c>bool</c> is the
     /// void bridge's internal success token (result shape 2 — the ABI has no <c>get_value</c> here, which its own
     /// header states, so a null per-key error <em>is</em> the success value) and must not reach the public surface.
     /// Each void future is erased over its key's <b>same</b> latch — no second completion — with the bridge's own

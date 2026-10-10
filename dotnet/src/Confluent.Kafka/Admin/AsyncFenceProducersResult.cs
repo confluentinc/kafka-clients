@@ -65,7 +65,7 @@ public sealed class AsyncFenceProducersResult
         new AsyncFenceProducersResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One payload-free awaitable per requested transactional id — Java's
+    /// One payload-free future per requested transactional id — Java's
     /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <c>KafkaFuture&lt;Void&gt;</c>.
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> FencedProducers => _erasedValues;
@@ -75,7 +75,7 @@ public sealed class AsyncFenceProducersResult
     /// <c>producerId(String)</c> (<c>:53</c>).
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>An awaitable over that id's producer id.</returns>
+    /// <returns>A future over that id's producer id.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request — Java's
@@ -89,7 +89,7 @@ public sealed class AsyncFenceProducersResult
     /// <c>epochId(String)</c> (<c>:60</c>), a <see langword="short"/> as Java's is.
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>An awaitable over that id's epoch.</returns>
+    /// <returns>A future over that id's epoch.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request — see

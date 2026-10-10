@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// The result of
 /// <see cref="IAsyncAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/> — the .NET
 /// realization of Java's
-/// <c>DescribeTopicsResult</c>: one awaitable <b>per topic</b>, handed back the moment the
+/// <c>DescribeTopicsResult</c>: one future <b>per topic</b>, handed back the moment the
 /// request is submitted, keyed by whichever identifier the request used.
 /// </summary>
 /// <remarks>
@@ -56,7 +56,7 @@ public sealed class AsyncDescribeTopicsResult
     private readonly IEqualityComparer<string> _topicNameComparer;
 
     /// <summary>
-    /// Wraps one awaitable per topic, keyed by id <b>or</b> by name — Java's
+    /// Wraps one future per topic, keyed by id <b>or</b> by name — Java's
     /// <c>protected DescribeTopicsResult(Map&lt;Uuid, KafkaFuture&lt;TopicDescription&gt;&gt; topicIdFutures,
     /// Map&lt;String, KafkaFuture&lt;TopicDescription&gt;&gt; nameFutures)</c>
     /// (<c>DescribeTopicsResult.java:37-44</c>, marked <c>// VisibleForTesting</c>), so a
@@ -85,8 +85,8 @@ public sealed class AsyncDescribeTopicsResult
     /// <c>design/current/STATUS.md</c>. The dictionaries are held by reference, as Java holds its maps.
     /// </para>
     /// </remarks>
-    /// <param name="topicIdFutures">One awaitable per topic id, or <see langword="null"/> for a by-name result.</param>
-    /// <param name="nameFutures">One awaitable per topic name, or <see langword="null"/> for a by-id result.</param>
+    /// <param name="topicIdFutures">One future per topic id, or <see langword="null"/> for a by-name result.</param>
+    /// <param name="nameFutures">One future per topic name, or <see langword="null"/> for a by-id result.</param>
     /// <exception cref="ArgumentException">
     /// Both are non-null (<c>"topicIdFutures and nameFutures cannot both be specified."</c>)
     /// or both are null (<c>"topicIdFutures and nameFutures cannot both be null."</c>) —
@@ -127,7 +127,7 @@ public sealed class AsyncDescribeTopicsResult
     }
 
     /// <summary>
-    /// One awaitable per requested topic id, or <see langword="null"/> if the request
+    /// One future per requested topic id, or <see langword="null"/> if the request
     /// used topic <em>names</em> — Java's <c>topicIdValues()</c>.
     /// </summary>
     /// <remarks>
@@ -138,7 +138,7 @@ public sealed class AsyncDescribeTopicsResult
     public IReadOnlyDictionary<Uuid, AsyncKafkaFuture<TopicDescription>>? TopicIdValues => _topicIdValues;
 
     /// <summary>
-    /// One awaitable per requested topic name, or <see langword="null"/> if the request
+    /// One future per requested topic name, or <see langword="null"/> if the request
     /// used topic <em>ids</em> — Java's <c>topicNameValues()</c>.
     /// </summary>
     /// <inheritdoc cref="TopicIdValues" path="/remarks"/>

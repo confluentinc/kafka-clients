@@ -20,18 +20,18 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ElectLeaders"/> — the .NET realization of Java's
-/// <c>ElectLeadersResult</c>: <b>one</b> awaitable over a map whose values are the
+/// <c>ElectLeadersResult</c>: <b>one</b> future over a map whose values are the
 /// per-partition outcomes (<c>ElectLeadersResult.java:47, :54</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted awaitable.</b> Java's
+/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted future.</b> Java's
 /// field is
 /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;</c>
 /// (<c>:36</c>), and the javadoc on <c>partitions()</c> spells the semantics out: "If the
 /// election succeeded then the value for a topic partition will be the empty Optional.
 /// Otherwise the election failed and the Optional will be set with the error"
-/// (<c>:43-46</c>). So a failed partition resolves the <em>same</em> successful task as
+/// (<c>:43-46</c>). So a failed partition resolves the <em>same</em> successful future as
 /// every other partition, carrying its error as
 /// <c>Optional&lt;Throwable&gt;</c> → <see cref="KafkaException"/>?.
 /// </para>
@@ -42,12 +42,12 @@ namespace Confluent.Kafka.Admin;
 /// accessor sets — <c>count</c>, <c>get_topic</c>, <c>get_partition</c>,
 /// <c>get_error</c>, <c>destroy</c> — yet
 /// <see cref="AsyncAlterPartitionReassignmentsResult"/> really is the ordinary per-key
-/// shape whose <c>get_error(i)</c> faults that partition's own awaitable. The Java
+/// shape whose <c>get_error(i)</c> faults that partition's own future. The Java
 /// return type is what separates them. See <c>AdminCallbacks.ElectLeadersOptionalError</c>
 /// for the reader that carries this, and the swap-detection tests that pin it.
 /// </para>
 /// <para>
-/// <b>Why one awaitable and not one per partition.</b> Java holds a single future, and
+/// <b>Why one future and not one per partition.</b> Java holds a single future, and
 /// the ABI agrees for a second reason: the request may name <em>no</em> partitions at all
 /// (<see cref="IAsyncAdmin.ElectLeaders"/> with a <see langword="null"/> selection means
 /// "every partition in the cluster"), so the result's keys are discovered from the
@@ -61,7 +61,7 @@ public sealed class AsyncElectLeadersResult
     private readonly Task<IReadOnlyDictionary<TopicPartition, KafkaException?>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ElectLeadersResult(KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;)</c>
     /// (<c>:38-40</c>).
     /// </summary>
@@ -83,9 +83,9 @@ public sealed class AsyncElectLeadersResult
     /// <c>partitions()</c> (<c>:47</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the map. A <see langword="null"/> value means that partition's
+    /// A future yielding the map. A <see langword="null"/> value means that partition's
     /// election <b>succeeded</b> (Java's empty <c>Optional</c>); a non-null value is that
-    /// partition's own failure and does <b>not</b> fault this task. The task itself faults
+    /// partition's own failure and does <b>not</b> fault this future. The future itself faults
     /// only when the election could not be run at all.
     /// </returns>
     /// <remarks>
@@ -104,7 +104,7 @@ public sealed class AsyncElectLeadersResult
     /// <returns>A future representing the whole election.</returns>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>Not an aggregate over N awaitables.</b> Java does not call
+    /// ⚠ <b>Not an aggregate over N futures.</b> Java does not call
     /// <c>KafkaFuture.allOf</c> here — it cannot, because there is only one future. It
     /// chains <c>whenComplete</c> on <c>partitions()</c>, forwards a call-level failure,
     /// and otherwise walks the map's <em>values</em> completing exceptionally with the
@@ -120,7 +120,7 @@ public sealed class AsyncElectLeadersResult
     /// <see cref="Partitions"/>, where they all remain.
     /// </para>
     /// <para>
-    /// A fresh task per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per
+    /// A fresh future per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per
     /// <c>all()</c> call. Admin is batch/administrative, so there is no per-record path to
     /// budget (<c>admin-client.md</c> §10).
     /// </para>

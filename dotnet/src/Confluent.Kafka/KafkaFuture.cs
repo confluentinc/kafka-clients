@@ -29,7 +29,9 @@ namespace Confluent.Kafka;
 /// result or rethrows its failure (Java's <c>get()</c>). Only <c>IProducer.Send</c> and the <c>IAdmin</c> result types
 /// return a usable one; <see cref="AsyncKafkaFuture{T}"/> is the async counterpart.
 /// </summary>
-/// <typeparam name="T">The operation's result: <see cref="RecordMetadata"/> for a producer send.</typeparam>
+/// <typeparam name="T">
+/// The operation's result: <see cref="RecordMetadata"/> for a producer send, or the value an admin result's future carries.
+/// </typeparam>
 /// <remarks>
 /// <list type="bullet">
 /// <item><b>Get blocks the calling thread</b> on a managed latch — not a <c>Task</c>, so this is not

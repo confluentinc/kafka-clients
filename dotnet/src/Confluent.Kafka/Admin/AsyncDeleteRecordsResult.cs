@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DeleteRecords"/> — the .NET realization of Java's
-/// <c>DeleteRecordsResult</c>: one awaitable <b>per topic partition</b>, handed back the
+/// <c>DeleteRecordsResult</c>: one future <b>per topic partition</b>, handed back the
 /// moment the request is submitted.
 /// </summary>
 /// <remarks>
@@ -46,7 +46,7 @@ public sealed class AsyncDeleteRecordsResult
     private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per topic partition — Java's <b>public</b>
+    /// Wraps one future per topic partition — Java's <b>public</b>
     /// <c>DeleteRecordsResult(Map&lt;TopicPartition, KafkaFuture&lt;DeletedRecords&gt;&gt;)</c>
     /// (<c>DeleteRecordsResult.java:32</c>).
     /// </summary>
@@ -54,7 +54,7 @@ public sealed class AsyncDeleteRecordsResult
     /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
     /// <c>design/current/STATUS.md</c>.
     /// </remarks>
-    /// <param name="lowWatermarks">One awaitable per topic partition.</param>
+    /// <param name="lowWatermarks">One future per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="lowWatermarks"/> is null.</exception>
     internal AsyncDeleteRecordsResult(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> lowWatermarks)
     {
@@ -69,7 +69,7 @@ public sealed class AsyncDeleteRecordsResult
         new AsyncDeleteRecordsResult(AsyncAdminFutures.Wrap(operation.Tasks));
 
     /// <summary>
-    /// One awaitable per requested topic partition, each carrying that partition's own
+    /// One future per requested topic partition, each carrying that partition's own
     /// <see cref="DeletedRecords"/> or its own failure — Java's <c>lowWatermarks()</c>.
     /// </summary>
     public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> LowWatermarks => _futures;

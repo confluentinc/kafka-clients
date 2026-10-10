@@ -23,17 +23,17 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DeleteConsumerGroupOffsets"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult</c>
-/// (<c>DeleteConsumerGroupOffsetsResult.java:31-32</c>): one awaitable over a map whose
+/// (<c>DeleteConsumerGroupOffsetsResult.java:31-32</c>): one future over a map whose
 /// values are the per-partition outcomes, **plus** the original request's partition set —
 /// the second stored field Java carries and <see cref="AsyncAlterConsumerGroupOffsetsResult"/>
 /// does not.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted awaitable</b> — the
+/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted future</b> — the
 /// same shape as <see cref="AsyncAlterConsumerGroupOffsetsResult"/>. Java's stored future is
 /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c> (<c>:31</c>). A
-/// whole-request failure faults the awaitable itself, and both accessors rethrow it
+/// whole-request failure faults the future itself, and both accessors rethrow it
 /// unchanged, as Java's continuations test the <c>throwable</c> first.
 /// </para>
 /// <para>
@@ -63,13 +63,13 @@ public sealed class AsyncDeleteConsumerGroupOffsetsResult
     private readonly IReadOnlyCollection<TopicPartition> _partitions;
 
     /// <summary>
-    /// Wraps the single awaitable and the original request's partition set — Java's
+    /// Wraps the single future and the original request's partition set — Java's
     /// package-private
     /// <c>DeleteConsumerGroupOffsetsResult(KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;,
     /// Set&lt;TopicPartition&gt;)</c> (<c>:35-38</c>).
     /// </summary>
     /// <param name="future">
-    /// The single awaitable: <c>PerKey</c> is the per-partition map (a <see langword="null"/>
+    /// The single future: <c>PerKey</c> is the per-partition map (a <see langword="null"/>
     /// value is Java's <c>Errors.NONE</c>), <c>All</c> the fault Java's <c>all()</c> reports,
     /// or <see langword="null"/> when it succeeds.
     /// </param>
@@ -161,8 +161,8 @@ public sealed class AsyncDeleteConsumerGroupOffsetsResult
     /// rethrown unchanged: the outcome <see cref="PartitionResult"/> reports for the first
     /// failing requested partition in topic-name-then-partition-id order, with no aggregate
     /// message naming every failure. A whole-request failure
-    /// faults the awaitable instead and propagates unchanged through the
-    /// <see langword="await"/> (<c>:67-68</c>). A fresh task per call, as Java allocates a
+    /// faults the future instead and propagates unchanged through the
+    /// <see langword="await"/> (<c>:67-68</c>). A fresh future per call, as Java allocates a
     /// fresh <c>KafkaFutureImpl</c> per <c>all()</c> call (<c>:64</c>).
     /// </remarks>
     public AsyncKafkaFuture All() => new AsyncKafkaFuture(AllCore());

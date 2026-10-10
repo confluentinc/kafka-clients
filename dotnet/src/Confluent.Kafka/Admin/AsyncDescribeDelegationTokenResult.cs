@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeDelegationToken"/> — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one awaitable over the
+/// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one future over the
 /// whole token list (<c>:29</c>). Java declares no <c>all()</c> here.
 /// </summary>
 /// <seealso cref="DescribeDelegationTokenResult"/>
@@ -45,7 +45,7 @@ public sealed class AsyncDescribeDelegationTokenResult
         new AsyncDescribeDelegationTokenResult(operation.Task);
 
     /// <summary>The described tokens — Java's <c>delegationTokens()</c> (<c>:38</c>).</summary>
-    /// <returns>An awaitable over the token list, in the order the ABI delivered it.</returns>
+    /// <returns>A future over the token list, in the order the ABI delivered it.</returns>
     public AsyncKafkaFuture<IReadOnlyList<Token>> DelegationTokens() => new AsyncKafkaFuture<IReadOnlyList<Token>>(_tokens);
 
     // Java's accessor is List-typed (:38) while the collection walker produces

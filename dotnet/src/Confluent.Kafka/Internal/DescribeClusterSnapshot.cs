@@ -19,7 +19,8 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// The four already-marshalled values one <c>describeCluster</c> completion carries, so
 /// the RPC can settle a single <see cref="SingleAdminOperation{TValue}"/> and the public
-/// <c>DescribeClusterResult</c> can project its four Java-shaped tasks out of it.
+/// <c>DescribeClusterResult</c> and <c>AsyncDescribeClusterResult</c> can project their four
+/// Java-shaped futures out of it.
 /// </summary>
 /// <remarks>
 /// <para>

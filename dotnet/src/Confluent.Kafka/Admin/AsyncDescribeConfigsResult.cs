@@ -20,15 +20,16 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeConfigs"/> — the .NET realization of Java's
-/// <c>DescribeConfigsResult</c>: one awaitable <b>per resource</b>, handed back the moment
+/// <c>DescribeConfigsResult</c>: one future <b>per resource</b>, handed back the moment
 /// the request is submitted (<c>DescribeConfigsResult.java:43, :50</c>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// ⚠ <b><see cref="All"/> here carries the whole map</b>
-/// (<c>KafkaFuture&lt;Map&lt;ConfigResource, Config&gt;&gt;</c>), whereas
-/// <see cref="AsyncAlterConfigsResult.All"/> is a bare <c>KafkaFuture&lt;Void&gt;</c>. The two
-/// results are otherwise the same shape, so the difference is easy to swap by accident.
+/// (Java's <c>KafkaFuture&lt;Map&lt;ConfigResource, Config&gt;&gt;</c>), whereas
+/// <see cref="AsyncAlterConfigsResult.All"/> is a bare <see cref="AsyncKafkaFuture"/> (Java's
+/// <c>KafkaFuture&lt;Void&gt;</c>). The two results are otherwise the same shape, so the
+/// difference is easy to swap by accident.
 /// </para>
 /// <para>
 /// A resource that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/> — the header says
@@ -45,7 +46,7 @@ public sealed class AsyncDescribeConfigsResult
     private readonly IEqualityComparer<ConfigResource> _comparer;
 
     /// <summary>
-    /// Wraps the per-resource awaitables — Java's <c>protected</c>
+    /// Wraps the per-resource futures — Java's <c>protected</c>
     /// <c>DescribeConfigsResult(Map&lt;ConfigResource, KafkaFuture&lt;Config&gt;&gt;)</c>
     /// (<c>:35</c>).
     /// </summary>
@@ -74,7 +75,7 @@ public sealed class AsyncDescribeConfigsResult
         new AsyncDescribeConfigsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested resource, keyed by resource — Java's <c>values()</c>
+    /// One future per requested resource, keyed by resource — Java's <c>values()</c>
     /// (<c>:43</c>).
     /// </summary>
     public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> Values => _futures;

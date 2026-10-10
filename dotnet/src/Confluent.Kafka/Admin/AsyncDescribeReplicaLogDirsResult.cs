@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeReplicaLogDirs"/> — the .NET realization of
-/// Java's <c>DescribeReplicaLogDirsResult</c>: one awaitable <b>per replica</b>
+/// Java's <c>DescribeReplicaLogDirsResult</c>: one future <b>per replica</b>
 /// (<c>DescribeReplicaLogDirsResult.java:41, :48</c>).
 /// </summary>
 /// <remarks>
@@ -42,7 +42,7 @@ public sealed class AsyncDescribeReplicaLogDirsResult
     private readonly IEqualityComparer<TopicPartitionReplica> _comparer;
 
     /// <summary>
-    /// Wraps the per-replica awaitables — Java's package-private constructor (<c>:34</c>).
+    /// Wraps the per-replica futures — Java's package-private constructor (<c>:34</c>).
     /// </summary>
     /// <remarks>
     /// The bridge's own comparer is threaded through so the aggregate and the per-key map
@@ -68,7 +68,7 @@ public sealed class AsyncDescribeReplicaLogDirsResult
         new AsyncDescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested replica — Java's <c>values()</c> (<c>:41</c>).
+    /// One future per requested replica — Java's <c>values()</c> (<c>:41</c>).
     /// </summary>
     public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values => _futures;
 

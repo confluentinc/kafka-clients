@@ -112,7 +112,7 @@ public sealed class ListTopicsResult
     /// <remarks>
     /// A <see cref="ProjectedSyncFuture{TIn, TOut}"/>: the projection runs once, on the first <c>Get()</c>'s thread,
     /// and a failure of the source propagates as the same <see cref="KafkaException"/> instance. Each call builds one
-    /// future, exactly as each Java <c>thenApply</c> allocates one <c>KafkaFuture</c> — and admin is
+    /// future, exactly as each Java <c>thenApply</c> allocates one <see cref="KafkaFuture{T}"/> — and admin is
     /// batch/administrative, with no per-record path to budget (<c>admin-client.md</c> §10).
     /// </remarks>
     private KafkaFuture<TResult> Project<TResult>(

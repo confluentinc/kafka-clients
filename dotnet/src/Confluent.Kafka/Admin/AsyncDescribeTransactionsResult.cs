@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>describeTransactions</c> call — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeTransactionsResult</c> (<c>:27</c>): one
-/// awaitable per transactional id.
+/// future per transactional id.
 /// </summary>
 /// <remarks>
 /// ⚠ Java publishes <b>no</b> per-id map, only the <see cref="Description"/> lookup and
@@ -34,8 +34,8 @@ public sealed class AsyncDescribeTransactionsResult
 {
     private readonly IReadOnlyDictionary<string, Task<TransactionDescription>> _futures;
 
-    /// <summary>Wraps one awaitable per transactional id.</summary>
-    /// <param name="futures">One awaitable per requested id.</param>
+    /// <summary>Wraps one future per transactional id.</summary>
+    /// <param name="futures">One future per requested id.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
     internal AsyncDescribeTransactionsResult(IReadOnlyDictionary<string, Task<TransactionDescription>> futures)
     {
@@ -51,11 +51,11 @@ public sealed class AsyncDescribeTransactionsResult
 
     /// <summary>One id's description — Java's <c>description(String)</c> (<c>:43</c>).</summary>
     /// <param name="transactionalId">A transactional id from the request.</param>
-    /// <returns>That id's awaitable.</returns>
+    /// <returns>That id's future.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// The id was not in the request — Java's <c>IllegalArgumentException</c> (<c>:47</c>),
-    /// thrown <b>synchronously</b> because it is a usage error, not a task outcome.
+    /// thrown <b>synchronously</b> because it is a usage error, not a future's outcome.
     /// </exception>
     public AsyncKafkaFuture<TransactionDescription> Description(string transactionalId)
     {

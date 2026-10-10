@@ -25,8 +25,8 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// ⚠ <b><see cref="All"/> here carries the whole map</b>
-/// (<c>KafkaFuture&lt;Map&lt;ConfigResource, Config&gt;&gt;</c>), whereas
-/// <see cref="AlterConfigsResult.All"/> is a bare <c>KafkaFuture&lt;Void&gt;</c>. The two
+/// (Java's <c>KafkaFuture&lt;Map&lt;ConfigResource, Config&gt;&gt;</c>), whereas
+/// <see cref="AlterConfigsResult.All"/> is a bare <see cref="KafkaFuture"/>. The two
 /// results are otherwise the same shape, so the difference is easy to swap by accident.
 /// </para>
 /// <para>

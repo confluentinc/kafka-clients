@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AlterClientQuotas"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.AlterClientQuotasResult</c>: one awaitable <b>per quota
+/// <c>org.apache.kafka.clients.admin.AlterClientQuotasResult</c>: one future <b>per quota
 /// entity</b>, handed back the moment the request is submitted.
 /// </summary>
 /// <remarks>
@@ -42,7 +42,7 @@ public sealed class AsyncAlterClientQuotasResult
     private readonly IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> _values;
 
     /// <summary>
-    /// Wraps one awaitable per entity — Java's <b>public</b>
+    /// Wraps one future per entity — Java's <b>public</b>
     /// <c>AlterClientQuotasResult(Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;)</c>
     /// (<c>AlterClientQuotasResult.java:38</c>), which a caller can use to fabricate a result,
     /// for a test double say.
@@ -52,7 +52,7 @@ public sealed class AsyncAlterClientQuotasResult
     /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map, so
     /// <see cref="Values"/> and <see cref="All"/> read whatever it holds when they are called.
     /// </remarks>
-    /// <param name="futures">One awaitable per entity, keyed by the entity.</param>
+    /// <param name="futures">One future per entity, keyed by the entity.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="futures"/> is null — where Java stores the null and throws
     /// <c>NullPointerException</c> on first use.
@@ -95,7 +95,7 @@ public sealed class AsyncAlterClientQuotasResult
         new AsyncAlterClientQuotasResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested entity, keyed by the entity — Java's <c>values()</c>
+    /// One future per requested entity, keyed by the entity — Java's <c>values()</c>
     /// (<c>:45</c>).
     /// </summary>
     public IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> Values => _values;

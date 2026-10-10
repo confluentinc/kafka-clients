@@ -568,9 +568,9 @@ internal sealed class SingleAdminOperation<TValue> : AdminOperation
     }
 
     /// <summary>
-    /// The async flavour's awaitable, in the Java <c>KafkaFuture&lt;T&gt;</c> shape the
-    /// public <c>*Result</c> exposes. Available before the submit, so the synchronous C#
-    /// method can hand it back immediately.
+    /// The async flavour's task, which the public <c>Async*Result</c> wraps as an
+    /// <see cref="AsyncKafkaFuture{T}"/> (Java's <c>KafkaFuture&lt;T&gt;</c>). Available before the
+    /// submit, so the synchronous C# method can hand it back immediately.
     /// </summary>
     /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Sync"/>.</exception>
     internal Task<TValue> Task =>

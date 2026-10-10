@@ -55,7 +55,7 @@ public sealed class AsyncListTransactionsResult
 
     /// <summary>Wraps the outer, broker-keyed future — Java's <c>byBrokerId()</c>.</summary>
     /// <param name="byBrokerId">
-    /// The future of the broker map; each value is that broker's own task, which may still be
+    /// The future of the broker map; each value is that broker's own future, which may still be
     /// pending when the map resolves.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="byBrokerId"/> is null.</exception>

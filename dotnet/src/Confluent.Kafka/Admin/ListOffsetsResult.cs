@@ -116,8 +116,8 @@ public sealed class ListOffsetsResult
     /// ⚠ Java's <c>all()</c> yields the <b>map</b>
     /// (<c>KafkaFuture&lt;Map&lt;TopicPartition, ListOffsetsResultInfo&gt;&gt;</c>,
     /// <c>allOf(...).thenApply(...)</c> at <c>:55-67</c>) — unlike
-    /// <see cref="DeleteRecordsResult.All"/>, whose Java counterpart is a bare
-    /// <c>KafkaFuture&lt;Void&gt;</c>. The two look alike and are not.
+    /// <see cref="DeleteRecordsResult.All"/>, which is a bare <see cref="KafkaFuture"/>, as in
+    /// Java. The two look alike and are not.
     /// </para>
     /// <para>
     /// Every partition is waited for first, so a failure fails this future with the first failure in key order exactly

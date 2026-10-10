@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ListConfigResources"/> — the .NET realization of Java's
-/// <c>ListConfigResourcesResult</c>: <b>one</b> awaitable over the whole listing, handed
+/// <c>ListConfigResourcesResult</c>: <b>one</b> future over the whole listing, handed
 /// back the moment the request is submitted (<c>ListConfigResourcesResult.java:42</c>).
 /// </summary>
 /// <remarks>
@@ -51,7 +51,7 @@ public sealed class AsyncListConfigResourcesResult
     private readonly Task<IReadOnlyCollection<ConfigResource>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListConfigResourcesResult(KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;)</c>
     /// (<c>:32</c>).
     /// </summary>
@@ -72,7 +72,7 @@ public sealed class AsyncListConfigResourcesResult
     /// The full set of config resources — Java's <c>all()</c> (<c>:42</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the resources, or faulting with the call's own
+    /// A future yielding the resources, or faulting with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <remarks>

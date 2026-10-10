@@ -23,9 +23,9 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// ⚠ The sole member is <see cref="Result"/>, <b>not</b> <c>All()</c>: Java names it
-/// <c>result()</c> (<c>:36</c>), and it wraps a scalar <c>KafkaFuture&lt;Void&gt;</c> rather
-/// than a per-key map. The five sibling P8 results do answer <c>All()</c>; that asymmetry is
-/// Java's and is deliberately kept.
+/// <c>result()</c> (<c>:36</c>), and it wraps a scalar <see cref="AsyncKafkaFuture"/> (Java's
+/// <c>KafkaFuture&lt;Void&gt;</c>) rather than a per-key map. The five sibling P8 results do
+/// answer <c>All()</c>; that asymmetry is Java's and is deliberately kept.
 /// </remarks>
 /// <seealso cref="TerminateTransactionResult"/>
 public sealed class AsyncTerminateTransactionResult
@@ -47,6 +47,6 @@ public sealed class AsyncTerminateTransactionResult
     /// <summary>
     /// Whether the transaction was terminated — Java's <c>result()</c> (<c>:36</c>).
     /// </summary>
-    /// <returns>An awaitable that completes when the termination has.</returns>
+    /// <returns>A future that completes when the termination has.</returns>
     public AsyncKafkaFuture Result() => new AsyncKafkaFuture(_result);
 }

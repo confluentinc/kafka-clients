@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.RemoveMembersFromConsumerGroup"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult</c>
-/// (<c>RemoveMembersFromConsumerGroupResult.java:33-42</c>): one awaitable over a map whose
+/// (<c>RemoveMembersFromConsumerGroupResult.java:33-42</c>): one future over a map whose
 /// values are the per-member outcomes (Java's <c>Map&lt;MemberIdentity, Errors&gt;</c>, keyed
 /// here by <c>group.instance.id</c>), **plus** the original request's member collection — the
 /// second stored field Java carries (<c>memberInfos</c>, <c>:36</c>), the same two-field
@@ -31,9 +31,9 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>A per-member failure is a map VALUE here, not a faulted awaitable</b> — the same
+/// ⚠⚠ <b>A per-member failure is a map VALUE here, not a faulted future</b> — the same
 /// shape as <see cref="AsyncDeleteConsumerGroupOffsetsResult"/> / <see cref="AsyncAlterConsumerGroupOffsetsResult"/>.
-/// A whole-request failure faults the awaitable itself, and both accessors rethrow it
+/// A whole-request failure faults the future itself, and both accessors rethrow it
 /// unchanged, as Java's continuations test the <c>throwable</c> first.
 /// </para>
 /// <para>
@@ -66,13 +66,13 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     private readonly IReadOnlyCollection<MemberToRemove> _memberInfos;
 
     /// <summary>
-    /// Wraps the single awaitable and the original request's member collection — Java's
+    /// Wraps the single future and the original request's member collection — Java's
     /// package-private
     /// <c>RemoveMembersFromConsumerGroupResult(KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;,
     /// Set&lt;MemberToRemove&gt;)</c> (<c>:38-42</c>).
     /// </summary>
     /// <param name="future">
-    /// The single awaitable: <c>PerKey</c> is the per-member map keyed by
+    /// The single future: <c>PerKey</c> is the per-member map keyed by
     /// <c>group.instance.id</c> (a <see langword="null"/> value is Java's <c>Errors.NONE</c>;
     /// empty in removeAll mode), <c>All</c> the fault Java's <c>all()</c> reports, or
     /// <see langword="null"/> when it succeeds.
@@ -110,7 +110,7 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     internal bool RemoveAll => _memberInfos.Count == 0;
 
     /// <summary>
-    /// Returns a task which indicates whether the request was 100% success, i.e. no either
+    /// Returns a future which indicates whether the request was 100% success, i.e. no either
     /// top level or member level error — Java's <c>all()</c> (<c>:49-76</c>). If not, the
     /// first member error is thrown.
     /// </summary>
@@ -119,8 +119,8 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     /// The fault is the core's <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>,
     /// rethrown unchanged — see the type remarks for what it carries in
     /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> mode. A whole-request
-    /// failure faults the awaitable instead and propagates unchanged through the
-    /// <see langword="await"/> (<c>:52-53</c>). A fresh task per call, as Java allocates a
+    /// failure faults the future instead and propagates unchanged through the
+    /// <see langword="await"/> (<c>:52-53</c>). A fresh future per call, as Java allocates a
     /// fresh <c>KafkaFutureImpl</c> per <c>all()</c> call (<c>:50</c>).
     /// </remarks>
     public AsyncKafkaFuture All() => new AsyncKafkaFuture(AllCore());

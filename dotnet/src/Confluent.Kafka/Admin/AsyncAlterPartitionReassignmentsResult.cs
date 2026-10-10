@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AlterPartitionReassignments"/> — the .NET realization
-/// of Java's <c>AlterPartitionReassignmentsResult</c>: one awaitable <b>per partition</b>,
+/// of Java's <c>AlterPartitionReassignmentsResult</c>: one future <b>per partition</b>,
 /// handed back the moment the request is submitted
 /// (<c>AlterPartitionReassignmentsResult.java:45, :52</c>).
 /// </summary>
@@ -82,7 +82,7 @@ public sealed class AsyncAlterPartitionReassignmentsResult
         new AsyncAlterPartitionReassignmentsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested partition, keyed by partition — Java's <c>values()</c>
+    /// One future per requested partition, keyed by partition — Java's <c>values()</c>
     /// (<c>:45</c>).
     /// </summary>
     public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture> Values => _values;

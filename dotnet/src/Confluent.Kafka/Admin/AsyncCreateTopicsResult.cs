@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.CreateTopics"/> — the .NET realization of Java's
-/// <c>CreateTopicsResult</c>: one awaitable <b>per topic</b>, handed back the moment the
+/// <c>CreateTopicsResult</c>: one future <b>per topic</b>, handed back the moment the
 /// request is submitted.
 /// </summary>
 /// <remarks>
@@ -41,7 +41,7 @@ public sealed class AsyncCreateTopicsResult
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> _values;
 
     /// <summary>
-    /// Wraps one awaitable per topic — Java's
+    /// Wraps one future per topic — Java's
     /// <c>protected CreateTopicsResult(Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt; futures)</c>
     /// (<c>CreateTopicsResult.java:35</c>), so a test or a mock can fabricate a result.
     /// </summary>
@@ -50,7 +50,7 @@ public sealed class AsyncCreateTopicsResult
     /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map
     /// (<c>CreateTopicsResult.java:35-37</c>), and every view reads it when called, <see cref="Values"/> included.
     /// </remarks>
-    /// <param name="futures">One awaitable per topic, keyed by topic name.</param>
+    /// <param name="futures">One future per topic, keyed by topic name.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="futures"/> is null — where Java stores the null and throws
     /// <c>NullPointerException</c> on first use.
@@ -68,7 +68,7 @@ public sealed class AsyncCreateTopicsResult
         new AsyncCreateTopicsResult(AsyncAdminFutures.Wrap(operation.Tasks));
 
     /// <summary>
-    /// One awaitable per requested topic, keyed by topic name — Java's
+    /// One future per requested topic, keyed by topic name — Java's
     /// <c>values()</c>, whose declared type is
     /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// </summary>
@@ -182,7 +182,7 @@ public sealed class AsyncCreateTopicsResult
 
     /// <summary>
     /// The .NET spelling of Java's <c>KafkaFuture.thenApply</c>: derive a narrower
-    /// awaitable from one topic's own awaitable. A failure of the source propagates
+    /// future from one topic's own future. A failure of the source propagates
     /// unchanged, and a throw from <paramref name="map"/> — which is exactly how Java's
     /// accessors report "created, but the broker sent no metadata" — faults the derived
     /// future rather than the caller.

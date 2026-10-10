@@ -45,8 +45,8 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// ⚠ <b>Four projections of ONE completion, not four requests</b> — and this is the
 /// recorded deviation (<c>definition-of-done.md</c> §7). Java holds four independent
-/// <c>KafkaFuture</c> fields which the client completes separately; the C ABI settles the
-/// whole result together and has no <c>KafkaFuture</c> type with which to express
+/// <see cref="KafkaFuture{T}"/> fields which the client completes separately; the C ABI settles the
+/// whole result together and has no future type with which to express
 /// independent timing, so the four futures here derive from one source. The consequence is
 /// <em>stronger</em> than Java's, not weaker: four projections of one completion cannot
 /// report four different cluster states.

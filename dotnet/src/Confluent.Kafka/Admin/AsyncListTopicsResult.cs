@@ -21,14 +21,14 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ListTopics"/> — the .NET realization of Java's
-/// <c>ListTopicsResult</c>: <b>one</b> awaitable over the whole cluster listing, handed
+/// <c>ListTopicsResult</c>: <b>one</b> future over the whole cluster listing, handed
 /// back the moment the request is submitted.
 /// </summary>
 /// <remarks>
 /// <para>
 /// ⚠ <b>One future, not one per topic — and that is the ABI's shape as much as Java's.</b>
 /// Every other admin RPC bound so far pre-registers the caller's keys and resolves one
-/// awaitable per key. <c>listTopics</c> cannot: the request carries no key array (the
+/// future per key. <c>listTopics</c> cannot: the request carries no key array (the
 /// topics are discovered from the response), and
 /// <c>kafka_admin_ListTopicsResult_t</c> declares <b>no <c>get_error</c> at all</b>.
 /// That absence is the ABI stating the semantics — there is no per-topic failure to
@@ -50,7 +50,7 @@ public sealed class AsyncListTopicsResult
     private readonly Task<IReadOnlyDictionary<string, TopicListing>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListTopicsResult(KafkaFuture&lt;Map&lt;String, TopicListing&gt;&gt;)</c>.
     /// </summary>
     internal AsyncListTopicsResult(Task<IReadOnlyDictionary<string, TopicListing>> future)
@@ -69,7 +69,7 @@ public sealed class AsyncListTopicsResult
     /// The topic names mapped to their listings — Java's <c>namesToListings()</c>.
     /// </summary>
     /// <returns>
-    /// A task yielding the map, or faulting with the call's own
+    /// A future yielding the map, or faulting with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <remarks>

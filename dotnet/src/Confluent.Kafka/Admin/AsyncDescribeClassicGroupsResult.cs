@@ -22,13 +22,13 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>describeClassicGroups</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeClassicGroupsResult</c>
-/// (<c>DescribeClassicGroupsResult.java:30</c>): one awaitable <b>per group id</b>, handed
+/// (<c>DescribeClassicGroupsResult.java:30</c>): one future <b>per group id</b>, handed
 /// back the moment the request is submitted.
 /// </summary>
 /// <remarks>
 /// <para>
 /// A group that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/>; a per-group failure
-/// is not a call failure. <see cref="All"/> is the aggregate over those per-group tasks and
+/// is not a call failure. <see cref="All"/> is the aggregate over those per-group futures and
 /// succeeds only if every one of them did.
 /// </para>
 /// <para>
@@ -55,7 +55,7 @@ public sealed class AsyncDescribeClassicGroupsResult
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per group id — Java's <b>public</b>
+    /// Wraps one future per group id — Java's <b>public</b>
     /// <c>DescribeClassicGroupsResult(Map&lt;String, KafkaFuture&lt;ClassicGroupDescription&gt;&gt;)</c>
     /// (<c>:34</c>).
     /// </summary>
@@ -63,7 +63,7 @@ public sealed class AsyncDescribeClassicGroupsResult
     /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
     /// <c>design/current/STATUS.md</c>. See <see cref="All"/> for the aggregate's key comparer.
     /// </remarks>
-    /// <param name="futures">One awaitable per requested group id.</param>
+    /// <param name="futures">One future per requested group id.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
     internal AsyncDescribeClassicGroupsResult(IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> futures)
     {
@@ -78,7 +78,7 @@ public sealed class AsyncDescribeClassicGroupsResult
         new AsyncDescribeClassicGroupsResult(AsyncAdminFutures.Wrap(operation.Tasks));
 
     /// <summary>
-    /// One awaitable per requested group id — Java's <c>describedGroups()</c>
+    /// One future per requested group id — Java's <c>describedGroups()</c>
     /// (<c>:41</c>).
     /// </summary>
     /// <remarks>

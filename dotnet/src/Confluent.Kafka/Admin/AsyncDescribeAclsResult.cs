@@ -20,13 +20,13 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeAcls"/> — the .NET realization of Java's
-/// <c>DescribeAclsResult</c>: <b>one</b> awaitable over the whole matching collection
+/// <c>DescribeAclsResult</c>: <b>one</b> future over the whole matching collection
 /// (<c>DescribeAclsResult.java:30</c>).
 /// </summary>
 /// <remarks>
 /// ⚠ <b>There is no <c>All()</c>.</b> Java publishes only <c>values()</c> (<c>:39</c>), and
 /// <c>kafka_admin_DescribeAclsResult_t</c> declares no <c>get_error</c> of any kind — so
-/// there is no per-key outcome to aggregate and any failure faults this single task.
+/// there is no per-key outcome to aggregate and any failure faults this single future.
 /// </remarks>
 /// <seealso cref="DescribeAclsResult"/>
 public sealed class AsyncDescribeAclsResult
@@ -34,7 +34,7 @@ public sealed class AsyncDescribeAclsResult
     private readonly Task<IReadOnlyCollection<AclBinding>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>DescribeAclsResult(KafkaFuture&lt;Collection&lt;AclBinding&gt;&gt;)</c>
     /// (<c>:34</c>).
     /// </summary>
@@ -55,7 +55,7 @@ public sealed class AsyncDescribeAclsResult
     /// Java's <c>values()</c> (<c>:39</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the bindings, or faulting with the call's own
+    /// A future yielding the bindings, or faulting with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <remarks>

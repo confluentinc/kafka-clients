@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AlterUserScramCredentials"/> — Java's
-/// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsResult</c>: one awaitable
+/// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsResult</c>: one future
 /// <b>per user</b> (<c>:31</c>).
 /// </summary>
 /// <remarks>
@@ -35,7 +35,7 @@ public sealed class AsyncAlterUserScramCredentialsResult
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
 
     /// <summary>
-    /// Wraps one awaitable per user — Java's <b>public</b>
+    /// Wraps one future per user — Java's <b>public</b>
     /// <c>AlterUserScramCredentialsResult(Map&lt;String, KafkaFuture&lt;Void&gt;&gt;)</c>
     /// (<c>AlterUserScramCredentialsResult.java:38</c>), which a caller can use to fabricate a
     /// result, for a test double say.
@@ -45,7 +45,7 @@ public sealed class AsyncAlterUserScramCredentialsResult
     /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map, so
     /// <see cref="Values"/> and <see cref="All"/> read whatever it holds when they are called.
     /// </remarks>
-    /// <param name="futures">One awaitable per user, keyed by user name.</param>
+    /// <param name="futures">One future per user, keyed by user name.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="futures"/> is null — where Java stores the null and throws
     /// <c>NullPointerException</c> on first use.
@@ -76,7 +76,7 @@ public sealed class AsyncAlterUserScramCredentialsResult
     internal static AsyncAlterUserScramCredentialsResult From(VoidKeyedAdminOperation<string> operation) =>
         new AsyncAlterUserScramCredentialsResult(operation.Tasks, operation.KeyComparer);
 
-    /// <summary>One awaitable per requested user — Java's <c>values()</c> (<c>:46</c>).</summary>
+    /// <summary>One future per requested user — Java's <c>values()</c> (<c>:46</c>).</summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 
     /// <summary>

@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.IncrementalAlterConfigs"/> — the .NET realization of
-/// Java's <c>AlterConfigsResult</c>: one awaitable <b>per resource</b>, handed back the
+/// Java's <c>AlterConfigsResult</c>: one future <b>per resource</b>, handed back the
 /// moment the request is submitted (<c>AlterConfigsResult.java:39, :46</c>).
 /// </summary>
 /// <remarks>
@@ -81,7 +81,7 @@ public sealed class AsyncAlterConfigsResult
         new AsyncAlterConfigsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested resource, keyed by resource — Java's <c>values()</c>
+    /// One future per requested resource, keyed by resource — Java's <c>values()</c>
     /// (<c>:39</c>).
     /// </summary>
     public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> Values => _values;

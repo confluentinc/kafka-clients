@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>listGroups</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListGroupsResult</c> (<c>ListGroupsResult.java:31</c>):
-/// <b>three</b> awaitable views of <b>one</b> listing, handed back the moment the request is
+/// <b>three</b> future views of <b>one</b> listing, handed back the moment the request is
 /// submitted.
 /// </summary>
 /// <remarks>
@@ -59,7 +59,7 @@ namespace Confluent.Kafka.Admin;
 /// one source future's value rather than a failure of it. It says nothing about the enclosing
 /// call failing: Java completes those two futures only from inside <c>thenApply</c>
 /// (<c>:40</c>), which does not run when the source future fails — so a failed call would leave
-/// all three permanently incomplete. A task that never completes is a hang, not a contract, so
+/// all three permanently incomplete. A future that never completes is a hang, not a contract, so
 /// when the call itself fails this binding faults all three instead. For per-group errors the
 /// behaviour is exactly as Java documents it.
 /// </para>
@@ -77,7 +77,7 @@ public sealed class AsyncListGroupsResult
     private readonly Task<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> _future;
 
     /// <summary>
-    /// Wraps the one awaitable the call completes — Java's package-private
+    /// Wraps the one future the call completes — Java's package-private
     /// <c>ListGroupsResult(KafkaFuture&lt;Collection&lt;Object&gt;&gt;)</c> (<c>:36</c>).
     /// </summary>
     /// <param name="future">
@@ -111,7 +111,7 @@ public sealed class AsyncListGroupsResult
     /// Every group listing, or the first error that occurred — Java's <c>all()</c> (<c>:69</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding all of the listings, or faulting with the <b>first</b> error when any
+    /// A future yielding all of the listings, or faulting with the <b>first</b> error when any
     /// occurred (<c>:52-53</c>).
     /// </returns>
     /// <remarks>
@@ -143,7 +143,7 @@ public sealed class AsyncListGroupsResult
     /// Just the listings that were fetched, errors ignored — Java's <c>valid()</c> (<c>:82</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the listings that succeeded, empty when none did. It does not fault for a
+    /// A future yielding the listings that succeeded, empty when none did. It does not fault for a
     /// per-group error.
     /// </returns>
     /// <remarks>
@@ -161,7 +161,7 @@ public sealed class AsyncListGroupsResult
     /// Just the errors that occurred — Java's <c>errors()</c> (<c>:95</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the errors, empty when none occurred. It does not fault for a per-group
+    /// A future yielding the errors, empty when none occurred. It does not fault for a per-group
     /// error — an error is an element here, not a failure.
     /// </returns>
     /// <remarks>

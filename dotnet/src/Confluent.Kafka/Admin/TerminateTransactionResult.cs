@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// ⚠ The sole member is <see cref="Result"/>, <b>not</b> <c>All()</c>: Java names it
-/// <c>result()</c> (<c>:36</c>), and it wraps a scalar <c>KafkaFuture&lt;Void&gt;</c> rather
+/// <c>result()</c> (<c>:36</c>), and it wraps a scalar <see cref="KafkaFuture"/> rather
 /// than a per-key map. The five sibling P8 results do answer <c>All()</c>; that asymmetry is
 /// Java's and is deliberately kept.
 /// </para>

@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.CreatePartitions"/> — the .NET realization of Java's
-/// <c>CreatePartitionsResult</c>: one awaitable <b>per topic</b>, handed back the moment
+/// <c>CreatePartitionsResult</c>: one future <b>per topic</b>, handed back the moment
 /// the request is submitted.
 /// </summary>
 /// <remarks>
@@ -68,7 +68,7 @@ public sealed class AsyncCreatePartitionsResult
         new AsyncCreatePartitionsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested topic, keyed by topic name — Java's <c>values()</c>.
+    /// One future per requested topic, keyed by topic name — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 

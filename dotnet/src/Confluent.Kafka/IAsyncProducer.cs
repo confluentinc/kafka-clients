@@ -66,9 +66,9 @@ namespace Confluent.Kafka;
 /// send-batch thread. Its result is the record's <see cref="AsyncKafkaFuture{T}"/> — Java's
 /// <c>Future&lt;RecordMetadata&gt;</c>; its <see cref="AsyncKafkaFuture{T}.Get"/> is the <b>delivery</b>
 /// <see cref="Task{TResult}"/>. That result is deliberately a named struct over the delivery
-/// <see cref="Task{TResult}"/>, not the plain <see cref="Task{TResult}"/> that Java's futures map to elsewhere in
-/// this binding (the admin client's <c>KafkaFuture&lt;T&gt;</c> → <see cref="Task{TResult}"/>), so that the two
-/// stages of <c>Send</c> are distinguishable (M11/P3.6 decision D7); it costs nothing at runtime — see
+/// <see cref="Task{TResult}"/>, not a plain <see cref="Task{TResult}"/>, so that the two stages of <c>Send</c> are
+/// distinguishable (M11/P3.6 decision D7); the async admin Results hold the same type for Java's
+/// <c>KafkaFuture&lt;T&gt;</c> (M15/P14). It costs nothing at runtime — see
 /// <see cref="AsyncKafkaFuture{T}"/>. The first stage is usually complete when <c>Send</c> returns; once the bound
 /// is reached it stays pending until capacity frees. It never parks the calling thread. This is Java's blocking
 /// <c>send()</c> on an async surface, in the Python binding's async <c>send</c> order: append, then wait for space.

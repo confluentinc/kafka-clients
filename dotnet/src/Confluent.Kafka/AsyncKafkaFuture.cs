@@ -29,7 +29,9 @@ namespace Confluent.Kafka;
 /// <c>future.get()</c>. Only <c>IAsyncProducer.Send</c> and the <c>IAsyncAdmin</c> result types return a usable one;
 /// <see cref="KafkaFuture{T}"/> is the sync counterpart.
 /// </summary>
-/// <typeparam name="T">The operation's result: <see cref="RecordMetadata"/> for a producer send.</typeparam>
+/// <typeparam name="T">
+/// The operation's result: <see cref="RecordMetadata"/> for a producer send, or the value an admin result's future carries.
+/// </typeparam>
 /// <remarks>
 /// For a producer send, the <see cref="ValueTask{TResult}"/> returned by
 /// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>

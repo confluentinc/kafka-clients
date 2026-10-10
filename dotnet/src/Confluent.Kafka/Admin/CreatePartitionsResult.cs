@@ -41,7 +41,7 @@ public sealed class CreatePartitionsResult
     private readonly IReadOnlyDictionary<string, KafkaFuture> _values;
 
     /// <summary>
-    /// Presents the bridge's latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void
+    /// Presents the bridge's latches as valueless <see cref="KafkaFuture"/>s: the <c>bool</c> is the void
     /// bridge's internal success token (result shape 2 — the ABI has no <c>get_value</c> here, so a null per-key error
     /// <em>is</em> the success value) and must not reach the public surface.
     /// </summary>

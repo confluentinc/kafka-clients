@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.UpdateFeatures"/> — Java's
-/// <c>org.apache.kafka.clients.admin.UpdateFeaturesResult</c>: one awaitable <b>per feature</b>
+/// <c>org.apache.kafka.clients.admin.UpdateFeaturesResult</c>: one future <b>per feature</b>
 /// (<c>:29</c>).
 /// </summary>
 /// <remarks>
@@ -52,7 +52,7 @@ public sealed class AsyncUpdateFeaturesResult
         new AsyncUpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested feature — Java's <c>values()</c> (<c>:39</c>).
+    /// One future per requested feature — Java's <c>values()</c> (<c>:39</c>).
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 

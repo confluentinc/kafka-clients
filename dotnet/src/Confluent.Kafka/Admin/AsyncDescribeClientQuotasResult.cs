@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeClientQuotas"/> — the .NET realization of Java's
-/// <c>DescribeClientQuotasResult</c>: <b>one</b> awaitable over the whole entity-to-quota
+/// <c>DescribeClientQuotasResult</c>: <b>one</b> future over the whole entity-to-quota
 /// map (<c>DescribeClientQuotasResult.java:31</c>).
 /// </summary>
 /// <remarks>
@@ -35,7 +35,7 @@ public sealed class AsyncDescribeClientQuotasResult
     private readonly AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's <b>public</b>
+    /// Wraps the single future — Java's <b>public</b>
     /// <c>DescribeClientQuotasResult(KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;)</c>
     /// (<c>:39</c>).
     /// </summary>
@@ -43,7 +43,7 @@ public sealed class AsyncDescribeClientQuotasResult
     /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
     /// <c>design/current/STATUS.md</c>.
     /// </remarks>
-    /// <param name="entities">The awaitable over the entity-to-quota map.</param>
+    /// <param name="entities">The future over the entity-to-quota map.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="entities"/> is a default value, bound to no task — this constructor's null, where Java
     /// stores the null and throws <c>NullPointerException</c> on first use.

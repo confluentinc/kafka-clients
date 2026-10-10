@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ListOffsets"/> — the .NET realization of Java's
-/// <c>ListOffsetsResult</c>: one awaitable <b>per partition</b>
+/// <c>ListOffsetsResult</c>: one future <b>per partition</b>
 /// (<c>ListOffsetsResult.java:32, :41, :54</c>).
 /// </summary>
 /// <remarks>
@@ -30,9 +30,9 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ <b>Shape 1, not shape 3 — despite sharing a "list" name with
 /// <see cref="AsyncListPartitionReassignmentsResult"/>.</b> Java stores
 /// <c>Map&lt;TopicPartition, KafkaFuture&lt;ListOffsetsResultInfo&gt;&gt;</c>
-/// (<c>:32</c>), so each partition has its own awaitable carrying its own value or its own
+/// (<c>:32</c>), so each partition has its own future carrying its own value or its own
 /// failure; the ABI agrees by declaring <b>both</b> a <c>get_error</c> and a
-/// <c>get_value</c>. A partition that fails faults only <em>its own</em> awaitable.
+/// <c>get_value</c>. A partition that fails faults only <em>its own</em> future.
 /// </para>
 /// <para>
 /// ⚠ <b><see cref="PartitionResult"/> THROWS for a partition that was not requested</b>,
@@ -46,7 +46,7 @@ public sealed class AsyncListOffsetsResult
     private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per topic partition — Java's <b>public</b>
+    /// Wraps one future per topic partition — Java's <b>public</b>
     /// <c>ListOffsetsResult(Map&lt;TopicPartition, KafkaFuture&lt;ListOffsetsResultInfo&gt;&gt;)</c>
     /// (<c>:34</c>).
     /// </summary>
@@ -54,7 +54,7 @@ public sealed class AsyncListOffsetsResult
     /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
     /// <c>design/current/STATUS.md</c>.
     /// </remarks>
-    /// <param name="futures">One awaitable per topic partition.</param>
+    /// <param name="futures">One future per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
     internal AsyncListOffsetsResult(
         IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> futures)
@@ -71,11 +71,11 @@ public sealed class AsyncListOffsetsResult
         new AsyncListOffsetsResult(AsyncAdminFutures.Wrap(operation.Tasks));
 
     /// <summary>
-    /// The awaitable for one requested partition — Java's <c>partitionResult(TopicPartition)</c>
+    /// The future for one requested partition — Java's <c>partitionResult(TopicPartition)</c>
     /// (<c>:41</c>).
     /// </summary>
     /// <param name="partition">A partition that was part of the request.</param>
-    /// <returns>That partition's awaitable, carrying its own value or its own failure.</returns>
+    /// <returns>That partition's future, carrying its own value or its own failure.</returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="partition"/> was not requested. ⚠ <b>Java throws here rather than
     /// returning null</b> (<c>:43-46</c>, <c>IllegalArgumentException</c>), and the message

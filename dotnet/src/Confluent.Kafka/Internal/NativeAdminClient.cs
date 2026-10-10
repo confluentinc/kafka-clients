@@ -980,8 +980,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, TopicMetadataAndConfig> CreateTopics(
         IEnumerable<NewTopic> newTopics,
@@ -1140,8 +1140,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal (VoidKeyedAdminOperation<string>? ByName, VoidKeyedAdminOperation<Uuid>? ById) DeleteTopics(
         TopicCollection topics,
@@ -1254,8 +1254,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal (KeyedAdminOperation<string, TopicDescription>? ByName, KeyedAdminOperation<Uuid, TopicDescription>? ById) DescribeTopics(
         TopicCollection topics,
@@ -1382,8 +1382,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> ListTopics(
         ListTopicsOptions? options,
@@ -1391,7 +1391,7 @@ internal sealed class NativeAdminClient : IDisposable
         ListTopics(options, flavour, NativeMethods.AdminClientListTopicsAsync);
 
     /// <summary>
-    /// Submits <c>listTopics</c> and returns immediately with the <b>single</b> awaitable
+    /// Submits <c>listTopics</c> and returns immediately with the <b>single</b> future
     /// Java's <c>ListTopicsResult</c> wraps (result shape 3).
     /// </summary>
     /// <remarks>
@@ -1450,8 +1450,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<string> CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions,
@@ -1460,7 +1460,7 @@ internal sealed class NativeAdminClient : IDisposable
         CreatePartitions(newPartitions, options, flavour, NativeMethods.AdminClientCreatePartitionsAsync);
 
     /// <summary>
-    /// Submits <c>createPartitions</c> and returns immediately with one awaitable per
+    /// Submits <c>createPartitions</c> and returns immediately with one future per
     /// topic. Java's <c>Map&lt;String, NewPartitions&gt;</c> becomes the ABI's two
     /// parallel arrays.
     /// </summary>
@@ -1613,8 +1613,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<TopicPartition, DeletedRecords> DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
@@ -1623,7 +1623,7 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteRecords(recordsToDelete, options, flavour, NativeMethods.AdminClientDeleteRecordsAsync);
 
     /// <summary>
-    /// Submits <c>deleteRecords</c> and returns immediately with one awaitable per topic
+    /// Submits <c>deleteRecords</c> and returns immediately with one future per topic
     /// partition. Java's <c>Map&lt;TopicPartition, RecordsToDelete&gt;</c> becomes the
     /// ABI's three parallel arrays — <c>topics</c>, <c>partitions</c>,
     /// <c>before_offsets</c>.
@@ -1774,8 +1774,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<DescribeClusterSnapshot> DescribeCluster(
         DescribeClusterOptions? options,
@@ -1783,14 +1783,14 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeCluster(options, flavour, NativeMethods.AdminClientDescribeClusterAsync);
 
     /// <summary>
-    /// Submits <c>describeCluster</c> and returns immediately with the four awaitables
+    /// Submits <c>describeCluster</c> and returns immediately with the four futures
     /// Java's <c>DescribeClusterResult</c> exposes (result shape 5).
     /// </summary>
     /// <remarks>
     /// ⚠ <b>One completion, four projections.</b> Java holds four independent
     /// <c>KafkaFuture</c> fields; the ABI settles the whole result together and has no
-    /// <c>KafkaFuture</c> type with which to express independent timing, so the four public
-    /// tasks derive from this single <see cref="SingleAdminOperation{TValue}"/> over an
+    /// future type with which to express independent timing, so the four public
+    /// futures derive from this single <see cref="SingleAdminOperation{TValue}"/> over an
     /// internal snapshot. The deviation is recorded on
     /// <see cref="DescribeClusterResult"/> (M15/P3 decision D12 — there is deliberately no
     /// public aggregate type).
@@ -1845,8 +1845,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyCollection<ConfigResource>> ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes,
@@ -1856,7 +1856,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>listConfigResources</c> and returns immediately with the <b>single</b>
-    /// awaitable Java's <c>ListConfigResourcesResult</c> wraps (result sub-shape 3b).
+    /// future Java's <c>ListConfigResourcesResult</c> wraps (result sub-shape 3b).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -1922,8 +1922,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<ConfigResource, Config> DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources,
@@ -1932,7 +1932,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeConfigs(resources, options, flavour, NativeMethods.AdminClientDescribeConfigsAsync);
 
     /// <summary>
-    /// Submits <c>describeConfigs</c> and returns immediately with one awaitable per
+    /// Submits <c>describeConfigs</c> and returns immediately with one future per
     /// resource. Java's <c>Collection&lt;ConfigResource&gt;</c> becomes the ABI's two
     /// parallel arrays — <c>resource_types</c> (Java's <c>Type.id()</c> codes) and
     /// <c>resource_names</c>.
@@ -1941,7 +1941,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// De-duplication mirrors Java, whose result is a <c>Map</c>, so a repeated resource is
     /// one entry — the same reasoning as <c>createTopics</c>. The null-element check is
     /// mandatory rather than defensive: the header says "an entry with a NULL name is
-    /// skipped", silently, which would drop a resource whose <see cref="Task"/> the caller
+    /// skipped", silently, which would drop a resource whose future the caller
     /// is holding (ffi §B5).
     /// </remarks>
     internal KeyedAdminOperation<ConfigResource, Config> DescribeConfigs(
@@ -2041,8 +2041,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<ConfigResource> IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
@@ -2051,7 +2051,7 @@ internal sealed class NativeAdminClient : IDisposable
         IncrementalAlterConfigs(configs, options, flavour, NativeMethods.AdminClientIncrementalAlterConfigsAsync);
 
     /// <summary>
-    /// Submits <c>incrementalAlterConfigs</c> and returns immediately with one awaitable
+    /// Submits <c>incrementalAlterConfigs</c> and returns immediately with one future
     /// per resource. Java's <c>Map&lt;ConfigResource, Collection&lt;AlterConfigOp&gt;&gt;</c>
     /// becomes the ABI's <b>five parallel arrays, one row per operation</b>.
     /// </summary>
@@ -2074,7 +2074,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// </para>
     /// <para>
     /// ⚠ <b>A null resource name is rejected</b>, because the ABI <em>silently skips</em>
-    /// such a row — the caller would be left holding a <see cref="Task"/> for a resource
+    /// such a row — the caller would be left holding a future for a resource
     /// the broker was never asked about (<c>FailUncompleted</c> would fault it, but with a
     /// far less useful message). ⚠ A null <b>config</b> name is not skipped: it is the
     /// zero-op sentinel below, so a real operation must never produce one — an operation
@@ -2295,8 +2295,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> DescribeLogDirs(
         IReadOnlyCollection<int> brokers,
@@ -2305,7 +2305,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeLogDirs(brokers, options, flavour, NativeMethods.AdminClientDescribeLogDirsAsync);
 
     /// <summary>
-    /// Submits <c>describeLogDirs</c> and returns immediately with one awaitable per broker.
+    /// Submits <c>describeLogDirs</c> and returns immediately with one future per broker.
     /// Java's <c>Collection&lt;Integer&gt;</c> becomes the ABI's single broker-id array.
     /// </summary>
     /// <remarks>
@@ -2384,8 +2384,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<TopicPartitionReplica> AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
@@ -2394,7 +2394,7 @@ internal sealed class NativeAdminClient : IDisposable
         AlterReplicaLogDirs(replicaAssignment, options, flavour, NativeMethods.AdminClientAlterReplicaLogDirsAsync);
 
     /// <summary>
-    /// Submits <c>alterReplicaLogDirs</c> and returns immediately with one awaitable per
+    /// Submits <c>alterReplicaLogDirs</c> and returns immediately with one future per
     /// replica. Java's <c>Map&lt;TopicPartitionReplica, String&gt;</c> becomes the ABI's four
     /// parallel arrays.
     /// </summary>
@@ -2411,7 +2411,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ <b>A null topic or null log directory is rejected here</b>, because the ABI
     /// <em>silently skips</em> such a row — the caller would be left holding a
-    /// <see cref="Task"/> for a replica the broker was never asked about. That is the one
+    /// future for a replica the broker was never asked about. That is the one
     /// way a key could still lose its row, and it is turned into an
     /// <see cref="ArgumentException"/> naming the entry rather than a late
     /// <c>FailUncompleted</c> message (ffi §B5).
@@ -2548,8 +2548,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
@@ -2558,7 +2558,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeReplicaLogDirs(replicas, options, flavour, NativeMethods.AdminClientDescribeReplicaLogDirsAsync);
 
     /// <summary>
-    /// Submits <c>describeReplicaLogDirs</c> and returns immediately with one awaitable per
+    /// Submits <c>describeReplicaLogDirs</c> and returns immediately with one future per
     /// replica. Java's <c>Collection&lt;TopicPartitionReplica&gt;</c> becomes the ABI's three
     /// parallel arrays.
     /// </summary>
@@ -2693,8 +2693,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> ElectLeaders(
         ElectionType electionType,
@@ -2704,12 +2704,12 @@ internal sealed class NativeAdminClient : IDisposable
         ElectLeaders(electionType, partitions, options, flavour, NativeMethods.AdminClientElectLeadersAsync);
 
     /// <summary>
-    /// Submits <c>electLeaders</c> and returns immediately with the <b>single</b> awaitable
+    /// Submits <c>electLeaders</c> and returns immediately with the <b>single</b> future
     /// Java's <c>ElectLeadersResult</c> wraps (result shape 3).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// ⚠ <b>One future, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;</c>
     /// (<c>ElectLeadersResult.java:47</c>), so this uses
     /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even
@@ -2830,8 +2830,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<TopicPartition> AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
@@ -2845,7 +2845,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>alterPartitionReassignments</c> and returns immediately with one
-    /// awaitable per topic partition. Java's
+    /// future per topic partition. Java's
     /// <c>Map&lt;TopicPartition, Optional&lt;NewPartitionReassignment&gt;&gt;</c> becomes
     /// the ABI's five parallel arrays.
     /// </summary>
@@ -3047,8 +3047,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> AlterConsumerGroupOffsets(
         string groupId,
@@ -3064,16 +3064,16 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>alterConsumerGroupOffsets</c> and returns immediately with the
-    /// <b>single</b> awaitable Java's <c>AlterConsumerGroupOffsetsResult</c> wraps (result
+    /// <b>single</b> future Java's <c>AlterConsumerGroupOffsetsResult</c> wraps (result
     /// shape 3).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// ⚠ <b>One future, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
     /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>), and the ABI fires <b>one</b>
     /// callback for it, so this uses <see cref="SingleAdminOperation{TValue}"/> — the
-    /// <c>electLeaders</c> shape. The awaitable resolves with the per-partition map <b>and</b>
+    /// <c>electLeaders</c> shape. The future resolves with the per-partition map <b>and</b>
     /// the core's own <c>all()</c> outcome, read together off the one result root.
     /// </para>
     /// <para>
@@ -3234,8 +3234,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal (SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> Operation, IReadOnlyCollection<TopicPartition> Partitions) DeleteConsumerGroupOffsets(
         string groupId,
@@ -3251,13 +3251,13 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>deleteConsumerGroupOffsets</c> and returns immediately with the
-    /// <b>single</b> awaitable Java's <c>DeleteConsumerGroupOffsetsResult</c> wraps (result
+    /// <b>single</b> future Java's <c>DeleteConsumerGroupOffsetsResult</c> wraps (result
     /// shape 3) — plus the original request's partition set, the second stored field Java
     /// carries (<c>DeleteConsumerGroupOffsetsResult.java:32</c>) that
     /// <c>AlterConsumerGroupOffsetsResult</c> does not.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
+    /// ⚠ <b>One future, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
     /// (<c>DeleteConsumerGroupOffsetsResult.java:31</c>), and the ABI fires <b>one</b>
     /// callback for it — the same <see cref="SingleAdminOperation{TValue}"/> shape, with the
@@ -3387,8 +3387,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<string> DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds,
@@ -3397,7 +3397,7 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteConsumerGroups(groupIds, options, flavour, NativeMethods.AdminClientDeleteConsumerGroupsAsync);
 
     /// <summary>
-    /// Submits <c>deleteConsumerGroups</c> and returns immediately with one awaitable per
+    /// Submits <c>deleteConsumerGroups</c> and returns immediately with one future per
     /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>
     /// (<c>DeleteConsumerGroupsResult.java:30</c>, result shape 2).
     /// </summary>
@@ -3461,8 +3461,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal (SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> Operation, IReadOnlyCollection<MemberToRemove> Members) RemoveMembersFromConsumerGroup(
         string groupId,
@@ -3476,7 +3476,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>removeMembersFromConsumerGroup</c> and returns immediately with the
-    /// <b>single</b> awaitable Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
+    /// <b>single</b> future Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
     /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 3) —
     /// plus the original request's member collection, the second stored field Java carries
     /// (<c>memberInfos</c>, <c>:36</c>), the same two-field pattern as
@@ -3484,7 +3484,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES.</b> Java's future
+    /// ⚠ <b>One future, and the per-member outcomes are its map's VALUES.</b> Java's future
     /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>, and the ABI fires <b>one</b>
     /// callback for it in both modes — the same <see cref="SingleAdminOperation{TValue}"/>
     /// shape, with the same no-countdown / no-submit-token rule, as
@@ -3617,8 +3617,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<AclBinding> CreateAcls(
         IEnumerable<AclBinding> acls,
@@ -3627,7 +3627,7 @@ internal sealed class NativeAdminClient : IDisposable
         CreateAcls(acls, options, flavour, NativeMethods.AdminClientCreateAclsAsync);
 
     /// <summary>
-    /// Submits <c>createAcls</c> and returns immediately with one awaitable per binding
+    /// Submits <c>createAcls</c> and returns immediately with one future per binding
     /// (result shape 2).
     /// </summary>
     /// <remarks>
@@ -3723,8 +3723,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> DeleteAcls(
         IEnumerable<AclBindingFilter> filters,
@@ -3733,7 +3733,7 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteAcls(filters, options, flavour, NativeMethods.AdminClientDeleteAclsAsync);
 
     /// <summary>
-    /// Submits <c>deleteAcls</c> and returns immediately with one awaitable per filter
+    /// Submits <c>deleteAcls</c> and returns immediately with one future per filter
     /// (result shape 1, whose value is itself an indexed list).
     /// </summary>
     /// <remarks>
@@ -3835,8 +3835,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyCollection<AclBinding>> DescribeAcls(
         AclBindingFilter filter,
@@ -3845,7 +3845,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeAcls(filter, options, flavour, NativeMethods.AdminClientDescribeAclsAsync);
 
     /// <summary>
-    /// Submits <c>describeAcls</c> and returns immediately with the <b>single</b> awaitable
+    /// Submits <c>describeAcls</c> and returns immediately with the <b>single</b> future
     /// Java's <c>DescribeAclsResult</c> wraps (result sub-shape 3b).
     /// </summary>
     /// <remarks>
@@ -3934,8 +3934,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> DescribeClientQuotas(
         ClientQuotaFilter filter,
@@ -3945,7 +3945,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>describeClientQuotas</c> and returns immediately with the <b>single</b>
-    /// awaitable Java's <c>DescribeClientQuotasResult</c> wraps (result shape 3).
+    /// future Java's <c>DescribeClientQuotasResult</c> wraps (result shape 3).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -4033,8 +4033,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<ClientQuotaEntity> AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries,
@@ -4043,7 +4043,7 @@ internal sealed class NativeAdminClient : IDisposable
         AlterClientQuotas(entries, options, flavour, NativeMethods.AdminClientAlterClientQuotasAsync);
 
     /// <summary>
-    /// Submits <c>alterClientQuotas</c> and returns immediately with one awaitable per entity
+    /// Submits <c>alterClientQuotas</c> and returns immediately with one future per entity
     /// (result shape 2).
     /// </summary>
     /// <remarks>
@@ -4204,8 +4204,8 @@ internal sealed class NativeAdminClient : IDisposable
     // ====================================================================================
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<DescribeUserScramCredentialsViews> DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users,
@@ -4219,7 +4219,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>describeUserScramCredentials</c> and returns immediately with the single
-    /// awaitable over the flattened result table.
+    /// future over the flattened result table.
     /// </summary>
     /// <remarks>
     /// ⚠ A <see langword="null"/> or empty <paramref name="users"/> describes <b>every</b> user
@@ -4319,8 +4319,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<string> AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
@@ -4333,7 +4333,7 @@ internal sealed class NativeAdminClient : IDisposable
             NativeMethods.AdminClientAlterUserScramCredentialsAsync);
 
     /// <summary>
-    /// Submits <c>alterUserScramCredentials</c> and returns immediately with one awaitable per
+    /// Submits <c>alterUserScramCredentials</c> and returns immediately with one future per
     /// user (result shape 2).
     /// </summary>
     /// <remarks>
@@ -4439,8 +4439,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<DelegationToken> CreateDelegationToken(
         CreateDelegationTokenOptions? options,
@@ -4448,7 +4448,7 @@ internal sealed class NativeAdminClient : IDisposable
         CreateDelegationToken(options, flavour, NativeMethods.AdminClientCreateDelegationTokenAsync);
 
     /// <summary>
-    /// Submits <c>createDelegationToken</c> and returns immediately with the single awaitable
+    /// Submits <c>createDelegationToken</c> and returns immediately with the single future
     /// over the issued token. The result carries no table, so the completion resolves the
     /// awaiter straight off the root.
     /// </summary>
@@ -4546,8 +4546,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<long> RenewDelegationToken(
         byte[] hmac,
@@ -4556,7 +4556,7 @@ internal sealed class NativeAdminClient : IDisposable
         RenewDelegationToken(hmac, options, flavour, NativeMethods.AdminClientRenewDelegationTokenAsync);
 
     /// <summary>
-    /// Submits <c>renewDelegationToken</c> and returns immediately with the single awaitable
+    /// Submits <c>renewDelegationToken</c> and returns immediately with the single future
     /// over the token's new expiry timestamp.
     /// </summary>
     internal SingleAdminOperation<long> RenewDelegationToken(
@@ -4619,8 +4619,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<long> ExpireDelegationToken(
         byte[] hmac,
@@ -4629,7 +4629,7 @@ internal sealed class NativeAdminClient : IDisposable
         ExpireDelegationToken(hmac, options, flavour, NativeMethods.AdminClientExpireDelegationTokenAsync);
 
     /// <summary>
-    /// Submits <c>expireDelegationToken</c> and returns immediately with the single awaitable
+    /// Submits <c>expireDelegationToken</c> and returns immediately with the single future
     /// over the token's expiry timestamp.
     /// </summary>
     internal SingleAdminOperation<long> ExpireDelegationToken(
@@ -4692,8 +4692,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyCollection<DelegationToken>> DescribeDelegationToken(
         DescribeDelegationTokenOptions? options,
@@ -4701,7 +4701,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeDelegationToken(options, flavour, NativeMethods.AdminClientDescribeDelegationTokenAsync);
 
     /// <summary>
-    /// Submits <c>describeDelegationToken</c> and returns immediately with the single awaitable
+    /// Submits <c>describeDelegationToken</c> and returns immediately with the single future
     /// over the token list (sub-shape 3b).
     /// </summary>
     /// <remarks>
@@ -4779,8 +4779,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<FeatureMetadata> DescribeFeatures(
         DescribeFeaturesOptions? options,
@@ -4788,7 +4788,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeFeatures(options, flavour, NativeMethods.AdminClientDescribeFeaturesAsync);
 
     /// <summary>
-    /// Submits <c>describeFeatures</c> and returns immediately with the <b>single</b> awaitable
+    /// Submits <c>describeFeatures</c> and returns immediately with the <b>single</b> future
     /// Java publishes, over the whole composite.
     /// </summary>
     internal SingleAdminOperation<FeatureMetadata> DescribeFeatures(
@@ -4836,8 +4836,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal VoidKeyedAdminOperation<string> UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
@@ -4846,7 +4846,7 @@ internal sealed class NativeAdminClient : IDisposable
         UpdateFeatures(featureUpdates, options, flavour, NativeMethods.AdminClientUpdateFeaturesAsync);
 
     /// <summary>
-    /// Submits <c>updateFeatures</c> and returns immediately with one awaitable per feature
+    /// Submits <c>updateFeatures</c> and returns immediately with one future per feature
     /// (result shape 2).
     /// </summary>
     /// <remarks>
@@ -5024,8 +5024,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, ProducerIdAndEpoch> FenceProducers(
         IReadOnlyCollection<string> transactionalIds,
@@ -5034,7 +5034,7 @@ internal sealed class NativeAdminClient : IDisposable
         FenceProducers(transactionalIds, options, flavour, NativeMethods.AdminClientFenceProducersAsync);
 
     /// <summary>
-    /// Submits <c>fenceProducers</c> and returns immediately with one awaitable per
+    /// Submits <c>fenceProducers</c> and returns immediately with one future per
     /// transactional id (result shape 1, value <c>ProducerIdAndEpoch</c>).
     /// </summary>
     /// <remarks>
@@ -5117,8 +5117,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, TransactionDescription> DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds,
@@ -5127,7 +5127,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeTransactions(transactionalIds, options, flavour, NativeMethods.AdminClientDescribeTransactionsAsync);
 
     /// <summary>
-    /// Submits <c>describeTransactions</c> and returns immediately with one awaitable per
+    /// Submits <c>describeTransactions</c> and returns immediately with one future per
     /// transactional id (result shape 1, value <c>TransactionDescription</c>).
     /// </summary>
     /// <remarks>
@@ -5203,8 +5203,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions,
@@ -5213,7 +5213,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeProducers(partitions, options, flavour, NativeMethods.AdminClientDescribeProducersAsync);
 
     /// <summary>
-    /// Submits <c>describeProducers</c> and returns immediately with one awaitable per topic
+    /// Submits <c>describeProducers</c> and returns immediately with one future per topic
     /// partition (result shape 1, value <c>PartitionProducerState</c>).
     /// </summary>
     /// <remarks>
@@ -5485,8 +5485,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<bool> AbortTransaction(
         AbortTransactionSpec spec,
@@ -5495,7 +5495,7 @@ internal sealed class NativeAdminClient : IDisposable
         AbortTransaction(spec, options, flavour, NativeMethods.AdminClientAbortTransactionAsync);
 
     /// <summary>
-    /// Submits <c>abortTransaction</c> and returns immediately with the single awaitable
+    /// Submits <c>abortTransaction</c> and returns immediately with the single future
     /// Java's <c>AbortTransactionResult</c> publishes (result shape 6 — no result handle).
     /// </summary>
     /// <remarks>
@@ -5577,8 +5577,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<bool> ForceTerminateTransaction(
         string transactionalId,
@@ -5592,7 +5592,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>forceTerminateTransaction</c> and returns immediately with the single
-    /// awaitable Java's <c>TerminateTransactionResult</c> publishes as <c>result()</c>
+    /// future Java's <c>TerminateTransactionResult</c> publishes as <c>result()</c>
     /// (result shape 6 — no result handle).
     /// </summary>
     /// <remarks>
@@ -5659,8 +5659,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions,
@@ -5674,12 +5674,12 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Submits <c>listPartitionReassignments</c> and returns immediately with the
-    /// <b>single</b> awaitable Java's <c>ListPartitionReassignmentsResult</c> wraps
+    /// <b>single</b> future Java's <c>ListPartitionReassignmentsResult</c> wraps
     /// (result shape 3).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>One awaitable, despite the name's parallel with
+    /// ⚠ <b>One future, despite the name's parallel with
     /// <c>alterPartitionReassignments</c>.</b> Java stores a single
     /// <c>KafkaFuture&lt;Map&lt;TopicPartition, PartitionReassignment&gt;&gt;</c>
     /// (<c>ListPartitionReassignmentsResult.java:31</c>), and the ABI's result declares no
@@ -5779,8 +5779,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
@@ -5789,7 +5789,7 @@ internal sealed class NativeAdminClient : IDisposable
         ListOffsets(topicPartitionOffsets, options, flavour, NativeMethods.AdminClientListOffsetsAsync);
 
     /// <summary>
-    /// Submits <c>listOffsets</c> and returns immediately with one awaitable per topic
+    /// Submits <c>listOffsets</c> and returns immediately with one future per topic
     /// partition. Java's <c>Map&lt;TopicPartition, OffsetSpec&gt;</c> becomes the ABI's four
     /// parallel arrays.
     /// </summary>
@@ -5965,8 +5965,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> ListGroups(
         ListGroupsOptions? options,
@@ -5974,7 +5974,7 @@ internal sealed class NativeAdminClient : IDisposable
         ListGroups(options, flavour, NativeMethods.AdminClientListGroupsAsync);
 
     /// <summary>
-    /// Submits <c>listGroups</c> and returns immediately with the <b>single</b> awaitable
+    /// Submits <c>listGroups</c> and returns immediately with the <b>single</b> future
     /// Java's <c>ListGroupsResult</c> wraps over its two independent collections (result
     /// sub-shape 3c).
     /// </summary>
@@ -6108,8 +6108,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, ConsumerGroupDescription> DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds,
@@ -6118,7 +6118,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeConsumerGroups(groupIds, options, flavour, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
 
     /// <summary>
-    /// Submits <c>describeConsumerGroups</c> and returns immediately with one awaitable per
+    /// Submits <c>describeConsumerGroups</c> and returns immediately with one future per
     /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;ConsumerGroupDescription&gt;&gt;</c>
     /// (result shape 1).
     /// </summary>
@@ -6199,8 +6199,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, ClassicGroupDescription> DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds,
@@ -6209,7 +6209,7 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeClassicGroups(groupIds, options, flavour, NativeMethods.AdminClientDescribeClassicGroupsAsync);
 
     /// <summary>
-    /// Submits <c>describeClassicGroups</c> and returns immediately with one awaitable per
+    /// Submits <c>describeClassicGroups</c> and returns immediately with one future per
     /// requested group id — Java's <c>Map&lt;String, KafkaFuture&lt;ClassicGroupDescription&gt;&gt;</c>
     /// (result shape 1).
     /// </summary>
@@ -6291,8 +6291,8 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
-    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the clients
+    /// of both flavours call this, then wrap the operation in their Result's <c>From</c>.
     /// </summary>
     internal KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
@@ -6301,7 +6301,7 @@ internal sealed class NativeAdminClient : IDisposable
         ListConsumerGroupOffsets(groupSpecs, options, flavour, NativeMethods.AdminClientListConsumerGroupOffsetsAsync);
 
     /// <summary>
-    /// Submits <c>listConsumerGroupOffsets</c> and returns immediately with one awaitable per
+    /// Submits <c>listConsumerGroupOffsets</c> and returns immediately with one future per
     /// requested group id — Java's
     /// <c>Map&lt;String, KafkaFuture&lt;Map&lt;TopicPartition, OffsetAndMetadata&gt;&gt;&gt;</c>
     /// (result shape 1).

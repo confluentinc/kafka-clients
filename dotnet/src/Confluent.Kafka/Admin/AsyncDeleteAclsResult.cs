@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DeleteAcls"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DeleteAclsResult</c>: one awaitable <b>per filter</b>,
+/// <c>org.apache.kafka.clients.admin.DeleteAclsResult</c>: one future <b>per filter</b>,
 /// each resolving to the list of ACLs that filter matched.
 /// </summary>
 /// <remarks>
@@ -41,7 +41,7 @@ public sealed class AsyncDeleteAclsResult
     private readonly IReadOnlyDictionary<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> _values;
     private readonly IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> _futures;
 
-    /// <summary>Wraps the bridge's per-filter awaitables, which are already Java-shaped.</summary>
+    /// <summary>Wraps the bridge's per-filter futures, which are already Java-shaped.</summary>
     internal AsyncDeleteAclsResult(IReadOnlyDictionary<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> values)
     {
         _values = values;
@@ -57,7 +57,7 @@ public sealed class AsyncDeleteAclsResult
         new AsyncDeleteAclsResult(operation.Tasks);
 
     /// <summary>
-    /// One awaitable per requested filter, keyed by the filter — Java's <c>values()</c>
+    /// One future per requested filter, keyed by the filter — Java's <c>values()</c>
     /// (<c>:91</c>).
     /// </summary>
     public IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> Values => _futures;

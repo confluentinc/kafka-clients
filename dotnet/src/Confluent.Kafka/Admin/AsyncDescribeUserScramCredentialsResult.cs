@@ -49,7 +49,7 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// Every described user, keyed by name — Java's <c>all()</c> (<c>:54</c>). Faults with the
     /// <b>first</b> per-user failure if any user could not be described (<c>:68-69</c>).
     /// </summary>
-    /// <returns>An awaitable over the whole map.</returns>
+    /// <returns>A future over the whole map.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All() =>
         new AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>>(AllCore());
 
@@ -67,7 +67,7 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// "will include users that have a credential but that could not be described"
     /// (<c>:89-90</c>). Only a failure of the call itself faults it.
     /// </remarks>
-    /// <returns>An awaitable over the user names.</returns>
+    /// <returns>A future over the user names.</returns>
     public AsyncKafkaFuture<IReadOnlyList<string>> Users() =>
         new AsyncKafkaFuture<IReadOnlyList<string>>(UsersCore());
 
@@ -83,7 +83,7 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// (<c>:128-131</c>).
     /// </summary>
     /// <param name="userName">The user to look up.</param>
-    /// <returns>An awaitable over that user's description.</returns>
+    /// <returns>A future over that user's description.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="userName"/> contains a NUL character or an unpaired surrogate (see the

@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AlterReplicaLogDirs"/> — the .NET realization of Java's
-/// <c>AlterReplicaLogDirsResult</c>: one awaitable <b>per replica</b>, handed back the
+/// <c>AlterReplicaLogDirsResult</c>: one future <b>per replica</b>, handed back the
 /// moment the request is submitted (<c>AlterReplicaLogDirsResult.java:67, :75</c>).
 /// </summary>
 /// <remarks>
@@ -75,7 +75,7 @@ public sealed class AsyncAlterReplicaLogDirsResult
         new AsyncAlterReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
-    /// One awaitable per requested replica — Java's <c>values()</c> (<c>:67</c>).
+    /// One future per requested replica — Java's <c>values()</c> (<c>:67</c>).
     /// </summary>
     public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture> Values => _values;
 

@@ -90,9 +90,9 @@ public sealed class DeleteRecordsResult
     /// </summary>
     /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every partition.</returns>
     /// <remarks>
-    /// Java's <c>all()</c> is a <c>KafkaFuture&lt;Void&gt;</c>: it reports only whether
-    /// everything succeeded, and the watermarks are read from
-    /// <see cref="LowWatermarks"/>. The non-generic <see cref="KafkaFuture"/> is that shape.
+    /// Java's <c>all()</c> is a <see cref="KafkaFuture"/> without a value, as here: it reports only
+    /// whether everything succeeded, and the watermarks are read from
+    /// <see cref="LowWatermarks"/>.
     /// </remarks>
     public KafkaFuture All() => SyncAdminFutures.AllOf(_futures.Values);
 }

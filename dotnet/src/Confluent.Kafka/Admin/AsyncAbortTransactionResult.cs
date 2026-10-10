@@ -46,6 +46,6 @@ public sealed class AsyncAbortTransactionResult
     /// <summary>
     /// Whether the transaction was aborted — Java's <c>all()</c> (<c>:41</c>).
     /// </summary>
-    /// <returns>An awaitable that completes when the abort has.</returns>
+    /// <returns>A future that completes when the abort has.</returns>
     public AsyncKafkaFuture All() => new AsyncKafkaFuture(_all);
 }

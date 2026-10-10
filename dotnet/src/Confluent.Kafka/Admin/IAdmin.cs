@@ -33,7 +33,7 @@ namespace Confluent.Kafka.Admin;
 /// <b>Every RPC returns its <c>*Result</c> at once, holding one future per key.</b>
 /// Java's <c>Admin</c> methods do not block: <c>createTopics</c> hands work to a
 /// background thread and returns instantly with a result object whose
-/// <c>KafkaFuture</c>s the caller waits on individually. So the methods here do not
+/// <see cref="KafkaFuture{T}"/>s the caller waits on individually. So the methods here do not
 /// block either, and the wait lives on the futures <em>inside</em> the result — one
 /// <see cref="KafkaFuture{T}"/> (or <see cref="KafkaFuture"/>) per key, never collapsed
 /// into one. Their <c>Get()</c> is Java's <c>KafkaFuture.get()</c>: it <b>blocks the
@@ -44,7 +44,7 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="Close(TimeSpan)"/> and <see cref="IDisposable.Dispose"/> <b>block</b> too:
 /// Java's <c>close(Duration)</c> joins the background thread. Calling any of these blocking
 /// members from <c>async</c> code ties up a pool thread for as long as it waits; async
-/// callers should use <see cref="IAsyncAdmin"/>, whose futures and <c>Close</c> are
+/// callers should use <see cref="IAsyncAdmin"/>, whose futures' <c>Get()</c> and <c>Close</c> are
 /// awaitable.
 /// </para>
 /// <para>
@@ -480,7 +480,7 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <returns>
     /// One future per resource, each reporting only whether <em>that</em> resource was
-    /// altered — Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>.
+    /// altered — Java's per-resource future is a <see cref="KafkaFuture"/>, which carries no value.
     /// </returns>
     /// <remarks>
     /// ⚠ <b>The result type is named for Java's return type</b>,
@@ -534,7 +534,7 @@ public interface IAdmin : IDisposable
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
     /// One future per replica, each reporting only whether <em>that</em> move was
-    /// accepted — Java's per-replica future is <c>KafkaFuture&lt;Void&gt;</c>.
+    /// accepted — Java's per-replica future is a <see cref="KafkaFuture"/>, which carries no value.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicaAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -637,7 +637,7 @@ public interface IAdmin : IDisposable
     /// <returns>
     /// One future per partition, each reporting only whether <em>that</em>
     /// reassignment was initiated — Java's per-partition future is
-    /// <c>KafkaFuture&lt;Void&gt;</c>. A partition that fails fails only its own
+    /// a <see cref="KafkaFuture"/>, which carries no value. A partition that fails fails only its own
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>

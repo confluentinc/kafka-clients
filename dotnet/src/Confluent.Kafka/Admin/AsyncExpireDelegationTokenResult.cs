@@ -19,7 +19,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ExpireDelegationToken"/> — Java's
-/// <c>org.apache.kafka.clients.admin.ExpireDelegationTokenResult</c>: one awaitable over the
+/// <c>org.apache.kafka.clients.admin.ExpireDelegationTokenResult</c>: one future over the
 /// token's expiry timestamp (<c>:26</c>).
 /// </summary>
 /// <remarks>
@@ -47,6 +47,6 @@ public sealed class AsyncExpireDelegationTokenResult
     /// The expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>
     /// (<c>:35</c>).
     /// </summary>
-    /// <returns>An awaitable over the timestamp.</returns>
+    /// <returns>A future over the timestamp.</returns>
     public AsyncKafkaFuture<long> ExpiryTimestamp() => new AsyncKafkaFuture<long>(_expiryTimestamp);
 }

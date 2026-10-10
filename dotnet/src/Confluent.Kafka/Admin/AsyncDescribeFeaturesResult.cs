@@ -24,7 +24,7 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ <b>ONE awaitable over a composite, not a fan-out.</b> Java stores a single
+/// ⚠ <b>ONE future over a composite, not a fan-out.</b> Java stores a single
 /// <c>KafkaFuture&lt;FeatureMetadata&gt;</c> (<c>:28</c>) with one accessor (<c>:34</c>), even
 /// though the ABI exposes two independent tables plus an optional scalar. The
 /// <c>describeCluster</c> snapshot supplies the read-the-whole-root mechanism; it does not
@@ -50,6 +50,6 @@ public sealed class AsyncDescribeFeaturesResult
     /// <summary>
     /// The cluster's feature metadata — Java's <c>featureMetadata()</c> (<c>:34</c>).
     /// </summary>
-    /// <returns>An awaitable over the metadata.</returns>
+    /// <returns>A future over the metadata.</returns>
     public AsyncKafkaFuture<Metadata> FeatureMetadata() => new AsyncKafkaFuture<Metadata>(_featureMetadata);
 }
