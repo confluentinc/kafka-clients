@@ -25,7 +25,8 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Admin-direction translation helpers for <see cref="AdminServiceImpl"/> — the C# port of
+/// Admin-direction translation helpers for <see cref="AdminServiceImpl"/> and
+/// <see cref="AsyncAdminServiceImpl"/> — the C# port of
 /// <c>grpc_translate.py</c>'s <c>_admin_*</c> family. Kept out of <see cref="Translate"/>
 /// (producer/consumer) so the admin slices can grow additively.
 /// </summary>
@@ -56,7 +57,8 @@ internal static class TranslateAdmin
     /// <summary>
     /// The normative mock-selection rule of <c>admin_service.proto</c>'s
     /// <c>CreateAdminRequest</c>: an empty config, or one whose every value is empty, selects
-    /// <see cref="AsyncMockAdminClient"/>. Port of <c>_admin_selects_mock</c>.
+    /// the flavour's mock (<see cref="MockAdminClient"/> / <see cref="AsyncMockAdminClient"/>).
+    /// Port of <c>_admin_selects_mock</c>.
     /// </summary>
     internal static bool SelectsMock(IReadOnlyDictionary<string, string> config)
     {
@@ -126,6 +128,12 @@ internal static class TranslateAdmin
     /// propagates to the handler's whole-call <c>catch</c>, which is where a failure with no
     /// per-key future belongs.
     /// </summary>
+    /// <remarks>
+    /// The async flavour's helper (<see cref="AsyncAdminServiceImpl"/>). Each of the three
+    /// future helpers has a sync twin over <see cref="KafkaFuture{T}"/> / <see cref="KafkaFuture"/>
+    /// for <see cref="AdminServiceImpl"/> (M15/P14), which blocks in <c>Get()</c> on the calling
+    /// thread instead of awaiting; the two differ only in how they wait.
+    /// </remarks>
     internal static async Task<(TValue Value, Proto.KafkaError? Error)> Resolve<TValue>(AsyncKafkaFuture<TValue> future)
     {
         try
@@ -139,14 +147,48 @@ internal static class TranslateAdmin
     }
 
     /// <summary>
-    /// The void-valued twin of <see cref="Resolve{TValue}"/>: <see langword="null"/> means that
-    /// key succeeded, there being no value to distinguish success by.
+    /// The sync twin of <see cref="Resolve{TValue}(AsyncKafkaFuture{TValue})"/>: blocks in
+    /// <see cref="KafkaFuture{T}.Get"/> on the calling thread.
+    /// </summary>
+    internal static (TValue Value, Proto.KafkaError? Error) Resolve<TValue>(KafkaFuture<TValue> future)
+    {
+        try
+        {
+            return (future.Get(), null);
+        }
+        catch (KafkaException ex)
+        {
+            return (default!, Translate.ToProto(ex));
+        }
+    }
+
+    /// <summary>
+    /// The void-valued twin of <see cref="Resolve{TValue}(AsyncKafkaFuture{TValue})"/>:
+    /// <see langword="null"/> means that key succeeded, there being no value to distinguish
+    /// success by.
     /// </summary>
     internal static async Task<Proto.KafkaError?> ResolveVoid(AsyncKafkaFuture future)
     {
         try
         {
             await future.Get().ConfigureAwait(false);
+            return null;
+        }
+        catch (KafkaException ex)
+        {
+            return Translate.ToProto(ex);
+        }
+    }
+
+    /// <summary>
+    /// The sync twin of <see cref="ResolveVoid(AsyncKafkaFuture)"/>: blocks in
+    /// <see cref="KafkaFuture.Get"/> on the calling thread.
+    /// </summary>
+    internal static Proto.KafkaError? ResolveVoid(KafkaFuture future)
+    {
+        try
+        {
+            future.Get();
             return null;
         }
         catch (KafkaException ex)
@@ -165,17 +207,44 @@ internal static class TranslateAdmin
         Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
         foreach (KeyValuePair<TKey, AsyncKafkaFuture> pair in futures)
         {
-            Proto.VoidResultEntry entry = new Proto.VoidResultEntry { Key = keyFn(pair.Key) };
-            Proto.KafkaError? error = await ResolveVoid(pair.Value).ConfigureAwait(false);
-            if (error is not null)
-            {
-                entry.Error = error;
-            }
-
-            response.Entries.Add(entry);
+            Proto.ResultKey key = keyFn(pair.Key);
+            response.Entries.Add(VoidEntry(key, await ResolveVoid(pair.Value).ConfigureAwait(false)));
         }
 
         return response;
+    }
+
+    /// <summary>
+    /// The sync twin of
+    /// <see cref="VoidResponse{TKey}(IReadOnlyDictionary{TKey, AsyncKafkaFuture}, Func{TKey, Proto.ResultKey})"/>:
+    /// resolves each key's future in turn with <see cref="ResolveVoid(KafkaFuture)"/>.
+    /// </summary>
+    internal static Proto.VoidKeyedResponse VoidResponse<TKey>(
+        IReadOnlyDictionary<TKey, KafkaFuture> futures, Func<TKey, Proto.ResultKey> keyFn)
+    {
+        Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
+        foreach (KeyValuePair<TKey, KafkaFuture> pair in futures)
+        {
+            Proto.ResultKey key = keyFn(pair.Key);
+            response.Entries.Add(VoidEntry(key, ResolveVoid(pair.Value)));
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// One <c>VoidResultEntry</c>, shared by both <c>VoidResponse</c> flavours: the key, plus the
+    /// error only when that key failed.
+    /// </summary>
+    private static Proto.VoidResultEntry VoidEntry(Proto.ResultKey key, Proto.KafkaError? error)
+    {
+        Proto.VoidResultEntry entry = new Proto.VoidResultEntry { Key = key };
+        if (error is not null)
+        {
+            entry.Error = error;
+        }
+
+        return entry;
     }
 
     /// <summary>

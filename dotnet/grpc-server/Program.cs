@@ -27,18 +27,21 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Entry point for the .NET gRPC backend used by the Rust multilanguage integration-test
-/// harness. Hosts a producer and a consumer servicer (plus the admin servicer, sync flavor
-/// only — M15/P12 D1) on Kestrel serving h2c (HTTP/2 cleartext, no TLS) — the Rust client
-/// dials <c>http://</c>.
+/// harness. Hosts a producer, a consumer and an admin servicer (admin on both flavours since
+/// M15/P14) on Kestrel serving h2c (HTTP/2 cleartext, no TLS) — the Rust client dials
+/// <c>http://</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Flavor selector (M8/P2; producer M12/P1; chaos M18/P1).</b> <c>CONSUMER_FLAVOR=async</c>
-/// hosts the asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over
-/// <c>AsyncKafkaProducer</c> + <see cref="AsyncConsumerServiceImpl"/> over
-/// <c>AsyncKafkaConsumer</c>); anything else (including unset, the sync default) hosts the
-/// synchronous servicers (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/> +
-/// <see cref="AdminServiceImpl"/>; admin is sync-only, M15/P12 D1). The chaos-harness service
+/// <b>Flavor selector (M8/P2; producer M12/P1; chaos M18/P1; admin M15/P14).</b>
+/// <c>CONSUMER_FLAVOR=async</c> hosts the asynchronous servicers
+/// (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c> +
+/// <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c> +
+/// <see cref="AsyncAdminServiceImpl"/> over <c>IAsyncAdmin</c>); anything else (including unset,
+/// the sync default) hosts the synchronous servicers (<see cref="ProducerServiceImpl"/> +
+/// <see cref="ConsumerServiceImpl"/> + <see cref="AdminServiceImpl"/> over <c>IAdmin</c>).
+/// Admin was sync-only until M15/P14 split it into <c>IAdmin</c> and <c>IAsyncAdmin</c>
+/// (M15/P12 D1 had no async surface to host). The chaos-harness service
 /// follows the flavor too: the sync flavor hosts <see cref="ChaosWorkloadServiceImpl"/> over the
 /// synchronous clients (the <c>dotnet</c> workload backend), and the async flavor hosts
 /// <see cref="AsyncChaosWorkloadServiceImpl"/> over the asynchronous ones (the
@@ -47,9 +50,9 @@ namespace Confluent.Kafka.GrpcServer;
 /// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
 /// the harness sets it explicitly for each backend kind instead (backend_pool.rs
 /// <c>native_command</c>). One server per flavor hosts the producer and consumer services
-/// together (Python-parity — <c>grpc_server.py</c> registers them in one server; Python also
-/// registers admin in its async server, where .NET does not); the env name stays
-/// <c>CONSUMER_FLAVOR</c> to avoid Dockerfile churn.
+/// together, and admin with them (Python-parity — <c>grpc_server.py</c> registers them in one
+/// server, admin in both of its servers too); the env name stays <c>CONSUMER_FLAVOR</c> to
+/// avoid Dockerfile churn.
 /// </para>
 /// <para>
 /// <b>Listen address and readiness line (M17/P1)</b> — the same contract as the Python and C
@@ -104,12 +107,15 @@ internal static class Program
         // request, so the map would be empty on every call after Create* (Python registers one
         // servicer instance per service — grpc_server.py). Registering them here makes
         // MapGrpcService resolve those single instances. The CONSUMER_FLAVOR selector (see the
-        // type remarks) picks the sync or async servicers; both flavors host the producer and
-        // consumer services, and only the sync flavor hosts admin.
+        // type remarks) picks the sync or async servicers; both flavors host the producer,
+        // consumer and admin services.
         if (useAsync)
         {
             builder.Services.AddSingleton<AsyncProducerServiceImpl>();
             builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
+
+            // Admin over IAsyncAdmin (M15/P14), a singleton for its admin_id -> client map.
+            builder.Services.AddSingleton<AsyncAdminServiceImpl>();
 
             // The chaos service (M18/P1), a singleton for its workload registry (see below).
             builder.Services.AddSingleton<AsyncChaosWorkloadServiceImpl>();
@@ -119,9 +125,9 @@ internal static class Program
             builder.Services.AddSingleton<ProducerServiceImpl>();
             builder.Services.AddSingleton<ConsumerServiceImpl>();
 
-            // Admin is registered in the SYNC branch ONLY (M15/P12 D1): .NET has no
-            // IAsyncAdmin, so an async arm would drive the same AdminServiceImpl over the
-            // same single IAdmin — byte-identical managed code for zero extra coverage.
+            // Admin over IAdmin, the blocking flavour (M15/P14; the async twin is registered
+            // above). Until M15/P14 this was the only admin servicer: .NET had no IAsyncAdmin
+            // (M15/P12 D1).
             builder.Services.AddSingleton<AdminServiceImpl>();
 
             // The chaos service (M18/P1) is a singleton for the same reason: its workload
@@ -134,6 +140,7 @@ internal static class Program
         {
             app.MapGrpcService<AsyncProducerServiceImpl>();
             app.MapGrpcService<AsyncConsumerServiceImpl>();
+            app.MapGrpcService<AsyncAdminServiceImpl>();
             app.MapGrpcService<AsyncChaosWorkloadServiceImpl>();
         }
         else
@@ -193,8 +200,9 @@ internal static class Program
     }
 
     /// <summary>
-    /// Disposes the singleton servicers so their consumer AND producer registries are drained at
-    /// shutdown (M9/P4 M5; producers added in M11/P8, Minor 14). Resolves from the host's own
+    /// Disposes the singleton servicers so their consumer, producer and admin registries are
+    /// drained at shutdown (M9/P4 M5; producers added in M11/P8, Minor 14; admin on both
+    /// flavours since M15/P14). Resolves from the host's own
     /// service provider — the same singletons every RPC used. Best-effort: a shutdown-time failure
     /// must not turn a passing harness run into a non-zero exit, so it is logged to STDERR and
     /// swallowed.
@@ -216,6 +224,7 @@ internal static class Program
             {
                 app.Services.GetRequiredService<AsyncConsumerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<AsyncProducerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<AsyncAdminServiceImpl>().Dispose();
 
                 // Stops every chaos workload and waits, bounded, for their drains (PLAN §5.8).
                 app.Services.GetRequiredService<AsyncChaosWorkloadServiceImpl>().Dispose();

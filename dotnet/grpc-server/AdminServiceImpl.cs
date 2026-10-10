@@ -27,15 +27,30 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="AsyncKafkaAdminClient"/> /
-/// <see cref="AsyncMockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
+/// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="KafkaAdminClient"/> /
+/// <see cref="MockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
 /// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions), G2 (cluster, configs,
 /// log dirs), G3 (elections, reassignments, offsets), G6 (producers &amp; transactions), G4
 /// (groups) and G5 (acls, quotas, scram, tokens, features) are all implemented here.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>No per-op lock</b> — the producer precedent, not the consumer's. <see cref="IAsyncAdmin"/>
+/// <b>Flavour (M15/P14).</b> The sync-flavour servicer, hosted when <c>CONSUMER_FLAVOR</c> is
+/// anything but <c>async</c> (the <c>dotnet</c> harness backend). Its async twin,
+/// <see cref="AsyncAdminServiceImpl"/>, covers the same RPCs over <see cref="IAsyncAdmin"/> with
+/// the same request, response and error translation; the two files are kept structurally
+/// parallel, so a change to one belongs in the other.
+/// </para>
+/// <para>
+/// <b>Blocking handlers.</b> Every handler blocks in <see cref="KafkaFuture{T}.Get"/> /
+/// <see cref="KafkaFuture.Get"/> on the gRPC handler thread, exactly as a sync caller of
+/// <see cref="IAdmin"/> would, and returns an already-completed task
+/// (<see cref="Task.FromResult{TResult}"/>). There is no <c>Task.Run</c> and no <c>await</c>:
+/// a sync future is completed by the native client's own threads and composed on the thread
+/// that calls <c>Get()</c>, so the wait needs no thread-pool thread to finish.
+/// </para>
+/// <para>
+/// <b>No per-op lock</b> — the producer precedent, not the consumer's. <see cref="IAdmin"/>
 /// permits concurrent operations (the admin ABI has no single-owner access guard), so the
 /// servicer needs only a thread-safe id map plus an <see cref="Interlocked"/> counter to make
 /// <c>CreateAdmin</c> / <c>Close</c> races safe.
@@ -45,17 +60,17 @@ namespace Confluent.Kafka.GrpcServer;
 /// top-level <c>error</c>, leaving <c>entries</c> empty; per-key failures never raise and
 /// arrive in the keyed map (<c>admin_service.proto</c>'s envelope commentary). Each handler
 /// therefore wraps its whole body in one <c>catch</c>, and
-/// <see cref="TranslateAdmin.Resolve{TValue}"/> peels off only the per-key
+/// <see cref="TranslateAdmin.Resolve{TValue}(KafkaFuture{TValue})"/> peels off only the per-key
 /// <see cref="KafkaException"/>s.
 /// </para>
 /// <para>
-/// <b>Singleton</b> (<c>Program.cs</c>): it owns the <c>admin_id -&gt; IAsyncAdmin</c> map every RPC
+/// <b>Singleton</b> (<c>Program.cs</c>): it owns the <c>admin_id -&gt; IAdmin</c> map every RPC
 /// shares.
 /// </para>
 /// </remarks>
 internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, IDisposable
 {
-    private readonly ConcurrentDictionary<ulong, IAsyncAdmin> _admins = new ConcurrentDictionary<ulong, IAsyncAdmin>();
+    private readonly ConcurrentDictionary<ulong, IAdmin> _admins = new ConcurrentDictionary<ulong, IAdmin>();
 
     private long _nextId;
 
@@ -67,9 +82,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     /// </summary>
     public void Dispose()
     {
-        foreach (KeyValuePair<ulong, IAsyncAdmin> pair in _admins)
+        foreach (KeyValuePair<ulong, IAdmin> pair in _admins)
         {
-            if (!_admins.TryRemove(pair.Key, out IAsyncAdmin? admin))
+            if (!_admins.TryRemove(pair.Key, out IAdmin? admin))
             {
                 continue;
             }
@@ -90,12 +105,12 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     {
         Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         int numBrokers = request.HasNumBrokers ? request.NumBrokers : 1;
-        IAsyncAdmin admin;
+        IAdmin admin;
         try
         {
             admin = TranslateAdmin.SelectsMock(config)
-                ? new AsyncMockAdminClient(numBrokers)
-                : (IAsyncAdmin)new AsyncKafkaAdminClient(config);
+                ? new MockAdminClient(numBrokers)
+                : (IAdmin)new KafkaAdminClient(config);
         }
         catch (Exception ex)
         {
@@ -109,51 +124,52 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.StatusResponse> Close(Proto.AdminCloseRequest request, ServerCallContext context)
+    public override Task<Proto.StatusResponse> Close(Proto.AdminCloseRequest request, ServerCallContext context)
     {
-        if (!_admins.TryRemove(request.AdminId, out IAsyncAdmin? admin))
+        if (!_admins.TryRemove(request.AdminId, out IAdmin? admin))
         {
             // Close is idempotent — silent success on an unknown id (Python / Java parity).
-            return new Proto.StatusResponse();
+            return Task.FromResult(new Proto.StatusResponse());
         }
 
         try
         {
             if (request.HasTimeoutMs)
             {
-                await admin.Close(TimeSpan.FromMilliseconds(request.TimeoutMs)).ConfigureAwait(false);
+                admin.Close(TimeSpan.FromMilliseconds(request.TimeoutMs));
             }
             else
             {
-                // Java's no-argument close() — wait indefinitely. IAsyncAdmin spells that
-                // DisposeAsync (IAsyncAdmin.Close(TimeSpan) has no "unset" spelling); the one
-                // divergence is that DisposeAsync swallows a close failure, so this path
-                // reports success where Python would forward the error.
-                await admin.DisposeAsync().ConfigureAwait(false);
+                // Java's no-argument close() — wait indefinitely. IAdmin spells that
+                // Dispose (IAdmin.Close(TimeSpan) has no "unset" spelling). Neither path has a
+                // close failure to report: the sync close ABI returns nothing, as Java's
+                // close(Duration) is void, so the catch below is left with preconditions such
+                // as a negative timeout.
+                admin.Dispose();
             }
 
-            return new Proto.StatusResponse();
+            return Task.FromResult(new Proto.StatusResponse());
         }
         catch (Exception ex)
         {
-            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- Topics & partitions (slice G1) --------------------------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.CreateTopicsResponse> CreateTopics(Proto.CreateTopicsRequest request, ServerCallContext context)
+    public override Task<Proto.CreateTopicsResponse> CreateTopics(Proto.CreateTopicsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.CreateTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.CreateTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncCreateTopicsResult result = admin.CreateTopics(
+            CreateTopicsResult result = admin.CreateTopics(
                 TranslateAdmin.NewTopics(request.Topics),
                 new CreateTopicsOptions
                 {
@@ -164,43 +180,43 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.CreateTopicsResponse response = new Proto.CreateTopicsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture> pair in result.Values)
+            foreach (KeyValuePair<string, KafkaFuture> pair in result.Values)
             {
                 Proto.CreateTopicsEntry entry = new Proto.CreateTopicsEntry { Key = TranslateAdmin.NameKey(pair.Key) };
-                Proto.KafkaError? error = await TranslateAdmin.ResolveVoid(pair.Value).ConfigureAwait(false);
+                Proto.KafkaError? error = TranslateAdmin.ResolveVoid(pair.Value);
                 if (error is not null)
                 {
                     entry.Error = error;
                 }
                 else
                 {
-                    entry.Value = await MetadataAndConfig(result, pair.Key).ConfigureAwait(false);
+                    entry.Value = MetadataAndConfig(result, pair.Key);
                 }
 
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.CreateTopicsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.CreateTopicsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> DeleteTopics(Proto.DeleteTopicsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> DeleteTopics(Proto.DeleteTopicsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             bool byIds = request.TopicsCase == Proto.DeleteTopicsRequest.TopicsOneofCase.TopicIds;
-            AsyncDeleteTopicsResult result = admin.DeleteTopics(
+            DeleteTopicsResult result = admin.DeleteTopics(
                 TranslateAdmin.TopicCollectionOf(byIds, request.Names, request.TopicIds),
                 new DeleteTopicsOptions
                 {
@@ -210,58 +226,58 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             // Exactly one of the two views is non-null, following the request's oneof.
-            return result.TopicIdValues is not null
-                ? await TranslateAdmin.VoidResponse(result.TopicIdValues, TranslateAdmin.TopicIdKey).ConfigureAwait(false)
-                : await TranslateAdmin.VoidResponse(result.TopicNameValues!, TranslateAdmin.NameKey).ConfigureAwait(false);
+            return Task.FromResult(result.TopicIdValues is not null
+                ? TranslateAdmin.VoidResponse(result.TopicIdValues, TranslateAdmin.TopicIdKey)
+                : TranslateAdmin.VoidResponse(result.TopicNameValues!, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.AdminListTopicsResponse> ListTopics(Proto.AdminListTopicsRequest request, ServerCallContext context)
+    public override Task<Proto.AdminListTopicsResponse> ListTopics(Proto.AdminListTopicsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.AdminListTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.AdminListTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             // Whole-value response (envelope addendum (a)): one future over the entire map, so a
             // failure has no key to land on and becomes the top-level error.
-            AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions
+            ListTopicsResult result = admin.ListTopics(new ListTopicsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 ListInternal = request.ListInternal,
             });
 
             IReadOnlyDictionary<string, TopicListing> listings =
-                await result.NamesToListings().Get().ConfigureAwait(false);
+                result.NamesToListings().Get();
             Proto.AdminListTopicsResponse response = new Proto.AdminListTopicsResponse();
             foreach (TopicListing listing in listings.Values)
             {
                 response.Listings.Add(TranslateAdmin.ListingToProto(listing));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.AdminListTopicsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.AdminListTopicsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeTopicsResponse> DescribeTopics(Proto.DescribeTopicsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeTopicsResponse> DescribeTopics(Proto.DescribeTopicsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeTopicsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -277,47 +293,47 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 options.PartitionSizeLimitPerResponse = request.PartitionSizeLimitPerResponse;
             }
 
-            AsyncDescribeTopicsResult result = admin.DescribeTopics(
+            DescribeTopicsResult result = admin.DescribeTopics(
                 TranslateAdmin.TopicCollectionOf(byIds, request.Names, request.TopicIds), options);
 
             Proto.DescribeTopicsResponse response = new Proto.DescribeTopicsResponse();
             if (result.TopicIdValues is not null)
             {
-                foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> pair in result.TopicIdValues)
+                foreach (KeyValuePair<Uuid, KafkaFuture<TopicDescription>> pair in result.TopicIdValues)
                 {
                     response.Entries.Add(
-                        await DescribeTopicsEntry(TranslateAdmin.TopicIdKey(pair.Key), pair.Value).ConfigureAwait(false));
+                        DescribeTopicsEntry(TranslateAdmin.TopicIdKey(pair.Key), pair.Value));
                 }
             }
             else
             {
-                foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> pair in result.TopicNameValues!)
+                foreach (KeyValuePair<string, KafkaFuture<TopicDescription>> pair in result.TopicNameValues!)
                 {
                     response.Entries.Add(
-                        await DescribeTopicsEntry(TranslateAdmin.NameKey(pair.Key), pair.Value).ConfigureAwait(false));
+                        DescribeTopicsEntry(TranslateAdmin.NameKey(pair.Key), pair.Value));
                 }
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeTopicsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeTopicsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> CreatePartitions(Proto.CreatePartitionsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> CreatePartitions(Proto.CreatePartitionsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncCreatePartitionsResult result = admin.CreatePartitions(
+            CreatePartitionsResult result = admin.CreatePartitions(
                 TranslateAdmin.NewPartitionsMap(request.Partitions),
                 new CreatePartitionsOptions
                 {
@@ -327,26 +343,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                         TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation),
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey).ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DeleteRecordsResponse> DeleteRecords(Proto.DeleteRecordsRequest request, ServerCallContext context)
+    public override Task<Proto.DeleteRecordsResponse> DeleteRecords(Proto.DeleteRecordsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DeleteRecordsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DeleteRecordsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDeleteRecordsResult result = admin.DeleteRecords(
+            DeleteRecordsResult result = admin.DeleteRecords(
                 TranslateAdmin.RecordsToDeleteMap(request.Records),
                 new DeleteRecordsOptions
                 {
@@ -354,10 +370,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DeleteRecordsResponse response = new Proto.DeleteRecordsResponse();
-            foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> pair in result.LowWatermarks)
+            foreach (KeyValuePair<TopicPartition, KafkaFuture<DeletedRecords>> pair in result.LowWatermarks)
             {
                 (DeletedRecords deleted, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DeleteRecordsEntry entry = new Proto.DeleteRecordsEntry
                 {
                     Key = TranslateAdmin.PartitionKey(pair.Key),
@@ -374,28 +390,28 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DeleteRecordsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DeleteRecordsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- Cluster, configs & log dirs (slice G2) ------------------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeClusterResponse> DescribeCluster(Proto.DescribeClusterRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeClusterResponse> DescribeCluster(Proto.DescribeClusterRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeClusterResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeClusterResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeClusterResult result = admin.DescribeCluster(new DescribeClusterOptions
+            DescribeClusterResult result = admin.DescribeCluster(new DescribeClusterOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 IncludeAuthorizedOperations = request.IncludeAuthorizedOperations,
@@ -403,22 +419,22 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             });
 
             // Whole-value response: Java's four futures are over attributes of one cluster, so
-            // there is nothing to key. All four are awaited before any error is reported, so
+            // there is nothing to key. All four are resolved before any error is reported, so
             // none is abandoned; when more than one failed the first in Java's declaration
             // order wins.
             (IReadOnlyCollection<Node> nodes, Proto.KafkaError? nodesError) =
-                await TranslateAdmin.Resolve(result.Nodes()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.Nodes());
             (Node? controller, Proto.KafkaError? controllerError) =
-                await TranslateAdmin.Resolve(result.Controller()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.Controller());
             (string? clusterId, Proto.KafkaError? clusterIdError) =
-                await TranslateAdmin.Resolve(result.ClusterId()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.ClusterId());
             (IReadOnlyCollection<AclOperation>? operations, Proto.KafkaError? operationsError) =
-                await TranslateAdmin.Resolve(result.AuthorizedOperations()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.AuthorizedOperations());
 
             Proto.KafkaError? error = nodesError ?? controllerError ?? clusterIdError ?? operationsError;
             if (error is not null)
             {
-                return new Proto.DescribeClusterResponse { Error = error };
+                return Task.FromResult(new Proto.DescribeClusterResponse { Error = error });
             }
 
             // Java's clusterId() is null on the old-broker Metadata fallback, and a proto3
@@ -448,26 +464,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 description.AuthorizedOperations = list;
             }
 
-            return new Proto.DescribeClusterResponse { Description = description };
+            return Task.FromResult(new Proto.DescribeClusterResponse { Description = description });
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeClusterResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeClusterResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeConfigsResponse> DescribeConfigs(Proto.DescribeConfigsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeConfigsResponse> DescribeConfigs(Proto.DescribeConfigsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeConfigsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeConfigsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeConfigsResult result = admin.DescribeConfigs(
+            DescribeConfigsResult result = admin.DescribeConfigs(
                 TranslateAdmin.ConfigResources(request.Resources),
                 new DescribeConfigsOptions
                 {
@@ -477,10 +493,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeConfigsResponse response = new Proto.DescribeConfigsResponse();
-            foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> pair in result.Values)
+            foreach (KeyValuePair<ConfigResource, KafkaFuture<Config>> pair in result.Values)
             {
                 (Config config, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DescribeConfigsEntry entry = new Proto.DescribeConfigsEntry
                 {
                     Key = TranslateAdmin.ConfigResourceKey(pair.Key),
@@ -497,26 +513,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeConfigsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeConfigsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> IncrementalAlterConfigs(Proto.IncrementalAlterConfigsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> IncrementalAlterConfigs(Proto.IncrementalAlterConfigsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
+            AlterConfigsResult result = admin.IncrementalAlterConfigs(
                 TranslateAdmin.AlterConfigsMap(request.Configs),
                 new AlterConfigsOptions
                 {
@@ -524,62 +540,61 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     ValidateOnly = request.ValidateOnly,
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ConfigResourceKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ConfigResourceKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListConfigResourcesResponse> ListConfigResources(Proto.ListConfigResourcesRequest request, ServerCallContext context)
+    public override Task<Proto.ListConfigResourcesResponse> ListConfigResources(Proto.ListConfigResourcesRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListConfigResourcesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListConfigResourcesResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             // An empty repeated field is Java's empty Set: every supported type. It is passed
             // through — the binding treats empty and absent alike.
-            AsyncListConfigResourcesResult result = admin.ListConfigResources(
+            ListConfigResourcesResult result = admin.ListConfigResources(
                 TranslateAdmin.ConfigResourceTypes(request.ResourceTypes),
                 new ListConfigResourcesOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            IReadOnlyCollection<ConfigResource> resources = await result.All().Get().ConfigureAwait(false);
+            IReadOnlyCollection<ConfigResource> resources = result.All().Get();
             Proto.ListConfigResourcesResponse response = new Proto.ListConfigResourcesResponse();
             foreach (ConfigResource resource in resources)
             {
                 response.Resources.Add(TranslateAdmin.ConfigResourceToProto(resource));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListConfigResourcesResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListConfigResourcesResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeLogDirsResponse> DescribeLogDirs(Proto.DescribeLogDirsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeLogDirsResponse> DescribeLogDirs(Proto.DescribeLogDirsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(
+            DescribeLogDirsResult result = admin.DescribeLogDirs(
                 new List<int>(request.Brokers),
                 new DescribeLogDirsOptions
                 {
@@ -587,11 +602,11 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeLogDirsResponse response = new Proto.DescribeLogDirsResponse();
-            foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> pair in
+            foreach (KeyValuePair<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> pair in
                 result.Descriptions)
             {
                 (IReadOnlyDictionary<string, LogDirDescription> descriptions, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DescribeLogDirsEntry entry = new Proto.DescribeLogDirsEntry
                 {
                     Key = TranslateAdmin.BrokerIdKey(pair.Key),
@@ -617,53 +632,52 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeLogDirsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeLogDirsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> AlterReplicaLogDirs(Proto.AlterReplicaLogDirsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> AlterReplicaLogDirs(Proto.AlterReplicaLogDirsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncAlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+            AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
                 TranslateAdmin.ReplicaLogDirAssignments(request.Assignments),
                 new AlterReplicaLogDirsOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ReplicaKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ReplicaKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeReplicaLogDirsResponse> DescribeReplicaLogDirs(Proto.DescribeReplicaLogDirsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeReplicaLogDirsResponse> DescribeReplicaLogDirs(Proto.DescribeReplicaLogDirsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeReplicaLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeReplicaLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(
+            DescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(
                 TranslateAdmin.Replicas(request.Replicas),
                 new DescribeReplicaLogDirsOptions
                 {
@@ -671,11 +685,11 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeReplicaLogDirsResponse response = new Proto.DescribeReplicaLogDirsResponse();
-            foreach (KeyValuePair<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> pair
+            foreach (KeyValuePair<TopicPartitionReplica, KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> pair
                 in result.Values)
             {
                 (DescribeReplicaLogDirsResult.ReplicaLogDirInfo info, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DescribeReplicaLogDirsEntry entry = new Proto.DescribeReplicaLogDirsEntry
                 {
                     Key = TranslateAdmin.ReplicaKey(pair.Key),
@@ -709,28 +723,28 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeReplicaLogDirsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeReplicaLogDirsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- Elections, reassignments & offsets (slice G3) ------------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> ElectLeaders(Proto.ElectLeadersRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> ElectLeaders(Proto.ElectLeadersRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncElectLeadersResult result = admin.ElectLeaders(
+            ElectLeadersResult result = admin.ElectLeaders(
                 (ElectionType)request.ElectionType,
                 TranslateAdmin.OptionalPartitions(request.Partitions),
                 new ElectLeadersOptions
@@ -743,10 +757,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // is the Optional<Throwable> inside the resolved map, absent meaning that
             // partition's election succeeded.
             (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
-                await TranslateAdmin.Resolve(result.Partitions()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.Partitions());
             if (error is not null)
             {
-                return new Proto.VoidKeyedResponse { Error = error };
+                return Task.FromResult(new Proto.VoidKeyedResponse { Error = error });
             }
 
             Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
@@ -764,26 +778,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> AlterPartitionReassignments(Proto.AlterPartitionReassignmentsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> AlterPartitionReassignments(Proto.AlterPartitionReassignmentsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+            AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
                 TranslateAdmin.Reassignments(request.Reassignments),
                 new AlterPartitionReassignmentsOptions
                 {
@@ -795,29 +809,28 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // Genuinely per-key futures here, so the top-level error keeps its ordinary
             // narrow meaning (unlike ElectLeaders above).
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListPartitionReassignmentsResponse> ListPartitionReassignments(Proto.ListPartitionReassignmentsRequest request, ServerCallContext context)
+    public override Task<Proto.ListPartitionReassignmentsResponse> ListPartitionReassignments(Proto.ListPartitionReassignmentsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListPartitionReassignmentsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListPartitionReassignmentsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             // Whole-value response (envelope addendum (a)): one future over the entire map, so
             // no individual reassignment carries an error.
-            AsyncListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
+            ListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
                 TranslateAdmin.OptionalPartitions(request.Partitions),
                 new ListPartitionReassignmentsOptions
                 {
@@ -825,7 +838,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
-                await result.Reassignments().Get().ConfigureAwait(false);
+                result.Reassignments().Get();
             Proto.ListPartitionReassignmentsResponse response = new Proto.ListPartitionReassignmentsResponse();
             foreach (KeyValuePair<TopicPartition, PartitionReassignment> pair in reassignments)
             {
@@ -836,21 +849,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListPartitionReassignmentsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListPartitionReassignmentsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListOffsetsResponse> ListOffsets(Proto.ListOffsetsRequest request, ServerCallContext context)
+    public override Task<Proto.ListOffsetsResponse> ListOffsets(Proto.ListOffsetsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -862,10 +875,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 TranslateAdmin.OffsetSpecs(request.Specs, out string? invalid);
             if (specs is null)
             {
-                return new Proto.ListOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
+                return Task.FromResult(new Proto.ListOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) });
             }
 
-            AsyncListOffsetsResult result = admin.ListOffsets(
+            ListOffsetsResult result = admin.ListOffsets(
                 specs,
                 new ListOffsetsOptions
                 {
@@ -879,7 +892,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             foreach (TopicPartition partition in specs.Keys)
             {
                 (ListOffsetsResult.ListOffsetsResultInfo info, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(result.PartitionResult(partition)).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.PartitionResult(partition));
                 Proto.ListOffsetsEntry entry = new Proto.ListOffsetsEntry
                 {
                     Key = TranslateAdmin.PartitionKey(partition),
@@ -896,23 +909,23 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListOffsetsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListOffsetsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- Producers & transactions (slice G6) ---------------------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeProducersResponse> DescribeProducers(Proto.DescribeProducersRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeProducersResponse> DescribeProducers(Proto.DescribeProducersRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -930,13 +943,13 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 options.BrokerId = request.BrokerId;
             }
 
-            AsyncDescribeProducersResult result = admin.DescribeProducers(partitions, options);
+            DescribeProducersResult result = admin.DescribeProducers(partitions, options);
 
             Proto.DescribeProducersResponse response = new Proto.DescribeProducersResponse();
             foreach (TopicPartition partition in partitions)
             {
                 (DescribeProducersResult.PartitionProducerState state, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(result.PartitionResult(partition)).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.PartitionResult(partition));
                 Proto.DescribeProducersEntry entry = new Proto.DescribeProducersEntry
                 {
                     Key = TranslateAdmin.PartitionKey(partition),
@@ -953,27 +966,27 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeProducersResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeProducersResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeTransactionsResponse> DescribeTransactions(Proto.DescribeTransactionsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeTransactionsResponse> DescribeTransactions(Proto.DescribeTransactionsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             List<string> ids = TranslateAdmin.DistinctKeys(request.TransactionalIds);
-            AsyncDescribeTransactionsResult result = admin.DescribeTransactions(
+            DescribeTransactionsResult result = admin.DescribeTransactions(
                 ids,
                 new DescribeTransactionsOptions
                 {
@@ -984,7 +997,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             foreach (string id in ids)
             {
                 (TransactionDescription description, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(result.Description(id)).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.Description(id));
                 Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
                 {
                     Key = TranslateAdmin.NameKey(id),
@@ -1001,21 +1014,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeTransactionsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeTransactionsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.StatusResponse> AbortTransaction(Proto.AbortTransactionRequest request, ServerCallContext context)
+    public override Task<Proto.StatusResponse> AbortTransaction(Proto.AbortTransactionRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -1024,64 +1037,64 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             AbortTransactionSpec? spec = TranslateAdmin.AbortSpec(request, out string? invalid);
             if (spec is null)
             {
-                return new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) };
+                return Task.FromResult(new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) });
             }
 
-            // Java's AsyncAbortTransactionResult carries no data and no per-key granularity, so
+            // Java's AbortTransactionResult carries no data and no per-key granularity, so
             // success is simply an absent error.
-            await admin.AbortTransaction(
+            admin.AbortTransaction(
                 spec,
                 new AbortTransactionOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                }).All().Get().ConfigureAwait(false);
+                }).All().Get();
 
-            return new Proto.StatusResponse();
+            return Task.FromResult(new Proto.StatusResponse());
         }
         catch (Exception ex)
         {
-            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.StatusResponse> ForceTerminateTransaction(Proto.ForceTerminateTransactionRequest request, ServerCallContext context)
+    public override Task<Proto.StatusResponse> ForceTerminateTransaction(Proto.ForceTerminateTransactionRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            await admin.ForceTerminateTransaction(
+            admin.ForceTerminateTransaction(
                 request.TransactionalId,
                 new TerminateTransactionOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                }).Result().Get().ConfigureAwait(false);
+                }).Result().Get();
 
-            return new Proto.StatusResponse();
+            return Task.FromResult(new Proto.StatusResponse());
         }
         catch (Exception ex)
         {
-            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListTransactionsResponse> ListTransactions(Proto.ListTransactionsRequest request, ServerCallContext context)
+    public override Task<Proto.ListTransactionsResponse> ListTransactions(Proto.ListTransactionsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncListTransactionsResult result = admin.ListTransactions(new ListTransactionsOptions
+            ListTransactionsResult result = admin.ListTransactions(new ListTransactionsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 // Java's default for both collections is an empty set meaning "no filter", so
@@ -1097,19 +1110,19 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // Keyed by broker: byBrokerId() is the only one of Java's three views that keeps a
             // per-broker error, so a partial listing survives. Only the broker-DISCOVERY
             // future's failure is a whole-call failure.
-            (IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers,
+            (IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers,
                 Proto.KafkaError? error) =
-                await TranslateAdmin.Resolve(result.ByBrokerId()).ConfigureAwait(false);
+                TranslateAdmin.Resolve(result.ByBrokerId());
             if (error is not null)
             {
-                return new Proto.ListTransactionsResponse { Error = error };
+                return Task.FromResult(new Proto.ListTransactionsResponse { Error = error });
             }
 
             Proto.ListTransactionsResponse response = new Proto.ListTransactionsResponse();
-            foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> broker in brokers)
+            foreach (KeyValuePair<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>> broker in brokers)
             {
                 (IReadOnlyCollection<TransactionListing> listings, Proto.KafkaError? brokerError) =
-                    await TranslateAdmin.Resolve(broker.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(broker.Value);
                 Proto.ListTransactionsEntry entry = new Proto.ListTransactionsEntry
                 {
                     Key = TranslateAdmin.BrokerIdKey(broker.Key),
@@ -1132,26 +1145,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListTransactionsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListTransactionsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.FenceProducersResponse> FenceProducers(Proto.FenceProducersRequest request, ServerCallContext context)
+    public override Task<Proto.FenceProducersResponse> FenceProducers(Proto.FenceProducersRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.FenceProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.FenceProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncFenceProducersResult result = admin.FenceProducers(
+            FenceProducersResult result = admin.FenceProducers(
                 TranslateAdmin.DistinctKeys(request.TransactionalIds),
                 new FenceProducersOptions
                 {
@@ -1164,9 +1177,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 // Both accessors project the same underlying per-id future, so they resolve
                 // identically; (-1, -1) is Java's ProducerIdAndEpoch.NONE, a legal value.
                 (long producerId, Proto.KafkaError? idError) =
-                    await TranslateAdmin.Resolve(result.ProducerId(id)).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.ProducerId(id));
                 (short epoch, Proto.KafkaError? epochError) =
-                    await TranslateAdmin.Resolve(result.EpochId(id)).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.EpochId(id));
                 Proto.FenceProducersEntry entry = new Proto.FenceProducersEntry
                 {
                     Key = TranslateAdmin.NameKey(id),
@@ -1184,29 +1197,29 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.FenceProducersResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.FenceProducersResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- Groups (slice G4) ---------------------------------------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListGroupsResponse> ListGroups(Proto.ListGroupsRequest request, ServerCallContext context)
+    public override Task<Proto.ListGroupsResponse> ListGroups(Proto.ListGroupsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             // Empty filter lists are Java's empty sets, i.e. the filter left unset.
-            AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
+            ListGroupsResult result = admin.ListGroups(new ListGroupsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 GroupStates = TranslateAdmin.GroupStates(request.GroupStates),
@@ -1216,10 +1229,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // Whole-value response whose value is Java's valid()/errors() split: the two lists
             // are independent and of unrelated length, so nothing may be zipped across them.
-            // A failure of the single underlying future faults both awaits and becomes the
+            // A failure of the single underlying future fails both Get() calls and becomes the
             // top-level error via the catch below.
-            IReadOnlyCollection<GroupListing> valid = await result.Valid().Get().ConfigureAwait(false);
-            IReadOnlyCollection<KafkaException> errors = await result.Errors().Get().ConfigureAwait(false);
+            IReadOnlyCollection<GroupListing> valid = result.Valid().Get();
+            IReadOnlyCollection<KafkaException> errors = result.Errors().Get();
 
             Proto.ListGroupsResponse response = new Proto.ListGroupsResponse();
             foreach (GroupListing listing in valid)
@@ -1232,26 +1245,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.ListingErrors.Add(Translate.ToProto(error));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListGroupsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListGroupsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeConsumerGroupsResponse> DescribeConsumerGroups(Proto.DescribeConsumerGroupsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeConsumerGroupsResponse> DescribeConsumerGroups(Proto.DescribeConsumerGroupsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeConsumerGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeConsumerGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeConsumerGroupsResult result = admin.DescribeConsumerGroups(
+            DescribeConsumerGroupsResult result = admin.DescribeConsumerGroups(
                 TranslateAdmin.DistinctKeys(request.GroupIds),
                 new DescribeConsumerGroupsOptions
                 {
@@ -1260,10 +1273,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeConsumerGroupsResponse response = new Proto.DescribeConsumerGroupsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups)
             {
                 (ConsumerGroupDescription description, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DescribeConsumerGroupsEntry entry = new Proto.DescribeConsumerGroupsEntry
                 {
                     Key = TranslateAdmin.NameKey(pair.Key),
@@ -1280,26 +1293,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeConsumerGroupsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeConsumerGroupsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeClassicGroupsResponse> DescribeClassicGroups(Proto.DescribeClassicGroupsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeClassicGroupsResponse> DescribeClassicGroups(Proto.DescribeClassicGroupsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeClassicGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeClassicGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(
+            DescribeClassicGroupsResult result = admin.DescribeClassicGroups(
                 TranslateAdmin.DistinctKeys(request.GroupIds),
                 new DescribeClassicGroupsOptions
                 {
@@ -1308,10 +1321,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeClassicGroupsResponse response = new Proto.DescribeClassicGroupsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, KafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups)
             {
                 (ClassicGroupDescription description, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DescribeClassicGroupsEntry entry = new Proto.DescribeClassicGroupsEntry
                 {
                     Key = TranslateAdmin.NameKey(pair.Key),
@@ -1328,21 +1341,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeClassicGroupsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeClassicGroupsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.ListConsumerGroupOffsetsResponse> ListConsumerGroupOffsets(Proto.ListConsumerGroupOffsetsRequest request, ServerCallContext context)
+    public override Task<Proto.ListConsumerGroupOffsetsResponse> ListConsumerGroupOffsets(Proto.ListConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -1352,10 +1365,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 TranslateAdmin.GroupOffsetSpecs(request.GroupSpecs, out string? invalid);
             if (specs is null)
             {
-                return new Proto.ListConsumerGroupOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
+                return Task.FromResult(new Proto.ListConsumerGroupOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) });
             }
 
-            AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+            ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
                 specs,
                 new ListConsumerGroupOffsetsOptions
                 {
@@ -1370,8 +1383,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             foreach (string groupId in specs.Keys)
             {
                 (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(result.PartitionsToOffsetAndMetadata(groupId))
-                        .ConfigureAwait(false);
+                    TranslateAdmin.Resolve(result.PartitionsToOffsetAndMetadata(groupId));
                 Proto.ListConsumerGroupOffsetsEntry entry = new Proto.ListConsumerGroupOffsetsEntry
                 {
                     Key = TranslateAdmin.NameKey(groupId),
@@ -1403,28 +1415,28 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> AlterConsumerGroupOffsets(Proto.AlterConsumerGroupOffsetsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> AlterConsumerGroupOffsets(Proto.AlterConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             Dictionary<TopicPartition, OffsetAndMetadata> offsets =
                 TranslateAdmin.GroupOffsetCommits(request.Offsets);
-            AsyncAlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+            AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
                 request.GroupId,
                 offsets,
                 new AlterConsumerGroupOffsetsOptions
@@ -1440,37 +1452,36 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // the one future, so it propagates a whole-call failure whatever the key count,
             // and since M15/P13.1 (single-callback ABI) an empty request here waits for the
             // core's real outcome too, so result.All() carries that error even at zero keys.
-            // This servicer does not await it. Python's servicer has the identical gap, so
+            // This servicer does not wait on it. Python's servicer has the identical gap, so
             // the behaviour change is deferred to a cross-binding harness item rather than
             // made here alone.
-            Dictionary<TopicPartition, AsyncKafkaFuture> futures = new Dictionary<TopicPartition, AsyncKafkaFuture>();
+            Dictionary<TopicPartition, KafkaFuture> futures = new Dictionary<TopicPartition, KafkaFuture>();
             foreach (TopicPartition partition in offsets.Keys)
             {
                 futures[partition] = result.PartitionResult(partition);
             }
 
-            return await TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroupOffsets(Proto.DeleteConsumerGroupOffsetsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> DeleteConsumerGroupOffsets(Proto.DeleteConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             List<TopicPartition> partitions = TranslateAdmin.DistinctKeys(PartitionsOf(request.Partitions));
-            AsyncDeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+            DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
                 request.GroupId,
                 partitions,
                 new DeleteConsumerGroupOffsetsOptions
@@ -1480,33 +1491,32 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // Same single-future shape as AlterConsumerGroupOffsets above, empty case included —
             // including the dropped whole-call error at zero keys and its deferral.
-            Dictionary<TopicPartition, AsyncKafkaFuture> futures = new Dictionary<TopicPartition, AsyncKafkaFuture>();
+            Dictionary<TopicPartition, KafkaFuture> futures = new Dictionary<TopicPartition, KafkaFuture>();
             foreach (TopicPartition partition in partitions)
             {
                 futures[partition] = result.PartitionResult(partition);
             }
 
-            return await TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroups(Proto.DeleteConsumerGroupsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> DeleteConsumerGroups(Proto.DeleteConsumerGroupsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(
+            DeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(
                 TranslateAdmin.DistinctKeys(request.GroupIds),
                 new DeleteConsumerGroupsOptions
                 {
@@ -1515,22 +1525,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // Genuinely per-key futures here (Map<String, KafkaFuture<Void>>), so the
             // top-level error keeps its ordinary narrow meaning.
-            return await TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> RemoveMembersFromConsumerGroup(Proto.RemoveMembersFromConsumerGroupRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> RemoveMembersFromConsumerGroup(Proto.RemoveMembersFromConsumerGroupRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -1548,86 +1557,84 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 options.Reason = request.Reason;
             }
 
-            AsyncRemoveMembersFromConsumerGroupResult result =
+            RemoveMembersFromConsumerGroupResult result =
                 admin.RemoveMembersFromConsumerGroup(request.GroupId, options);
 
             if (options.RemoveAll)
             {
                 // In removeAll mode Java's memberResult refuses, so all() is the only
                 // observable: its failure is the top-level error and its success reports no
-                // per-member entry at all. Awaiting it here runs the removal to completion
+                // per-member entry at all. Waiting on it here runs the removal to completion
                 // before responding.
-                Proto.KafkaError? error = await TranslateAdmin.ResolveVoid(result.All()).ConfigureAwait(false);
-                return error is null
+                Proto.KafkaError? error = TranslateAdmin.ResolveVoid(result.All());
+                return Task.FromResult(error is null
                     ? new Proto.VoidKeyedResponse()
-                    : new Proto.VoidKeyedResponse { Error = error };
+                    : new Proto.VoidKeyedResponse { Error = error });
             }
 
-            Dictionary<MemberToRemove, AsyncKafkaFuture> futures = new Dictionary<MemberToRemove, AsyncKafkaFuture>();
+            Dictionary<MemberToRemove, KafkaFuture> futures = new Dictionary<MemberToRemove, KafkaFuture>();
             foreach (MemberToRemove member in members!)
             {
                 futures[member] = result.MemberResult(member);
             }
 
-            return await TranslateAdmin
-                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId))
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin
+                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId)));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     // -- ACLs, quotas, SCRAM, tokens & features (slice G5) -------------------------------
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> CreateAcls(Proto.CreateAclsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> CreateAcls(Proto.CreateAclsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncCreateAclsResult result = admin.CreateAcls(
+            CreateAclsResult result = admin.CreateAcls(
                 TranslateAdmin.AclBindings(request.Acls),
                 new CreateAclsOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.AclBindingKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.AclBindingKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeAclsResponse> DescribeAcls(Proto.DescribeAclsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeAclsResponse> DescribeAcls(Proto.DescribeAclsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             if (request.Filter is null)
             {
-                return new Proto.DescribeAclsResponse
+                return Task.FromResult(new Proto.DescribeAclsResponse
                 {
                     Error = TranslateAdmin.RequestError("describe_acls requires a filter"),
-                };
+                });
             }
 
-            AsyncDescribeAclsResult result = admin.DescribeAcls(
+            DescribeAclsResult result = admin.DescribeAcls(
                 TranslateAdmin.AclFilter(request.Filter),
                 new DescribeAclsOptions
                 {
@@ -1637,31 +1644,31 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // Whole-value: one future for the whole call, so an empty list is a successful
             // "nothing matched" rather than a per-binding error arm.
             Proto.DescribeAclsResponse response = new Proto.DescribeAclsResponse();
-            foreach (AclBinding binding in await result.Values().Get().ConfigureAwait(false))
+            foreach (AclBinding binding in result.Values().Get())
             {
                 response.Acls.Add(TranslateAdmin.AclBindingToProto(binding));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeAclsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeAclsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DeleteAclsResponse> DeleteAcls(Proto.DeleteAclsRequest request, ServerCallContext context)
+    public override Task<Proto.DeleteAclsResponse> DeleteAcls(Proto.DeleteAclsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DeleteAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DeleteAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDeleteAclsResult result = admin.DeleteAcls(
+            DeleteAclsResult result = admin.DeleteAcls(
                 TranslateAdmin.AclFilters(request.Filters),
                 new DeleteAclsOptions
                 {
@@ -1669,10 +1676,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DeleteAclsResponse response = new Proto.DeleteAclsResponse();
-            foreach (KeyValuePair<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values)
+            foreach (KeyValuePair<AclBindingFilter, KafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values)
             {
                 (DeleteAclsResult.FilterResults results, Proto.KafkaError? error) =
-                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                    TranslateAdmin.Resolve(pair.Value);
                 Proto.DeleteAclsEntry entry = new Proto.DeleteAclsEntry
                 {
                     Key = TranslateAdmin.AclFilterKey(pair.Key),
@@ -1689,21 +1696,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entries.Add(entry);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DeleteAclsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DeleteAclsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeClientQuotasResponse> DescribeClientQuotas(Proto.DescribeClientQuotasRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeClientQuotasResponse> DescribeClientQuotas(Proto.DescribeClientQuotasRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeClientQuotasResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeClientQuotasResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -1711,13 +1718,13 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             ClientQuotaFilter? filter = TranslateAdmin.QuotaFilter(request, out string? invalid);
             if (filter is null)
             {
-                return new Proto.DescribeClientQuotasResponse
+                return Task.FromResult(new Proto.DescribeClientQuotasResponse
                 {
                     Error = TranslateAdmin.RequestError(invalid!),
-                };
+                });
             }
 
-            AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
+            DescribeClientQuotasResult result = admin.DescribeClientQuotas(
                 filter,
                 new DescribeClientQuotasOptions
                 {
@@ -1728,7 +1735,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // is the only observable separating a removal from a zero-valued set.
             Proto.DescribeClientQuotasResponse response = new Proto.DescribeClientQuotasResponse();
             IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-                await result.Entities().Get().ConfigureAwait(false);
+                result.Entities().Get();
             foreach (KeyValuePair<ClientQuotaEntity, IReadOnlyDictionary<string, double>> pair in entities)
             {
                 Proto.EntityQuotas reported = new Proto.EntityQuotas
@@ -1743,26 +1750,26 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Entities.Add(reported);
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeClientQuotasResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeClientQuotasResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> AlterClientQuotas(Proto.AlterClientQuotasRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> AlterClientQuotas(Proto.AlterClientQuotasRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
+            AlterClientQuotasResult result = admin.AlterClientQuotas(
                 TranslateAdmin.QuotaAlterations(request.Entries),
                 new AlterClientQuotasOptions
                 {
@@ -1770,31 +1777,30 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     ValidateOnly = request.ValidateOnly,
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.QuotaEntityKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.QuotaEntityKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeUserScramCredentialsResponse> DescribeUserScramCredentials(Proto.DescribeUserScramCredentialsRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeUserScramCredentialsResponse> DescribeUserScramCredentials(Proto.DescribeUserScramCredentialsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeUserScramCredentialsResponse
+            return Task.FromResult(new Proto.DescribeUserScramCredentialsResponse
             {
                 Error = Translate.UnknownAdmin(request.AdminId),
-            };
+            });
         }
 
         try
         {
             // An empty `users` is Java's no-argument overload: describe every user.
-            AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(
+            DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(
                 new List<string>(request.Users),
                 new DescribeUserScramCredentialsOptions
                 {
@@ -1804,10 +1810,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // RAW per-user rows, so the client can rebuild all three Java views. users()
             // excludes RESOURCE_NOT_FOUND users, so all()'s keys supply those; all() itself
             // faults on a hard per-user error, and then every non-RNF user is already listed.
-            List<string> candidates = new List<string>(await result.Users().Get().ConfigureAwait(false));
+            List<string> candidates = new List<string>(result.Users().Get());
             try
             {
-                foreach (string user in (await result.All().Get().ConfigureAwait(false)).Keys)
+                foreach (string user in result.All().Get().Keys)
                 {
                     if (!candidates.Contains(user))
                     {
@@ -1823,51 +1829,50 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 new Proto.DescribeUserScramCredentialsResponse();
             foreach (string user in candidates)
             {
-                response.Entries.Add(await ScramCredentialsEntry(result, user).ConfigureAwait(false));
+                response.Entries.Add(ScramCredentialsEntry(result, user));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeUserScramCredentialsResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeUserScramCredentialsResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> AlterUserScramCredentials(Proto.AlterUserScramCredentialsRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> AlterUserScramCredentials(Proto.AlterUserScramCredentialsRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncAlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
+            AlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
                 TranslateAdmin.ScramAlterations(request.Alterations),
                 new AlterUserScramCredentialsOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.CreateDelegationTokenResponse> CreateDelegationToken(Proto.CreateDelegationTokenRequest request, ServerCallContext context)
+    public override Task<Proto.CreateDelegationTokenResponse> CreateDelegationToken(Proto.CreateDelegationTokenRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.CreateDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.CreateDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -1885,31 +1890,31 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 options.Owner = TranslateAdmin.Principals(new[] { request.Owner })[0];
             }
 
-            AsyncCreateDelegationTokenResult result = admin.CreateDelegationToken(options);
-            DelegationToken token = await result.DelegationToken().Get().ConfigureAwait(false);
-            return new Proto.CreateDelegationTokenResponse
+            CreateDelegationTokenResult result = admin.CreateDelegationToken(options);
+            DelegationToken token = result.DelegationToken().Get();
+            return Task.FromResult(new Proto.CreateDelegationTokenResponse
             {
                 Token = TranslateAdmin.DelegationTokenToProto(token),
-            };
+            });
         }
         catch (Exception ex)
         {
-            return new Proto.CreateDelegationTokenResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.CreateDelegationTokenResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DelegationTokenExpiryResponse> RenewDelegationToken(Proto.RenewDelegationTokenRequest request, ServerCallContext context)
+    public override Task<Proto.DelegationTokenExpiryResponse> RenewDelegationToken(Proto.RenewDelegationTokenRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncRenewDelegationTokenResult result = admin.RenewDelegationToken(
+            RenewDelegationTokenResult result = admin.RenewDelegationToken(
                 request.Hmac.ToByteArray(),
                 new RenewDelegationTokenOptions
                 {
@@ -1917,29 +1922,29 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     RenewTimePeriodMs = request.RenewTimePeriodMs,
                 });
 
-            return new Proto.DelegationTokenExpiryResponse
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse
             {
-                ExpiryTimestampMs = await result.ExpiryTimestamp().Get().ConfigureAwait(false),
-            };
+                ExpiryTimestampMs = result.ExpiryTimestamp().Get(),
+            });
         }
         catch (Exception ex)
         {
-            return new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DelegationTokenExpiryResponse> ExpireDelegationToken(Proto.ExpireDelegationTokenRequest request, ServerCallContext context)
+    public override Task<Proto.DelegationTokenExpiryResponse> ExpireDelegationToken(Proto.ExpireDelegationTokenRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncExpireDelegationTokenResult result = admin.ExpireDelegationToken(
+            ExpireDelegationTokenResult result = admin.ExpireDelegationToken(
                 request.Hmac.ToByteArray(),
                 new ExpireDelegationTokenOptions
                 {
@@ -1947,29 +1952,29 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     ExpiryTimePeriodMs = request.ExpiryTimePeriodMs,
                 });
 
-            return new Proto.DelegationTokenExpiryResponse
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse
             {
-                ExpiryTimestampMs = await result.ExpiryTimestamp().Get().ConfigureAwait(false),
-            };
+                ExpiryTimestampMs = result.ExpiryTimestamp().Get(),
+            });
         }
         catch (Exception ex)
         {
-            return new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeDelegationTokenResponse> DescribeDelegationToken(Proto.DescribeDelegationTokenRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeDelegationTokenResponse> DescribeDelegationToken(Proto.DescribeDelegationTokenRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
-            AsyncDescribeDelegationTokenResult result = admin.DescribeDelegationToken(
+            DescribeDelegationTokenResult result = admin.DescribeDelegationToken(
                 new DescribeDelegationTokenOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
@@ -1977,58 +1982,58 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 });
 
             Proto.DescribeDelegationTokenResponse response = new Proto.DescribeDelegationTokenResponse();
-            foreach (DelegationToken token in await result.DelegationTokens().Get().ConfigureAwait(false))
+            foreach (DelegationToken token in result.DelegationTokens().Get())
             {
                 response.Tokens.Add(TranslateAdmin.DelegationTokenToProto(token));
             }
 
-            return response;
+            return Task.FromResult(response);
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeDelegationTokenResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeDelegationTokenResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.DescribeFeaturesResponse> DescribeFeatures(Proto.DescribeFeaturesRequest request, ServerCallContext context)
+    public override Task<Proto.DescribeFeaturesResponse> DescribeFeatures(Proto.DescribeFeaturesRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.DescribeFeaturesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.DescribeFeaturesResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
         {
             // An absent node_id is Java's empty OptionalInt; node 0 is a legal broker, so
             // presence is what carries the absence.
-            AsyncDescribeFeaturesResult result = admin.DescribeFeatures(
+            DescribeFeaturesResult result = admin.DescribeFeatures(
                 new DescribeFeaturesOptions
                 {
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                     NodeId = request.HasNodeId ? request.NodeId : (int?)null,
                 });
 
-            FeatureMetadata metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
-            return new Proto.DescribeFeaturesResponse
+            FeatureMetadata metadata = result.FeatureMetadata().Get();
+            return Task.FromResult(new Proto.DescribeFeaturesResponse
             {
                 Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
-            };
+            });
         }
         catch (Exception ex)
         {
-            return new Proto.DescribeFeaturesResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.DescribeFeaturesResponse { Error = Translate.ToProto(ex) });
         }
     }
 
     /// <inheritdoc/>
-    public override async Task<Proto.VoidKeyedResponse> UpdateFeatures(Proto.UpdateFeaturesRequest request, ServerCallContext context)
+    public override Task<Proto.VoidKeyedResponse> UpdateFeatures(Proto.UpdateFeaturesRequest request, ServerCallContext context)
     {
-        IAsyncAdmin? admin = Get(request.AdminId);
+        IAdmin? admin = Get(request.AdminId);
         if (admin is null)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) });
         }
 
         try
@@ -2037,13 +2042,13 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 TranslateAdmin.FeatureUpdates(request.FeatureUpdates, out string? invalid);
             if (updates is null)
             {
-                return new Proto.VoidKeyedResponse { Error = TranslateAdmin.RequestError(invalid!) };
+                return Task.FromResult(new Proto.VoidKeyedResponse { Error = TranslateAdmin.RequestError(invalid!) });
             }
 
             // An empty map is forwarded as such: a real client rejects it synchronously, as Java
             // does, and that throw is exactly what the top-level error is for; a mock, like
             // Java's, returns an empty result.
-            AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
+            UpdateFeaturesResult result = admin.UpdateFeatures(
                 updates,
                 new UpdateFeaturesOptions
                 {
@@ -2051,12 +2056,11 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     ValidateOnly = request.ValidateOnly,
                 });
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
-                .ConfigureAwait(false);
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
-            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+            return Task.FromResult(new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) });
         }
     }
 
@@ -2091,15 +2095,15 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     /// One RAW <c>describeUserScramCredentials</c> row: the user, plus either its credentials or
     /// the wire error code that <c>description(user)</c> faulted with.
     /// </summary>
-    private static async Task<Proto.DescribeUserScramCredentialsEntry> ScramCredentialsEntry(
-        AsyncDescribeUserScramCredentialsResult result, string user)
+    private static Proto.DescribeUserScramCredentialsEntry ScramCredentialsEntry(
+        DescribeUserScramCredentialsResult result, string user)
     {
         Proto.DescribeUserScramCredentialsEntry entry =
             new Proto.DescribeUserScramCredentialsEntry { User = user };
         try
         {
             UserScramCredentialsDescription description =
-                await result.Description(user).Get().ConfigureAwait(false);
+                result.Description(user).Get();
             foreach (ScramCredentialInfo info in description.CredentialInfos)
             {
                 entry.CredentialInfos.Add(TranslateAdmin.ScramInfoToProto(info));
@@ -2126,11 +2130,11 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     /// <summary>
     /// One <c>describeTopics</c> entry: the key plus that key's own description or error.
     /// </summary>
-    private static async Task<Proto.DescribeTopicsEntry> DescribeTopicsEntry(
-        Proto.ResultKey key, AsyncKafkaFuture<TopicDescription> future)
+    private static Proto.DescribeTopicsEntry DescribeTopicsEntry(
+        Proto.ResultKey key, KafkaFuture<TopicDescription> future)
     {
         (TopicDescription description, Proto.KafkaError? error) =
-            await TranslateAdmin.Resolve(future).ConfigureAwait(false);
+            TranslateAdmin.Resolve(future);
         Proto.DescribeTopicsEntry entry = new Proto.DescribeTopicsEntry { Key = key };
         if (error is not null)
         {
@@ -2149,17 +2153,17 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     /// future resolved, but the four accessors rethrow when the broker created the topic without
     /// returning its metadata, and that third state must cross as the value's own error arm.
     /// </summary>
-    private static async Task<Proto.TopicMetadataAndConfig> MetadataAndConfig(AsyncCreateTopicsResult result, string topic)
+    private static Proto.TopicMetadataAndConfig MetadataAndConfig(CreateTopicsResult result, string topic)
     {
         try
         {
             Proto.TopicMetadata metadata = new Proto.TopicMetadata
             {
-                TopicId = (await result.TopicId(topic).Get().ConfigureAwait(false)).ToString(),
-                NumPartitions = await result.NumPartitions(topic).Get().ConfigureAwait(false),
-                ReplicationFactor = await result.ReplicationFactor(topic).Get().ConfigureAwait(false),
+                TopicId = result.TopicId(topic).Get().ToString(),
+                NumPartitions = result.NumPartitions(topic).Get(),
+                ReplicationFactor = result.ReplicationFactor(topic).Get(),
             };
-            Config config = await result.Config(topic).Get().ConfigureAwait(false);
+            Config config = result.Config(topic).Get();
             foreach (ConfigEntry entry in config.Entries)
             {
                 metadata.Configs.Add(TranslateAdmin.ConfigEntryToProto(entry));
@@ -2173,6 +2177,6 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         }
     }
 
-    private IAsyncAdmin? Get(ulong adminId) =>
-        _admins.TryGetValue(adminId, out IAsyncAdmin? admin) ? admin : null;
+    private IAdmin? Get(ulong adminId) =>
+        _admins.TryGetValue(adminId, out IAdmin? admin) ? admin : null;
 }
