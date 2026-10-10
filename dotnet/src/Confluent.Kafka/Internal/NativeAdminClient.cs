@@ -988,6 +988,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options) =>
         CreateTopics(newTopics, options, NativeMethods.AdminClientCreateTopicsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, TopicMetadataAndConfig> CreateTopics(
+        IEnumerable<NewTopic> newTopics,
+        CreateTopicsOptions? options,
+        AdminFlavour flavour) =>
+        CreateTopics(newTopics, options, flavour, NativeMethods.AdminClientCreateTopicsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal CreateTopicsResult CreateTopics(
         IEnumerable<NewTopic> newTopics,
@@ -1152,6 +1162,21 @@ internal sealed class NativeAdminClient : IDisposable
             NativeMethods.AdminClientDeleteTopicsAsync,
             NativeMethods.AdminClientDeleteTopicsByIdsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal (VoidKeyedAdminOperation<string>? ByName, VoidKeyedAdminOperation<Uuid>? ById) DeleteTopics(
+        TopicCollection topics,
+        DeleteTopicsOptions? options,
+        AdminFlavour flavour) =>
+        DeleteTopics(
+            topics,
+            options,
+            flavour,
+            NativeMethods.AdminClientDeleteTopicsAsync,
+            NativeMethods.AdminClientDeleteTopicsByIdsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DeleteTopicsResult DeleteTopics(
         TopicCollection topics,
@@ -1263,6 +1288,21 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeTopics(
             topics,
             options,
+            NativeMethods.AdminClientDescribeTopicsAsync,
+            NativeMethods.AdminClientDescribeTopicsByIdsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal (KeyedAdminOperation<string, TopicDescription>? ByName, KeyedAdminOperation<Uuid, TopicDescription>? ById) DescribeTopics(
+        TopicCollection topics,
+        DescribeTopicsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeTopics(
+            topics,
+            options,
+            flavour,
             NativeMethods.AdminClientDescribeTopicsAsync,
             NativeMethods.AdminClientDescribeTopicsByIdsAsync);
 
@@ -1390,6 +1430,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal ListTopicsResult ListTopics(ListTopicsOptions? options) =>
         ListTopics(options, NativeMethods.AdminClientListTopicsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> ListTopics(
+        ListTopicsOptions? options,
+        AdminFlavour flavour) =>
+        ListTopics(options, flavour, NativeMethods.AdminClientListTopicsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListTopicsResult ListTopics(ListTopicsOptions? options, NativeListTopicsSubmit submit) =>
         ListTopicsResult.From(ListTopics(options, AdminFlavour.Async, submit));
@@ -1456,6 +1505,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal CreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options) =>
         CreatePartitions(newPartitions, options, NativeMethods.AdminClientCreatePartitionsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<string> CreatePartitions(
+        IReadOnlyDictionary<string, NewPartitions> newPartitions,
+        CreatePartitionsOptions? options,
+        AdminFlavour flavour) =>
+        CreatePartitions(newPartitions, options, flavour, NativeMethods.AdminClientCreatePartitionsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal CreatePartitionsResult CreatePartitions(
@@ -1622,6 +1681,16 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteRecordsOptions? options) =>
         DeleteRecords(recordsToDelete, options, NativeMethods.AdminClientDeleteRecordsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<TopicPartition, DeletedRecords> DeleteRecords(
+        IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
+        DeleteRecordsOptions? options,
+        AdminFlavour flavour) =>
+        DeleteRecords(recordsToDelete, options, flavour, NativeMethods.AdminClientDeleteRecordsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
@@ -1783,6 +1852,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeClusterResult DescribeCluster(DescribeClusterOptions? options) =>
         DescribeCluster(options, NativeMethods.AdminClientDescribeClusterAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<DescribeClusterSnapshot> DescribeCluster(
+        DescribeClusterOptions? options,
+        AdminFlavour flavour) =>
+        DescribeCluster(options, flavour, NativeMethods.AdminClientDescribeClusterAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeClusterResult DescribeCluster(
         DescribeClusterOptions? options, NativeDescribeClusterSubmit submit) =>
@@ -1853,6 +1931,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes, ListConfigResourcesOptions? options) =>
         ListConfigResources(configResourceTypes, options, NativeMethods.AdminClientListConfigResourcesAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyCollection<ConfigResource>> ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes,
+        ListConfigResourcesOptions? options,
+        AdminFlavour flavour) =>
+        ListConfigResources(configResourceTypes, options, flavour, NativeMethods.AdminClientListConfigResourcesAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListConfigResourcesResult ListConfigResources(
@@ -1931,6 +2019,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options) =>
         DescribeConfigs(resources, options, NativeMethods.AdminClientDescribeConfigsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<ConfigResource, Config> DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources,
+        DescribeConfigsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeConfigs(resources, options, flavour, NativeMethods.AdminClientDescribeConfigsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeConfigsResult DescribeConfigs(
@@ -2052,6 +2150,16 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options) =>
         IncrementalAlterConfigs(configs, options, NativeMethods.AdminClientIncrementalAlterConfigsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<ConfigResource> IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options,
+        AdminFlavour flavour) =>
+        IncrementalAlterConfigs(configs, options, flavour, NativeMethods.AdminClientIncrementalAlterConfigsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterConfigsResult IncrementalAlterConfigs(
@@ -2306,6 +2414,16 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options) =>
         DescribeLogDirs(brokers, options, NativeMethods.AdminClientDescribeLogDirsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> DescribeLogDirs(
+        IReadOnlyCollection<int> brokers,
+        DescribeLogDirsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeLogDirs(brokers, options, flavour, NativeMethods.AdminClientDescribeLogDirsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers,
@@ -2397,6 +2515,16 @@ internal sealed class NativeAdminClient : IDisposable
         AlterReplicaLogDirsOptions? options) =>
         AlterReplicaLogDirs(
             replicaAssignment, options, NativeMethods.AdminClientAlterReplicaLogDirsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<TopicPartitionReplica> AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options,
+        AdminFlavour flavour) =>
+        AlterReplicaLogDirs(replicaAssignment, options, flavour, NativeMethods.AdminClientAlterReplicaLogDirsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
@@ -2564,6 +2692,16 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeReplicaLogDirs(
             replicas, options, NativeMethods.AdminClientDescribeReplicaLogDirsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas,
+        DescribeReplicaLogDirsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeReplicaLogDirs(replicas, options, flavour, NativeMethods.AdminClientDescribeReplicaLogDirsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
@@ -2712,6 +2850,17 @@ internal sealed class NativeAdminClient : IDisposable
         ElectLeadersOptions? options) =>
         ElectLeaders(electionType, partitions, options, NativeMethods.AdminClientElectLeadersAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options,
+        AdminFlavour flavour) =>
+        ElectLeaders(electionType, partitions, options, flavour, NativeMethods.AdminClientElectLeadersAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ElectLeadersResult ElectLeaders(
         ElectionType electionType,
@@ -2851,6 +3000,20 @@ internal sealed class NativeAdminClient : IDisposable
         AlterPartitionReassignmentsOptions? options) =>
         AlterPartitionReassignments(
             reassignments, options, NativeMethods.AdminClientAlterPartitionReassignmentsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<TopicPartition> AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options,
+        AdminFlavour flavour) =>
+        AlterPartitionReassignments(
+            reassignments,
+            options,
+            flavour,
+            NativeMethods.AdminClientAlterPartitionReassignmentsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
@@ -3069,6 +3232,22 @@ internal sealed class NativeAdminClient : IDisposable
         AlterConsumerGroupOffsets(
             groupId, offsets, options, NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour) =>
+        AlterConsumerGroupOffsets(
+            groupId,
+            offsets,
+            options,
+            flavour,
+            NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
@@ -3255,6 +3434,22 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteConsumerGroupOffsets(
             groupId, partitions, options, NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal (SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> Operation, IReadOnlyCollection<TopicPartition> Partitions) DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour) =>
+        DeleteConsumerGroupOffsets(
+            groupId,
+            partitions,
+            options,
+            flavour,
+            NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
@@ -3404,6 +3599,16 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options) =>
         DeleteConsumerGroups(groupIds, options, NativeMethods.AdminClientDeleteConsumerGroupsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<string> DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DeleteConsumerGroupsOptions? options,
+        AdminFlavour flavour) =>
+        DeleteConsumerGroups(groupIds, options, flavour, NativeMethods.AdminClientDeleteConsumerGroupsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds,
@@ -3479,6 +3684,20 @@ internal sealed class NativeAdminClient : IDisposable
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroup(
             groupId, options, NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal (SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> Operation, IReadOnlyCollection<MemberToRemove> Members) RemoveMembersFromConsumerGroup(
+        string groupId,
+        RemoveMembersFromConsumerGroupOptions options,
+        AdminFlavour flavour) =>
+        RemoveMembersFromConsumerGroup(
+            groupId,
+            options,
+            flavour,
+            NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
@@ -3632,6 +3851,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options) =>
         CreateAcls(acls, options, NativeMethods.AdminClientCreateAclsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<AclBinding> CreateAcls(
+        IEnumerable<AclBinding> acls,
+        CreateAclsOptions? options,
+        AdminFlavour flavour) =>
+        CreateAcls(acls, options, flavour, NativeMethods.AdminClientCreateAclsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal CreateAclsResult CreateAcls(
         IEnumerable<AclBinding> acls, CreateAclsOptions? options, NativeCreateAclsSubmit submit) =>
@@ -3736,6 +3965,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options) =>
         DeleteAcls(filters, options, NativeMethods.AdminClientDeleteAclsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> DeleteAcls(
+        IEnumerable<AclBindingFilter> filters,
+        DeleteAclsOptions? options,
+        AdminFlavour flavour) =>
+        DeleteAcls(filters, options, flavour, NativeMethods.AdminClientDeleteAclsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DeleteAclsResult DeleteAcls(
@@ -3850,6 +4089,16 @@ internal sealed class NativeAdminClient : IDisposable
         AclBindingFilter filter, DescribeAclsOptions? options) =>
         DescribeAcls(filter, options, NativeMethods.AdminClientDescribeAclsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyCollection<AclBinding>> DescribeAcls(
+        AclBindingFilter filter,
+        DescribeAclsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeAcls(filter, options, flavour, NativeMethods.AdminClientDescribeAclsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeAclsResult DescribeAcls(
         AclBindingFilter filter,
@@ -3950,6 +4199,16 @@ internal sealed class NativeAdminClient : IDisposable
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options) =>
         DescribeClientQuotas(filter, options, NativeMethods.AdminClientDescribeClientQuotasAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> DescribeClientQuotas(
+        ClientQuotaFilter filter,
+        DescribeClientQuotasOptions? options,
+        AdminFlavour flavour) =>
+        DescribeClientQuotas(filter, options, flavour, NativeMethods.AdminClientDescribeClientQuotasAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter,
@@ -4049,6 +4308,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options) =>
         AlterClientQuotas(entries, options, NativeMethods.AdminClientAlterClientQuotasAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<ClientQuotaEntity> AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries,
+        AlterClientQuotasOptions? options,
+        AdminFlavour flavour) =>
+        AlterClientQuotas(entries, options, flavour, NativeMethods.AdminClientAlterClientQuotasAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterClientQuotasResult AlterClientQuotas(
@@ -4223,6 +4492,20 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeUserScramCredentials(
             users, options, NativeMethods.AdminClientDescribeUserScramCredentialsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<DescribeUserScramCredentialsViews> DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users,
+        DescribeUserScramCredentialsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeUserScramCredentials(
+            users,
+            options,
+            flavour,
+            NativeMethods.AdminClientDescribeUserScramCredentialsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users,
@@ -4335,6 +4618,20 @@ internal sealed class NativeAdminClient : IDisposable
         IEnumerable<UserScramCredentialAlteration> alterations, AlterUserScramCredentialsOptions? options) =>
         AlterUserScramCredentials(
             alterations, options, NativeMethods.AdminClientAlterUserScramCredentialsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<string> AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options,
+        AdminFlavour flavour) =>
+        AlterUserScramCredentials(
+            alterations,
+            options,
+            flavour,
+            NativeMethods.AdminClientAlterUserScramCredentialsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AlterUserScramCredentialsResult AlterUserScramCredentials(
@@ -4452,6 +4749,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options) =>
         CreateDelegationToken(options, NativeMethods.AdminClientCreateDelegationTokenAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<DelegationToken> CreateDelegationToken(
+        CreateDelegationTokenOptions? options,
+        AdminFlavour flavour) =>
+        CreateDelegationToken(options, flavour, NativeMethods.AdminClientCreateDelegationTokenAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal CreateDelegationTokenResult CreateDelegationToken(
         CreateDelegationTokenOptions? options, NativeCreateDelegationTokenSubmit submit) =>
@@ -4559,6 +4865,16 @@ internal sealed class NativeAdminClient : IDisposable
         byte[] hmac, RenewDelegationTokenOptions? options) =>
         RenewDelegationToken(hmac, options, NativeMethods.AdminClientRenewDelegationTokenAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<long> RenewDelegationToken(
+        byte[] hmac,
+        RenewDelegationTokenOptions? options,
+        AdminFlavour flavour) =>
+        RenewDelegationToken(hmac, options, flavour, NativeMethods.AdminClientRenewDelegationTokenAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options, NativeRenewDelegationTokenSubmit submit) =>
@@ -4631,6 +4947,16 @@ internal sealed class NativeAdminClient : IDisposable
         byte[] hmac, ExpireDelegationTokenOptions? options) =>
         ExpireDelegationToken(hmac, options, NativeMethods.AdminClientExpireDelegationTokenAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<long> ExpireDelegationToken(
+        byte[] hmac,
+        ExpireDelegationTokenOptions? options,
+        AdminFlavour flavour) =>
+        ExpireDelegationToken(hmac, options, flavour, NativeMethods.AdminClientExpireDelegationTokenAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options, NativeExpireDelegationTokenSubmit submit) =>
@@ -4702,6 +5028,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options) =>
         DescribeDelegationToken(options, NativeMethods.AdminClientDescribeDelegationTokenAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyCollection<DelegationToken>> DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options,
+        AdminFlavour flavour) =>
+        DescribeDelegationToken(options, flavour, NativeMethods.AdminClientDescribeDelegationTokenAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeDelegationTokenResult DescribeDelegationToken(
@@ -4789,6 +5124,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options) =>
         DescribeFeatures(options, NativeMethods.AdminClientDescribeFeaturesAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<FeatureMetadata> DescribeFeatures(
+        DescribeFeaturesOptions? options,
+        AdminFlavour flavour) =>
+        DescribeFeatures(options, flavour, NativeMethods.AdminClientDescribeFeaturesAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeFeaturesResult DescribeFeatures(
         DescribeFeaturesOptions? options, NativeDescribeFeaturesSubmit submit) =>
@@ -4845,6 +5189,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates, UpdateFeaturesOptions? options) =>
         UpdateFeatures(featureUpdates, options, NativeMethods.AdminClientUpdateFeaturesAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal VoidKeyedAdminOperation<string> UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options,
+        AdminFlavour flavour) =>
+        UpdateFeatures(featureUpdates, options, flavour, NativeMethods.AdminClientUpdateFeaturesAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal UpdateFeaturesResult UpdateFeatures(
@@ -5035,6 +5389,16 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options) =>
         FenceProducers(transactionalIds, options, NativeMethods.AdminClientFenceProducersAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, ProducerIdAndEpoch> FenceProducers(
+        IReadOnlyCollection<string> transactionalIds,
+        FenceProducersOptions? options,
+        AdminFlavour flavour) =>
+        FenceProducers(transactionalIds, options, flavour, NativeMethods.AdminClientFenceProducersAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds,
@@ -5130,6 +5494,16 @@ internal sealed class NativeAdminClient : IDisposable
         DescribeTransactions(
             transactionalIds, options, NativeMethods.AdminClientDescribeTransactionsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, TransactionDescription> DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds,
+        DescribeTransactionsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeTransactions(transactionalIds, options, flavour, NativeMethods.AdminClientDescribeTransactionsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds,
@@ -5216,6 +5590,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options) =>
         DescribeProducers(partitions, options, NativeMethods.AdminClientDescribeProducersAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions,
+        DescribeProducersOptions? options,
+        AdminFlavour flavour) =>
+        DescribeProducers(partitions, options, flavour, NativeMethods.AdminClientDescribeProducersAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeProducersResult DescribeProducers(
@@ -5326,6 +5710,22 @@ internal sealed class NativeAdminClient : IDisposable
         ListTransactions(options, NativeMethods.AdminClientListTransactionsAsync);
 
     /// <summary>
+    /// The production submit of <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>,
+    /// for the async flavour's clients (M15/P14), which wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    /// <remarks>
+    /// Unlike the other RPCs it takes no <see cref="AdminFlavour"/>: the operation has a single, task-backed shape,
+    /// which is the async flavour's.
+    /// </remarks>
+    internal ListTransactionsAdminOperation ListTransactionsOperation(ListTransactionsOptions? options) =>
+        ListTransactionsOperation(options, NativeMethods.AdminClientListTransactionsAsync);
+
+    /// <summary>The pre-P14 overload of the core below.</summary>
+    internal ListTransactionsResult ListTransactions(
+        ListTransactionsOptions? options, NativeListTransactionsSubmit submit) =>
+        new ListTransactionsResult(ListTransactionsOperation(options, submit).ByBrokerId);
+
+    /// <summary>
     /// Submits <c>listTransactions</c> and returns immediately with Java's
     /// <c>byBrokerId()</c> shape: one awaitable over the broker map, whose per-broker
     /// awaitables each resolve on their own.
@@ -5355,7 +5755,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="ListTransactionsAdminOperation"/>.
     /// </para>
     /// </remarks>
-    internal ListTransactionsResult ListTransactions(
+    internal ListTransactionsAdminOperation ListTransactionsOperation(
         ListTransactionsOptions? options, NativeListTransactionsSubmit submit)
     {
         ThrowIfClosed();
@@ -5433,12 +5833,12 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListTransactionsResult(operation.ByBrokerId);
+        return operation;
     }
 
     /// <summary>
     /// The state filter and its count, produced together — see the transposition note on
-    /// <see cref="ListTransactions(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
     /// </summary>
     /// <param name="options">The request options, or null.</param>
     /// <param name="pinned">Receives the call-scoped pins the returned pointers borrow from.</param>
@@ -5465,7 +5865,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// The producer-id filter and its count, produced together — see the transposition note on
-    /// <see cref="ListTransactions(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
     /// </summary>
     /// <param name="options">The request options, or null.</param>
     /// <returns>The producer ids and their count.</returns>
@@ -5488,6 +5888,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal AbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options) =>
         AbortTransaction(spec, options, NativeMethods.AdminClientAbortTransactionAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<bool> AbortTransaction(
+        AbortTransactionSpec spec,
+        AbortTransactionOptions? options,
+        AdminFlavour flavour) =>
+        AbortTransaction(spec, options, flavour, NativeMethods.AdminClientAbortTransactionAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal AbortTransactionResult AbortTransaction(
@@ -5581,6 +5991,20 @@ internal sealed class NativeAdminClient : IDisposable
         ForceTerminateTransaction(
             transactionalId, options, NativeMethods.AdminClientForceTerminateTransactionAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<bool> ForceTerminateTransaction(
+        string transactionalId,
+        TerminateTransactionOptions? options,
+        AdminFlavour flavour) =>
+        ForceTerminateTransaction(
+            transactionalId,
+            options,
+            flavour,
+            NativeMethods.AdminClientForceTerminateTransactionAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId,
@@ -5660,6 +6084,20 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
         ListPartitionReassignments(
             partitions, options, NativeMethods.AdminClientListPartitionReassignmentsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions? options,
+        AdminFlavour flavour) =>
+        ListPartitionReassignments(
+            partitions,
+            options,
+            flavour,
+            NativeMethods.AdminClientListPartitionReassignmentsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListPartitionReassignmentsResult ListPartitionReassignments(
@@ -5777,6 +6215,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets, ListOffsetsOptions? options) =>
         ListOffsets(topicPartitionOffsets, options, NativeMethods.AdminClientListOffsetsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
+        ListOffsetsOptions? options,
+        AdminFlavour flavour) =>
+        ListOffsets(topicPartitionOffsets, options, flavour, NativeMethods.AdminClientListOffsetsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListOffsetsResult ListOffsets(
@@ -5964,6 +6412,15 @@ internal sealed class NativeAdminClient : IDisposable
     internal ListGroupsResult ListGroups(ListGroupsOptions? options) =>
         ListGroups(options, NativeMethods.AdminClientListGroupsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> ListGroups(
+        ListGroupsOptions? options,
+        AdminFlavour flavour) =>
+        ListGroups(options, flavour, NativeMethods.AdminClientListGroupsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListGroupsResult ListGroups(ListGroupsOptions? options, NativeListGroupsSubmit submit) =>
         ListGroupsResult.From(ListGroups(options, AdminFlavour.Async, submit));
@@ -6106,6 +6563,16 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options) =>
         DescribeConsumerGroups(groupIds, options, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
 
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, ConsumerGroupDescription> DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeConsumerGroupsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeConsumerGroups(groupIds, options, flavour, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
+
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds,
@@ -6197,6 +6664,16 @@ internal sealed class NativeAdminClient : IDisposable
     internal DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options) =>
         DescribeClassicGroups(groupIds, options, NativeMethods.AdminClientDescribeClassicGroupsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, ClassicGroupDescription> DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeClassicGroupsOptions? options,
+        AdminFlavour flavour) =>
+        DescribeClassicGroups(groupIds, options, flavour, NativeMethods.AdminClientDescribeClassicGroupsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeClassicGroupsResult DescribeClassicGroups(
@@ -6292,6 +6769,16 @@ internal sealed class NativeAdminClient : IDisposable
         ListConsumerGroupOffsetsOptions? options) =>
         ListConsumerGroupOffsets(
             groupSpecs, options, NativeMethods.AdminClientListConsumerGroupOffsetsAsync);
+
+    /// <summary>
+    /// The production submit of the core below, for a client of the given flavour (M15/P14): the async
+    /// flavour's clients call this, then wrap the operation in their Result's <c>From</c>.
+    /// </summary>
+    internal KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour) =>
+        ListConsumerGroupOffsets(groupSpecs, options, flavour, NativeMethods.AdminClientListConsumerGroupOffsetsAsync);
 
     /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(

@@ -1,0 +1,78 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
+
+namespace Confluent.Kafka.Admin;
+
+/// <summary>
+/// The result of <see cref="IAsyncAdmin.DescribeClientQuotas"/> — the .NET realization of Java's
+/// <c>DescribeClientQuotasResult</c>: <b>one</b> awaitable over the whole entity-to-quota
+/// map (<c>DescribeClientQuotasResult.java:31</c>).
+/// </summary>
+/// <remarks>
+/// ⚠ <b>There is no <c>All()</c>.</b> Java publishes only <c>entities()</c> (<c>:46</c>), and
+/// <c>kafka_admin_DescribeClientQuotasResult_t</c> declares no <c>get_error</c> of any kind —
+/// so there is no per-entity outcome to aggregate and any failure faults this single future.
+/// </remarks>
+/// <seealso cref="DescribeClientQuotasResult"/>
+public sealed class AsyncDescribeClientQuotasResult
+{
+    private readonly AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> _future;
+
+    /// <summary>
+    /// Wraps the single awaitable — Java's <b>public</b>
+    /// <c>DescribeClientQuotasResult(KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;)</c>
+    /// (<c>:39</c>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
+    /// <c>design/current/STATUS.md</c>.
+    /// </remarks>
+    /// <param name="entities">The awaitable over the entity-to-quota map.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="entities"/> is a default value, bound to no task — this constructor's null, where Java
+    /// stores the null and throws <c>NullPointerException</c> on first use.
+    /// </exception>
+    internal AsyncDescribeClientQuotasResult(
+        AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities)
+    {
+        _future = entities != default ? entities : throw new ArgumentNullException(nameof(entities));
+    }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AsyncDescribeClientQuotasResult From(
+        SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation) =>
+        new AsyncDescribeClientQuotasResult(new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(operation.Task));
+
+    /// <summary>
+    /// The quotas of every entity matching the filter — Java's <c>entities()</c>
+    /// (<c>:46</c>). A quota type an entity has no value for is simply absent.
+    /// </summary>
+    /// <returns>
+    /// A future yielding the map, or faulting with the call's own
+    /// <see cref="KafkaException"/>.
+    /// </returns>
+    /// <remarks>
+    /// This is the stored future itself, so every call returns an equal future over the <b>same</b> task —
+    /// no second task whose fault could go unobserved.
+    /// </remarks>
+    public AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities() => _future;
+}
