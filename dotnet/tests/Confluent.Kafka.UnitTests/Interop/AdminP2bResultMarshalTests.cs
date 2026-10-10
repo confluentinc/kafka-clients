@@ -220,28 +220,29 @@ public sealed class AdminP2bResultMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr capturedUserData = IntPtr.Zero;
-        ListTopicsResult result = admin.ListTopics(
+        AsyncListTopicsResult result = AsyncListTopicsResult.From(admin.ListTopics(
             options: null,
-            (nativeHandle, timeoutMs, listInternal, callback, userData) => capturedUserData = userData);
+            AdminFlavour.Async,
+            (nativeHandle, timeoutMs, listInternal, callback, userData) => capturedUserData = userData));
 
         Assert.NotEqual(IntPtr.Zero, capturedUserData);
-        Assert.False(result.NamesToListings().IsCompleted);
+        Assert.False(result.NamesToListings().Get().IsCompleted);
 
         AdminCallbacks.ListTopics(IntPtr.Zero, MakeError(42, "could not submit"), capturedUserData);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.NamesToListings(), s_deadline));
+            () => TestTimeout.Run(() => result.NamesToListings().Get(), s_deadline));
         Assert.Equal(42, failure.Code);
         Assert.Equal("could not submit", failure.Message);
 
         // The projections are derived from the same future, so they carry the same
         // failure rather than hanging or reporting an empty map.
         KafkaException fromListings = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Listings(), s_deadline));
+            () => TestTimeout.Run(() => result.Listings().Get(), s_deadline));
         Assert.Equal("could not submit", fromListings.Message);
 
         KafkaException fromNames = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Names(), s_deadline));
+            () => TestTimeout.Run(() => result.Names().Get(), s_deadline));
         Assert.Equal("could not submit", fromNames.Message);
     }
 

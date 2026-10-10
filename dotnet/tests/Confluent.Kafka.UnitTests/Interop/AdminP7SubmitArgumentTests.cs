@@ -167,16 +167,17 @@ public sealed class AdminP7SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        AlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
+        AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
             new UserScramCredentialAlteration[] { Upsert("dup"), Upsert("dup") },
             options: null,
+            AdminFlavour.Async,
             (handle, users, isDeletions, mechanisms, iterations, passwords, passwordLens,
              salts, saltLens, hasSalts, count, timeoutMs, callback, userData) =>
             {
                 captured.Count = count;
                 captured.Users = Decode(users);
                 captured.UserData = userData;
-            });
+            }));
 
         // M15/P9 CP6: one callback per DISTINCT user, which is the one thing the row count
         // is not — two rows, one key, one callback.
@@ -485,9 +486,10 @@ public sealed class AdminP7SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        admin.AlterUserScramCredentials(
+        AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
             alterations,
             options: null,
+            AdminFlavour.Async,
             (handle, users, isDeletions, mechanisms, iterations, passwords, passwordLens,
              salts, saltLens, hasSalts, count, timeoutMs, callback, userData) =>
             {
@@ -504,7 +506,7 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.IsDeletions = CopyFlags(isDeletions, count);
                 captured.HasSalts = CopyFlags(hasSalts, count);
                 captured.UserData = userData;
-            });
+            }));
 
         CompleteDistinctUsers(captured);
         return captured;
@@ -541,16 +543,17 @@ public sealed class AdminP7SubmitArgumentTests
         IReadOnlyList<string?> names = Array.Empty<string?>();
         IntPtr userData = IntPtr.Zero;
 
-        admin.DescribeUserScramCredentials(
+        AsyncDescribeUserScramCredentialsResult.From(admin.DescribeUserScramCredentials(
             users,
             options,
+            AdminFlavour.Async,
             (handle, pinned, pinnedCount, timeoutMs, callback, data) =>
             {
                 count = pinnedCount;
                 timeout = timeoutMs;
                 names = Decode(pinned);
                 userData = data;
-            });
+            }));
 
         AdminCallbacks.DescribeUserScramCredentials(IntPtr.Zero, CapturedError(), userData);
         return (count, names, timeout);
@@ -561,8 +564,9 @@ public sealed class AdminP7SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedCreateToken captured = new CapturedCreateToken();
-        admin.CreateDelegationToken(
+        AsyncCreateDelegationTokenResult.From(admin.CreateDelegationToken(
             options,
+            AdminFlavour.Async,
             (handle, renewerTypes, renewerNames, renewerCount, ownerType, ownerName,
              maxLifetimeMs, timeoutMs, callback, userData) =>
             {
@@ -575,7 +579,7 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.OwnerName = Utf8Marshal.PtrToString(ownerName);
                 captured.MaxLifetimeMs = maxLifetimeMs;
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.CreateDelegationToken(IntPtr.Zero, CapturedError(), captured.UserData);
         return captured;
@@ -590,16 +594,17 @@ public sealed class AdminP7SubmitArgumentTests
         long period = 0;
         IntPtr userData = IntPtr.Zero;
 
-        admin.RenewDelegationToken(
+        AsyncRenewDelegationTokenResult.From(admin.RenewDelegationToken(
             hmac,
             new RenewDelegationTokenOptions { RenewTimePeriodMs = periodMs },
+            AdminFlavour.Async,
             (handle, pointer, hmacLength, renewMs, timeoutMs, callback, data) =>
             {
                 length = hmacLength;
                 bytes = CopyRow(pointer, hmacLength);
                 period = renewMs;
                 userData = data;
-            });
+            }));
 
         AdminCallbacks.RenewDelegationToken(IntPtr.Zero, CapturedError(), userData);
         return (length, bytes, period);
@@ -614,16 +619,17 @@ public sealed class AdminP7SubmitArgumentTests
         long period = 0;
         IntPtr userData = IntPtr.Zero;
 
-        admin.ExpireDelegationToken(
+        AsyncExpireDelegationTokenResult.From(admin.ExpireDelegationToken(
             hmac,
             new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = periodMs },
+            AdminFlavour.Async,
             (handle, pointer, hmacLength, expiryMs, timeoutMs, callback, data) =>
             {
                 length = hmacLength;
                 bytes = CopyRow(pointer, hmacLength);
                 period = expiryMs;
                 userData = data;
-            });
+            }));
 
         AdminCallbacks.ExpireDelegationToken(IntPtr.Zero, CapturedError(), userData);
         return (length, bytes, period);
@@ -634,8 +640,9 @@ public sealed class AdminP7SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedDescribeTokens captured = new CapturedDescribeTokens();
-        admin.DescribeDelegationToken(
+        AsyncDescribeDelegationTokenResult.From(admin.DescribeDelegationToken(
             options,
+            AdminFlavour.Async,
             (handle, hasOwnersFilter, ownerTypes, ownerNames, ownerCount, timeoutMs, callback, userData) =>
             {
                 captured.HasOwnersFilter = hasOwnersFilter;
@@ -643,7 +650,7 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.OwnerPrincipalTypes = Decode(ownerTypes);
                 captured.OwnerNames = Decode(ownerNames);
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.DescribeDelegationToken(IntPtr.Zero, CapturedError(), captured.UserData);
         return captured;
@@ -657,14 +664,15 @@ public sealed class AdminP7SubmitArgumentTests
         int node = -1;
         IntPtr userData = IntPtr.Zero;
 
-        admin.DescribeFeatures(
+        AsyncDescribeFeaturesResult.From(admin.DescribeFeatures(
             options,
+            AdminFlavour.Async,
             (handle, has, nodeId, timeoutMs, callback, data) =>
             {
                 hasNodeId = has;
                 node = nodeId;
                 userData = data;
-            });
+            }));
 
         AdminCallbacks.DescribeFeatures(IntPtr.Zero, CapturedError(), userData);
         return (hasNodeId, node);
@@ -676,9 +684,10 @@ public sealed class AdminP7SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedUpdateFeatures captured = new CapturedUpdateFeatures();
-        admin.UpdateFeatures(
+        AsyncUpdateFeaturesResult.From(admin.UpdateFeatures(
             updates,
             options,
+            AdminFlavour.Async,
             (handle, features, maxVersionLevels, upgradeTypes, count, timeoutMs, validateOnly,
              callback, userData) =>
             {
@@ -691,7 +700,7 @@ public sealed class AdminP7SubmitArgumentTests
 
                 // Accepted: NULL is "submitted", so the callbacks below are owed.
                 return IntPtr.Zero;
-            });
+            }));
 
         // M15/P9 CP6: one callback per feature name — the map's keys are already distinct.
         foreach (string? feature in captured.Features)

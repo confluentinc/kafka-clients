@@ -176,12 +176,13 @@ public sealed class AdminConfigsLifetimeTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [s_resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
                 validateOnly, callback, userData) =>
             {
@@ -190,14 +191,14 @@ public sealed class AdminConfigsLifetimeTests
                 NativeMethods.AdminClientIncrementalAlterConfigsAsync(
                     nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
                     validateOnly, callback, userData);
-            });
+            }));
 
         // The awaiter is already faulted with NO await and NO sleep, which can only be true
         // if the callback ran to completion inside the entry point.
-        Assert.NotNull(result.Values[s_resource].Exception);
+        Assert.NotNull(result.Values[s_resource].Get().Exception);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[s_resource]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[s_resource].Get()), s_deadline);
         Assert.Equal(UnknownOpTypeMessage, failure.Message);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
@@ -236,15 +237,16 @@ public sealed class AdminConfigsLifetimeTests
         ConfigResource zeroOps = new ConfigResource(ConfigResourceType.Topic, "cfg-fail-zero-ops");
 
         IntPtr userData = IntPtr.Zero;
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [withOps] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
                 [zeroOps] = Array.Empty<AlterConfigOp>(),
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
-                validateOnly, callback, captured) => userData = captured);
+                validateOnly, callback, captured) => userData = captured));
 
         Assert.NotEqual(IntPtr.Zero, userData);
 
@@ -259,12 +261,12 @@ public sealed class AdminConfigsLifetimeTests
         foreach (ConfigResource resource in new[] { withOps, zeroOps })
         {
             KafkaException carrying = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => result.Values[resource]), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.Values[resource].Get()), s_deadline);
             Assert.Equal(61, carrying.Code);
             Assert.Equal("submit failed", carrying.Message);
         }
 
-        KafkaException all = await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        KafkaException all = await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(61, all.Code);
         Assert.Equal("submit failed", all.Message);
     }
@@ -300,25 +302,26 @@ public sealed class AdminConfigsLifetimeTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        DescribeConfigsResult described = admin.DescribeConfigs(new[] { undefined, unknown }, options: null);
+        AsyncDescribeConfigsResult described = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(new[] { undefined, unknown }, options: null, AdminFlavour.Async));
         Assert.Single(described.Values);
 
         KafkaException describeFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => described.Values[unknown]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => described.Values[unknown].Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, describeFailure.Code);
         Assert.Equal("Not implemented yet", describeFailure.Message);
 
-        AlterConfigsResult altered = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult altered = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [undefined] = Array.Empty<AlterConfigOp>(),
                 [unknown] = Array.Empty<AlterConfigOp>(),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
         Assert.Single(altered.Values);
 
         KafkaException alterFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => altered.Values[undefined]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => altered.Values[undefined].Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, alterFailure.Code);
         Assert.Equal("Not implemented yet", alterFailure.Message);
 
@@ -380,11 +383,11 @@ public sealed class AdminConfigsLifetimeTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(configs, options: null);
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(configs, options: null, AdminFlavour.Async));
         Assert.Single(result.Values);
 
-        await TestTimeout.Run(() => result.Values[first], s_deadline);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.Values[first].Get(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         Assert.True(
             DisposeAndAwaitRelease(admin, handle),
@@ -500,45 +503,49 @@ public sealed class AdminConfigsLifetimeTests
     {
         if (rpc == Rpc.DescribeConfigs)
         {
-            DescribeConfigsResult result = admin.DescribeConfigs(
+            AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(
                 new[] { s_resource },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, resourceTypes, resourceNames, count, timeoutMs, synonyms, documentation, callback,
-                    userData) => onSubmit(userData));
-            return () => result.Values[s_resource];
+                    userData) => onSubmit(userData)));
+            return () => result.Values[s_resource].Get();
         }
 
-        AlterConfigsResult altered = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult altered = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [s_resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
-                validateOnly, callback, userData) => onSubmit(userData));
-        return () => altered.Values[s_resource];
+                validateOnly, callback, userData) => onSubmit(userData)));
+        return () => altered.Values[s_resource].Get();
     }
 
     private static void SubmitThrowing(NativeAdminClient admin, Rpc rpc)
     {
         if (rpc == Rpc.DescribeConfigs)
         {
-            admin.DescribeConfigs(
+            AsyncDescribeConfigsResult.From(admin.DescribeConfigs(
                 new[] { s_resource },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, resourceTypes, resourceNames, count, timeoutMs, synonyms, documentation, callback,
-                    userData) => throw new InvalidOperationException("submit failed"));
+                    userData) => throw new InvalidOperationException("submit failed")));
             return;
         }
 
-        admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [s_resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
-                validateOnly, callback, userData) => throw new InvalidOperationException("submit failed"));
+                validateOnly, callback, userData) => throw new InvalidOperationException("submit failed")));
     }
 
     /// <summary>

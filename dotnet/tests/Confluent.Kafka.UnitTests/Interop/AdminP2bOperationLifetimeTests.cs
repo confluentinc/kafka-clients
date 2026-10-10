@@ -318,33 +318,36 @@ public sealed class AdminP2bOperationLifetimeTests
         {
             case Rpc.ListTopics:
                 {
-                    ListTopicsResult result = admin.ListTopics(
+                    AsyncListTopicsResult result = AsyncListTopicsResult.From(admin.ListTopics(
                         options: null,
-                        (nativeHandle, timeoutMs, listInternal, callback, userData) => onSubmit(userData));
-                    return () => result.NamesToListings();
+                        AdminFlavour.Async,
+                        (nativeHandle, timeoutMs, listInternal, callback, userData) => onSubmit(userData)));
+                    return () => result.NamesToListings().Get();
                 }
 
             case Rpc.CreatePartitions:
                 {
-                    CreatePartitionsResult result = admin.CreatePartitions(
+                    AsyncCreatePartitionsResult result = AsyncCreatePartitionsResult.From(admin.CreatePartitions(
                         new Dictionary<string, NewPartitions> { [Topic] = NewPartitions.IncreaseTo(2) },
                         options: null,
+                        AdminFlavour.Async,
                         (nativeHandle, topics, newPartitions, count, timeoutMs, validateOnly, retry, callback,
-                            userData) => onSubmit(userData));
-                    return () => result.Values[Topic];
+                            userData) => onSubmit(userData)));
+                    return () => result.Values[Topic].Get();
                 }
 
             default:
                 {
-                    DeleteRecordsResult result = admin.DeleteRecords(
+                    AsyncDeleteRecordsResult result = AsyncDeleteRecordsResult.From(admin.DeleteRecords(
                         new Dictionary<TopicPartition, RecordsToDelete>
                         {
                             [new TopicPartition(Topic, 0)] = RecordsToDelete.BeforeOffset(5),
                         },
                         options: null,
+                        AdminFlavour.Async,
                         (nativeHandle, topics, partitions, beforeOffsets, count, timeoutMs, callback, userData) =>
-                            onSubmit(userData));
-                    return () => result.LowWatermarks[new TopicPartition(Topic, 0)];
+                            onSubmit(userData)));
+                    return () => result.LowWatermarks[new TopicPartition(Topic, 0)].Get();
                 }
         }
     }
@@ -354,29 +357,32 @@ public sealed class AdminP2bOperationLifetimeTests
         switch (rpc)
         {
             case Rpc.ListTopics:
-                admin.ListTopics(
+                AsyncListTopicsResult.From(admin.ListTopics(
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, timeoutMs, listInternal, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 break;
 
             case Rpc.CreatePartitions:
-                admin.CreatePartitions(
+                AsyncCreatePartitionsResult.From(admin.CreatePartitions(
                     new Dictionary<string, NewPartitions> { [Topic] = NewPartitions.IncreaseTo(2) },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, topics, newPartitions, count, timeoutMs, validateOnly, retry, callback,
-                        userData) => throw new InvalidOperationException("submit failed"));
+                        userData) => throw new InvalidOperationException("submit failed")));
                 break;
 
             default:
-                admin.DeleteRecords(
+                AsyncDeleteRecordsResult.From(admin.DeleteRecords(
                     new Dictionary<TopicPartition, RecordsToDelete>
                     {
                         [new TopicPartition(Topic, 0)] = RecordsToDelete.BeforeOffset(5),
                     },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, topics, partitions, beforeOffsets, count, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 break;
         }
     }

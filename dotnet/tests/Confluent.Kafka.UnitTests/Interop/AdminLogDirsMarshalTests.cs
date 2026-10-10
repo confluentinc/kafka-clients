@@ -91,7 +91,7 @@ public sealed class AdminLogDirsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         LogDirsCaptureState capture = SubmitLogDirsAndCapture(admin, 0);
 
@@ -140,7 +140,7 @@ public sealed class AdminLogDirsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
         ReplicaCaptureState capture = SubmitReplicaLogDirsAndCapture(admin, replica);
@@ -195,7 +195,7 @@ public sealed class AdminLogDirsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
         ReplicaCaptureState capture =

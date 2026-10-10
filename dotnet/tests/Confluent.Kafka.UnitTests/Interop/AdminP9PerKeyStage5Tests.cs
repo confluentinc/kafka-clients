@@ -76,13 +76,13 @@ public sealed class AdminP9PerKeyStage5Tests
 
         AclBinding[] bindings = { Binding("cp6-alpha"), Binding("cp6-beta"), Binding("cp6-gamma") };
 
-        CreateAclsResult result = admin.CreateAcls(bindings, options: null);
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(bindings, options: null, AdminFlavour.Async));
 
         Assert.Equal(bindings.Length, result.Values.Count);
         foreach (AclBinding binding in bindings)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[binding], s_deadline));
+                () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -100,14 +100,14 @@ public sealed class AdminP9PerKeyStage5Tests
         ClientQuotaEntity alpha = Entity("cp6-quota-alpha");
         ClientQuotaEntity beta = Entity("cp6-quota-beta");
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
-            new[] { Alteration(alpha), Alteration(beta) }, options: null);
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
+            new[] { Alteration(alpha), Alteration(beta) }, options: null, AdminFlavour.Async));
 
         Assert.Equal(2, result.Values.Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[entity], s_deadline));
+                () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
 
             // ⚠ The core's own wording, typo included (mock_admin_client.rs:1766).
@@ -137,20 +137,20 @@ public sealed class AdminP9PerKeyStage5Tests
                 quotas[i] = Alteration(Entity($"cp6-quota-balance-{round}-{i}"));
             }
 
-            CreateAclsResult acls = admin.CreateAcls(bindings, options: null);
-            AlterClientQuotasResult altered = admin.AlterClientQuotas(quotas, options: null);
+            AsyncCreateAclsResult acls = AsyncCreateAclsResult.From(admin.CreateAcls(bindings, options: null, AdminFlavour.Async));
+            AsyncAlterClientQuotasResult altered = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(quotas, options: null, AdminFlavour.Async));
 
             Assert.Equal(bindings.Length, acls.Values.Count);
             Assert.Equal(quotas.Length, altered.Values.Count);
 
-            foreach (Task awaitable in acls.Values.Values)
+            foreach (AsyncKafkaFuture awaitable in acls.Values.Values)
             {
-                await TestTimeout.Run(() => Settle(awaitable), s_deadline);
+                await TestTimeout.Run(() => Settle(awaitable.Get()), s_deadline);
             }
 
-            foreach (Task awaitable in altered.Values.Values)
+            foreach (AsyncKafkaFuture awaitable in altered.Values.Values)
             {
-                await TestTimeout.Run(() => Settle(awaitable), s_deadline);
+                await TestTimeout.Run(() => Settle(awaitable.Get()), s_deadline);
             }
 
             Assert.False(handle.IsClosed, "the client is still alive between operations");
@@ -178,16 +178,16 @@ public sealed class AdminP9PerKeyStage5Tests
         Uuid second = new Uuid(33L, 44L);
         Assert.NotEqual(first, second);
 
-        DeleteTopicsResult result = admin.DeleteTopics(
-            TopicCollection.OfTopicIds(new[] { first, second }), options: null);
+        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
+            TopicCollection.OfTopicIds(new[] { first, second }), options: null, AdminFlavour.Async));
 
-        IReadOnlyDictionary<Uuid, Task> values = result.TopicIdValues!;
+        IReadOnlyDictionary<Uuid, AsyncKafkaFuture> values = result.TopicIdValues!;
         Assert.Equal(2, values.Count);
 
         foreach (Uuid id in new[] { first, second })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => values[id], s_deadline));
+                () => TestTimeout.Run(() => values[id].Get(), s_deadline));
             Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
             Assert.Equal($"Topic {id} does not exist.", failure.Message);
         }
@@ -204,29 +204,30 @@ public sealed class AdminP9PerKeyStage5Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartitionReplica zero = new TopicPartitionReplica("cp6-logdirs", 0, 0);
         TopicPartitionReplica one = new TopicPartitionReplica("cp6-logdirs", 1, 0);
 
-        AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+        AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string>
             {
                 [zero] = "/cp6-offline-zero",
                 [one] = "/cp6-offline-one",
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
         Assert.Equal(2, result.Values.Count);
 
         KafkaException zeroFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[zero], s_deadline));
+            () => TestTimeout.Run(() => result.Values[zero].Get(), s_deadline));
         Assert.Equal(KafkaStorageErrorCode, zeroFailure.Code);
         Assert.Equal("Log directory /cp6-offline-zero is offline", zeroFailure.Message);
 
         KafkaException oneFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[one], s_deadline));
+            () => TestTimeout.Run(() => result.Values[one].Get(), s_deadline));
         Assert.Equal("Log directory /cp6-offline-one is offline", oneFailure.Message);
     }
 
@@ -241,24 +242,25 @@ public sealed class AdminP9PerKeyStage5Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartition inRange = new TopicPartition("cp6-reassign", 0);
         TopicPartition outOfRange = new TopicPartition("cp6-reassign", 7);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [inRange] = new NewPartitionReassignment(new[] { 0 }),
                 [outOfRange] = new NewPartitionReassignment(new[] { 0 }),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
-        await TestTimeout.Run(() => result.Values[inRange], s_deadline);
+        await TestTimeout.Run(() => result.Values[inRange].Get(), s_deadline);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[outOfRange], s_deadline));
+            () => TestTimeout.Run(() => result.Values[outOfRange].Get(), s_deadline));
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
 
@@ -272,31 +274,32 @@ public sealed class AdminP9PerKeyStage5Tests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        CreatePartitionsResult partitions = admin.CreatePartitions(
+        AsyncCreatePartitionsResult partitions = AsyncCreatePartitionsResult.From(admin.CreatePartitions(
             new Dictionary<string, NewPartitions>
             {
                 ["cp6-parts-alpha"] = NewPartitions.IncreaseTo(3),
                 ["cp6-parts-beta"] = NewPartitions.IncreaseTo(4),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
         Assert.Equal(2, partitions.Values.Count);
         foreach (string topic in new[] { "cp6-parts-alpha", "cp6-parts-beta" })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => partitions.Values[topic], s_deadline));
+                () => TestTimeout.Run(() => partitions.Values[topic].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
 
-        DeleteConsumerGroupsResult groups =
-            admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null);
+        AsyncDeleteConsumerGroupsResult groups =
+            AsyncDeleteConsumerGroupsResult.From(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null, AdminFlavour.Async));
 
         Assert.Equal(2, groups.DeletedGroups.Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => groups.DeletedGroups[group], s_deadline));
+                () => TestTimeout.Run(() => groups.DeletedGroups[group].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -321,20 +324,21 @@ public sealed class AdminP9PerKeyStage5Tests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        AlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
+        AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
             new UserScramCredentialAlteration[]
             {
                 new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha256),
                 new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha512),
                 new UserScramCredentialDeletion("cp6-user-b", ScramMechanism.ScramSha256),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
         Assert.Equal(2, result.Values.Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[user], s_deadline));
+                () => TestTimeout.Run(() => result.Values[user].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -356,22 +360,22 @@ public sealed class AdminP9PerKeyStage5Tests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        Assert.Empty(admin.CreateAcls(Array.Empty<AclBinding>(), options: null).Values);
-        Assert.Empty(admin.AlterClientQuotas(Array.Empty<ClientQuotaAlteration>(), options: null).Values);
+        Assert.Empty(AsyncCreateAclsResult.From(admin.CreateAcls(Array.Empty<AclBinding>(), options: null, AdminFlavour.Async)).Values);
+        Assert.Empty(AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(Array.Empty<ClientQuotaAlteration>(), options: null, AdminFlavour.Async)).Values);
         Assert.Empty(
-            admin.CreatePartitions(new Dictionary<string, NewPartitions>(), options: null).Values);
-        Assert.Empty(admin.DeleteConsumerGroups(Array.Empty<string>(), options: null).DeletedGroups);
+            AsyncCreatePartitionsResult.From(admin.CreatePartitions(new Dictionary<string, NewPartitions>(), options: null, AdminFlavour.Async)).Values);
+        Assert.Empty(AsyncDeleteConsumerGroupsResult.From(admin.DeleteConsumerGroups(Array.Empty<string>(), options: null, AdminFlavour.Async)).DeletedGroups);
         Assert.Empty(
-            admin.AlterUserScramCredentials(Array.Empty<UserScramCredentialAlteration>(), options: null)
+            AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(Array.Empty<UserScramCredentialAlteration>(), options: null, AdminFlavour.Async))
                 .Values);
         Assert.Empty(
-            admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), options: null)
+            AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), options: null, AdminFlavour.Async))
                 .Values);
         Assert.Empty(
-            admin.AlterPartitionReassignments(
-                new Dictionary<TopicPartition, NewPartitionReassignment?>(), options: null).Values);
+            AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
+                new Dictionary<TopicPartition, NewPartitionReassignment?>(), options: null, AdminFlavour.Async)).Values);
         Assert.Empty(
-            admin.DeleteTopics(TopicCollection.OfTopicIds(Array.Empty<Uuid>()), options: null)
+            AsyncDeleteTopicsResult.From(admin.DeleteTopics(TopicCollection.OfTopicIds(Array.Empty<Uuid>()), options: null, AdminFlavour.Async))
                 .TopicIdValues!);
 
         TestTimeout.Run(admin.Dispose, s_deadline);

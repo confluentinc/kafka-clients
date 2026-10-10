@@ -203,15 +203,16 @@ public sealed class AdminP3SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        admin.DescribeCluster(
+        AsyncDescribeClusterResult.From(admin.DescribeCluster(
             options,
+            AdminFlavour.Async,
             (nativeHandle, timeoutMs, includeAuthorizedOperations, includeFencedBrokers, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
                 captured.IncludeAuthorizedOperations = includeAuthorizedOperations;
                 captured.IncludeFencedBrokers = includeFencedBrokers;
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.DescribeCluster(IntPtr.Zero, CapturedError(), captured.UserData);
         return captured;
@@ -223,22 +224,23 @@ public sealed class AdminP3SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        ListConfigResourcesResult result = admin.ListConfigResources(
+        AsyncListConfigResourcesResult result = AsyncListConfigResourcesResult.From(admin.ListConfigResources(
             new[] { ConfigResourceType.Topic },
             options,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
                 captured.Count = count;
                 captured.FirstResourceType = count > 0 ? resourceTypes[0] : int.MinValue;
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.ListConfigResources(IntPtr.Zero, CapturedError(), captured.UserData);
 
         // All() hands back the completion source's own task, so this read is synchronous
         // and race-free — the shape DescribeCluster's projections do not have.
-        Assert.NotNull(result.All().Exception);
+        Assert.NotNull(result.All().Get().Exception);
         return captured;
     }
 

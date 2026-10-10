@@ -106,7 +106,7 @@ public sealed class AdminP5ResultMarshalTests
         List<int> listingIndices = new List<int>();
         List<int> errorIndices = new List<int>();
 
-        ListGroupsResult result = Walk(
+        AsyncListGroupsResult result = Walk(
             validCount,
             errorCount,
             (root, index) =>
@@ -123,9 +123,9 @@ public sealed class AdminP5ResultMarshalTests
             });
 
         IReadOnlyCollection<GroupListing> valid =
-            await TestTimeout.Run(() => result.Valid(), s_deadline);
+            await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
         IReadOnlyCollection<KafkaException> errors =
-            await TestTimeout.Run(() => result.Errors(), s_deadline);
+            await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
 
         // The lengths, independently.
         Assert.Equal(validCount, valid.Count);
@@ -196,12 +196,12 @@ public sealed class AdminP5ResultMarshalTests
     [InlineData(2, -1)]
     public async Task ANegativeCount_YieldsAnEmptyListOnThatAxisAlone(int validCount, int errorCount)
     {
-        ListGroupsResult result = Walk(validCount, errorCount, (_, index) => Listing(index), (_, index) => Error(index));
+        AsyncListGroupsResult result = Walk(validCount, errorCount, (_, index) => Listing(index), (_, index) => Error(index));
 
         IReadOnlyCollection<GroupListing> valid =
-            await TestTimeout.Run(() => result.Valid(), s_deadline);
+            await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
         IReadOnlyCollection<KafkaException> errors =
-            await TestTimeout.Run(() => result.Errors(), s_deadline);
+            await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
 
         Assert.Equal(Math.Max(validCount, 0), valid.Count);
         Assert.Equal(Math.Max(errorCount, 0), errors.Count);
@@ -215,16 +215,16 @@ public sealed class AdminP5ResultMarshalTests
     [Fact]
     public async Task All_ThrowsTheFirstError_WhileValidStillYieldsThePartialResults()
     {
-        ListGroupsResult result = Walk(2, 3, (_, index) => Listing(index), (_, index) => Error(index));
+        AsyncListGroupsResult result = Walk(2, 3, (_, index) => Listing(index), (_, index) => Error(index));
 
         KafkaException thrown = await TestTimeout
-            .Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All()), s_deadline)
+            .Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline)
             ;
 
         IReadOnlyCollection<KafkaException> errors =
-            await TestTimeout.Run(() => result.Errors(), s_deadline);
+            await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
         IReadOnlyCollection<GroupListing> valid =
-            await TestTimeout.Run(() => result.Valid(), s_deadline);
+            await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
 
         // The first error object itself, not a copy and not the last one.
         Assert.Same(errors.First(), thrown);
@@ -242,10 +242,10 @@ public sealed class AdminP5ResultMarshalTests
     [Fact]
     public async Task All_YieldsEveryListing_WhenNoErrorOccurred()
     {
-        ListGroupsResult result = Walk(3, 0, (_, index) => Listing(index), (_, index) => Error(index));
+        AsyncListGroupsResult result = Walk(3, 0, (_, index) => Listing(index), (_, index) => Error(index));
 
         IReadOnlyCollection<GroupListing> all =
-            await TestTimeout.Run(() => result.All(), s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         Assert.Equal(new[] { "g0", "g1", "g2" }, all.Select(listing => listing.GroupId));
     }
@@ -282,7 +282,7 @@ public sealed class AdminP5ResultMarshalTests
     }
 
     /// <summary>Runs the walker and hands back the public result the user would hold.</summary>
-    private static ListGroupsResult Walk(
+    private static AsyncListGroupsResult Walk(
         int validCount,
         int errorCount,
         Func<IntPtr, int, GroupListing> readListing,
@@ -307,7 +307,7 @@ public sealed class AdminP5ResultMarshalTests
             readListing,
             readError);
 
-        return new ListGroupsResult(operation.Task);
+        return new AsyncListGroupsResult(operation.Task);
     }
 
     /// <summary>The listing an index stands for, so a shifted walk is visible by name.</summary>
@@ -357,7 +357,7 @@ public sealed class AdminP5ResultMarshalTests
         try
         {
             List<int> valueReads = new List<int>();
-            DescribeConsumerGroupsResult result = WalkDescribe(
+            AsyncDescribeConsumerGroupsResult result = WalkDescribe(
                 new[] { "good", "bad" },
                 count: 2,
                 getError: index => index == 1 ? error : IntPtr.Zero,
@@ -370,8 +370,8 @@ public sealed class AdminP5ResultMarshalTests
 
             Assert.Equal(new[] { 0 }, valueReads);
 
-            Task<ConsumerGroupDescription> good = result.DescribedGroups["good"];
-            Task<ConsumerGroupDescription> bad = result.DescribedGroups["bad"];
+            Task<ConsumerGroupDescription> good = result.DescribedGroups["good"].Get();
+            Task<ConsumerGroupDescription> bad = result.DescribedGroups["bad"].Get();
 
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
             Assert.Equal(TaskStatus.Faulted, bad.Status);
@@ -407,7 +407,7 @@ public sealed class AdminP5ResultMarshalTests
 
             // The aggregate follows the one failure; the good future is untouched by it.
             KafkaException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
             Assert.Equal(15, fromAll.Code);
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
         }
@@ -644,12 +644,12 @@ public sealed class AdminP5ResultMarshalTests
     }
 
     /// <summary>
-    /// The bridge dictionary and <see cref="DescribeConsumerGroupsResult"/>'s aggregate are
+    /// The bridge dictionary and <see cref="AsyncDescribeConsumerGroupsResult"/>'s aggregate are
     /// keyed the same way, so two ids differing only in case stay two distinct groups all
     /// the way out.
     /// </summary>
     /// <remarks>
-    /// ⚠ <see cref="DescribeConsumerGroupsResult"/> hardcodes
+    /// ⚠ <see cref="AsyncDescribeConsumerGroupsResult"/> hardcodes
     /// <see cref="StringComparer.Ordinal"/> and — unlike <c>DescribeTopicsResult</c> — has
     /// a public constructor with no internal factory to thread a different comparer
     /// through. So a bridge built with any other comparer would disagree with the result it
@@ -659,7 +659,7 @@ public sealed class AdminP5ResultMarshalTests
     [Fact]
     public async Task Describe_TheBridgeAndTheAggregate_KeepCaseVariantsApart()
     {
-        DescribeConsumerGroupsResult result = WalkDescribe(
+        AsyncDescribeConsumerGroupsResult result = WalkDescribe(
             new[] { "g", "G" },
             count: 2,
             getError: index => IntPtr.Zero,
@@ -669,13 +669,13 @@ public sealed class AdminP5ResultMarshalTests
         Assert.Equal(2, result.DescribedGroups.Count);
         Assert.Equal(
             "lower",
-            (await TestTimeout.Run(() => result.DescribedGroups["g"], s_deadline)).GroupId);
+            (await TestTimeout.Run(() => result.DescribedGroups["g"].Get(), s_deadline)).GroupId);
         Assert.Equal(
             "upper",
-            (await TestTimeout.Run(() => result.DescribedGroups["G"], s_deadline)).GroupId);
+            (await TestTimeout.Run(() => result.DescribedGroups["G"].Get(), s_deadline)).GroupId);
 
         IReadOnlyDictionary<string, ConsumerGroupDescription> all =
-            await TestTimeout.Run(result.All, s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         Assert.Equal(2, all.Count);
         Assert.Equal("lower", all["g"].GroupId);
@@ -691,7 +691,7 @@ public sealed class AdminP5ResultMarshalTests
     /// <param name="getError">The per-index error pointer — <b>borrowed</b>, never freed here.</param>
     /// <param name="readKey">The per-index key reader.</param>
     /// <param name="readValue">The per-index value reader.</param>
-    private static DescribeConsumerGroupsResult WalkDescribe(
+    private static AsyncDescribeConsumerGroupsResult WalkDescribe(
         IReadOnlyCollection<string> keys,
         int count,
         Func<int, IntPtr> getError,
@@ -712,7 +712,7 @@ public sealed class AdminP5ResultMarshalTests
         // The trampoline's rescue, mirrored: any key the walk did not name must still be
         // settled or its future would hang forever.
         operation.FailUncompleted();
-        return new DescribeConsumerGroupsResult(operation.Tasks);
+        return AsyncDescribeConsumerGroupsResult.From(operation);
     }
 
     /// <summary>
@@ -722,14 +722,14 @@ public sealed class AdminP5ResultMarshalTests
     /// <param name="value">The description the value reader yields at index 0.</param>
     private static ConsumerGroupDescription WalkDescribeOne(ConsumerGroupDescription value)
     {
-        DescribeConsumerGroupsResult result = WalkDescribe(
+        AsyncDescribeConsumerGroupsResult result = WalkDescribe(
             new[] { "g" },
             count: 1,
             getError: index => IntPtr.Zero,
             readKey: index => "g",
             readValue: index => value);
 
-        Task<ConsumerGroupDescription> described = result.DescribedGroups["g"];
+        Task<ConsumerGroupDescription> described = result.DescribedGroups["g"].Get();
         Assert.Equal(TaskStatus.RanToCompletion, described.Status);
         return described.Result;
     }
@@ -824,7 +824,7 @@ public sealed class AdminP5ResultMarshalTests
         try
         {
             List<int> valueReads = new List<int>();
-            DescribeClassicGroupsResult result = WalkDescribeClassic(
+            AsyncDescribeClassicGroupsResult result = WalkDescribeClassic(
                 new[] { "good", "bad" },
                 count: 2,
                 getError: index => index == 1 ? error : IntPtr.Zero,
@@ -837,8 +837,8 @@ public sealed class AdminP5ResultMarshalTests
 
             Assert.Equal(new[] { 0 }, valueReads);
 
-            Task<ClassicGroupDescription> good = result.DescribedGroups["good"];
-            Task<ClassicGroupDescription> bad = result.DescribedGroups["bad"];
+            Task<ClassicGroupDescription> good = result.DescribedGroups["good"].Get();
+            Task<ClassicGroupDescription> bad = result.DescribedGroups["bad"].Get();
 
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
             Assert.Equal(TaskStatus.Faulted, bad.Status);
@@ -869,7 +869,7 @@ public sealed class AdminP5ResultMarshalTests
             Assert.Equal("the coordinator is not available", perKey.Message);
 
             KafkaException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
             Assert.Equal(15, fromAll.Code);
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
         }
@@ -1028,7 +1028,7 @@ public sealed class AdminP5ResultMarshalTests
     /// <param name="getError">The per-index error pointer — <b>borrowed</b>, never freed here.</param>
     /// <param name="readKey">The per-index key reader.</param>
     /// <param name="readValue">The per-index value reader.</param>
-    private static DescribeClassicGroupsResult WalkDescribeClassic(
+    private static AsyncDescribeClassicGroupsResult WalkDescribeClassic(
         IReadOnlyCollection<string> keys,
         int count,
         Func<int, IntPtr> getError,
@@ -1049,7 +1049,7 @@ public sealed class AdminP5ResultMarshalTests
         // The trampoline's rescue, mirrored: any key the walk did not name must still be
         // settled or its future would hang forever.
         operation.FailUncompleted();
-        return new DescribeClassicGroupsResult(operation.Tasks);
+        return AsyncDescribeClassicGroupsResult.From(operation);
     }
 
     /// <summary>
@@ -1059,14 +1059,14 @@ public sealed class AdminP5ResultMarshalTests
     /// <param name="value">The description the value reader yields at index 0.</param>
     private static ClassicGroupDescription WalkDescribeClassicOne(ClassicGroupDescription value)
     {
-        DescribeClassicGroupsResult result = WalkDescribeClassic(
+        AsyncDescribeClassicGroupsResult result = WalkDescribeClassic(
             new[] { "g" },
             count: 1,
             getError: index => IntPtr.Zero,
             readKey: index => "g",
             readValue: index => value);
 
-        Task<ClassicGroupDescription> described = result.DescribedGroups["g"];
+        Task<ClassicGroupDescription> described = result.DescribedGroups["g"].Get();
         Assert.Equal(TaskStatus.RanToCompletion, described.Status);
         return described.Result;
     }
@@ -1143,7 +1143,7 @@ public sealed class AdminP5ResultMarshalTests
         try
         {
             List<int> valueReads = new List<int>();
-            ListConsumerGroupOffsetsResult result = WalkListOffsets(
+            AsyncListConsumerGroupOffsetsResult result = WalkListOffsets(
                 new[] { "good", "bad" },
                 count: 2,
                 getError: index => index == 1 ? error : IntPtr.Zero,
@@ -1160,9 +1160,9 @@ public sealed class AdminP5ResultMarshalTests
             Assert.Equal(new[] { 0 }, valueReads);
 
             Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> good =
-                result.PartitionsToOffsetAndMetadata("good");
+                result.PartitionsToOffsetAndMetadata("good").Get();
             Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> bad =
-                result.PartitionsToOffsetAndMetadata("bad");
+                result.PartitionsToOffsetAndMetadata("bad").Get();
 
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
             Assert.Equal(TaskStatus.Faulted, bad.Status);
@@ -1180,7 +1180,7 @@ public sealed class AdminP5ResultMarshalTests
             Assert.Equal("the coordinator is not available", perKey.Message);
 
             KafkaException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
             Assert.Equal(15, fromAll.Code);
             Assert.Equal(TaskStatus.RanToCompletion, good.Status);
         }
@@ -1345,7 +1345,7 @@ public sealed class AdminP5ResultMarshalTests
     /// <param name="getError">The per-index error pointer — <b>borrowed</b>, never freed here.</param>
     /// <param name="readKey">The per-index key reader.</param>
     /// <param name="readValue">The per-index value reader.</param>
-    private static ListConsumerGroupOffsetsResult WalkListOffsets(
+    private static AsyncListConsumerGroupOffsetsResult WalkListOffsets(
         IReadOnlyCollection<string> keys,
         int count,
         Func<int, IntPtr> getError,
@@ -1366,7 +1366,7 @@ public sealed class AdminP5ResultMarshalTests
         SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
         operation.FailUncompleted();
-        return new ListConsumerGroupOffsetsResult(operation.Tasks);
+        return new AsyncListConsumerGroupOffsetsResult(operation.Tasks);
     }
 
     /// <summary>

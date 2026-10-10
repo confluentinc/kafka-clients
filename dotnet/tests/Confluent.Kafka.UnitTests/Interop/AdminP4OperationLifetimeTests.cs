@@ -277,51 +277,55 @@ public sealed class AdminP4OperationLifetimeTests
     {
         if (rpc == Rpc.ElectLeaders)
         {
-            ElectLeadersResult result = admin.ElectLeaders(
+            AsyncElectLeadersResult result = AsyncElectLeadersResult.From(admin.ElectLeaders(
                 ElectionType.Preferred,
                 new[] { new TopicPartition("p4-lifetime", 0) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, electionType, allPartitions, topics, partitions, count, timeoutMs, callback,
-                    userData) => onSubmit(userData));
+                    userData) => onSubmit(userData)));
 
-            return result.Partitions;
+            return () => result.Partitions().Get();
         }
 
-        AlterPartitionReassignmentsResult reassigned = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult reassigned = AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [s_lifetimePartition] = new NewPartitionReassignment(new[] { 0 }),
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, cancel, targetReplicas, targetReplicaCounts, count, timeoutMs,
-                allowReplicationFactorChange, callback, userData) => onSubmit(userData));
+                allowReplicationFactorChange, callback, userData) => onSubmit(userData)));
 
-        return reassigned.All;
+        return () => reassigned.All().Get();
     }
 
     private static void SubmitThrowing(NativeAdminClient admin, Rpc rpc)
     {
         if (rpc == Rpc.ElectLeaders)
         {
-            admin.ElectLeaders(
+            AsyncElectLeadersResult.From(admin.ElectLeaders(
                 ElectionType.Unclean,
                 new[] { new TopicPartition("p4-throwing", 0) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, electionType, allPartitions, topics, partitions, count, timeoutMs, callback,
-                    userData) => throw new InvalidOperationException("submit failed"));
+                    userData) => throw new InvalidOperationException("submit failed")));
             return;
         }
 
-        admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [new TopicPartition("p4-throwing", 0)] = new NewPartitionReassignment(new[] { 0, 1 }),
                 [new TopicPartition("p4-throwing", 1)] = null,
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, cancel, targetReplicas, targetReplicaCounts, count, timeoutMs,
                 allowReplicationFactorChange, callback, userData) =>
-                throw new InvalidOperationException("submit failed"));
+                throw new InvalidOperationException("submit failed")));
     }
 
     /// <summary>

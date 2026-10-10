@@ -79,24 +79,25 @@ public sealed class AdminP9PerKeyStage6Tests
         TopicPartition second = new TopicPartition("cp7-mock-acgo", 1);
         TopicPartition unrequested = new TopicPartition("cp7-mock-acgo", 9);
 
-        AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+        AsyncAlterConsumerGroupOffsetsResult result = AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
             "cp7-group",
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
                 [first] = new OffsetAndMetadata(5),
                 [second] = new OffsetAndMetadata(6),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
         KafkaException fromAll = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplementedTypo, fromAll.Message);
 
         foreach (TopicPartition partition in new[] { first, second, unrequested })
         {
             KafkaException fromPartition = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.PartitionResult(partition), s_deadline));
+                () => TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline));
             Assert.Same(fromAll, fromPartition);
         }
 
@@ -120,18 +121,18 @@ public sealed class AdminP9PerKeyStage6Tests
             new TopicPartition("cp7-mock-dcgo", 0), new TopicPartition("cp7-mock-dcgo", 3),
         };
 
-        DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
-            "cp7-group", requested, options: null);
+        AsyncDeleteConsumerGroupOffsetsResult result = AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
+            "cp7-group", requested, options: null, AdminFlavour.Async));
 
         KafkaException fromAll = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (TopicPartition partition in requested)
         {
             KafkaException fromPartition = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.PartitionResult(partition), s_deadline));
+                () => TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline));
             Assert.Same(fromAll, fromPartition);
         }
 
@@ -154,21 +155,22 @@ public sealed class AdminP9PerKeyStage6Tests
         TopicPartition partition = new TopicPartition("cp7-dup-dcgo", 2);
         int sawCount = -1;
 
-        DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+        AsyncDeleteConsumerGroupOffsetsResult result = AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
             "cp7-group",
             new[] { partition, partition },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitions, count, timeoutMs, callback, userData) =>
             {
                 sawCount = count;
                 NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync(
                     nativeHandle, groupId, topics, partitions, count, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, sawCount);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.PartitionResult(partition), s_deadline));
+            () => TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -195,8 +197,8 @@ public sealed class AdminP9PerKeyStage6Tests
         SafeAdminHandle handle = admin.Handle;
         CountingRemoveMembersSeam seam = new CountingRemoveMembersSeam();
 
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
-            "cp7-group", new RemoveMembersFromConsumerGroupOptions(), seam.Submit);
+        AsyncRemoveMembersFromConsumerGroupResult result = AsyncRemoveMembersFromConsumerGroupResult.From(admin.RemoveMembersFromConsumerGroup(
+            "cp7-group", new RemoveMembersFromConsumerGroupOptions(), AdminFlavour.Async, seam.Submit));
 
         Assert.True(seam.RemoveAll);
         Assert.Equal(0, seam.MemberCount);
@@ -204,7 +206,7 @@ public sealed class AdminP9PerKeyStage6Tests
         Assert.True(result.RemoveAll);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -257,8 +259,8 @@ public sealed class AdminP9PerKeyStage6Tests
             new[] { members[0], members[1], members[2], new MemberToRemove("cp7-many-b") });
         Assert.Equal(3, options.Members.Count);
 
-        RemoveMembersFromConsumerGroupResult result =
-            admin.RemoveMembersFromConsumerGroup("cp7-group", options, seam.Submit);
+        AsyncRemoveMembersFromConsumerGroupResult result =
+            AsyncRemoveMembersFromConsumerGroupResult.From(admin.RemoveMembersFromConsumerGroup("cp7-group", options, AdminFlavour.Async, seam.Submit));
 
         Assert.False(seam.RemoveAll);
         Assert.Equal(3, seam.MemberCount);
@@ -267,14 +269,14 @@ public sealed class AdminP9PerKeyStage6Tests
             SortedOrdinal(seam.GroupInstanceIds!));
 
         KafkaException fromAll = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (MemberToRemove member in members)
         {
             KafkaException fromMember = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.MemberResult(member), s_deadline));
+                () => TestTimeout.Run(() => result.MemberResult(member).Get(), s_deadline));
             Assert.Same(fromAll, fromMember);
         }
 
@@ -388,13 +390,13 @@ public sealed class AdminP9PerKeyStage6Tests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        AlterConsumerGroupOffsetsResult alter = admin.AlterConsumerGroupOffsets(
-            "cp7-group", new Dictionary<TopicPartition, OffsetAndMetadata>(), options: null);
-        DeleteConsumerGroupOffsetsResult delete = admin.DeleteConsumerGroupOffsets(
-            "cp7-group", Array.Empty<TopicPartition>(), options: null);
+        AsyncAlterConsumerGroupOffsetsResult alter = AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
+            "cp7-group", new Dictionary<TopicPartition, OffsetAndMetadata>(), options: null, AdminFlavour.Async));
+        AsyncDeleteConsumerGroupOffsetsResult delete = AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
+            "cp7-group", Array.Empty<TopicPartition>(), options: null, AdminFlavour.Async));
 
-        Task alterAll = alter.All();
-        Task deleteAll = delete.All();
+        Task alterAll = alter.All().Get();
+        Task deleteAll = delete.All().Get();
         Assert.NotEqual(TaskStatus.RanToCompletion, alterAll.Status);
         Assert.NotEqual(TaskStatus.RanToCompletion, deleteAll.Status);
 

@@ -214,12 +214,13 @@ public sealed class AdminP4Stage2ResultMarshalTests
         TopicPartition partition = SeedTopic(admin, "p4s2-lpr-marshal", replicationFactor: 2);
 
         await TestTimeout.Run(
-            () => admin.AlterPartitionReassignments(
+            () => AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
                 new Dictionary<TopicPartition, NewPartitionReassignment?>
                 {
                     [partition] = new NewPartitionReassignment(new[] { 0, 2 }),
                 },
-                options: null).All(),
+                options: null,
+                AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         PartitionReassignment reassignment;
@@ -312,8 +313,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
         NativeAdminClient admin, string name, int partitions = 1, short replicationFactor = 1)
     {
         TestTimeout.Run(
-            () => admin.CreateTopics(
-                new[] { new NewTopic(name, partitions, replicationFactor) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(
+                new[] { new NewTopic(name, partitions, replicationFactor) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline)
             .GetAwaiter()
             .GetResult();
@@ -339,14 +340,15 @@ public sealed class AdminP4Stage2ResultMarshalTests
         GCHandle gcHandle = GCHandle.Alloc(captures, GCHandleType.Normal);
         try
         {
-            admin.ListOffsets(
+            AsyncListOffsetsResult.From(admin.ListOffsets(
                 request,
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
                     isolationLevel, callback, userData) =>
                     NativeMethods.AdminClientListOffsetsAsync(
                         nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
-                        isolationLevel, s_captureOffsets, GCHandle.ToIntPtr(gcHandle)));
+                        isolationLevel, s_captureOffsets, GCHandle.ToIntPtr(gcHandle))));
 
             Assert.True(captures.Done.Wait(s_deadline), "the listOffsets callbacks never fired");
         }
@@ -364,13 +366,14 @@ public sealed class AdminP4Stage2ResultMarshalTests
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         try
         {
-            admin.ListPartitionReassignments(
+            AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
                 new[] { partition },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, allPartitions, topics, partitions2, count, timeoutMs, callback, userData) =>
                     NativeMethods.AdminClientListPartitionReassignmentsAsync(
                         nativeHandle, allPartitions, topics, partitions2, count, timeoutMs,
-                        s_captureReassignments, GCHandle.ToIntPtr(gcHandle)));
+                        s_captureReassignments, GCHandle.ToIntPtr(gcHandle))));
 
             Assert.True(capture.Done.Wait(s_deadline), "the listPartitionReassignments callback never fired");
         }

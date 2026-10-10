@@ -194,9 +194,10 @@ public sealed class AdminLogDirsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => admin.AlterReplicaLogDirs(
+            () => AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
                 new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!,
-                options: null));
+                options: null,
+                AdminFlavour.Async)));
 
         Assert.Equal("replicaAssignment", failure.ParamName);
 
@@ -230,17 +231,17 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         Assert.Equal(
             "brokers",
-            Assert.Throws<ArgumentNullException>(() => admin.DescribeLogDirs(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
         Assert.Equal(
             "replicaAssignment",
-            Assert.Throws<ArgumentNullException>(() => admin.AlterReplicaLogDirs(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
         Assert.Equal(
             "replicas",
             Assert.Throws<ArgumentNullException>(
-                () => admin.DescribeReplicaLogDirs(null!, options: null)).ParamName);
+                () => AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
 
         ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: null));
+            () => AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: null, AdminFlavour.Async)));
         Assert.Equal("replicas", nullElement.ParamName);
     }
 
@@ -260,7 +261,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        DescribeLogDirsResult result = admin.DescribeLogDirs(brokers, options, captured.RecordDescribeLogDirs);
+        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(brokers, options, AdminFlavour.Async, captured.RecordDescribeLogDirs));
 
         // Shape 4a: one callback per broker id, which crosses as a plain int32_t.
         foreach (int broker in result.Descriptions.Keys)
@@ -285,8 +286,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
         }
 
         Captured captured = new Captured();
-        AlterReplicaLogDirsResult result =
-            admin.AlterReplicaLogDirs(assignment, options, captured.RecordAlterReplicaLogDirs);
+        AsyncAlterReplicaLogDirsResult result =
+            AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(assignment, options, AdminFlavour.Async, captured.RecordAlterReplicaLogDirs));
 
         // Shape 4b: one per-key failure per DISTINCT replica the submit carried, keyed by
         // its three scalars, with an owned error the trampoline frees.
@@ -307,8 +308,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        DescribeReplicaLogDirsResult result =
-            admin.DescribeReplicaLogDirs(replicas, options, captured.RecordDescribeReplicaLogDirs);
+        AsyncDescribeReplicaLogDirsResult result =
+            AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Async, captured.RecordDescribeReplicaLogDirs));
 
         // Shape 4a: one per-key failure per DISTINCT replica the submit carried, with a
         // NULL value slot and an owned error the trampoline frees.
@@ -333,12 +334,23 @@ public sealed class AdminLogDirsSubmitArgumentTests
     /// <c>GCHandle</c> and span-the-op reference are released before the client is disposed
     /// and no faulted task goes unobserved.
     /// </summary>
-    private static void AssertEveryAwaitableFaulted<TKey, TTask>(IReadOnlyDictionary<TKey, TTask> tasks)
-        where TTask : Task
+    private static void AssertEveryAwaitableFaulted<TKey>(IReadOnlyDictionary<TKey, AsyncKafkaFuture> futures)
     {
-        foreach (KeyValuePair<TKey, TTask> entry in tasks)
+        foreach (KeyValuePair<TKey, AsyncKafkaFuture> entry in futures)
         {
-            Assert.NotNull(entry.Value.Exception);
+            Assert.NotNull(entry.Value.Get().Exception);
+        }
+    }
+
+    /// <summary>
+    /// The value-carrying form of <see cref="AssertEveryAwaitableFaulted{TKey}"/>.
+    /// </summary>
+    private static void AssertEveryAwaitableFaulted<TKey, TValue>(
+        IReadOnlyDictionary<TKey, AsyncKafkaFuture<TValue>> futures)
+    {
+        foreach (KeyValuePair<TKey, AsyncKafkaFuture<TValue>> entry in futures)
+        {
+            Assert.NotNull(entry.Value.Get().Exception);
         }
     }
 

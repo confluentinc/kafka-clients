@@ -86,9 +86,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         SafeAdminHandle handle = admin.Handle;
 
         Rows sent = Rows.None;
-        CreateAclsResult result = admin.CreateAcls(
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
             new[] { binding },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                 permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -96,14 +97,14 @@ public sealed class AdminAclUndefinedCodeKeyingTests
                 NativeMethods.AdminClientCreateAclsAsync(
                     nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                     permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, sent.Count);
         Assert.Equal(new[] { 0 }, sent.Codes(column));
         Assert.Equal(binding, Assert.Single(result.Values).Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[binding], s_deadline));
+            () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -131,9 +132,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         SafeAdminHandle handle = admin.Handle;
 
         Rows sent = Rows.None;
-        CreateAclsResult result = admin.CreateAcls(
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
             new[] { first, second },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                 permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -141,14 +143,14 @@ public sealed class AdminAclUndefinedCodeKeyingTests
                 NativeMethods.AdminClientCreateAclsAsync(
                     nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                     permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, sent.Count);
         Assert.Equal(new[] { 0 }, sent.Codes(column));
         Assert.Single(result.Values);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[second], s_deadline));
+            () => TestTimeout.Run(() => result.Values[second].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -175,9 +177,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         SafeAdminHandle handle = admin.Handle;
 
         Rows sent = Rows.None;
-        DeleteAclsResult result = admin.DeleteAcls(
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
             new[] { filter },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                 permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -185,14 +188,14 @@ public sealed class AdminAclUndefinedCodeKeyingTests
                 NativeMethods.AdminClientDeleteAclsAsync(
                     nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                     permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, sent.Count);
         Assert.Equal(new[] { 0 }, sent.Codes(column));
         Assert.Equal(filter, Assert.Single(result.Values).Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[filter], s_deadline));
+            () => TestTimeout.Run(() => result.Values[filter].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -220,9 +223,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         SafeAdminHandle handle = admin.Handle;
 
         Rows sent = Rows.None;
-        DeleteAclsResult result = admin.DeleteAcls(
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
             new[] { first, second },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                 permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -230,14 +234,14 @@ public sealed class AdminAclUndefinedCodeKeyingTests
                 NativeMethods.AdminClientDeleteAclsAsync(
                     nativeHandle, resourceTypes, resourceNames, patternTypes, principals, hosts, operations,
                     permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, sent.Count);
         Assert.Equal(new[] { 0 }, sent.Codes(column));
         Assert.Single(result.Values);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[second], s_deadline));
+            () => TestTimeout.Run(() => result.Values[second].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 

@@ -123,17 +123,18 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         SafeAdminHandle handle = admin.Handle;
         TopicPartition partition = new TopicPartition("p13-inline-acgo", 0);
 
-        AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+        AsyncAlterConsumerGroupOffsetsResult result = AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
             Group,
             new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(10) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitions, offsets, metadata, leaderEpochs,
              hasLeaderEpoch, count, timeoutMs, callback, userData) =>
                 NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync(
                     IntPtr.Zero, groupId, topics, partitions, offsets, metadata, leaderEpochs,
-                    hasLeaderEpoch, count, timeoutMs, callback, userData));
+                    hasLeaderEpoch, count, timeoutMs, callback, userData)));
 
-        AssertFaultedInline(result.All(), NullAdmin, result.PartitionResult(partition));
+        AssertFaultedInline(result.All().Get(), NullAdmin, result.PartitionResult(partition).Get());
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -150,10 +151,11 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         SafeAdminHandle handle = admin.Handle;
         TopicPartition partition = new TopicPartition("p13-inline-acgo", 1);
 
-        AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+        AsyncAlterConsumerGroupOffsetsResult result = AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
             Group,
             new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(10) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitions, offsets, metadata, leaderEpochs,
              hasLeaderEpoch, count, timeoutMs, callback, userData) =>
             {
@@ -162,9 +164,9 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                 NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync(
                     nativeHandle, groupId, topics, partitions, offsets, metadata, leaderEpochs,
                     hasLeaderEpoch, count, timeoutMs, callback, userData);
-            });
+            }));
 
-        AssertFaultedInline(result.All(), NegativeOffsetAtZero, result.PartitionResult(partition));
+        AssertFaultedInline(result.All().Get(), NegativeOffsetAtZero, result.PartitionResult(partition).Get());
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -179,15 +181,16 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         SafeAdminHandle handle = admin.Handle;
         TopicPartition partition = new TopicPartition("p13-inline-dcgo", 0);
 
-        DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+        AsyncDeleteConsumerGroupOffsetsResult result = AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
             Group,
             new[] { partition },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitions, count, timeoutMs, callback, userData) =>
                 NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync(
-                    IntPtr.Zero, groupId, topics, partitions, count, timeoutMs, callback, userData));
+                    IntPtr.Zero, groupId, topics, partitions, count, timeoutMs, callback, userData)));
 
-        AssertFaultedInline(result.All(), NullAdmin, result.PartitionResult(partition));
+        AssertFaultedInline(result.All().Get(), NullAdmin, result.PartitionResult(partition).Get());
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -206,23 +209,24 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         SafeAdminHandle handle = admin.Handle;
         MemberToRemove member = new MemberToRemove("p13-inline-rm");
 
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+        AsyncRemoveMembersFromConsumerGroupResult result = AsyncRemoveMembersFromConsumerGroupResult.From(admin.RemoveMembersFromConsumerGroup(
             Group,
             RemoveMembersOptions(removeAll, member),
+            AdminFlavour.Async,
             (nativeHandle, groupId, removeAllFlag, groupInstanceIds, memberCount, reason, timeoutMs,
              callback, userData) =>
                 NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync(
                     IntPtr.Zero, groupId, removeAllFlag, groupInstanceIds, memberCount, reason,
-                    timeoutMs, callback, userData));
+                    timeoutMs, callback, userData)));
 
         Assert.Equal(removeAll, result.RemoveAll);
         if (removeAll)
         {
-            AssertFaultedInline(result.All(), NullAdmin);
+            AssertFaultedInline(result.All().Get(), NullAdmin);
         }
         else
         {
-            AssertFaultedInline(result.All(), NullAdmin, result.MemberResult(member));
+            AssertFaultedInline(result.All().Get(), NullAdmin, result.MemberResult(member).Get());
         }
 
         AssertReleasedExactlyOnce(admin, handle);
@@ -241,9 +245,10 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         SafeAdminHandle handle = admin.Handle;
         MemberToRemove member = new MemberToRemove("p13-inline-rm-empty");
 
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+        AsyncRemoveMembersFromConsumerGroupResult result = AsyncRemoveMembersFromConsumerGroupResult.From(admin.RemoveMembersFromConsumerGroup(
             Group,
             RemoveMembersOptions(removeAll: false, member),
+            AdminFlavour.Async,
             (nativeHandle, groupId, removeAllFlag, groupInstanceIds, memberCount, reason, timeoutMs,
              callback, userData) =>
             {
@@ -252,9 +257,9 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                 NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync(
                     nativeHandle, groupId, removeAllFlag, groupInstanceIds, 0, reason, timeoutMs,
                     callback, userData);
-            });
+            }));
 
-        AssertFaultedInline(result.All(), EmptyMembers, result.MemberResult(member));
+        AssertFaultedInline(result.All().Get(), EmptyMembers, result.MemberResult(member).Get());
         AssertReleasedExactlyOnce(admin, handle);
     }
 
@@ -292,22 +297,23 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         IntPtr capturedUserData = IntPtr.Zero;
         int capturedCount = -1;
 
-        AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+        AsyncAlterConsumerGroupOffsetsResult result = AsyncAlterConsumerGroupOffsetsResult.From(admin.AlterConsumerGroupOffsets(
             Group,
             offsets,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitions, offsetValues, metadata, leaderEpochs,
              hasLeaderEpoch, count, timeoutMs, callback, userData) =>
             {
                 capturedCallback = callback;
                 capturedUserData = userData;
                 capturedCount = count;
-            });
+            }));
 
         Assert.Equal(partitionCount, capturedCount);
         Assert.Same(AdminCallbacks.AlterConsumerGroupOffsets, capturedCallback);
 
-        Task all = result.All();
+        Task all = result.All().Get();
         AssertPendingAndRooted<TopicPartition>(admin, handle, all, capturedUserData);
 
         capturedCallback!(IntPtr.Zero, MintError(7, "p13-late-acgo"), capturedUserData);
@@ -347,21 +353,22 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         IntPtr capturedUserData = IntPtr.Zero;
         int capturedCount = -1;
 
-        DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+        AsyncDeleteConsumerGroupOffsetsResult result = AsyncDeleteConsumerGroupOffsetsResult.From(admin.DeleteConsumerGroupOffsets(
             Group,
             partitions,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, groupId, topics, partitionIds, count, timeoutMs, callback, userData) =>
             {
                 capturedCallback = callback;
                 capturedUserData = userData;
                 capturedCount = count;
-            });
+            }));
 
         Assert.Equal(partitionCount, capturedCount);
         Assert.Same(AdminCallbacks.DeleteConsumerGroupOffsets, capturedCallback);
 
-        Task all = result.All();
+        Task all = result.All().Get();
         AssertPendingAndRooted<TopicPartition>(admin, handle, all, capturedUserData);
 
         capturedCallback!(IntPtr.Zero, MintError(11, "p13-late-dcgo"), capturedUserData);
@@ -429,9 +436,10 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
         bool? capturedRemoveAll = null;
         bool capturedNullArray = false;
 
-        RemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
+        AsyncRemoveMembersFromConsumerGroupResult result = AsyncRemoveMembersFromConsumerGroupResult.From(admin.RemoveMembersFromConsumerGroup(
             Group,
             RemoveMembersOptions(removeAll, members),
+            AdminFlavour.Async,
             (nativeHandle, groupId, removeAllFlag, groupInstanceIds, count, reason, timeoutMs,
              callback, userData) =>
             {
@@ -440,14 +448,14 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
                 capturedCount = count;
                 capturedRemoveAll = removeAllFlag;
                 capturedNullArray = groupInstanceIds is null;
-            });
+            }));
 
         Assert.Equal(memberCount, capturedCount);
         Assert.Equal(removeAll, capturedRemoveAll);
         Assert.Equal(removeAll, capturedNullArray);
         Assert.Same(AdminCallbacks.RemoveMembersFromConsumerGroup, capturedCallback);
 
-        Task all = result.All();
+        Task all = result.All().Get();
         AssertPendingAndRooted<string>(admin, handle, all, capturedUserData);
 
         capturedCallback!(IntPtr.Zero, MintError(13, "p13-late-rm"), capturedUserData);

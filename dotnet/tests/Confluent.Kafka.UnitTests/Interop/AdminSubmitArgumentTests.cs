@@ -116,9 +116,10 @@ public sealed class AdminSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic(Topic, 1, 1) },
             options,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
             {
                 captured.Count = count;
@@ -127,7 +128,7 @@ public sealed class AdminSubmitArgumentTests
                 captured.ValidateOnly = validateOnly;
                 captured.RetryOnQuotaViolation = retryOnQuotaViolation;
                 captured.UserData = userData;
-            });
+            }));
 
         // Complete it so the operation's GCHandle and span-the-op reference are released
         // before the client is disposed.
@@ -141,7 +142,7 @@ public sealed class AdminSubmitArgumentTests
                 captured.UserData);
         }
 
-        Assert.NotNull(result.Values[Topic].Exception);
+        Assert.NotNull(result.Values[Topic].Get().Exception);
         return captured;
     }
 

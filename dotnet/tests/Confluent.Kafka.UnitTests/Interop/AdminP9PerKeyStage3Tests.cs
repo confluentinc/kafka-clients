@@ -69,13 +69,13 @@ public sealed class AdminP9PerKeyStage3Tests
             request[key] = RecordsToDelete.BeforeOffset(10);
         }
 
-        DeleteRecordsResult result = admin.DeleteRecords(request, options: null);
+        AsyncDeleteRecordsResult result = AsyncDeleteRecordsResult.From(admin.DeleteRecords(request, options: null, AdminFlavour.Async));
 
         Assert.Equal(keys.Length, result.LowWatermarks.Count);
         foreach (TopicPartition key in keys)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.LowWatermarks[key], s_deadline));
+                () => TestTimeout.Run(() => result.LowWatermarks[key].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -92,28 +92,29 @@ public sealed class AdminP9PerKeyStage3Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp4-offsets", 2, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp4-offsets", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartition good = new TopicPartition("cp4-offsets", 0);
         TopicPartition bad = new TopicPartition("cp4-offsets", 1);
 
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = AsyncListOffsetsResult.From(admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec>
             {
                 [good] = OffsetSpec.Latest(),
                 [bad] = OffsetSpec.ForTimestamp(1),
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
         ListOffsetsResult.ListOffsetsResultInfo info =
-            await TestTimeout.Run(() => result.PartitionResult(good), s_deadline);
+            await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline);
         // The mock reports -1 for an unwritten partition; what matters is that a real owned
         // value crossed and was copied out before the callback destroyed it.
         Assert.Equal(-1L, info.Offset);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.PartitionResult(bad), s_deadline));
+            () => TestTimeout.Run(() => result.PartitionResult(bad).Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
     }
 
@@ -128,7 +129,7 @@ public sealed class AdminP9PerKeyStage3Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp4-replicas", 2, 2) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp4-replicas", 2, 2) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartitionReplica[] keys =
@@ -139,13 +140,13 @@ public sealed class AdminP9PerKeyStage3Tests
             new TopicPartitionReplica("cp4-replicas", 1, 1),
         };
 
-        DescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(keys, options: null);
+        AsyncDescribeReplicaLogDirsResult result = AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(keys, options: null, AdminFlavour.Async));
 
         Assert.Equal(keys.Length, result.Values.Count);
         foreach (TopicPartitionReplica key in keys)
         {
             DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-                await TestTimeout.Run(() => result.Values[key], s_deadline);
+                await TestTimeout.Run(() => result.Values[key].Get(), s_deadline);
             Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
         }
     }
@@ -167,12 +168,12 @@ public sealed class AdminP9PerKeyStage3Tests
             new TopicPartition("cp4-prod-b", 0),
         };
 
-        DescribeProducersResult result = admin.DescribeProducers(keys, options: null);
+        AsyncDescribeProducersResult result = AsyncDescribeProducersResult.From(admin.DescribeProducers(keys, options: null, AdminFlavour.Async));
 
         foreach (TopicPartition key in keys)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.PartitionResult(key), s_deadline));
+                () => TestTimeout.Run(() => result.PartitionResult(key).Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -293,10 +294,10 @@ public sealed class AdminP9PerKeyStage3Tests
                         request[key] = RecordsToDelete.BeforeOffset(1);
                     }
 
-                    DeleteRecordsResult result = admin.DeleteRecords(request, options: null);
-                    foreach (KeyValuePair<TopicPartition, Task<DeletedRecords>> entry in result.LowWatermarks)
+                    AsyncDeleteRecordsResult result = AsyncDeleteRecordsResult.From(admin.DeleteRecords(request, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> entry in result.LowWatermarks)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -311,11 +312,11 @@ public sealed class AdminP9PerKeyStage3Tests
                         request[key] = OffsetSpec.Latest();
                     }
 
-                    ListOffsetsResult result = admin.ListOffsets(request, options: null);
+                    AsyncListOffsetsResult result = AsyncListOffsetsResult.From(admin.ListOffsets(request, options: null, AdminFlavour.Async));
                     foreach (TopicPartition key in request.Keys)
                     {
                         TopicPartition captured = key;
-                        awaitables.Add(() => result.PartitionResult(captured));
+                        awaitables.Add(() => result.PartitionResult(captured).Get());
                     }
 
                     break;
@@ -323,11 +324,11 @@ public sealed class AdminP9PerKeyStage3Tests
 
             case Rpc.DescribeProducers:
                 {
-                    DescribeProducersResult result = admin.DescribeProducers(keys, options: null);
+                    AsyncDescribeProducersResult result = AsyncDescribeProducersResult.From(admin.DescribeProducers(keys, options: null, AdminFlavour.Async));
                     foreach (TopicPartition key in keys)
                     {
                         TopicPartition captured = key;
-                        awaitables.Add(() => result.PartitionResult(captured));
+                        awaitables.Add(() => result.PartitionResult(captured).Get());
                     }
 
                     break;
@@ -341,12 +342,12 @@ public sealed class AdminP9PerKeyStage3Tests
                         replicas.Add(new TopicPartitionReplica(key.Topic, key.Partition, 0));
                     }
 
-                    DescribeReplicaLogDirsResult result =
-                        admin.DescribeReplicaLogDirs(replicas, options: null);
+                    AsyncDescribeReplicaLogDirsResult result =
+                        AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(replicas, options: null, AdminFlavour.Async));
                     foreach (KeyValuePair<TopicPartitionReplica,
-                        Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in result.Values)
+                        AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in result.Values)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;

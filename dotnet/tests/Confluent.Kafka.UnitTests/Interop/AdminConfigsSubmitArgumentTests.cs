@@ -240,13 +240,14 @@ public sealed class AdminConfigsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [s_topicResource] = Array.Empty<AlterConfigOp>(),
             },
             options: null,
-            captured.RecordAlter);
+            AdminFlavour.Async,
+            captured.RecordAlter));
 
         Assert.Equal(1, captured.Count);
         Assert.Equal(new[] { 2 }, captured.ResourceTypes);
@@ -257,7 +258,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         Assert.Equal(new[] { -1 }, captured.OpTypes);
 
         // Pending on its callback — not completed locally.
-        Task pending = result.Values[s_topicResource];
+        Task pending = result.Values[s_topicResource].Get();
         Assert.False(pending.IsCompleted, "a zero-op resource must wait for the callback the ABI owes it");
 
         FireAlter(s_topicResource, IntPtr.Zero, captured.UserData);
@@ -291,7 +292,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         SafeAdminHandle handle = admin.Handle;
 
         Captured captured = new Captured();
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [a] = new[]
@@ -303,7 +304,8 @@ public sealed class AdminConfigsSubmitArgumentTests
                 [c] = new[] { new AlterConfigOp(new ConfigEntry("c1", "3"), AlterConfigOpType.Append) },
             },
             options: null,
-            captured.RecordAlter);
+            AdminFlavour.Async,
+            captured.RecordAlter));
 
         // ---- The row shape: grouped, in caller order, with B's sentinel in its place. ----
         Assert.Equal(4, captured.Count);
@@ -318,9 +320,9 @@ public sealed class AdminConfigsSubmitArgumentTests
         FireAlter(a, IntPtr.Zero, captured.UserData);
         FireAlter(c, IntPtr.Zero, captured.UserData);
 
-        Assert.True(result.Values[a].IsCompleted);
-        Assert.True(result.Values[c].IsCompleted);
-        Assert.False(result.Values[b].IsCompleted, "the countdown must wait for the zero-op key's own callback");
+        Assert.True(result.Values[a].Get().IsCompleted);
+        Assert.True(result.Values[c].Get().IsCompleted);
+        Assert.False(result.Values[b].Get().IsCompleted, "the countdown must wait for the zero-op key's own callback");
 
         // …and the operation still holds the client: Dispose must defer the native destroy.
         TestTimeout.Run(admin.Dispose, s_deadline);
@@ -330,10 +332,10 @@ public sealed class AdminConfigsSubmitArgumentTests
         FireAlter(b, IntPtr.Zero, captured.UserData);
 
         Assert.True(handle.IsClosed, "the last callback must run the deferred release");
-        foreach (KeyValuePair<ConfigResource, Task> entry in result.Values)
+        foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture> entry in result.Values)
         {
-            Assert.True(entry.Value.IsCompleted);
-            Assert.Null(entry.Value.Exception);
+            Assert.True(entry.Value.Get().IsCompleted);
+            Assert.Null(entry.Value.Get().Exception);
         }
     }
 
@@ -353,25 +355,26 @@ public sealed class AdminConfigsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [s_topicResource] = Array.Empty<AlterConfigOp>(),
             },
             new AlterConfigsOptions { ValidateOnly = true },
-            captured.RecordAlter);
+            AdminFlavour.Async,
+            captured.RecordAlter));
 
         Assert.True(captured.ValidateOnly);
         Assert.Equal(1, captured.Count);
         Assert.Equal(new[] { "cfg-topic" }, captured.ResourceNames);
         Assert.Equal(new[] { IntPtr.Zero }, captured.ConfigNamePointers);
         Assert.Equal(new[] { -1 }, captured.OpTypes);
-        Assert.False(result.Values[s_topicResource].IsCompleted);
+        Assert.False(result.Values[s_topicResource].Get().IsCompleted);
 
         FireAlter(s_topicResource, CapturedError(), captured.UserData);
 
         KafkaException answer = Assert.IsType<KafkaException>(
-            Assert.Single(result.Values[s_topicResource].Exception!.InnerExceptions));
+            Assert.Single(result.Values[s_topicResource].Get().Exception!.InnerExceptions));
         Assert.Equal(1, answer.Code);
         Assert.Equal("captured", answer.Message);
     }
@@ -393,15 +396,16 @@ public sealed class AdminConfigsSubmitArgumentTests
         SafeAdminHandle handle = admin.Handle;
 
         Captured captured = new Captured();
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(),
             options: null,
-            captured.RecordAlter);
+            AdminFlavour.Async,
+            captured.RecordAlter));
 
         Assert.Equal(0, captured.Count);
         Assert.Empty(result.Values);
-        Assert.True(result.All().IsCompleted);
-        Assert.Null(result.All().Exception);
+        Assert.True(result.All().Get().IsCompleted);
+        Assert.Null(result.All().Get().Exception);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.True(handle.IsClosed, "an n == 0 operation must have released the client at the submit boundary");
@@ -450,10 +454,11 @@ public sealed class AdminConfigsSubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        DescribeConfigsResult result = admin.DescribeConfigs(
+        AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(
             resources.Length == 0 ? new[] { s_topicResource } : resources,
             options,
-            captured.RecordDescribe);
+            AdminFlavour.Async,
+            captured.RecordDescribe));
 
         // Shape 4a: one callback per key, keyed by the composite (type id, name) pair.
         foreach (ConfigResource resource in result.Values.Keys)
@@ -464,9 +469,9 @@ public sealed class AdminConfigsSubmitArgumentTests
         }
 
         // Values[] hands back the bridge's own task, so this read is synchronous.
-        foreach (KeyValuePair<ConfigResource, Task<Config>> entry in result.Values)
+        foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values)
         {
-            Assert.NotNull(entry.Value.Exception);
+            Assert.NotNull(entry.Value.Get().Exception);
         }
 
         return captured;
@@ -493,7 +498,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         }
 
         Captured captured = new Captured();
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(configs, options, captured.RecordAlter);
+        AsyncAlterConfigsResult result = AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(configs, options, AdminFlavour.Async, captured.RecordAlter));
 
         // One callback per resource — a zero-op one included, since its sentinel row names
         // it (M15/P13.2, finding F1) — so every key is answered, and faulted, the same way.
@@ -502,9 +507,9 @@ public sealed class AdminConfigsSubmitArgumentTests
             FireAlter(resource, CapturedError(), captured.UserData);
         }
 
-        foreach (KeyValuePair<ConfigResource, Task> entry in result.Values)
+        foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture> entry in result.Values)
         {
-            Assert.NotNull(entry.Value.Exception);
+            Assert.NotNull(entry.Value.Get().Exception);
         }
 
         return captured;

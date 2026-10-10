@@ -76,9 +76,10 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         SafeAdminHandle handle = admin.Handle;
 
         List<Row> sent = new List<Row>();
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
             new[] { Alteration("f7-dup", 1d), Alteration("f7-dup", 2d) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues, opCounts, count,
                 timeoutMs, validateOnly, callback, userData) =>
             {
@@ -86,18 +87,18 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
                 NativeMethods.AdminClientAlterClientQuotasAsync(
                     nativeHandle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues, opCounts,
                     count, timeoutMs, validateOnly, callback, userData);
-            });
+            }));
 
         Assert.Equal(2, sent.Count);
         Assert.All(sent, row => Assert.Equal(new[] { "user=f7-dup" }, row.Entries));
         Assert.Equal(new[] { 1d }, sent[0].Values);
         Assert.Equal(new[] { 2d }, sent[1].Values);
 
-        KeyValuePair<ClientQuotaEntity, Task> only = Assert.Single(result.Values);
+        KeyValuePair<ClientQuotaEntity, AsyncKafkaFuture> only = Assert.Single(result.Values);
         Assert.Equal(Entity("f7-dup"), only.Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[Entity("f7-dup")], s_deadline));
+            () => TestTimeout.Run(() => result.Values[Entity("f7-dup")].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -118,9 +119,10 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 
         ClientQuotaAlteration.Op[] noOps = Array.Empty<ClientQuotaAlteration.Op>();
         List<Row> sent = new List<Row>();
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
             new[] { new ClientQuotaAlteration(EmptyEntity(), noOps), new ClientQuotaAlteration(EmptyEntity(), noOps) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues, opCounts, count,
                 timeoutMs, validateOnly, callback, userData) =>
             {
@@ -128,7 +130,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
                 NativeMethods.AdminClientAlterClientQuotasAsync(
                     nativeHandle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues, opCounts,
                     count, timeoutMs, validateOnly, callback, userData);
-            });
+            }));
 
         Assert.Equal(2, sent.Count);
         Assert.All(sent, row => Assert.Empty(row.Entries));
@@ -136,7 +138,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[EmptyEntity()], s_deadline));
+            () => TestTimeout.Run(() => result.Values[EmptyEntity()].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 

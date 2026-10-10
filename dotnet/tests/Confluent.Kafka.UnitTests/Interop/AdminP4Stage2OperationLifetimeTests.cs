@@ -213,46 +213,50 @@ public sealed class AdminP4Stage2OperationLifetimeTests
     {
         if (rpc == Rpc.ListPartitionReassignments)
         {
-            ListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
+            AsyncListPartitionReassignmentsResult result = AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
                 new[] { new TopicPartition(LifetimeTopic, 0) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, allPartitions, topics, partitions, count, timeoutMs, callback, userData) =>
-                    onSubmit(userData));
+                    onSubmit(userData)));
 
-            return result.Reassignments;
+            return () => result.Reassignments().Get();
         }
 
         TopicPartition partition = new TopicPartition(LifetimeTopic, 0);
-        ListOffsetsResult offsets = admin.ListOffsets(
+        AsyncListOffsetsResult offsets = AsyncListOffsetsResult.From(admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Latest() },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs, isolationLevel,
-                callback, userData) => onSubmit(userData));
+                callback, userData) => onSubmit(userData)));
 
-        return () => offsets.PartitionResult(partition);
+        return () => offsets.PartitionResult(partition).Get();
     }
 
     private static void SubmitThrowing(NativeAdminClient admin, Rpc rpc)
     {
         if (rpc == Rpc.ListPartitionReassignments)
         {
-            admin.ListPartitionReassignments(
+            AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
                 new[] { new TopicPartition("p4s2-throwing", 0) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, allPartitions, topics, partitions, count, timeoutMs, callback, userData) =>
-                    throw new InvalidOperationException("submit failed"));
+                    throw new InvalidOperationException("submit failed")));
             return;
         }
 
-        admin.ListOffsets(
+        AsyncListOffsetsResult.From(admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec>
             {
                 [new TopicPartition("p4s2-throwing", 0)] = OffsetSpec.Earliest(),
                 [new TopicPartition("p4s2-throwing", 1)] = OffsetSpec.ForTimestamp(5),
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs, isolationLevel,
-                callback, userData) => throw new InvalidOperationException("submit failed"));
+                callback, userData) => throw new InvalidOperationException("submit failed")));
     }
 
     /// <summary>

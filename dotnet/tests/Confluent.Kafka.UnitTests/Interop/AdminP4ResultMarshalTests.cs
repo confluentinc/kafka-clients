@@ -386,7 +386,7 @@ public sealed class AdminP4ResultMarshalTests
     private static TopicPartition SeedTopic(NativeAdminClient admin, string name, int partitions = 1)
     {
         TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(name, partitions, 1) }, options: null).All(), s_deadline)
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(name, partitions, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline)
             .GetAwaiter()
             .GetResult();
         return new TopicPartition(name, 0);

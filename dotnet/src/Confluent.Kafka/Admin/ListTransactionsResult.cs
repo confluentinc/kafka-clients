@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -60,6 +61,13 @@ public sealed class ListTransactionsResult
     {
         _byBrokerId = byBrokerId ?? throw new ArgumentNullException(nameof(byBrokerId));
     }
+
+    /// <summary>
+    /// Builds this result over a <c>listTransactions</c> operation's outer stage: the one place it is built from an
+    /// admin operation (M15/P14).
+    /// </summary>
+    internal static ListTransactionsResult From(ListTransactionsAdminOperation operation) =>
+        new ListTransactionsResult(operation.ByBrokerId);
 
     /// <summary>
     /// Every listing in the cluster, failing with the first error — Java's <c>all()</c>

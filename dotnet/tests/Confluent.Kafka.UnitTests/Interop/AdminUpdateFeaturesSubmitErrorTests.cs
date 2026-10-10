@@ -113,9 +113,9 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(async () =>
             {
-                UpdateFeaturesResult result = admin.UpdateFeatures(updates, options: null);
+                AsyncUpdateFeaturesResult result = AsyncUpdateFeaturesResult.From(admin.UpdateFeatures(updates, options: null, AdminFlavour.Async));
                 returned = true;
-                await result.All().ConfigureAwait(false);
+                await result.All().Get().ConfigureAwait(false);
             }),
             s_deadline);
 
@@ -137,19 +137,20 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         WeakReference? operation = null;
         int submits = 0;
 
-        KafkaException thrown = Assert.Throws<KafkaException>(() => admin.UpdateFeatures(
+        KafkaException thrown = Assert.Throws<KafkaException>(() => AsyncUpdateFeaturesResult.From(admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
                 ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, features, maxVersionLevels, upgradeTypes, count, timeoutMs, validateOnly, callback,
                 userData) =>
             {
                 submits++;
                 operation = new WeakReference(GCHandle.FromIntPtr(userData).Target);
                 return MakeError(InvalidRequestCode, "the stand-in refused the request");
-            }));
+            })));
 
         return (thrown, operation!, submits);
     }

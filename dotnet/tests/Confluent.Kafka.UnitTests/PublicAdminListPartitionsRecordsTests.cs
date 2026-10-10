@@ -126,8 +126,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         bool? captured = null;
         int capturedTimeout = int.MinValue;
-        ListTopicsResult result = admin.ListTopics(
+        AsyncListTopicsResult result = AsyncListTopicsResult.From(admin.ListTopics(
             new ListTopicsOptions { ListInternal = listInternal, TimeoutMs = 4321 },
+            Confluent.Kafka.Internal.AdminFlavour.Async,
             (nativeHandle, timeoutMs, flag, callback, userData) =>
             {
                 captured = flag;
@@ -142,7 +143,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("probe");
                 AdminCallbacks.ListTopics(
                     IntPtr.Zero, NativeMethods.KafkaErrorNew(1, message.Pointer), userData);
-            });
+            }));
 
         Assert.Equal(listInternal, captured);
 
@@ -150,7 +151,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Equal(4321, capturedTimeout);
 
         // Observe the fault so the awaiter is not left unobserved.
-        Assert.True(result.NamesToListings().IsFaulted);
+        Assert.True(result.NamesToListings().Get().IsFaulted);
     }
 
     /// <summary>

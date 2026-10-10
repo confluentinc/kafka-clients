@@ -68,14 +68,14 @@ public sealed class AdminListTransactionsTwoStageTests
 
         Discover(submission, 3, 1, 2);
 
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await TestTimeout.Run(() => submission.Result.ByBrokerId(), s_deadline);
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await TestTimeout.Run(() => submission.Result.ByBrokerId().Get(), s_deadline);
         Assert.Equal(new[] { 1, 2, 3 }, brokers.Keys.OrderBy(static id => id).ToArray());
-        Assert.All(brokers.Values, static broker => Assert.False(broker.IsCompleted));
+        Assert.All(brokers.Values, static broker => Assert.False(broker.Get().IsCompleted));
 
         Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> allByBrokerId =
-            submission.Result.AllByBrokerId();
-        Task<IReadOnlyCollection<TransactionListing>> all = submission.Result.All();
+            submission.Result.AllByBrokerId().Get();
+        Task<IReadOnlyCollection<TransactionListing>> all = submission.Result.All().Get();
         Assert.False(allByBrokerId.IsCompleted, "no broker has finished");
         Assert.False(all.IsCompleted, "no broker has finished");
 
@@ -95,21 +95,21 @@ public sealed class AdminListTransactionsTwoStageTests
         Submission submission = Submit(admin);
         Discover(submission, 1, 2);
 
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await TestTimeout.Run(() => submission.Result.ByBrokerId(), s_deadline);
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await TestTimeout.Run(() => submission.Result.ByBrokerId().Get(), s_deadline);
 
         FailBroker(submission, 1, 15, "broker 1 has no coordinator");
 
         KafkaException first = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => brokers[1]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => brokers[1].Get()), s_deadline);
         Assert.Equal(15, first.Code);
         Assert.Equal("broker 1 has no coordinator", first.Message);
-        Assert.False(brokers[2].IsCompleted, "broker 2 has its own callback still to come");
+        Assert.False(brokers[2].Get().IsCompleted, "broker 2 has its own callback still to come");
 
         FailBroker(submission, 2, 31, "broker 2 refused");
 
         KafkaException second = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => brokers[2]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => brokers[2].Get()), s_deadline);
         Assert.Equal(31, second.Code);
         Assert.Equal("broker 2 refused", second.Message);
     }
@@ -126,8 +126,8 @@ public sealed class AdminListTransactionsTwoStageTests
         Discover(submission, 1, 2);
 
         Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> allByBrokerId =
-            submission.Result.AllByBrokerId();
-        Task<IReadOnlyCollection<TransactionListing>> all = submission.Result.All();
+            submission.Result.AllByBrokerId().Get();
+        Task<IReadOnlyCollection<TransactionListing>> all = submission.Result.All().Get();
 
         FailBroker(submission, 2, 31, "broker 2 refused");
 
@@ -139,9 +139,9 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.Equal("broker 2 refused", viaMap.Message);
         Assert.Same(viaMap, viaAll);
 
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await submission.Result.ByBrokerId();
-        Assert.False(brokers[1].IsCompleted, "the fail-fast views must not have waited for broker 1");
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await submission.Result.ByBrokerId().Get();
+        Assert.False(brokers[1].Get().IsCompleted, "the fail-fast views must not have waited for broker 1");
 
         FailBroker(submission, 1, 14, "broker 1 loading");
     }
@@ -164,11 +164,11 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.True(handle.IsClosed, "a failed discovery is the operation's last callback");
 
         KafkaException byBrokerId = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.ByBrokerId()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.ByBrokerId().Get()), s_deadline);
         KafkaException allByBrokerId = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.AllByBrokerId()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.AllByBrokerId().Get()), s_deadline);
         KafkaException all = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All().Get()), s_deadline);
 
         Assert.Equal(7, byBrokerId.Code);
         Assert.Equal("metadata timed out", byBrokerId.Message);
@@ -191,9 +191,9 @@ public sealed class AdminListTransactionsTwoStageTests
         submission.ByBrokerIdCallback(IntPtr.Zero, 0, IntPtr.Zero, submission.UserData);
         Assert.True(handle.IsClosed, "no per-broker callback follows an empty discovery");
 
-        Assert.Empty(await TestTimeout.Run(() => submission.Result.ByBrokerId(), s_deadline));
-        Assert.Empty(await TestTimeout.Run(() => submission.Result.AllByBrokerId(), s_deadline));
-        Assert.Empty(await TestTimeout.Run(() => submission.Result.All(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => submission.Result.ByBrokerId().Get(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => submission.Result.AllByBrokerId().Get(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => submission.Result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -238,7 +238,7 @@ public sealed class AdminListTransactionsTwoStageTests
         SafeAdminHandle handle = admin.Handle;
         Submission submission = Submit(admin, inline: static submitted => Discover(submitted, 5));
 
-        Assert.Equal(TaskStatus.RanToCompletion, submission.Result.ByBrokerId().Status);
+        Assert.Equal(TaskStatus.RanToCompletion, submission.Result.ByBrokerId().Get().Status);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.False(handle.IsClosed, "broker 5's callback is still owed");
@@ -247,7 +247,7 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.True(handle.IsClosed, "broker 5's callback was the last one");
 
         KafkaException broker = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(async () => await (await submission.Result.ByBrokerId())[5]),
+            () => Assert.ThrowsAsync<KafkaException>(async () => await (await submission.Result.ByBrokerId().Get())[5].Get()),
             s_deadline);
         Assert.Equal(14, broker.Code);
         Assert.Equal("broker 5 loading", broker.Message);
@@ -268,13 +268,13 @@ public sealed class AdminListTransactionsTwoStageTests
             inline: static submitted => submitted.ByBrokerIdCallback(
                 IntPtr.Zero, 0, MakeError(7, "could not submit"), submitted.UserData));
 
-        Assert.True(submission.Result.ByBrokerId().IsFaulted, "the inline discovery ran before the submit returned");
+        Assert.True(submission.Result.ByBrokerId().Get().IsFaulted, "the inline discovery ran before the submit returned");
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.True(handle.IsClosed, "nothing is owed once the submit has returned");
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All().Get()), s_deadline);
         Assert.Equal(7, failure.Code);
         Assert.Equal("could not submit", failure.Message);
     }
@@ -295,8 +295,8 @@ public sealed class AdminListTransactionsTwoStageTests
 
         int[] ids = Enumerable.Range(1, brokerCount).ToArray();
         Discover(submission, ids);
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await TestTimeout.Run(() => submission.Result.ByBrokerId(), s_deadline);
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await TestTimeout.Run(() => submission.Result.ByBrokerId().Get(), s_deadline);
 
         // Build every error up front, so the two threads only fire.
         IntPtr[] errors = ids.Select(static id => MakeError(14, "broker " + id + " loading")).ToArray();
@@ -313,7 +313,7 @@ public sealed class AdminListTransactionsTwoStageTests
         foreach (int id in ids)
         {
             KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => brokers[id]), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => brokers[id].Get()), s_deadline);
             Assert.Equal(14, failure.Code);
             Assert.Equal("broker " + id + " loading", failure.Message);
         }
@@ -336,7 +336,7 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.True(handle.IsClosed, "the malformed callback still releases its slot");
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.All().Get()), s_deadline);
         Assert.Equal(0, failure.Code);
         Assert.Equal("The listTransactions result carried neither listings nor an error for broker 7.", failure.Message);
     }
@@ -358,12 +358,12 @@ public sealed class AdminListTransactionsTwoStageTests
         FailBroker(submission, 99, 31, "an unannounced broker");
         Assert.True(handle.IsClosed, "the count the discovery announced has been released");
 
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await submission.Result.ByBrokerId();
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await submission.Result.ByBrokerId().Get();
         Assert.Equal(new[] { 1 }, brokers.Keys.ToArray());
 
         KafkaException silent = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => brokers[1]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => brokers[1].Get()), s_deadline);
         Assert.Equal(0, silent.Code);
         Assert.Equal("The listTransactions result contained no entry for broker 1.", silent.Message);
     }
@@ -385,10 +385,10 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.False(handle.IsClosed, "native still owes the two per-broker callbacks it announced");
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.ByBrokerId()), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => submission.Result.ByBrokerId().Get()), s_deadline);
         Assert.Equal(0, failure.Code);
         Assert.Equal("The listTransactions broker discovery reported 2 broker(s) but no broker ids.", failure.Message);
-        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => submission.Result.All()));
+        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => submission.Result.All().Get()));
 
         FailBroker(submission, 1, 14, "broker 1 loading");
         Assert.False(handle.IsClosed, "one per-broker callback is still owed");
@@ -406,7 +406,7 @@ public sealed class AdminListTransactionsTwoStageTests
     public async Task ABrokersListings_ReachItsOwnEntry_AndEveryView()
     {
         ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
-        ListTransactionsResult result = new ListTransactionsResult(operation.ByBrokerId);
+        AsyncListTransactionsResult result = new AsyncListTransactionsResult(operation.ByBrokerId);
 
         TransactionListing first = new TransactionListing("txn-a", 11L, TransactionState.Ongoing);
         TransactionListing second = new TransactionListing("txn-b", 12L, TransactionState.CompleteCommit);
@@ -417,11 +417,11 @@ public sealed class AdminListTransactionsTwoStageTests
         operation.PublishBrokers(new[] { 1, 2, 1 });
         operation.SetBrokerResult(1, brokerOne);
 
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await TestTimeout.Run(() => result.ByBrokerId(), s_deadline);
+        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
+            await TestTimeout.Run(() => result.ByBrokerId().Get(), s_deadline);
         Assert.Equal(2, brokers.Count);
-        Assert.Same(brokerOne, await brokers[1]);
-        Assert.False(brokers[2].IsCompleted, "broker 2 has not been answered");
+        Assert.Same(brokerOne, await brokers[1].Get());
+        Assert.False(brokers[2].Get().IsCompleted, "broker 2 has not been answered");
 
         // An unannounced broker is inert, not a throw.
         operation.SetBrokerResult(5, brokerTwo);
@@ -430,12 +430,12 @@ public sealed class AdminListTransactionsTwoStageTests
         operation.SetBrokerResult(2, brokerTwo);
 
         IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> map =
-            await TestTimeout.Run(() => result.AllByBrokerId(), s_deadline);
+            await TestTimeout.Run(() => result.AllByBrokerId().Get(), s_deadline);
         Assert.Equal(new[] { 1, 2 }, map.Keys.OrderBy(static id => id).ToArray());
         Assert.Same(brokerOne, map[1]);
         Assert.Same(brokerTwo, map[2]);
 
-        IReadOnlyCollection<TransactionListing> all = await TestTimeout.Run(() => result.All(), s_deadline);
+        IReadOnlyCollection<TransactionListing> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal(2, all.Count);
         Assert.Contains(first, all);
         Assert.Contains(second, all);
@@ -449,12 +449,12 @@ public sealed class AdminListTransactionsTwoStageTests
     public async Task TheFailFastViews_FailWithTheFirstBrokerToFail_NotTheLowestId()
     {
         ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
-        ListTransactionsResult result = new ListTransactionsResult(operation.ByBrokerId);
+        AsyncListTransactionsResult result = new AsyncListTransactionsResult(operation.ByBrokerId);
         operation.PublishBrokers(new[] { 1, 2, 3 });
 
         Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> allByBrokerId =
-            result.AllByBrokerId();
-        Task<IReadOnlyCollection<TransactionListing>> all = result.All();
+            result.AllByBrokerId().Get();
+        Task<IReadOnlyCollection<TransactionListing>> all = result.All().Get();
 
         KafkaException third = new KafkaException("broker 3 failed first");
         operation.SetBrokerException(3, third);
@@ -579,7 +579,7 @@ public sealed class AdminListTransactionsTwoStageTests
     private static Submission Submit(NativeAdminClient admin, Action<Submission>? inline = null)
     {
         Submission submission = new Submission();
-        submission.Result = admin.ListTransactions(
+        submission.Result = AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             options: null,
             (handle, states, stateCount, producerIds, producerIdCount, durationMs, pattern,
              timeoutMs, byBrokerIdCallback, callback, data) =>
@@ -588,7 +588,7 @@ public sealed class AdminListTransactionsTwoStageTests
                 submission.Callback = callback;
                 submission.UserData = data;
                 inline?.Invoke(submission);
-            });
+            }));
         return submission;
     }
 
@@ -646,7 +646,7 @@ public sealed class AdminListTransactionsTwoStageTests
     /// <summary>What production's submit handed native, captured through the seam.</summary>
     private sealed class Submission
     {
-        internal ListTransactionsResult Result { get; set; } = null!;
+        internal AsyncListTransactionsResult Result { get; set; } = null!;
 
         internal AdminCallbacks.ListTransactionsByBrokerIdCallback ByBrokerIdCallback { get; set; } = null!;
 

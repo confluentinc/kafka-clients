@@ -75,7 +75,7 @@ public sealed class AdminConfigsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(
                 new[]
                 {
                     new NewTopic(Topic, 1, 1)
@@ -87,7 +87,8 @@ public sealed class AdminConfigsMarshalTests
                         },
                     },
                 },
-                options: null).All(),
+                options: null,
+                AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
@@ -175,22 +176,22 @@ public sealed class AdminConfigsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);
         ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "cfg-absent-topic");
 
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { present, missing }, options: null);
+        AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(new[] { present, missing }, options: null, AdminFlavour.Async));
 
-        Config config = await TestTimeout.Run(() => result.Values[present], s_deadline);
+        Config config = await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
         Assert.NotNull(config);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Contains("not found", failure.Message, StringComparison.Ordinal);
 
         // …and All() fails because one resource did.
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>
@@ -340,7 +341,7 @@ public sealed class AdminConfigsMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);

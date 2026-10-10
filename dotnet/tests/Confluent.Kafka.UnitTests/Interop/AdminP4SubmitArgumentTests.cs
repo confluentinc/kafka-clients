@@ -89,16 +89,17 @@ public sealed class AdminP4SubmitArgumentTests
 
         object? context = null;
         IntPtr captured = IntPtr.Zero;
-        ElectLeadersResult result = admin.ElectLeaders(
+        AsyncElectLeadersResult result = AsyncElectLeadersResult.From(admin.ElectLeaders(
             ElectionType.Preferred,
             new[] { new TopicPartition("p4-routing", 0) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, electionType, allPartitions, topics, partitions, count, timeoutMs, callback,
                 userData) =>
             {
                 captured = userData;
                 context = GCHandle.FromIntPtr(userData).Target;
-            });
+            }));
 
         Assert.IsType<SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException>>>(context);
 
@@ -106,7 +107,7 @@ public sealed class AdminP4SubmitArgumentTests
         AdminCallbacks.ElectLeaders(IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(3, "routing"), captured);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.Partitions), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Partitions().Get()), s_deadline);
         Assert.Equal(3, failure.Code);
         Assert.Equal("routing", failure.Message);
     }
@@ -129,19 +130,20 @@ public sealed class AdminP4SubmitArgumentTests
 
         object? context = null;
         IntPtr captured = IntPtr.Zero;
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [new TopicPartition("p4-routing", 0)] = new NewPartitionReassignment(new[] { 0 }),
                 [new TopicPartition("p4-routing", 1)] = null,
             },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, cancel, targetReplicas, targetReplicaCounts, count, timeoutMs,
                 allowReplicationFactorChange, callback, userData) =>
             {
                 captured = userData;
                 context = GCHandle.FromIntPtr(userData).Target;
-            });
+            }));
 
         Assert.IsType<VoidKeyedAdminOperation<TopicPartition>>(context);
 
@@ -162,10 +164,10 @@ public sealed class AdminP4SubmitArgumentTests
                 captured);
         }
 
-        foreach (Task task in result.Values.Values)
+        foreach (AsyncKafkaFuture task in result.Values.Values)
         {
             KafkaException failure =
-                await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => task), s_deadline);
+                await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => task.Get()), s_deadline);
             Assert.Equal(4, failure.Code);
             Assert.Equal("routing", failure.Message);
         }
@@ -232,12 +234,13 @@ public sealed class AdminP4SubmitArgumentTests
 
         bool submitted = false;
         ArgumentOutOfRangeException rejected = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ElectLeaders(
+            AsyncElectLeadersResult.From(admin.ElectLeaders(
                 (ElectionType)value,
                 Array.Empty<TopicPartition>(),
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, electionType, allPartitions, topics, partitions, count, timeoutMs, callback,
-                    userData) => submitted = true));
+                    userData) => submitted = true)));
 
         Assert.Equal("electionType", rejected.ParamName);
         Assert.False(submitted, "the value must be rejected before the native call");
@@ -276,12 +279,13 @@ public sealed class AdminP4SubmitArgumentTests
 
         bool submitted = false;
         ArgumentException rejected = Assert.Throws<ArgumentException>(() =>
-            admin.ElectLeaders(
+            AsyncElectLeadersResult.From(admin.ElectLeaders(
                 ElectionType.Preferred,
                 new[] { default(TopicPartition) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, electionType, allPartitions, topics, partitions, count, timeoutMs, callback,
-                    userData) => submitted = true));
+                    userData) => submitted = true)));
 
         Assert.Equal("partitions", rejected.ParamName);
         Assert.False(submitted, "a null topic must be rejected before the native call");
@@ -371,11 +375,12 @@ public sealed class AdminP4SubmitArgumentTests
 
         bool submitted = false;
         ArgumentException rejected = Assert.Throws<ArgumentException>(() =>
-            admin.AlterPartitionReassignments(
+            AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
                 new Dictionary<TopicPartition, NewPartitionReassignment?> { [default] = null },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, topics, partitions, cancel, targetReplicas, targetReplicaCounts, count,
-                    timeoutMs, allowReplicationFactorChange, callback, userData) => submitted = true));
+                    timeoutMs, allowReplicationFactorChange, callback, userData) => submitted = true)));
 
         Assert.Equal("reassignments", rejected.ParamName);
         Assert.False(submitted, "a null topic must be rejected before the native call");
@@ -388,7 +393,7 @@ public sealed class AdminP4SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() =>
-            admin.AlterPartitionReassignments(null!, options: null));
+            AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(null!, options: null, AdminFlavour.Async)));
         Assert.Equal("reassignments", rejected.ParamName);
     }
 
@@ -448,10 +453,11 @@ public sealed class AdminP4SubmitArgumentTests
 
         Captured captured = new Captured();
         IntPtr userDataToRelease = IntPtr.Zero;
-        admin.ElectLeaders(
+        AsyncElectLeadersResult.From(admin.ElectLeaders(
             type,
             partitions,
             options,
+            AdminFlavour.Async,
             (nativeHandle, electionType, allPartitions, topics, partitionIds, count, timeoutMs, callback,
                 userData) =>
             {
@@ -473,7 +479,7 @@ public sealed class AdminP4SubmitArgumentTests
                 captured.Topics = names;
                 captured.Partitions = ids;
                 userDataToRelease = userData;
-            });
+            }));
 
         // Release the operation rather than leaking its GCHandle and the client reference.
         AdminCallbacks.ElectLeaders(
@@ -489,9 +495,10 @@ public sealed class AdminP4SubmitArgumentTests
 
         Captured captured = new Captured();
         IntPtr userDataToRelease = IntPtr.Zero;
-        admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             reassignments,
             options,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitionIds, cancel, targetReplicas, targetReplicaCounts, count, timeoutMs,
                 allowReplicationFactorChange, callback, userData) =>
             {
@@ -524,7 +531,7 @@ public sealed class AdminP4SubmitArgumentTests
                 captured.Partitions = ids;
                 captured.ReplicaIds = replicaIds;
                 userDataToRelease = userData;
-            });
+            }));
 
         // Release the operation rather than leaking its GCHandle and the client reference —
         // one callback per requested partition, since M15/P9 CP6 gives this RPC no

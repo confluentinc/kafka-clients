@@ -150,10 +150,11 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.CreateTopics(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic("ok", 1, 1), new NewTopic("a\0b", 1, 1) },
             options: null,
-            (nativeHandle, topics, count, timeoutMs, validateOnly, retry, callback, userData) => submitted = true));
+            AdminFlavour.Async,
+            (nativeHandle, topics, count, timeoutMs, validateOnly, retry, callback, userData) => submitted = true)));
 
         Assert.Equal("newTopics", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
@@ -172,11 +173,12 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DeleteTopics(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { "fine", "x\uDC00" }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => submitted = true,
-            (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => submitted = true));
+            (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => submitted = true)));
 
         Assert.Equal("topics", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
@@ -195,21 +197,22 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "b5-configs");
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic("b5-configs", 1, 1) }, null).All(), s_deadline);
+        await TestTimeout.Run(() => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("b5-configs", 1, 1) }, null, AdminFlavour.Async)).All().Get(), s_deadline);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.IncrementalAlterConfigs(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(
             SetOp(topic, "retention.ms", "10\u0000tail"),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, resourceTypes, resourceNames, configNames, configValues, opTypes, count, timeoutMs,
-                validateOnly, callback, userData) => submitted = true));
+                validateOnly, callback, userData) => submitted = true)));
 
         Assert.Equal("configs", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
 
-        await TestTimeout.Run(() => admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), null).All(), s_deadline);
+        await TestTimeout.Run(() => AsyncAlterConfigsResult.From(admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), null, AdminFlavour.Async)).All().Get(), s_deadline);
         Config? config = null;
-        await TestTimeout.Run(async () => config = await admin.DescribeConfigs(new[] { topic }, null).Values[topic], s_deadline);
+        await TestTimeout.Run(async () => config = await AsyncDescribeConfigsResult.From(admin.DescribeConfigs(new[] { topic }, null, AdminFlavour.Async)).Values[topic].Get(), s_deadline);
         Assert.Equal("1000", config!.Get("retention.ms")!.Value);
 
         Assert.True(DisposeAndAwaitRelease(admin, handle), "a rejected call must hold no client reference");
@@ -227,18 +230,18 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListTransactions(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\uD800" },
             (nativeHandle, states, stateCount, producerIds, producerIdCount, durationMs, pattern, timeoutMs,
-                byBrokerIdCallback, callback, userData) => submitted = true));
+                byBrokerIdCallback, callback, userData) => submitted = true)));
 
         Assert.Equal("options", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
 
-        ListTransactionsResult result =
-            admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" });
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        AsyncListTransactionsResult result =
+            AsyncListTransactionsResult.From(admin.ListTransactionsOperation(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(35, failure.Code);
         Assert.Equal("Not implemented yet", failure.Message);
 
@@ -258,18 +261,19 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeClientQuotas(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             UserFilter("ali\u0000ce"),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
-                submitted = true));
+                submitted = true)));
 
         Assert.Equal("filter", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(UserFilter("alice"), null);
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.Entities, s_deadline));
+        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(UserFilter("alice"), null, AdminFlavour.Async));
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(35, failure.Code);
         Assert.Equal("Not implement yet", failure.Message);
 
@@ -288,19 +292,21 @@ public sealed class AdminStringsTests
         SafeAdminHandle handle = admin.Handle;
         bool submitted = false;
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeDelegationToken(
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncDescribeDelegationTokenResult.From(admin.DescribeDelegationToken(
             new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice\uDC00") } },
+            AdminFlavour.Async,
             (nativeHandle, hasOwnersFilter, ownerPrincipalTypes, ownerNames, ownerCount, timeoutMs, callback, userData) =>
-                submitted = true));
+                submitted = true)));
 
         Assert.Equal("options", rejected.ParamName);
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.False(submitted);
 
-        DescribeDelegationTokenResult result = admin.DescribeDelegationToken(
-            new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice") } });
+        AsyncDescribeDelegationTokenResult result = AsyncDescribeDelegationTokenResult.From(admin.DescribeDelegationToken(
+            new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice") } },
+            AdminFlavour.Async));
         IReadOnlyList<DelegationToken> tokens = Array.Empty<DelegationToken>();
-        await TestTimeout.Run(async () => tokens = await result.DelegationTokens(), s_deadline);
+        await TestTimeout.Run(async () => tokens = await result.DelegationTokens().Get(), s_deadline);
         Assert.Empty(tokens);
 
         Assert.True(DisposeAndAwaitRelease(admin, handle), "a rejected call must hold no client reference");
@@ -321,7 +327,7 @@ public sealed class AdminStringsTests
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
-        DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice" }, null);
+        AsyncDescribeUserScramCredentialsResult result = AsyncDescribeUserScramCredentialsResult.From(admin.DescribeUserScramCredentials(new[] { "alice" }, null, AdminFlavour.Async));
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = result.Description("ali\uD800ce"); });
 
@@ -329,7 +335,7 @@ public sealed class AdminStringsTests
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Description("alice"), s_deadline));
+            () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
         Assert.Equal(35, failure.Code);
         Assert.Equal("Not implemented yet", failure.Message);
 
@@ -377,9 +383,9 @@ public sealed class AdminStringsTests
     {
         long offset = 0;
         await TestTimeout.Run(
-            async () => offset = (await admin
-                .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, null)
-                .PartitionResult(partition)).Offset,
+            async () => offset = (await AsyncListOffsetsResult.From(admin
+                    .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, null, AdminFlavour.Async))
+                .PartitionResult(partition).Get()).Offset,
             s_deadline);
         return offset;
     }

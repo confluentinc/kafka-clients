@@ -92,11 +92,12 @@ public sealed class AdminOperationLifetimeTests
         SafeAdminHandle handle = admin.Handle;
 
         IntPtr capturedUserData = IntPtr.Zero;
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic(Topic, 1, 1) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                capturedUserData = userData);
+                capturedUserData = userData));
 
         Assert.NotEqual(IntPtr.Zero, capturedUserData);
 
@@ -115,7 +116,7 @@ public sealed class AdminOperationLifetimeTests
             "completing the in-flight operation must run the deferred release");
 
         // Observe the faulted awaiter so it is not left unobserved.
-        Assert.NotNull(result.Values[Topic].Exception);
+        Assert.NotNull(result.Values[Topic].Get().Exception);
     }
 
     /// <summary>
@@ -129,11 +130,12 @@ public sealed class AdminOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr capturedUserData = IntPtr.Zero;
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic("alpha", 1, 1), new NewTopic("beta", 1, 1), new NewTopic("gamma", 1, 1) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                capturedUserData = userData);
+                capturedUserData = userData));
 
         foreach (string key in new[] { "alpha", "beta", "gamma" })
         {
@@ -141,16 +143,16 @@ public sealed class AdminOperationLifetimeTests
         }
 
         Assert.Equal(3, result.Values.Count);
-        foreach (KeyValuePair<string, Task> entry in result.Values)
+        foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.Values)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => entry.Value, s_deadline));
+                () => TestTimeout.Run(() => entry.Value.Get(), s_deadline));
             Assert.Equal(7, failure.Code);
             Assert.Equal("could not submit", failure.Message);
         }
 
         // all() must fault too, not hang.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -187,14 +189,15 @@ public sealed class AdminOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr capturedUserData = IntPtr.Zero;
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic(Topic, 1, 1) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                capturedUserData = userData);
+                capturedUserData = userData));
 
         int ranInline = 0;
-        Task probe = result.Values[Topic].ContinueWith(
+        Task probe = result.Values[Topic].Get().ContinueWith(
             _ =>
             {
                 if (s_insideTrampoline)
@@ -234,11 +237,12 @@ public sealed class AdminOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr capturedUserData = IntPtr.Zero;
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic(Topic, 1, 1) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                capturedUserData = userData);
+                capturedUserData = userData));
 
         for (int i = 0; i < 3; i++)
         {
@@ -252,7 +256,7 @@ public sealed class AdminOperationLifetimeTests
         // null and this would throw rather than complete the awaiter.
         FireKeyFailure(Topic, 3, "after gc", capturedUserData);
 
-        Assert.NotNull(result.Values[Topic].Exception);
+        Assert.NotNull(result.Values[Topic].Get().Exception);
     }
 
     /// <summary>
@@ -271,16 +275,17 @@ public sealed class AdminOperationLifetimeTests
         for (int i = 0; i < 50; i++)
         {
             IntPtr capturedUserData = IntPtr.Zero;
-            CreateTopicsResult result = admin.CreateTopics(
+            AsyncCreateTopicsResult result = AsyncCreateTopicsResult.From(admin.CreateTopics(
                 new[] { new NewTopic($"{Topic}-{i}", 1, 1) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                    capturedUserData = userData);
+                    capturedUserData = userData));
 
             FireKeyFailure($"{Topic}-{i}", 9, "balance probe", capturedUserData);
 
             // Reading Exception observes the fault, so no awaiter is left unobserved.
-            Assert.NotNull(result.Values[$"{Topic}-{i}"].Exception);
+            Assert.NotNull(result.Values[$"{Topic}-{i}"].Get().Exception);
             Assert.False(handle.IsClosed, "the client is still alive between operations");
         }
 
@@ -299,11 +304,12 @@ public sealed class AdminOperationLifetimeTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        Assert.Throws<InvalidOperationException>(() => admin.CreateTopics(
+        Assert.Throws<InvalidOperationException>(() => AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic(Topic, 1, 1) },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
-                throw new InvalidOperationException("submit failed")));
+                throw new InvalidOperationException("submit failed"))));
 
         TestTimeout.Run(admin.Dispose, s_deadline);
 

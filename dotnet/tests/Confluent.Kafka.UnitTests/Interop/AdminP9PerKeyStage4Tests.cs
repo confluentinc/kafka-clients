@@ -70,13 +70,13 @@ public sealed class AdminP9PerKeyStage4Tests
             Filter("cp5-gamma"),
         };
 
-        DeleteAclsResult result = admin.DeleteAcls(filters, options: null);
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(filters, options: null, AdminFlavour.Async));
 
         Assert.Equal(filters.Length, result.Values.Count);
         foreach (AclBindingFilter filter in filters)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[filter], s_deadline));
+                () => TestTimeout.Run(() => result.Values[filter].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -101,7 +101,7 @@ public sealed class AdminP9PerKeyStage4Tests
         // a reader that collapses both onto one entry.
         AclBindingFilter named = Filter("cp5-null-vs-empty");
 
-        DeleteAclsResult result = admin.DeleteAcls(new[] { any, named }, options: null);
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(new[] { any, named }, options: null, AdminFlavour.Async));
 
         // ⚠ The mock's OWN code/message, asserted per key. A key the reader reconstructed
         // wrongly is not left pending — the operation faults it with a synthesized
@@ -109,7 +109,7 @@ public sealed class AdminP9PerKeyStage4Tests
         foreach (AclBindingFilter filter in new[] { any, named })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[filter], s_deadline));
+                () => TestTimeout.Run(() => result.Values[filter].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -125,7 +125,7 @@ public sealed class AdminP9PerKeyStage4Tests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
 
-        Assert.Empty(admin.DeleteAcls(Array.Empty<AclBindingFilter>(), options: null).Values);
+        Assert.Empty(AsyncDeleteAclsResult.From(admin.DeleteAcls(Array.Empty<AclBindingFilter>(), options: null, AdminFlavour.Async)).Values);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
 
@@ -154,13 +154,13 @@ public sealed class AdminP9PerKeyStage4Tests
 
         for (int round = 0; round < 3; round++)
         {
-            DeleteAclsResult result = admin.DeleteAcls(filters, options: null);
+            AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(filters, options: null, AdminFlavour.Async));
             Assert.Equal(filters.Length, result.Values.Count);
 
-            foreach (KeyValuePair<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> entry
+            foreach (KeyValuePair<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> entry
                 in result.Values)
             {
-                await TestTimeout.Run(() => Settle(entry.Value), s_deadline);
+                await TestTimeout.Run(() => Settle(entry.Value.Get()), s_deadline);
             }
 
             Assert.False(handle.IsClosed, "the client is still alive between operations");

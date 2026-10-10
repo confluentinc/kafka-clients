@@ -66,12 +66,13 @@ public sealed class AdminP2aOperationLifetimeTests
         SafeAdminHandle handle = admin.Handle;
 
         IntPtr capturedUserData = IntPtr.Zero;
-        DeleteTopicsResult result = admin.DeleteTopics(
+        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retryOnQuotaViolation, callback, userData) =>
                 capturedUserData = userData,
-            UnusedDeleteSubmit);
+            UnusedDeleteSubmit));
 
         Assert.NotEqual(IntPtr.Zero, capturedUserData);
 
@@ -84,7 +85,7 @@ public sealed class AdminP2aOperationLifetimeTests
         FireDeleteByName(Topic, 42, "submit failed", capturedUserData);
 
         Assert.True(handle.IsClosed, "completing the in-flight operation must run the deferred release");
-        Assert.NotNull(result.TopicNameValues![Topic].Exception);
+        Assert.NotNull(result.TopicNameValues![Topic].Get().Exception);
     }
 
     /// <summary>
@@ -103,12 +104,13 @@ public sealed class AdminP2aOperationLifetimeTests
         SafeAdminHandle handle = admin.Handle;
 
         IntPtr capturedUserData = IntPtr.Zero;
-        DescribeTopicsResult result = admin.DescribeTopics(
+        AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
                 capturedUserData = userData,
-            UnusedDescribeSubmit);
+            UnusedDescribeSubmit));
 
         Assert.NotEqual(IntPtr.Zero, capturedUserData);
 
@@ -118,7 +120,7 @@ public sealed class AdminP2aOperationLifetimeTests
         FireDescribeByName(Topic, 42, "submit failed", capturedUserData);
 
         Assert.True(handle.IsClosed);
-        Assert.NotNull(result.TopicNameValues![Topic].Exception);
+        Assert.NotNull(result.TopicNameValues![Topic].Get().Exception);
     }
 
     /// <summary>
@@ -139,15 +141,16 @@ public sealed class AdminP2aOperationLifetimeTests
         // ---- deleteTopics, by name ----
         string? byNameKey = null;
         bool byIdsCalled = false;
-        admin.DeleteTopics(
+        AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 byNameKey = Utf8Marshal.PtrToString(keys[0]);
                 AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
-            (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => byIdsCalled = true);
+            (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => byIdsCalled = true));
 
         Assert.Equal(Topic, byNameKey);
         Assert.False(byIdsCalled, "a name collection must not drive the by-id entry point");
@@ -155,15 +158,16 @@ public sealed class AdminP2aOperationLifetimeTests
         // ---- deleteTopics, by id ----
         string? byIdKey = null;
         bool byNameCalled = false;
-        admin.DeleteTopics(
+        AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicIds(new[] { id }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => byNameCalled = true,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 byIdKey = Utf8Marshal.PtrToString(keys[0]);
                 AdminCallbacks.DeleteTopicsById(keys[0], MakeError(1, "done"), userData);
-            });
+            }));
 
         Assert.False(byNameCalled, "an id collection must not drive the by-name entry point");
 
@@ -174,32 +178,34 @@ public sealed class AdminP2aOperationLifetimeTests
         // ---- describeTopics, both forms ----
         string? describeByNameKey = null;
         bool describeByIdsCalled = false;
-        admin.DescribeTopics(
+        AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
             {
                 describeByNameKey = Utf8Marshal.PtrToString(keys[0]);
                 AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
-                describeByIdsCalled = true);
+                describeByIdsCalled = true));
 
         Assert.Equal(Topic, describeByNameKey);
         Assert.False(describeByIdsCalled);
 
         string? describeByIdKey = null;
         bool describeByNameCalled = false;
-        admin.DescribeTopics(
+        AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicIds(new[] { id }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
                 describeByNameCalled = true,
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
             {
                 describeByIdKey = Utf8Marshal.PtrToString(keys[0]);
                 AdminCallbacks.DescribeTopicsById(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
-            });
+            }));
 
         Assert.False(describeByNameCalled);
         Assert.Equal(id.ToString(), describeByIdKey);
@@ -216,16 +222,17 @@ public sealed class AdminP2aOperationLifetimeTests
 
         int deleteTimeout = 0;
         bool deleteRetry = true;
-        admin.DeleteTopics(
+        AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             new DeleteTopicsOptions { TimeoutMs = 1234, RetryOnQuotaViolation = false },
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 deleteTimeout = timeoutMs;
                 deleteRetry = retry;
                 AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
-            UnusedDeleteSubmit);
+            UnusedDeleteSubmit));
 
         Assert.Equal(1234, deleteTimeout);
         Assert.False(deleteRetry);
@@ -235,16 +242,17 @@ public sealed class AdminP2aOperationLifetimeTests
         // zero timeout) and retryOnQuotaViolation = true.
         int defaultedTimeout = 0;
         bool defaultedRetry = false;
-        admin.DeleteTopics(
+        AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 defaultedTimeout = timeoutMs;
                 defaultedRetry = retry;
                 AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
-            UnusedDeleteSubmit);
+            UnusedDeleteSubmit));
 
         Assert.True(defaultedTimeout < 0, "an unset timeout must cross as negative, not as zero");
         Assert.True(defaultedRetry);
@@ -252,7 +260,7 @@ public sealed class AdminP2aOperationLifetimeTests
         int describeTimeout = 0;
         bool includeAuthorized = false;
         int limit = 0;
-        admin.DescribeTopics(
+        AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             new DescribeTopicsOptions
             {
@@ -260,6 +268,7 @@ public sealed class AdminP2aOperationLifetimeTests
                 IncludeAuthorizedOperations = true,
                 PartitionSizeLimitPerResponse = 7,
             },
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, include, partitionLimit, callback, userData) =>
             {
                 describeTimeout = timeoutMs;
@@ -267,7 +276,7 @@ public sealed class AdminP2aOperationLifetimeTests
                 limit = partitionLimit;
                 AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
-            UnusedDescribeSubmit);
+            UnusedDescribeSubmit));
 
         Assert.Equal(4321, describeTimeout);
         Assert.True(includeAuthorized);
@@ -275,15 +284,16 @@ public sealed class AdminP2aOperationLifetimeTests
 
         // Null options => Java's own 2000 default, not 0 and not the ABI's "unset".
         int defaultedLimit = 0;
-        admin.DescribeTopics(
+        AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, include, partitionLimit, callback, userData) =>
             {
                 defaultedLimit = partitionLimit;
                 AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
-            UnusedDescribeSubmit);
+            UnusedDescribeSubmit));
 
         Assert.Equal(2000, defaultedLimit);
     }
@@ -328,9 +338,10 @@ public sealed class AdminP2aOperationLifetimeTests
 
         Uuid placeholder = new Uuid(9L, 9L);
 
-        DeleteTopicsResult result = admin.DeleteTopics(
+        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicIds(new[] { placeholder }),
             options: null,
+            AdminFlavour.Async,
             UnusedDeleteSubmit,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
@@ -345,15 +356,15 @@ public sealed class AdminP2aOperationLifetimeTests
                     retry,
                     callback,
                     userData);
-            });
+            }));
 
         // No await: the callback has already run, on this thread, inside the call above.
         Assert.True(
-            result.TopicIdValues![placeholder].IsFaulted,
+            result.TopicIdValues![placeholder].Get().IsFaulted,
             "the callback must have fired inline, before the entry point returned");
 
         KafkaException failure = Assert.IsType<KafkaException>(
-            result.TopicIdValues![placeholder].Exception!.InnerException);
+            result.TopicIdValues![placeholder].Get().Exception!.InnerException);
 
         // ⚠ M15/P9 CP6 INVERTED this: the malformed text IS the per-key ABI's key, so the
         // trampoline cannot name it (Uuid.Parse throws inside the no-throw boundary) and
@@ -386,24 +397,26 @@ public sealed class AdminP2aOperationLifetimeTests
         for (int i = 0; i < 25; i++)
         {
             IntPtr deleteUserData = IntPtr.Zero;
-            DeleteTopicsResult deleted = admin.DeleteTopics(
+            AsyncDeleteTopicsResult deleted = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { $"{Topic}-{i}" }),
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
                     deleteUserData = userData,
-                UnusedDeleteSubmit);
+                UnusedDeleteSubmit));
             FireDeleteByName($"{Topic}-{i}", 9, "balance probe", deleteUserData);
-            Assert.NotNull(deleted.TopicNameValues![$"{Topic}-{i}"].Exception);
+            Assert.NotNull(deleted.TopicNameValues![$"{Topic}-{i}"].Get().Exception);
 
             IntPtr describeUserData = IntPtr.Zero;
-            DescribeTopicsResult described = admin.DescribeTopics(
+            AsyncDescribeTopicsResult described = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
                 TopicCollection.OfTopicIds(new[] { new Uuid(i, i) }),
                 options: null,
+                AdminFlavour.Async,
                 UnusedDescribeSubmit,
                 (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) =>
-                    describeUserData = userData);
+                    describeUserData = userData));
             FireDescribeById(new Uuid(i, i), 9, "balance probe", describeUserData);
-            Assert.NotNull(described.TopicIdValues![new Uuid(i, i)].Exception);
+            Assert.NotNull(described.TopicIdValues![new Uuid(i, i)].Get().Exception);
 
             Assert.False(handle.IsClosed, "the client is still alive between operations");
         }
@@ -429,21 +442,23 @@ public sealed class AdminP2aOperationLifetimeTests
         {
             if (delete)
             {
-                admin.DeleteTopics(
+                AsyncDeleteTopicsResult.From(admin.DeleteTopics(
                     TopicCollection.OfTopicNames(new[] { Topic }),
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
                         throw new InvalidOperationException("submit failed"),
-                    UnusedDeleteSubmit);
+                    UnusedDeleteSubmit));
             }
             else
             {
-                admin.DescribeTopics(
+                AsyncDescribeTopicsResult.From(admin.DescribeTopics(
                     TopicCollection.OfTopicNames(new[] { Topic }),
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) =>
                         throw new InvalidOperationException("submit failed"),
-                    UnusedDescribeSubmit);
+                    UnusedDescribeSubmit));
             }
         });
 
@@ -465,11 +480,12 @@ public sealed class AdminP2aOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr nameUserData = IntPtr.Zero;
-        DeleteTopicsResult byName = admin.DeleteTopics(
+        AsyncDeleteTopicsResult byName = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { "alpha", "beta", "gamma" }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => nameUserData = userData,
-            UnusedDeleteSubmit);
+            UnusedDeleteSubmit));
 
         foreach (string key in new[] { "alpha", "beta", "gamma" })
         {
@@ -477,22 +493,23 @@ public sealed class AdminP2aOperationLifetimeTests
         }
 
         Assert.Equal(3, byName.TopicNameValues!.Count);
-        foreach (KeyValuePair<string, Task> entry in byName.TopicNameValues!)
+        foreach (KeyValuePair<string, AsyncKafkaFuture> entry in byName.TopicNameValues!)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => entry.Value, s_deadline));
+                () => TestTimeout.Run(() => entry.Value.Get(), s_deadline));
             Assert.Equal(7, failure.Code);
             Assert.Equal("could not submit", failure.Message);
         }
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(byName.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => byName.All().Get(), s_deadline));
 
         IntPtr idUserData = IntPtr.Zero;
-        DescribeTopicsResult byId = admin.DescribeTopics(
+        AsyncDescribeTopicsResult byId = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicIds(new[] { new Uuid(1L, 1L), new Uuid(2L, 2L) }),
             options: null,
+            AdminFlavour.Async,
             UnusedDescribeSubmit,
-            (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) => idUserData = userData);
+            (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) => idUserData = userData));
 
         foreach (Uuid id in new[] { new Uuid(1L, 1L), new Uuid(2L, 2L) })
         {
@@ -500,15 +517,15 @@ public sealed class AdminP2aOperationLifetimeTests
         }
 
         Assert.Equal(2, byId.TopicIdValues!.Count);
-        foreach (KeyValuePair<Uuid, Task<TopicDescription>> entry in byId.TopicIdValues!)
+        foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in byId.TopicIdValues!)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => entry.Value, s_deadline));
+                () => TestTimeout.Run(() => entry.Value.Get(), s_deadline));
             Assert.Equal(8, failure.Code);
         }
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => byId.AllTopicIds()!, s_deadline));
+            () => TestTimeout.Run(() => byId.AllTopicIds()!.Value.Get(), s_deadline));
     }
 
     /// <summary>
@@ -522,12 +539,13 @@ public sealed class AdminP2aOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         IntPtr capturedUserData = IntPtr.Zero;
-        DescribeTopicsResult result = admin.DescribeTopics(
+        AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) =>
                 capturedUserData = userData,
-            UnusedDescribeSubmit);
+            UnusedDescribeSubmit));
 
         for (int i = 0; i < 3; i++)
         {
@@ -539,7 +557,7 @@ public sealed class AdminP2aOperationLifetimeTests
 
         FireDescribeByName(Topic, 3, "after gc", capturedUserData);
 
-        Assert.NotNull(result.TopicNameValues![Topic].Exception);
+        Assert.NotNull(result.TopicNameValues![Topic].Get().Exception);
     }
 
     /// <summary>
@@ -573,12 +591,13 @@ public sealed class AdminP2aOperationLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         const string Doomed = "p2a-pin-lifetime";
 
-        CreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(Doomed, 1, 1) }, options: null);
-        await TestTimeout.Run(() => created.Values[Doomed], s_deadline);
+        AsyncCreateTopicsResult created = AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Doomed, 1, 1) }, options: null, AdminFlavour.Async));
+        await TestTimeout.Run(() => created.Values[Doomed].Get(), s_deadline);
 
-        DeleteTopicsResult result = admin.DeleteTopics(
+        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { Doomed }),
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 // Force a compacting collection into the window between the pin and the
@@ -590,18 +609,18 @@ public sealed class AdminP2aOperationLifetimeTests
                 NativeMethods.AdminClientDeleteTopicsAsync(
                     nativeHandle, keys, count, timeoutMs, retry, callback, userData);
             },
-            UnusedDeleteSubmit);
+            UnusedDeleteSubmit));
 
         // The key survived: the delete found the topic rather than a relocated buffer, so
         // it neither faulted nor came back keyed by garbage.
         Assert.True(result.TopicNameValues!.ContainsKey(Doomed), "the result key is not the name that was sent");
-        await TestTimeout.Run(() => result.TopicNameValues![Doomed], s_deadline);
+        await TestTimeout.Run(() => result.TopicNameValues![Doomed].Get(), s_deadline);
 
         // …and it is really gone, so the name the ABI read was the name that was sent.
-        DescribeTopicsResult gone = admin.DescribeTopics(
-            TopicCollection.OfTopicNames(new[] { Doomed }), options: null);
+        AsyncDescribeTopicsResult gone = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
+            TopicCollection.OfTopicNames(new[] { Doomed }), options: null, AdminFlavour.Async));
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => gone.TopicNameValues![Doomed], s_deadline));
+            () => TestTimeout.Run(() => gone.TopicNameValues![Doomed].Get(), s_deadline));
         Assert.Equal($"Topic {Doomed} not found.", failure.Message);
     }
 

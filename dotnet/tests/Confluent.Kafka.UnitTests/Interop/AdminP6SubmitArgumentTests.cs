@@ -360,19 +360,20 @@ public sealed class AdminP6SubmitArgumentTests
         AclBinding alpha = Binding("inline-alpha");
         AclBinding beta = Binding("inline-beta");
 
-        CreateAclsResult result = admin.CreateAcls(
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
             new[] { alpha, beta },
             options: null,
+            AdminFlavour.Async,
             (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
              operations, permissionTypes, count, timeoutMs, callback, userData) =>
                 NativeMethods.AdminClientCreateAclsAsync(
                     handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-                    operations, permissionTypes, count, timeoutMs, callback, userData));
+                    operations, permissionTypes, count, timeoutMs, callback, userData)));
 
         foreach (AclBinding binding in new[] { alpha, beta })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => result.Values[binding]);
+                () => result.Values[binding].Get());
             Assert.Equal(35, failure.Code);
             Assert.Equal("Not implemented yet", failure.Message);
         }
@@ -509,16 +510,17 @@ public sealed class AdminP6SubmitArgumentTests
         // mint, so the inline fan-out is driven through the REAL ABI rather than a hand-fired
         // callback: the mock's submit fails, so every key completes on this thread before the
         // call returns — which is the inline path this test is about.
-        DeleteAclsResult result = admin.DeleteAcls(
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
             new[] { alpha, beta },
             options: null,
-            NativeMethods.AdminClientDeleteAclsAsync);
+            AdminFlavour.Async,
+            NativeMethods.AdminClientDeleteAclsAsync));
 
         // The mock completes each filter's own future exceptionally, so the callbacks arrive
         // on the core's dispatcher thread rather than inline.
-        await Assert.ThrowsAsync<KafkaException>(() => result.Values[alpha]);
+        await Assert.ThrowsAsync<KafkaException>(() => result.Values[alpha].Get());
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values[beta]);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values[beta].Get());
         Assert.Equal("Not implemented yet", failure.Message);
         Assert.Equal(35, failure.Code);
     }
@@ -636,17 +638,18 @@ public sealed class AdminP6SubmitArgumentTests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        DescribeAclsResult result = admin.DescribeAcls(
+        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
             DescribeFilter("inline"),
             options: null,
+            AdminFlavour.Async,
             (handle, resourceType, resourceName, patternType, principal, host,
              operation, permissionType, timeoutMs, callback, userData) =>
                 // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData));
+                callback(IntPtr.Zero, CapturedError(), userData)));
 
-        Assert.True(result.Values().IsFaulted);
+        Assert.True(result.Values().Get().IsFaulted);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values());
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values().Get());
         Assert.Equal("captured", failure.Message);
         Assert.Equal(1, failure.Code);
     }
@@ -803,16 +806,17 @@ public sealed class AdminP6SubmitArgumentTests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(
+        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             ClientQuotaFilter.All(),
             options: null,
+            AdminFlavour.Async,
             (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
                 // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData));
+                callback(IntPtr.Zero, CapturedError(), userData)));
 
-        Assert.True(result.Entities().IsFaulted);
+        Assert.True(result.Entities().Get().IsFaulted);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Entities());
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Entities().Get());
         Assert.Equal("captured", failure.Message);
         Assert.Equal(1, failure.Code);
     }
@@ -1165,25 +1169,26 @@ public sealed class AdminP6SubmitArgumentTests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
             new[]
             {
                 new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "inline-a"), s_noOps),
                 new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "inline-b"), s_noOps),
             },
             options: null,
+            AdminFlavour.Async,
             (handle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues,
              opCounts, count, timeoutMs, validateOnly, callback, userData) =>
                 NativeMethods.AdminClientAlterClientQuotasAsync(
                     handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
-                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData));
+                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData)));
 
         Assert.Equal(2, result.Values.Count);
 
         // Every per-key task settles: none is left hanging.
-        foreach (Task task in result.Values.Values)
+        foreach (AsyncKafkaFuture task in result.Values.Values)
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => task);
+            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => task.Get());
 
             // ⚠ The core's own wording, typo included (mock_admin_client.rs:1766).
             Assert.Equal("Not implement yet", failure.Message);
@@ -1224,9 +1229,10 @@ public sealed class AdminP6SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        CreateAclsResult result = admin.CreateAcls(
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
             acls,
             options,
+            AdminFlavour.Async,
             (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
              operations, permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -1253,13 +1259,13 @@ public sealed class AdminP6SubmitArgumentTests
                 NativeMethods.AdminClientCreateAclsAsync(
                     handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
                     operations, permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         // Observe the faults the trampolines deliver, so nothing is left unobserved. The
         // mock completes each binding's own future exceptionally, so they arrive on the
         // core's dispatcher thread and this waits rather than asserting now.
         using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All();
+        Task all = result.All().Get();
         all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
         Assert.True(
             settled.Wait(TimeSpan.FromSeconds(30)), "the create_acls per-key callbacks never fired");
@@ -1308,9 +1314,10 @@ public sealed class AdminP6SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        DeleteAclsResult result = admin.DeleteAcls(
+        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
             filters,
             options,
+            AdminFlavour.Async,
             (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
              operations, permissionTypes, count, timeoutMs, callback, userData) =>
             {
@@ -1336,12 +1343,12 @@ public sealed class AdminP6SubmitArgumentTests
                 NativeMethods.AdminClientDeleteAclsAsync(
                     handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
                     operations, permissionTypes, count, timeoutMs, callback, userData);
-            });
+            }));
 
         // Observe the faults the trampolines deliver, so nothing is left unobserved. They
         // arrive on the core's dispatcher thread, so this waits rather than asserting now.
         using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All();
+        Task all = result.All().Get();
         all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
         Assert.True(
             settled.Wait(TimeSpan.FromSeconds(30)), "the delete_acls per-key callbacks never fired");
@@ -1370,9 +1377,10 @@ public sealed class AdminP6SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         DescribeCaptured captured = new DescribeCaptured();
-        DescribeAclsResult result = admin.DescribeAcls(
+        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
             filter,
             options,
+            AdminFlavour.Async,
             (handle, resourceType, resourceName, patternType, principal, host,
              operation, permissionType, timeoutMs, callback, userData) =>
             {
@@ -1391,12 +1399,12 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.Principal = Utf8Marshal.PtrToString(principal);
                 captured.Host = Utf8Marshal.PtrToString(host);
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.DescribeAcls(IntPtr.Zero, CapturedError(), captured.UserData);
 
         // Observe the fault the trampoline just delivered, so nothing is left unobserved.
-        Assert.NotNull(result.Values().Exception);
+        Assert.NotNull(result.Values().Get().Exception);
         return captured;
     }
 
@@ -1439,9 +1447,10 @@ public sealed class AdminP6SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         QuotaCaptured captured = new QuotaCaptured();
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(
+        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             filter,
             options,
+            AdminFlavour.Async,
             (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
             {
                 captured.Count = count;
@@ -1454,12 +1463,12 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.EntityTypes = Decode(entityTypes);
                 captured.MatchNames = Decode(matchNames);
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.DescribeClientQuotas(IntPtr.Zero, CapturedError(), captured.UserData);
 
         // Observe the fault the trampoline just delivered, so nothing is left unobserved.
-        Assert.NotNull(result.Entities().Exception);
+        Assert.NotNull(result.Entities().Get().Exception);
         return captured;
     }
 
@@ -1497,9 +1506,10 @@ public sealed class AdminP6SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         AlterCaptured captured = new AlterCaptured();
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
             entries,
             options,
+            AdminFlavour.Async,
             (handle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues,
              opCounts, count, timeoutMs, validateOnly, callback, userData) =>
             {
@@ -1534,12 +1544,12 @@ public sealed class AdminP6SubmitArgumentTests
                 NativeMethods.AdminClientAlterClientQuotasAsync(
                     handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
                     opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData);
-            });
+            }));
 
         // Observe the faults the trampolines deliver, so nothing is left unobserved. They
         // arrive on the core's dispatcher thread, so this waits rather than asserting now.
         using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All();
+        Task all = result.All().Get();
         all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
         Assert.True(
             settled.Wait(TimeSpan.FromSeconds(30)),

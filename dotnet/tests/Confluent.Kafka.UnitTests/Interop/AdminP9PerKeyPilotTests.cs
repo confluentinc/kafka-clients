@@ -49,26 +49,26 @@ public sealed class AdminP9PerKeyPilotTests
     [Fact]
     public async Task CreateTopics_PerKeyOutcomes_AreIndependent()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         // Replication factor 5 cannot be satisfied by 1 broker, so the same submit
         // carries one success and one failure.
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic("cp2-good", 3, 1), new NewTopic("cp2-bad", 1, 5) });
 
-        await TestTimeout.Run(() => result.Values["cp2-good"], s_deadline);
+        await TestTimeout.Run(() => result.Values["cp2-good"].Get(), s_deadline);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values["cp2-bad"], s_deadline));
+            () => TestTimeout.Run(() => result.Values["cp2-bad"].Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
         // The copied-out value outlives the owned native payload the callback destroyed.
-        Assert.Equal(3, await TestTimeout.Run(() => result.NumPartitions("cp2-good"), s_deadline));
-        Assert.Equal(1, await TestTimeout.Run(() => result.ReplicationFactor("cp2-good"), s_deadline));
+        Assert.Equal(3, await TestTimeout.Run(() => result.NumPartitions("cp2-good").Get(), s_deadline));
+        Assert.Equal(1, await TestTimeout.Run(() => result.ReplicationFactor("cp2-good").Get(), s_deadline));
         Assert.NotEqual(
-            Uuid.Zero, await TestTimeout.Run(() => result.TopicId("cp2-good"), s_deadline));
+            Uuid.Zero, await TestTimeout.Run(() => result.TopicId("cp2-good").Get(), s_deadline));
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -78,19 +78,19 @@ public sealed class AdminP9PerKeyPilotTests
     [Fact]
     public async Task DeleteTopicsByName_PerKeyOutcomes_AreIndependent()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp2-present", 1, 1) }).All(),
+            () => admin.CreateTopics(new[] { new NewTopic("cp2-present", 1, 1) }).All().Get(),
             s_deadline);
 
-        DeleteTopicsResult result = admin.DeleteTopics(
+        AsyncDeleteTopicsResult result = admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { "cp2-present", "cp2-absent" }));
 
-        await TestTimeout.Run(() => result.TopicNameValues!["cp2-present"], s_deadline);
+        await TestTimeout.Run(() => result.TopicNameValues!["cp2-present"].Get(), s_deadline);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.TopicNameValues!["cp2-absent"], s_deadline));
+            () => TestTimeout.Run(() => result.TopicNameValues!["cp2-absent"].Get(), s_deadline));
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
 
@@ -111,12 +111,12 @@ public sealed class AdminP9PerKeyPilotTests
 
         if (create)
         {
-            Assert.Empty(admin.CreateTopics(Array.Empty<NewTopic>(), options: null).Values);
+            Assert.Empty(AsyncCreateTopicsResult.From(admin.CreateTopics(Array.Empty<NewTopic>(), options: null, AdminFlavour.Async)).Values);
         }
         else
         {
             Assert.Empty(
-                admin.DeleteTopics(TopicCollection.OfTopicNames(Array.Empty<string>()), options: null)
+                AsyncDeleteTopicsResult.From(admin.DeleteTopics(TopicCollection.OfTopicNames(Array.Empty<string>()), options: null, AdminFlavour.Async))
                     .TopicNameValues!);
         }
 
@@ -148,15 +148,16 @@ public sealed class AdminP9PerKeyPilotTests
                 topics.Add(new NewTopic($"cp2-balance-{round}-{i}", 1, 1));
             }
 
-            CreateTopicsResult created = admin.CreateTopics(topics, options: null);
+            AsyncCreateTopicsResult created = AsyncCreateTopicsResult.From(admin.CreateTopics(topics, options: null, AdminFlavour.Async));
             Assert.Equal(25, created.Values.Count);
-            await TestTimeout.Run(created.All, s_deadline);
+            await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
-            DeleteTopicsResult deleted = admin.DeleteTopics(
+            AsyncDeleteTopicsResult deleted = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
                 TopicCollection.OfTopicNames(topics.ConvertAll(topic => topic.Name)),
-                options: null);
+                options: null,
+                AdminFlavour.Async));
             Assert.Equal(25, deleted.TopicNameValues!.Count);
-            await TestTimeout.Run(deleted.All, s_deadline);
+            await TestTimeout.Run(() => deleted.All().Get(), s_deadline);
 
             Assert.False(handle.IsClosed, "the client is still alive between operations");
         }

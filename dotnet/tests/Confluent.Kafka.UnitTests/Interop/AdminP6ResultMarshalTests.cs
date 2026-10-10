@@ -170,14 +170,14 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter key = fixture.AddFilter("mixed");
         fixture.AddMixedEntries(key);
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
-        AssertMixedEntries(await TestTimeout.Run(() => result.Values[key], s_deadline));
+        AssertMixedEntries(await TestTimeout.Run(() => result.Values[key].Get(), s_deadline));
 
         // All() throws the first inner error it meets — the failed entry's, whose binding is
         // still reported beside it.
         KafkaException all = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal("could not delete", all.Message);
         Assert.Equal(42, all.Code);
     }
@@ -199,15 +199,15 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter ok = fixture.AddFilter("well-formed");
         fixture.AddBinding(ok, Binding("survivor"));
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[malformed], s_deadline));
+            () => TestTimeout.Run(() => result.Values[malformed].Get(), s_deadline));
         Assert.Equal(NoBindingWithinCount, failure.Message);
 
         Assert.Equal(
             Binding("survivor"),
-            Assert.Single((await TestTimeout.Run(() => result.Values[ok], s_deadline)).Values).Binding);
+            Assert.Single((await TestTimeout.Run(() => result.Values[ok].Get(), s_deadline)).Values).Binding);
     }
 
     /// <summary>
@@ -255,9 +255,9 @@ public sealed class AdminP6ResultMarshalTests
 
         AclBindingFilter key = fixture.AddFilter("no-match");
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
-        Assert.Empty((await TestTimeout.Run(() => result.Values[key], s_deadline)).Values);
+        Assert.Empty((await TestTimeout.Run(() => result.Values[key].Get(), s_deadline)).Values);
     }
 
     // ------------------------------------------------------------------------------------
@@ -277,16 +277,16 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter key = fixture.AddFilter("inner-only");
         fixture.AddInnerError(key, 58, "ACL deletion failed");
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
         // Channel 1: the filter's own Task completed, carrying the error as a VALUE.
         DeleteAclsResult.FilterResults results =
-            await TestTimeout.Run(() => result.Values[key], s_deadline);
+            await TestTimeout.Run(() => result.Values[key].Get(), s_deadline);
         Assert.Equal("ACL deletion failed", Assert.Single(results.Values).Exception!.Message);
 
         // Channel 2: All() throws the first inner error it meets.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal("ACL deletion failed", failure.Message);
         Assert.Equal(58, failure.Code);
     }
@@ -306,20 +306,20 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter ok = fixture.AddFilter("filter-ok");
         fixture.AddBinding(ok, Binding("survivor"));
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
         KafkaException perFilter = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[failed], s_deadline));
+            () => TestTimeout.Run(() => result.Values[failed].Get(), s_deadline));
         Assert.Equal("filter rejected", perFilter.Message);
         Assert.Equal(31, perFilter.Code);
 
         // The other filter is unaffected and awaitable on its own.
         Assert.Equal(
             Binding("survivor"),
-            Assert.Single((await TestTimeout.Run(() => result.Values[ok], s_deadline)).Values).Binding);
+            Assert.Single((await TestTimeout.Run(() => result.Values[ok].Get(), s_deadline)).Values).Binding);
 
         KafkaException all = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal("filter rejected", all.Message);
     }
 
@@ -335,9 +335,9 @@ public sealed class AdminP6ResultMarshalTests
         fixture.AddFilter("empty-a");
         fixture.AddFilter("empty-b");
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
-        Assert.Empty(await TestTimeout.Run(result.All, s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -355,11 +355,11 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter second = fixture.AddFilter("acc-second");
         fixture.AddBinding(second, Binding("three"));
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
         Assert.Equal(
             new[] { Binding("one"), Binding("two"), Binding("three") },
-            await TestTimeout.Run(result.All, s_deadline));
+            await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -382,16 +382,16 @@ public sealed class AdminP6ResultMarshalTests
         operation.FailAll(new KafkaException("submit failed"));
         operation.FailUncompleted();
 
-        DeleteAclsResult result = new DeleteAclsResult(operation.Tasks);
+        AsyncDeleteAclsResult result = new AsyncDeleteAclsResult(operation.Tasks);
 
         Assert.Equal(
             "submit failed",
             (await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[alpha], s_deadline))).Message);
+                () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline))).Message);
         Assert.Equal(
             "submit failed",
             (await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[beta], s_deadline))).Message);
+                () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline))).Message);
     }
 
     /// <summary>
@@ -405,11 +405,11 @@ public sealed class AdminP6ResultMarshalTests
 
         fixture.AddFilter("keyed-by-value");
 
-        DeleteAclsResult result = fixture.Walk();
+        AsyncDeleteAclsResult result = fixture.Walk();
 
         AclBindingFilter lookup = Filter("keyed-by-value");
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
-        Assert.Empty((await TestTimeout.Run(() => result.Values[lookup], s_deadline)).Values);
+        Assert.Empty((await TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline)).Values);
     }
 
     // ------------------------------------------------------------------------------------
@@ -476,15 +476,16 @@ public sealed class AdminP6ResultMarshalTests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        DescribeAclsResult result = admin.DescribeAcls(
+        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
             Filter("top-level"),
             options: null,
+            AdminFlavour.Async,
             (handle, resourceType, resourceName, patternType, principal, host,
              operation, permissionType, timeoutMs, callback, userData) =>
-                callback(IntPtr.Zero, NewOwnedError(7, "describe failed"), userData));
+                callback(IntPtr.Zero, NewOwnedError(7, "describe failed"), userData)));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Values, s_deadline));
+            () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal("describe failed", failure.Message);
         Assert.Equal(7, failure.Code);
     }
@@ -610,7 +611,7 @@ public sealed class AdminP6ResultMarshalTests
             ("request_percentage", double.MaxValue));
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(fixture.Walk().Entities, s_deadline);
+            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
 
         IReadOnlyDictionary<string, double> quotas = entities[key];
         Assert.Equal(3, quotas.Count);
@@ -632,7 +633,7 @@ public sealed class AdminP6ResultMarshalTests
         ClientQuotaEntity key = fixture.AddRow(new[] { ("ip", (string?)"10.0.0.1") });
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(fixture.Walk().Entities, s_deadline);
+            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
 
         Assert.Empty(entities[key]);
     }
@@ -651,7 +652,7 @@ public sealed class AdminP6ResultMarshalTests
             ("producer_byte_rate", 1024.0));
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(fixture.Walk().Entities, s_deadline);
+            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
 
         ClientQuotaEntity lookup = new ClientQuotaEntity(
             new Dictionary<string, string?> { ["user"] = null, ["client-id"] = "svc" });
@@ -675,7 +676,7 @@ public sealed class AdminP6ResultMarshalTests
             new[] { ("user", (string?)null) }, ("producer_byte_rate", 2.0));
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(fixture.Walk().Entities, s_deadline);
+            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
 
         Assert.Equal(2, entities.Count);
         Assert.Equal(1.0, entities[alice]["producer_byte_rate"]);
@@ -691,14 +692,15 @@ public sealed class AdminP6ResultMarshalTests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(
+        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
             ClientQuotaFilter.All(),
             options: null,
+            AdminFlavour.Async,
             (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
-                callback(IntPtr.Zero, NewOwnedError(11, "describe quotas failed"), userData));
+                callback(IntPtr.Zero, NewOwnedError(11, "describe quotas failed"), userData)));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Entities, s_deadline));
+            () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal("describe quotas failed", failure.Message);
         Assert.Equal(11, failure.Code);
     }
@@ -751,7 +753,7 @@ public sealed class AdminP6ResultMarshalTests
         }
 
         /// <summary>Runs production's shape-3 walk over this table and wraps the outcome.</summary>
-        internal DescribeClientQuotasResult Walk()
+        internal AsyncDescribeClientQuotasResult Walk()
         {
             SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
                 new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
@@ -797,7 +799,7 @@ public sealed class AdminP6ResultMarshalTests
                     }),
                 EqualityComparer<ClientQuotaEntity>.Default);
 
-            return new DescribeClientQuotasResult(operation.Task);
+            return AsyncDescribeClientQuotasResult.From(operation);
         }
 
         /// <summary>Releases every pin.</summary>
@@ -1012,7 +1014,7 @@ public sealed class AdminP6ResultMarshalTests
         }
 
         /// <summary>Runs production's walk over this table and wraps the outcome.</summary>
-        internal DeleteAclsResult Walk()
+        internal AsyncDeleteAclsResult Walk()
         {
             List<AclBindingFilter> keys = Enumerable
                 .Range(0, _rows.Count)
@@ -1053,7 +1055,7 @@ public sealed class AdminP6ResultMarshalTests
 
             // The trampoline's rescue, mirrored: an unnamed key would hang forever.
             operation.FailUncompleted();
-            return new DeleteAclsResult(operation.Tasks);
+            return new AsyncDeleteAclsResult(operation.Tasks);
         }
 
         /// <summary>

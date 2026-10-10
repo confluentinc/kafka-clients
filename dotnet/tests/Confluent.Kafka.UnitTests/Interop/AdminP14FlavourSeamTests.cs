@@ -194,10 +194,11 @@ public sealed class AdminP14FlavourSeamTests
         SafeAdminHandle handle = admin.Handle;
 
         // Seeded through the async flavour, so the sync rows below read a topic the mock has.
-        CreateTopicsResult seeded = admin.CreateTopics(
+        AsyncCreateTopicsResult seeded = AsyncCreateTopicsResult.From(admin.CreateTopics(
             new[] { new NewTopic("dispatched-listed", 1, 1), new NewTopic("dispatched-deleted", 1, 1) },
-            options: null);
-        await TestTimeout.Run(seeded.All, s_deadline);
+            options: null,
+            AdminFlavour.Async));
+        await TestTimeout.Run(() => seeded.All().Get(), s_deadline);
 
         SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> listed = admin.ListTopics(
             options: null, AdminFlavour.Sync, NativeMethods.AdminClientListTopicsAsync);

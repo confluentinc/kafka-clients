@@ -63,19 +63,19 @@ public sealed class AdminP9PerKeyStage2Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
-        DescribeTopicsResult result = admin.DescribeTopics(
-            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null);
+        AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
+            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null, AdminFlavour.Async));
 
         TopicDescription present = await TestTimeout.Run(
-            () => result.TopicNameValues!["cp3-present"], s_deadline);
+            () => result.TopicNameValues!["cp3-present"].Get(), s_deadline);
         Assert.Equal("cp3-present", present.Name);
         Assert.Equal(3, present.Partitions.Count);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.TopicNameValues!["cp3-absent"], s_deadline));
+            () => TestTimeout.Run(() => result.TopicNameValues!["cp3-absent"].Get(), s_deadline));
         Assert.Equal("Topic cp3-absent not found.", failure.Message);
     }
 
@@ -89,15 +89,15 @@ public sealed class AdminP9PerKeyStage2Tests
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        CreateTopicsResult created =
-            admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, options: null);
-        Uuid id = await TestTimeout.Run(() => created.TopicId("cp3-by-id"), s_deadline);
+        AsyncCreateTopicsResult created =
+            AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, options: null, AdminFlavour.Async));
+        Uuid id = await TestTimeout.Run(() => created.TopicId("cp3-by-id").Get(), s_deadline);
         Assert.NotEqual(Uuid.Zero, id);
 
-        DescribeTopicsResult result =
-            admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null);
+        AsyncDescribeTopicsResult result =
+            AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null, AdminFlavour.Async));
 
-        TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues![id], s_deadline);
+        TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues![id].Get(), s_deadline);
         Assert.Equal(id, description.TopicId);
         Assert.Equal("cp3-by-id", description.Name);
     }
@@ -114,21 +114,21 @@ public sealed class AdminP9PerKeyStage2Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg");
         ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "0");
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg-absent");
 
-        DescribeConfigsResult result =
-            admin.DescribeConfigs(new[] { topic, broker, absent }, options: null);
+        AsyncDescribeConfigsResult result =
+            AsyncDescribeConfigsResult.From(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null, AdminFlavour.Async));
 
-        Assert.NotNull(await TestTimeout.Run(() => result.Values[topic], s_deadline));
-        Assert.NotNull(await TestTimeout.Run(() => result.Values[broker], s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.Values[broker].Get(), s_deadline));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[absent], s_deadline));
+            () => TestTimeout.Run(() => result.Values[absent].Get(), s_deadline));
         Assert.Equal(
             "Resource ConfigResource(type=Topic, name='cp3-cfg-absent') not found.", failure.Message);
     }
@@ -145,12 +145,12 @@ public sealed class AdminP9PerKeyStage2Tests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(2);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         // Requested in DESCENDING order, so a callback that mistook the key for a position
         // would resolve them swapped.
-        DescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 1, 0 }, options: null);
+        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(new[] { 1, 0 }, options: null, AdminFlavour.Async));
 
         Assert.Equal(2, result.Descriptions.Count);
         Assert.Contains(0, result.Descriptions.Keys);
@@ -163,7 +163,7 @@ public sealed class AdminP9PerKeyStage2Tests
         foreach (int broker in new[] { 1, 0 })
         {
             IReadOnlyDictionary<string, LogDirDescription> directories =
-                await TestTimeout.Run(() => result.Descriptions[broker], s_deadline);
+                await TestTimeout.Run(() => result.Descriptions[broker].Get(), s_deadline);
             foreach (KeyValuePair<string, LogDirDescription> entry in directories)
             {
                 Assert.Equal("/tmp/kafka-logs", entry.Key);
@@ -343,11 +343,11 @@ public sealed class AdminP9PerKeyStage2Tests
         {
             case Rpc.DescribeTopicsByName:
                 {
-                    DescribeTopicsResult result =
-                        admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null);
-                    foreach (KeyValuePair<string, Task<TopicDescription>> entry in result.TopicNameValues!)
+                    AsyncDescribeTopicsResult result =
+                        AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> entry in result.TopicNameValues!)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -361,11 +361,11 @@ public sealed class AdminP9PerKeyStage2Tests
                         ids.Add(new Uuid(i + 1, i + 1));
                     }
 
-                    DescribeTopicsResult result =
-                        admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null);
-                    foreach (KeyValuePair<Uuid, Task<TopicDescription>> entry in result.TopicIdValues!)
+                    AsyncDescribeTopicsResult result =
+                        AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in result.TopicIdValues!)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -379,10 +379,10 @@ public sealed class AdminP9PerKeyStage2Tests
                         resources.Add(new ConfigResource(ConfigResourceType.Topic, key));
                     }
 
-                    DescribeConfigsResult result = admin.DescribeConfigs(resources, options: null);
-                    foreach (KeyValuePair<ConfigResource, Task<Config>> entry in result.Values)
+                    AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(resources, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -396,11 +396,11 @@ public sealed class AdminP9PerKeyStage2Tests
                         brokers.Add(i);
                     }
 
-                    DescribeLogDirsResult result = admin.DescribeLogDirs(brokers, options: null);
-                    foreach (KeyValuePair<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> entry
+                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(brokers, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> entry
                         in result.Descriptions)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -408,12 +408,12 @@ public sealed class AdminP9PerKeyStage2Tests
 
             case Rpc.DescribeConsumerGroups:
                 {
-                    DescribeConsumerGroupsResult result =
-                        admin.DescribeConsumerGroups(keys, options: null);
-                    foreach (KeyValuePair<string, Task<ConsumerGroupDescription>> entry
+                    AsyncDescribeConsumerGroupsResult result =
+                        AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(keys, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry
                         in result.DescribedGroups)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -421,12 +421,12 @@ public sealed class AdminP9PerKeyStage2Tests
 
             case Rpc.DescribeClassicGroups:
                 {
-                    DescribeClassicGroupsResult result =
-                        admin.DescribeClassicGroups(keys, options: null);
-                    foreach (KeyValuePair<string, Task<ClassicGroupDescription>> entry
+                    AsyncDescribeClassicGroupsResult result =
+                        AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(keys, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> entry
                         in result.DescribedGroups)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;
@@ -441,12 +441,12 @@ public sealed class AdminP9PerKeyStage2Tests
                         specs[key] = new ListConsumerGroupOffsetsSpec();
                     }
 
-                    ListConsumerGroupOffsetsResult result =
-                        admin.ListConsumerGroupOffsets(specs, options: null);
+                    AsyncListConsumerGroupOffsetsResult result =
+                        AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(specs, options: null, AdminFlavour.Async));
                     foreach (string key in specs.Keys)
                     {
                         string captured = key;
-                        awaitables.Add(() => result.PartitionsToOffsetAndMetadata(captured));
+                        awaitables.Add(() => result.PartitionsToOffsetAndMetadata(captured).Get());
                     }
 
                     break;
@@ -454,11 +454,11 @@ public sealed class AdminP9PerKeyStage2Tests
 
             case Rpc.DescribeTransactions:
                 {
-                    DescribeTransactionsResult result = admin.DescribeTransactions(keys, options: null);
+                    AsyncDescribeTransactionsResult result = AsyncDescribeTransactionsResult.From(admin.DescribeTransactions(keys, options: null, AdminFlavour.Async));
                     foreach (string key in keys)
                     {
                         string captured = key;
-                        awaitables.Add(() => result.Description(captured));
+                        awaitables.Add(() => result.Description(captured).Get());
                     }
 
                     break;
@@ -466,10 +466,10 @@ public sealed class AdminP9PerKeyStage2Tests
 
             default:
                 {
-                    FenceProducersResult result = admin.FenceProducers(keys, options: null);
-                    foreach (KeyValuePair<string, Task> entry in result.FencedProducers)
+                    AsyncFenceProducersResult result = AsyncFenceProducersResult.From(admin.FenceProducers(keys, options: null, AdminFlavour.Async));
+                    foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.FencedProducers)
                     {
-                        awaitables.Add(() => entry.Value);
+                        awaitables.Add(() => entry.Value.Get());
                     }
 
                     break;

@@ -266,24 +266,26 @@ public sealed class AdminP3OperationLifetimeTests
         {
             case Rpc.DescribeCluster:
                 {
-                    DescribeClusterResult result = admin.DescribeCluster(
+                    AsyncDescribeClusterResult result = AsyncDescribeClusterResult.From(admin.DescribeCluster(
                         options: null,
+                        AdminFlavour.Async,
                         (nativeHandle, timeoutMs, includeAuthorizedOperations, includeFencedBrokers, callback,
-                            userData) => onSubmit(userData));
+                            userData) => onSubmit(userData)));
 
                     // Any one of the four projections carries the call's failure; Nodes is
                     // arbitrary. The "all four fault together" claim is asserted in
                     // AdminP3ResultMarshalTests.
-                    return result.Nodes;
+                    return () => result.Nodes().Get();
                 }
 
             default:
                 {
-                    ListConfigResourcesResult result = admin.ListConfigResources(
+                    AsyncListConfigResourcesResult result = AsyncListConfigResourcesResult.From(admin.ListConfigResources(
                         new[] { ConfigResourceType.Topic },
                         options: null,
-                        (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) => onSubmit(userData));
-                    return result.All;
+                        AdminFlavour.Async,
+                        (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) => onSubmit(userData)));
+                    return () => result.All().Get();
                 }
         }
     }
@@ -293,18 +295,20 @@ public sealed class AdminP3OperationLifetimeTests
         switch (rpc)
         {
             case Rpc.DescribeCluster:
-                admin.DescribeCluster(
+                AsyncDescribeClusterResult.From(admin.DescribeCluster(
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, timeoutMs, includeAuthorizedOperations, includeFencedBrokers, callback,
-                        userData) => throw new InvalidOperationException("submit failed"));
+                        userData) => throw new InvalidOperationException("submit failed")));
                 break;
 
             default:
-                admin.ListConfigResources(
+                AsyncListConfigResourcesResult.From(admin.ListConfigResources(
                     new[] { ConfigResourceType.Topic },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, resourceTypes, count, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 break;
         }
     }

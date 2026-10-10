@@ -177,17 +177,17 @@ public sealed class AdminP3ResultMarshalTests
         // The mapping DescribeClusterMarshal depends on.
         Assert.Null(NodeMarshal.CopyOut(IntPtr.Zero));
 
-        DescribeClusterResult result = new DescribeClusterResult(
+        AsyncDescribeClusterResult result = new AsyncDescribeClusterResult(
             Task.FromResult(new DescribeClusterSnapshot(Array.Empty<Node>(), null, "id", null)));
 
-        Assert.Null(await TestTimeout.Run(result.Controller, s_deadline));
-        Assert.Null(await TestTimeout.Run(result.AuthorizedOperations, s_deadline));
-        Assert.Equal("id", await TestTimeout.Run(result.ClusterId, s_deadline));
-        Assert.Empty(await TestTimeout.Run(result.Nodes, s_deadline));
+        Assert.Null(await TestTimeout.Run(() => result.Controller().Get(), s_deadline));
+        Assert.Null(await TestTimeout.Run(() => result.AuthorizedOperations().Get(), s_deadline));
+        Assert.Equal("id", await TestTimeout.Run(() => result.ClusterId().Get(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.Nodes().Get(), s_deadline));
     }
 
     /// <summary>
-    /// Each of <see cref="DescribeClusterResult"/>'s four projections returns the
+    /// Each of <see cref="AsyncDescribeClusterResult"/>'s four projections returns the
     /// <b>same</b> <see cref="Task"/> instance on every call, as Java's accessors return the
     /// same stored <c>KafkaFuture</c>, and all four derive from the <b>one</b> completion.
     /// </summary>
@@ -200,18 +200,18 @@ public sealed class AdminP3ResultMarshalTests
             "cid",
             new[] { AclOperation.Describe });
 
-        DescribeClusterResult result = new DescribeClusterResult(Task.FromResult(snapshot));
+        AsyncDescribeClusterResult result = new AsyncDescribeClusterResult(Task.FromResult(snapshot));
 
-        Assert.Same(result.Nodes(), result.Nodes());
-        Assert.Same(result.Controller(), result.Controller());
-        Assert.Same(result.ClusterId(), result.ClusterId());
-        Assert.Same(result.AuthorizedOperations(), result.AuthorizedOperations());
+        Assert.Same(result.Nodes().Get(), result.Nodes().Get());
+        Assert.Same(result.Controller().Get(), result.Controller().Get());
+        Assert.Same(result.ClusterId().Get(), result.ClusterId().Get());
+        Assert.Same(result.AuthorizedOperations().Get(), result.AuthorizedOperations().Get());
 
-        Assert.Equal(7, Assert.Single(await TestTimeout.Run(result.Nodes, s_deadline)).Id);
-        Assert.Equal("cid", await TestTimeout.Run(result.ClusterId, s_deadline));
+        Assert.Equal(7, Assert.Single(await TestTimeout.Run(() => result.Nodes().Get(), s_deadline)).Id);
+        Assert.Equal("cid", await TestTimeout.Run(() => result.ClusterId().Get(), s_deadline));
 
         IReadOnlyCollection<AclOperation>? operations =
-            await TestTimeout.Run(result.AuthorizedOperations, s_deadline);
+            await TestTimeout.Run(() => result.AuthorizedOperations().Get(), s_deadline);
         Assert.NotNull(operations);
         Assert.Equal(AclOperation.Describe, Assert.Single(operations!));
     }
@@ -229,16 +229,16 @@ public sealed class AdminP3ResultMarshalTests
             new TaskCompletionSource<DescribeClusterSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
         source.SetException(failure);
 
-        DescribeClusterResult result = new DescribeClusterResult(source.Task);
+        AsyncDescribeClusterResult result = new AsyncDescribeClusterResult(source.Task);
 
-        Assert.Same(failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.Nodes), s_deadline));
+        Assert.Same(failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Nodes().Get()), s_deadline));
         Assert.Same(
-            failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.Controller), s_deadline));
+            failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Controller().Get()), s_deadline));
         Assert.Same(
-            failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.ClusterId), s_deadline));
+            failure, await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.ClusterId().Get()), s_deadline));
         Assert.Same(
             failure,
-            await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.AuthorizedOperations), s_deadline));
+            await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.AuthorizedOperations().Get()), s_deadline));
     }
 
     /// <summary>

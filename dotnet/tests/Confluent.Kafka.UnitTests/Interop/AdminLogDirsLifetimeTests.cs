@@ -214,26 +214,26 @@ public sealed class AdminLogDirsLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         TopicPartitionReplica known = new TopicPartitionReplica(Topic, 0, 0);
         TopicPartitionReplica unknown = new TopicPartitionReplica("logdir-absent-topic", 0, 0);
 
-        DescribeReplicaLogDirsResult result =
-            admin.DescribeReplicaLogDirs(new[] { known, unknown }, options: null);
+        AsyncDescribeReplicaLogDirsResult result =
+            AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(new[] { known, unknown }, options: null, AdminFlavour.Async));
 
         // The known replica still succeeds: one missing key does not fail the call.
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-            await TestTimeout.Run(() => result.Values[known], s_deadline);
+            await TestTimeout.Run(() => result.Values[known].Get(), s_deadline);
         Assert.NotNull(info.GetCurrentReplicaLogDir());
 
         KafkaException missing = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[unknown]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[unknown].Get()), s_deadline);
 
         AssertAbsentKey(missing);
 
         // …and All() therefore faults as well, with the same error.
-        AssertAbsentKey(await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline));
+        AssertAbsentKey(await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline));
     }
 
     /// <summary>
@@ -269,12 +269,12 @@ public sealed class AdminLogDirsLifetimeTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null).All(), s_deadline);
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null, AdminFlavour.Async)).All().Get(), s_deadline);
 
         TopicPartitionReplica accepted = new TopicPartitionReplica(Topic, 0, 0);
         TopicPartitionReplica rejected = new TopicPartitionReplica(Topic, 1, 0);
 
-        AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+        AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string>
             {
                 // The dir the mock seeded for every broker.
@@ -283,15 +283,16 @@ public sealed class AdminLogDirsLifetimeTests
                 // A directory the broker does not have.
                 [rejected] = "/no/such/dir",
             },
-            options: null);
+            options: null,
+            AdminFlavour.Async));
 
-        await TestTimeout.Run(() => result.Values[accepted], s_deadline);
+        await TestTimeout.Run(() => result.Values[accepted].Get(), s_deadline);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[rejected]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[rejected].Get()), s_deadline);
         Assert.Equal("Log directory /no/such/dir is offline", failure.Message);
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>Which RPC a parameterised case drives.</summary>
@@ -313,31 +314,34 @@ public sealed class AdminLogDirsLifetimeTests
         {
             case Rpc.DescribeLogDirs:
                 {
-                    DescribeLogDirsResult result = admin.DescribeLogDirs(
+                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(
                         new[] { 0 },
                         options: null,
-                        (nativeHandle, brokers, count, timeoutMs, callback, userData) => onSubmit(userData));
-                    return () => result.Descriptions[0];
+                        AdminFlavour.Async,
+                        (nativeHandle, brokers, count, timeoutMs, callback, userData) => onSubmit(userData)));
+                    return () => result.Descriptions[0].Get();
                 }
 
             case Rpc.AlterReplicaLogDirs:
                 {
-                    AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+                    AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
                         new Dictionary<TopicPartitionReplica, string> { [s_replica] = "/data" },
                         options: null,
+                        AdminFlavour.Async,
                         (nativeHandle, topics, partitions, brokerIds, logDirs, count, timeoutMs, callback, userData) =>
-                            onSubmit(userData));
-                    return () => result.Values[s_replica];
+                            onSubmit(userData)));
+                    return () => result.Values[s_replica].Get();
                 }
 
             default:
                 {
-                    DescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(
+                    AsyncDescribeReplicaLogDirsResult result = AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(
                         new[] { s_replica },
                         options: null,
+                        AdminFlavour.Async,
                         (nativeHandle, topics, partitions, brokerIds, count, timeoutMs, callback, userData) =>
-                            onSubmit(userData));
-                    return () => result.Values[s_replica];
+                            onSubmit(userData)));
+                    return () => result.Values[s_replica].Get();
                 }
         }
     }
@@ -347,27 +351,30 @@ public sealed class AdminLogDirsLifetimeTests
         switch (rpc)
         {
             case Rpc.DescribeLogDirs:
-                admin.DescribeLogDirs(
+                AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(
                     new[] { 0 },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, brokers, count, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 return;
 
             case Rpc.AlterReplicaLogDirs:
-                admin.AlterReplicaLogDirs(
+                AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
                     new Dictionary<TopicPartitionReplica, string> { [s_replica] = "/data" },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, topics, partitions, brokerIds, logDirs, count, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 return;
 
             default:
-                admin.DescribeReplicaLogDirs(
+                AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(
                     new[] { s_replica },
                     options: null,
+                    AdminFlavour.Async,
                     (nativeHandle, topics, partitions, brokerIds, count, timeoutMs, callback, userData) =>
-                        throw new InvalidOperationException("submit failed"));
+                        throw new InvalidOperationException("submit failed")));
                 return;
         }
     }

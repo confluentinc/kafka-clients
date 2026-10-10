@@ -489,7 +489,7 @@ public sealed class AdminP8SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedListTransactions captured = new CapturedListTransactions();
-        admin.ListTransactions(
+        AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             options,
             (handle, states, stateCount, producerIds, producerIdCount, durationMs, pattern,
              timeoutMs, byBrokerIdCallback, callback, data) =>
@@ -505,7 +505,7 @@ public sealed class AdminP8SubmitArgumentTests
                 captured.Pattern = Utf8Marshal.PtrToString(pattern);
                 captured.TimeoutMs = timeoutMs;
                 captured.UserData = data;
-            });
+            }));
 
         // Settle the operation the way a discovery failure does: one owned error, no brokers.
         AdminCallbacks.ListTransactionsByBrokerId(IntPtr.Zero, 0, CapturedError(), captured.UserData);
@@ -543,9 +543,10 @@ public sealed class AdminP8SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedDescribeProducers captured = new CapturedDescribeProducers();
-        admin.DescribeProducers(
+        AsyncDescribeProducersResult.From(admin.DescribeProducers(
             partitions,
             options,
+            AdminFlavour.Async,
             (handle, topics, partitionIds, count, hasBrokerId, brokerId, timeoutMs, callback, data) =>
             {
                 captured.Topics = topics.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
@@ -555,7 +556,7 @@ public sealed class AdminP8SubmitArgumentTests
                 captured.BrokerId = brokerId;
                 captured.TimeoutMs = timeoutMs;
                 captured.UserData = data;
-            });
+            }));
 
         // Shape 4a: one per-key failure per DISTINCT (topic, partition) pair, read back off
         // what the submit actually carried. The value slot is NULL on a failing key and
@@ -580,16 +581,17 @@ public sealed class AdminP8SubmitArgumentTests
         int timeout = 0;
         IntPtr userData = IntPtr.Zero;
 
-        admin.DescribeTransactions(
+        AsyncDescribeTransactionsResult.From(admin.DescribeTransactions(
             transactionalIds,
             options,
+            AdminFlavour.Async,
             (handle, pinned, pinnedCount, timeoutMs, callback, data) =>
             {
                 ids = pinned.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
                 count = pinnedCount;
                 timeout = timeoutMs;
                 userData = data;
-            });
+            }));
 
         FirePerKeyFailures(AdminCallbacks.DescribeTransactions.Invoke, transactionalIds, userData);
         return (ids, count, timeout);
@@ -605,16 +607,17 @@ public sealed class AdminP8SubmitArgumentTests
         int timeout = 0;
         IntPtr userData = IntPtr.Zero;
 
-        admin.FenceProducers(
+        AsyncFenceProducersResult.From(admin.FenceProducers(
             transactionalIds,
             options,
+            AdminFlavour.Async,
             (handle, pinned, pinnedCount, timeoutMs, callback, data) =>
             {
                 ids = pinned.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
                 count = pinnedCount;
                 timeout = timeoutMs;
                 userData = data;
-            });
+            }));
 
         FirePerKeyFailures(AdminCallbacks.FenceProducers.Invoke, transactionalIds, userData);
         return (ids, count, timeout);
@@ -626,9 +629,10 @@ public sealed class AdminP8SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         CapturedAbort captured = new CapturedAbort();
-        admin.AbortTransaction(
+        AsyncAbortTransactionResult.From(admin.AbortTransaction(
             spec,
             options,
+            AdminFlavour.Async,
             (handle, topic, partition, producerId, producerEpoch, coordinatorEpoch, timeoutMs,
              callback, userData) =>
             {
@@ -639,7 +643,7 @@ public sealed class AdminP8SubmitArgumentTests
                 captured.CoordinatorEpoch = coordinatorEpoch;
                 captured.TimeoutMs = timeoutMs;
                 captured.UserData = userData;
-            });
+            }));
 
         // Settle the operation so its GCHandle and span-the-op reference are released.
         AdminCallbacks.AbortTransaction(CapturedError(), captured.UserData);
@@ -655,15 +659,16 @@ public sealed class AdminP8SubmitArgumentTests
         int timeout = 0;
         IntPtr userData = IntPtr.Zero;
 
-        admin.ForceTerminateTransaction(
+        AsyncTerminateTransactionResult.From(admin.ForceTerminateTransaction(
             transactionalId,
             options,
+            AdminFlavour.Async,
             (handle, pinnedId, timeoutMs, callback, data) =>
             {
                 id = Utf8Marshal.PtrToString(pinnedId);
                 timeout = timeoutMs;
                 userData = data;
-            });
+            }));
 
         AdminCallbacks.ForceTerminateTransaction(CapturedError(), userData);
         return (id, timeout);

@@ -164,11 +164,12 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         bool submitted = false;
         ArgumentOutOfRangeException rejected = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ListOffsets(
+            AsyncListOffsetsResult.From(admin.ListOffsets(
                 request,
                 new ListOffsetsOptions { IsolationLevel = (IsolationLevel)7 },
+                AdminFlavour.Async,
                 (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
-                    isolationLevel, callback, userData) => submitted = true));
+                    isolationLevel, callback, userData) => submitted = true)));
 
         Assert.Equal("options", rejected.ParamName);
         Assert.False(submitted, "an undefined isolation level must be rejected before the native call");
@@ -225,19 +226,21 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         bool submitted = false;
         ArgumentException listing = Assert.Throws<ArgumentException>(() =>
-            admin.ListPartitionReassignments(
+            AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
                 new[] { default(TopicPartition) },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, allPartitions, topics, partitions, count, timeoutMs, callback, userData) =>
-                    submitted = true));
+                    submitted = true)));
         Assert.Equal("partitions", listing.ParamName);
 
         ArgumentException offsets = Assert.Throws<ArgumentException>(() =>
-            admin.ListOffsets(
+            AsyncListOffsetsResult.From(admin.ListOffsets(
                 new Dictionary<TopicPartition, OffsetSpec> { [default] = OffsetSpec.Latest() },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
-                    isolationLevel, callback, userData) => submitted = true));
+                    isolationLevel, callback, userData) => submitted = true)));
         Assert.Equal("topicPartitionOffsets", offsets.ParamName);
 
         Assert.False(submitted, "both must be rejected before the native call");
@@ -256,12 +259,13 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         ArgumentException nullSpec = Assert.Throws<ArgumentException>(() =>
-            admin.ListOffsets(
+            AsyncListOffsetsResult.From(admin.ListOffsets(
                 new Dictionary<TopicPartition, OffsetSpec> { [new TopicPartition("t", 0)] = null! },
                 options: null,
+                AdminFlavour.Async,
                 (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
                     isolationLevel, callback, userData) =>
-                { }));
+                { })));
         Assert.Equal("topicPartitionOffsets", nullSpec.ParamName);
         Assert.StartsWith(
             "The offset spec for 't-0' must not be null.",
@@ -270,7 +274,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         Assert.Equal(
             "topicPartitionOffsets",
-            Assert.Throws<ArgumentNullException>(() => admin.ListOffsets(null!, options: null)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => AsyncListOffsetsResult.From(admin.ListOffsets(null!, options: null, AdminFlavour.Async))).ParamName);
     }
 
     /// <summary>
@@ -322,14 +326,15 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         object? listingContext = null;
         IntPtr listingUserData = IntPtr.Zero;
-        ListPartitionReassignmentsResult listing = admin.ListPartitionReassignments(
+        AsyncListPartitionReassignmentsResult listing = AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
             null,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, allPartitions, topics, partitions, count, timeoutMs, callback, userData) =>
             {
                 listingUserData = userData;
                 listingContext = GCHandle.FromIntPtr(userData).Target;
-            });
+            }));
 
         Assert.IsType<SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>>(
             listingContext);
@@ -337,15 +342,16 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         TopicPartition partition = new TopicPartition("p4s2-routing", 0);
         object? offsetsContext = null;
         IntPtr offsetsUserData = IntPtr.Zero;
-        ListOffsetsResult offsets = admin.ListOffsets(
+        AsyncListOffsetsResult offsets = AsyncListOffsetsResult.From(admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Latest() },
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs, isolationLevel,
                 callback, userData) =>
             {
                 offsetsUserData = userData;
                 offsetsContext = GCHandle.FromIntPtr(userData).Target;
-            });
+            }));
 
         Assert.IsType<KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>(
             offsetsContext);
@@ -358,11 +364,11 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         Assert.Equal(
             3,
             (await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(listing.Reassignments), s_deadline)).Code);
+                () => Assert.ThrowsAsync<KafkaException>(() => listing.Reassignments().Get()), s_deadline)).Code);
         Assert.Equal(
             4,
             (await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => offsets.PartitionResult(partition)),
+                () => Assert.ThrowsAsync<KafkaException>(() => offsets.PartitionResult(partition).Get()),
                 s_deadline)).Code);
     }
 
@@ -401,9 +407,10 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         Captured captured = new Captured();
         IntPtr toRelease = IntPtr.Zero;
-        admin.ListOffsets(
+        AsyncListOffsetsResult.From(admin.ListOffsets(
             request,
             options,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitionIds, isTimestamp, specTimestamps, count, timeoutMs, isolationLevel,
                 callback, userData) =>
             {
@@ -422,7 +429,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
                 captured.Topics = names;
                 toRelease = userData;
-            });
+            }));
 
         // Shape 4a: one per-key failure per requested (topic, partition) pair, read back
         // off what the submit actually carried.
@@ -442,9 +449,10 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         Captured captured = new Captured();
         IntPtr toRelease = IntPtr.Zero;
-        admin.ListPartitionReassignments(
+        AsyncListPartitionReassignmentsResult.From(admin.ListPartitionReassignments(
             partitions,
             options,
+            AdminFlavour.Async,
             (nativeHandle, allPartitions, topics, partitionIds, count, timeoutMs, callback, userData) =>
             {
                 captured.AllPartitions = allPartitions;
@@ -460,7 +468,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
                 captured.Topics = names;
                 toRelease = userData;
-            });
+            }));
 
         AdminCallbacks.ListPartitionReassignments(
             IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(1, "captured"), toRelease);

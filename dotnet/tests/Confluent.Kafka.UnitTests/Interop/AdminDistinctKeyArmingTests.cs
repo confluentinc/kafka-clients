@@ -95,9 +95,10 @@ public sealed class AdminDistinctKeyArmingTests
 
         int count = -1;
         IReadOnlyList<string?> topics = Array.Empty<string?>();
-        CreatePartitionsResult result = admin.CreatePartitions(
+        AsyncCreatePartitionsResult result = AsyncCreatePartitionsResult.From(admin.CreatePartitions(
             request,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topicArray, newPartitions, n, timeoutMs, validateOnly, retry, callback, userData) =>
             {
                 count = n;
@@ -105,14 +106,14 @@ public sealed class AdminDistinctKeyArmingTests
                 Assert.Equal(n, newPartitions.Length);
                 NativeMethods.AdminClientCreatePartitionsAsync(
                     nativeHandle, topicArray, newPartitions, n, timeoutMs, validateOnly, retry, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, count);
         Assert.Equal(new[] { "f4-parts" }, topics);
         Assert.Single(result.Values);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[second], s_deadline));
+            () => TestTimeout.Run(() => result.Values[second].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -146,9 +147,10 @@ public sealed class AdminDistinctKeyArmingTests
         IReadOnlyList<string?> topics = Array.Empty<string?>();
         int[] partitions = Array.Empty<int>();
         long[] offsets = Array.Empty<long>();
-        DeleteRecordsResult result = admin.DeleteRecords(
+        AsyncDeleteRecordsResult result = AsyncDeleteRecordsResult.From(admin.DeleteRecords(
             request,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topicArray, partitionArray, beforeOffsets, n, timeoutMs, callback, userData) =>
             {
                 count = n;
@@ -157,7 +159,7 @@ public sealed class AdminDistinctKeyArmingTests
                 offsets = beforeOffsets.ToArray();
                 NativeMethods.AdminClientDeleteRecordsAsync(
                     nativeHandle, topicArray, partitionArray, beforeOffsets, n, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, count);
         Assert.Equal(new[] { "f4-records" }, topics);
@@ -166,7 +168,7 @@ public sealed class AdminDistinctKeyArmingTests
         Assert.Single(result.LowWatermarks);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.LowWatermarks[second], s_deadline));
+            () => TestTimeout.Run(() => result.LowWatermarks[second].Get(), s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
@@ -186,7 +188,7 @@ public sealed class AdminDistinctKeyArmingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("f4-replicas", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("f4-replicas", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartitionReplica first = new TopicPartitionReplica("f4-replicas", 0, 0);
@@ -202,23 +204,24 @@ public sealed class AdminDistinctKeyArmingTests
 
         int count = -1;
         IReadOnlyList<string?> directories = Array.Empty<string?>();
-        AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+        AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
             request,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, brokerIds, logDirs, n, timeoutMs, callback, userData) =>
             {
                 count = n;
                 directories = Decode(logDirs);
                 NativeMethods.AdminClientAlterReplicaLogDirsAsync(
                     nativeHandle, topics, partitions, brokerIds, logDirs, n, timeoutMs, callback, userData);
-            });
+            }));
 
         Assert.Equal(1, count);
         Assert.Equal(new[] { "/f4-first" }, directories);
         Assert.Single(result.Values);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[second], s_deadline));
+            () => TestTimeout.Run(() => result.Values[second].Get(), s_deadline));
         Assert.Equal(KafkaStorageErrorCode, failure.Code);
         Assert.Equal("Log directory /f4-first is offline", failure.Message);
 
@@ -238,7 +241,7 @@ public sealed class AdminDistinctKeyArmingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("f4-reassign", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("f4-reassign", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartition first = new TopicPartition(Copy("f4-reassign"), 0);
@@ -254,9 +257,10 @@ public sealed class AdminDistinctKeyArmingTests
         int count = -1;
         bool[] cancel = Array.Empty<bool>();
         int[] replicaCounts = Array.Empty<int>();
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
             request,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, cancelArray, replicas, counts, n, timeoutMs, allowChange, callback,
                 userData) =>
             {
@@ -269,14 +273,14 @@ public sealed class AdminDistinctKeyArmingTests
                 NativeMethods.AdminClientAlterPartitionReassignmentsAsync(
                     nativeHandle, topics, partitions, cancelArray, replicas, counts, n, timeoutMs, allowChange,
                     callback, userData);
-            });
+            }));
 
         Assert.Equal(1, count);
         Assert.Equal(new[] { false }, cancel);
         Assert.Equal(new[] { 1 }, replicaCounts);
         Assert.Single(result.Values);
 
-        await TestTimeout.Run(() => result.Values[second], s_deadline);
+        await TestTimeout.Run(() => result.Values[second].Get(), s_deadline);
 
         Assert.True(
             DisposeAndAwaitRelease(admin, handle),
@@ -294,7 +298,7 @@ public sealed class AdminDistinctKeyArmingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("f4-offsets", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("f4-offsets", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
         TopicPartition first = new TopicPartition(Copy("f4-offsets"), 0);
@@ -310,9 +314,10 @@ public sealed class AdminDistinctKeyArmingTests
         int count = -1;
         bool[] isTimestamp = Array.Empty<bool>();
         long[] specs = Array.Empty<long>();
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = AsyncListOffsetsResult.From(admin.ListOffsets(
             request,
             options: null,
+            AdminFlavour.Async,
             (nativeHandle, topics, partitions, timestampFlags, specTimestamps, n, timeoutMs, isolation, callback,
                 userData) =>
             {
@@ -324,17 +329,17 @@ public sealed class AdminDistinctKeyArmingTests
                 NativeMethods.AdminClientListOffsetsAsync(
                     nativeHandle, topics, partitions, timestampFlags, specTimestamps, n, timeoutMs, isolation,
                     callback, userData);
-            });
+            }));
 
         Assert.Equal(1, count);
         Assert.Equal(new[] { false }, isTimestamp);
         Assert.Equal(new[] { -1L }, specs);
 
         ListOffsetsResult.ListOffsetsResultInfo info =
-            await TestTimeout.Run(() => result.PartitionResult(second), s_deadline);
+            await TestTimeout.Run(() => result.PartitionResult(second).Get(), s_deadline);
         Assert.Equal(-1L, info.Offset);
         IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> all =
-            await TestTimeout.Run(result.All, s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Single(all);
 
         Assert.True(
@@ -353,15 +358,15 @@ public sealed class AdminDistinctKeyArmingTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         SafeAdminHandle handle = admin.Handle;
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("a", 1, 1) }, options: null).All(),
+            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("a", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
             s_deadline);
 
-        DescribeTopicsResult result =
-            admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a", "a" }), options: null);
+        AsyncDescribeTopicsResult result =
+            AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a", "a" }), options: null, AdminFlavour.Async));
 
-        KeyValuePair<string, Task<TopicDescription>> only = Assert.Single(result.TopicNameValues!);
+        KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> only = Assert.Single(result.TopicNameValues!);
         Assert.Equal("a", only.Key);
-        TopicDescription description = await TestTimeout.Run(() => only.Value, s_deadline);
+        TopicDescription description = await TestTimeout.Run(() => only.Value.Get(), s_deadline);
         Assert.Equal("a", description.Name);
 
         Assert.True(

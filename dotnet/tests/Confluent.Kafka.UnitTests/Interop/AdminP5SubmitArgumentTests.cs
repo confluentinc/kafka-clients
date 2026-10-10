@@ -241,10 +241,11 @@ public sealed class AdminP5SubmitArgumentTests
             : new ListGroupsOptions { Types = new[] { (GroupType)99 } };
 
         ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(
+            () => AsyncListGroupsResult.From(admin.ListGroups(
                 options,
+                AdminFlavour.Async,
                 (handle, states, stateCount, protocols, protocolCount, types, typeCount, timeoutMs, callback, userData) =>
-                    submitted = true));
+                    submitted = true)));
 
         Assert.False(submitted, "an undefined enum value must never reach the submit");
         Assert.Equal("options", failure.ParamName);
@@ -305,8 +306,9 @@ public sealed class AdminP5SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         Captured captured = new Captured();
-        ListGroupsResult result = admin.ListGroups(
+        AsyncListGroupsResult result = AsyncListGroupsResult.From(admin.ListGroups(
             options,
+            AdminFlavour.Async,
             (handle, states, stateCount, protocols, protocolCount, types, typeCount, timeoutMs, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
@@ -316,13 +318,13 @@ public sealed class AdminP5SubmitArgumentTests
                 captured.ProtocolTypes = new CapturedAxis(protocolCount, Decode(protocols));
                 captured.Types = new CapturedAxis(typeCount, Decode(types));
                 captured.UserData = userData;
-            });
+            }));
 
         AdminCallbacks.ListGroups(IntPtr.Zero, CapturedError(), captured.UserData);
 
         // Observe the fault the trampoline just delivered. All() awaits an already-faulted
         // source, so it completes synchronously and this read is race-free.
-        Assert.NotNull(result.All().Exception);
+        Assert.NotNull(result.All().Get().Exception);
         return captured;
     }
 
@@ -508,11 +510,11 @@ public sealed class AdminP5SubmitArgumentTests
             (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true;
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { admin.DescribeConsumerGroups(null!, null, submit); });
+            () => { AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(null!, null, AdminFlavour.Async, submit)); });
         Assert.Equal("groupIds", missing.ParamName);
 
         ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => { admin.DescribeConsumerGroups(new string?[] { "g1", null }!, null, submit); });
+            () => { AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(new string?[] { "g1", null }!, null, AdminFlavour.Async, submit)); });
         Assert.Equal("groupIds", nullElement.ParamName);
 
         Assert.False(submitted, "a malformed id list must never reach the submit");
@@ -532,9 +534,10 @@ public sealed class AdminP5SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         DescribeCaptured captured = new DescribeCaptured();
-        DescribeConsumerGroupsResult result = admin.DescribeConsumerGroups(
+        AsyncDescribeConsumerGroupsResult result = AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(
             groupIds,
             options,
+            AdminFlavour.Async,
             (handle, ids, count, timeoutMs, include, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
@@ -543,13 +546,13 @@ public sealed class AdminP5SubmitArgumentTests
                 // ⚠ Decoded HERE: production unpins every id the moment this returns.
                 captured.GroupIds = new CapturedAxis(count, Decode(ids));
                 captured.UserData = userData;
-            });
+            }));
 
         FirePerKeyFailures(
             AdminCallbacks.DescribeConsumerGroups.Invoke, groupIds, captured.UserData);
 
         Assert.NotEmpty(result.DescribedGroups);
-        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Exception));
+        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Get().Exception));
         return captured;
     }
 
@@ -665,11 +668,11 @@ public sealed class AdminP5SubmitArgumentTests
             (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true;
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { admin.DescribeClassicGroups(null!, null, submit); });
+            () => { AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(null!, null, AdminFlavour.Async, submit)); });
         Assert.Equal("groupIds", missing.ParamName);
 
         ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => { admin.DescribeClassicGroups(new string?[] { "g1", null }!, null, submit); });
+            () => { AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(new string?[] { "g1", null }!, null, AdminFlavour.Async, submit)); });
         Assert.Equal("groupIds", nullElement.ParamName);
 
         Assert.False(submitted, "a malformed request must never reach the submit");
@@ -689,9 +692,10 @@ public sealed class AdminP5SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         DescribeCaptured captured = new DescribeCaptured();
-        DescribeClassicGroupsResult result = admin.DescribeClassicGroups(
+        AsyncDescribeClassicGroupsResult result = AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(
             groupIds,
             options,
+            AdminFlavour.Async,
             (handle, ids, count, timeoutMs, include, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
@@ -700,7 +704,7 @@ public sealed class AdminP5SubmitArgumentTests
                 // ⚠ Decoded HERE: production unpins every id the moment this returns.
                 captured.GroupIds = new CapturedAxis(count, Decode(ids));
                 captured.UserData = userData;
-            });
+            }));
 
         // ⚠ This RPC's own trampoline, not the consumer one: a submit-level error is OWNED,
         // and routing it through the wrong trampoline is what the split delegate prevents.
@@ -708,7 +712,7 @@ public sealed class AdminP5SubmitArgumentTests
             AdminCallbacks.DescribeClassicGroups.Invoke, groupIds, captured.UserData);
 
         Assert.NotEmpty(result.DescribedGroups);
-        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Exception));
+        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Get().Exception));
         return captured;
     }
 
@@ -900,44 +904,47 @@ public sealed class AdminP5SubmitArgumentTests
                 submitted = true;
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { admin.ListConsumerGroupOffsets(null!, null, submit); });
+            () => { AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(null!, null, AdminFlavour.Async, submit)); });
         Assert.Equal("groupSpecs", missing.ParamName);
 
         ArgumentException nullGroupId = Assert.Throws<ArgumentException>(
-            () => admin.ListConsumerGroupOffsets(
+            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
                 new GroupSpecEntries(
                     new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
                         null!, new ListConsumerGroupOffsetsSpec())),
                 null,
-                submit));
+                AdminFlavour.Async,
+                submit)));
         Assert.Equal("groupSpecs", nullGroupId.ParamName);
 
         ArgumentException duplicate = Assert.Throws<ArgumentException>(
-            () => admin.ListConsumerGroupOffsets(
+            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
                 new GroupSpecEntries(
                     new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
                         "g1", new ListConsumerGroupOffsetsSpec()),
                     new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
                         "g1", new ListConsumerGroupOffsetsSpec())),
                 null,
-                submit));
+                AdminFlavour.Async,
+                submit)));
         Assert.Equal("groupSpecs", duplicate.ParamName);
         Assert.Contains("'g1'", duplicate.Message, StringComparison.Ordinal);
 
         ArgumentException nullSpec = Assert.Throws<ArgumentException>(
-            () => admin.ListConsumerGroupOffsets(
+            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
                     ["g1"] = null!,
                 },
                 null,
-                submit));
+                AdminFlavour.Async,
+                submit)));
         Assert.Equal("groupSpecs", nullSpec.ParamName);
 
         // A `default(TopicPartition)` carries a null topic, which the ABI would read as an
         // absent name rather than as the request the caller wrote.
         ArgumentException nullTopic = Assert.Throws<ArgumentException>(
-            () => admin.ListConsumerGroupOffsets(
+            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
                     ["g1"] = new ListConsumerGroupOffsetsSpec
@@ -946,7 +953,8 @@ public sealed class AdminP5SubmitArgumentTests
                     },
                 },
                 null,
-                submit));
+                AdminFlavour.Async,
+                submit)));
         Assert.Equal("groupSpecs", nullTopic.ParamName);
 
         Assert.False(submitted, "a malformed request must never reach the submit");
@@ -974,9 +982,10 @@ public sealed class AdminP5SubmitArgumentTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         OffsetsCaptured captured = new OffsetsCaptured();
-        ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult result = AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
             groupSpecs,
             options,
+            AdminFlavour.Async,
             (handle, ids, all, topics, partitions, counts, count, timeoutMs, stable, callback, userData) =>
             {
                 captured.TimeoutMs = timeoutMs;
@@ -1012,7 +1021,7 @@ public sealed class AdminP5SubmitArgumentTests
 
                 captured.InnerPointersNull = innerNull;
                 captured.Selections = selections;
-            });
+            }));
 
         FirePerKeyFailures(
             AdminCallbacks.ListConsumerGroupOffsets.Invoke, captured.GroupIds, captured.UserData);
@@ -1020,7 +1029,7 @@ public sealed class AdminP5SubmitArgumentTests
         Assert.NotEmpty(captured.GroupIds);
         Assert.All(
             captured.GroupIds,
-            groupId => Assert.NotNull(result.PartitionsToOffsetAndMetadata(groupId).Exception));
+            groupId => Assert.NotNull(result.PartitionsToOffsetAndMetadata(groupId).Get().Exception));
         return captured;
     }
 
