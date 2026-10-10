@@ -53,9 +53,13 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// a row run on one flavour pins half of that code. Each sync view is read through
 /// <see cref="ListTransactionsHarness"/>'s <see cref="FutureProbe"/>s: pending is a
 /// <c>Get()</c> parked on a dedicated thread, and settled is that same <c>Get()</c> returning
-/// within the deadline, so a sync view that would hang fails the row. The two operation-level
-/// gather rows stay async-only: their flavour pairs are
-/// <see cref="AdminP14SyncCompositionTests"/>' <c>listTransactions</c> rows.
+/// within the deadline, so a sync view that would hang fails the row. A repeated broker id runs
+/// on both flavours too, at the seam and one layer down:
+/// <see cref="ListTransactionsAdminOperation.PublishBrokers"/> folds a repeat into one entry in a
+/// separate loop per flavour, and only the sync loop's output arms that group. Of the
+/// operation-level rows only <see cref="TheFailFastViews_FailWithTheFirstBrokerToFail_NotTheLowestId"/>
+/// stays async-only; its flavour pair is the <c>two-fail-first-in-time</c> <c>listTransactions</c>
+/// row of <see cref="AdminP14SyncCompositionTests"/>.
 /// </para>
 /// <para>
 /// <see cref="SafeHandle.IsClosed"/> after the client's own <c>Dispose</c> is the witness of
@@ -484,17 +488,82 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.True(handle.IsClosed, "both announced callbacks have landed");
     }
 
+    /// <summary>
+    /// A discovery that repeats a broker id breaks the header's promise of distinct ids. The
+    /// repeat is one entry, as in Java's map, and every view still settles. The countdown counts
+    /// the callbacks native announced, so the repeat's own callback releases a slot and resolves
+    /// nothing: its broker has been answered already.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ListTransactionsAdminOperation.PublishBrokers"/> folds the repeat in a separate
+    /// loop per flavour, and only the sync loop's output arms the fail-fast group. A repeat that
+    /// reached that group would fail the discovery inside the trampoline, and all three views with
+    /// it, on the sync flavour alone.
+    /// </remarks>
+    [Theory]
+    [InlineData(Sync)]
+    [InlineData(Async)]
+    public async Task ARepeatedBrokerId_IsOneEntry_AndEveryViewSettles(string flavour)
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        SafeAdminHandle handle = admin.Handle;
+        Submission submission = Submit(admin, flavour);
+        ListTransactionsHarness views = submission.Views;
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        Discover(submission, 1, 2, 1);
+        Assert.False(handle.IsClosed, "native still owes the three per-broker callbacks it announced");
+
+        object? brokers = await views.ByBrokerId().Outcome();
+        Assert.Equal(new[] { 1, 2 }, views.BrokerIdsOf(brokers).OrderBy(static id => id).ToArray());
+        FutureProbe first = views.BrokerOf(brokers, 1);
+        FutureProbe second = views.BrokerOf(brokers, 2);
+        FutureProbe allByBrokerId = views.AllByBrokerId();
+        FutureProbe all = views.All();
+        first.AssertPending();
+        second.AssertPending();
+        allByBrokerId.AssertPending();
+        all.AssertPending();
+
+        FailBroker(submission, 1, 14, "broker 1 loading");
+        Assert.False(handle.IsClosed, "two per-broker callbacks are still owed");
+
+        KafkaException loading = AssertFailure(await first.Outcome(), 14, "broker 1 loading");
+        Assert.Same(loading, await allByBrokerId.Outcome());
+        Assert.Same(loading, await all.Outcome());
+        second.AssertPending();
+
+        // The repeat's own callback: broker 1 keeps its first outcome.
+        FailBroker(submission, 1, 31, "broker 1 again");
+        Assert.False(handle.IsClosed, "broker 2's callback is still owed");
+        Assert.Same(loading, await views.BrokerOf(brokers, 1).Outcome());
+        second.AssertPending();
+
+        FailBroker(submission, 2, 31, "broker 2 refused");
+        Assert.True(handle.IsClosed, "the three announced callbacks have landed");
+
+        AssertFailure(await second.Outcome(), 31, "broker 2 refused");
+
+        // Requested with both brokers complete: the first faulted in discovery order.
+        Assert.Same(loading, await views.AllByBrokerId().Outcome());
+        Assert.Same(loading, await views.All().Outcome());
+    }
+
     // ---- the operation -------------------------------------------------------------------
 
     /// <summary>
     /// A broker's listings reach that broker's own entry and every view — the success half no
-    /// ABI constructor lets the seam drive (see the class remarks).
+    /// ABI constructor lets the seam drive (see the class remarks) — and a repeated id is one
+    /// entry, as in Java's map. Both run on each flavour, for the reason
+    /// <see cref="ARepeatedBrokerId_IsOneEntry_AndEveryViewSettles"/> gives.
     /// </summary>
-    [Fact]
-    public async Task ABrokersListings_ReachItsOwnEntry_AndEveryView()
+    [Theory]
+    [InlineData(Sync)]
+    [InlineData(Async)]
+    public async Task ABrokersListings_ReachItsOwnEntry_AndEveryView(string flavour)
     {
-        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(AdminFlavour.Async);
-        AsyncListTransactionsResult result = new AsyncListTransactionsResult(operation.ByBrokerId);
+        ListTransactionsHarness views = ListTransactionsHarness.For(FlavourOf(flavour));
+        ListTransactionsAdminOperation operation = views.Operation;
 
         TransactionListing first = new TransactionListing("txn-a", 11L, TransactionState.Ongoing);
         TransactionListing second = new TransactionListing("txn-b", 12L, TransactionState.CompleteCommit);
@@ -505,28 +574,37 @@ public sealed class AdminListTransactionsTwoStageTests
         operation.PublishBrokers(new[] { 1, 2, 1 });
         operation.SetBrokerResult(1, brokerOne);
 
-        IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers =
-            await TestTimeout.Run(() => result.ByBrokerId().Get(), s_deadline);
-        Assert.Equal(2, brokers.Count);
-        Assert.Same(brokerOne, await brokers[1].Get());
-        Assert.False(brokers[2].Get().IsCompleted, "broker 2 has not been answered");
+        object? brokers = await views.ByBrokerId().Outcome();
+        Assert.Equal(new[] { 1, 2 }, views.BrokerIdsOf(brokers).OrderBy(static id => id).ToArray());
+        Assert.Same(brokerOne, await views.BrokerOf(brokers, 1).Outcome());
+        FutureProbe unanswered = views.BrokerOf(brokers, 2);
+        FutureProbe allByBrokerId = views.AllByBrokerId();
+        FutureProbe all = views.All();
+        unanswered.AssertPending();
+        allByBrokerId.AssertPending();
+        all.AssertPending();
 
         // An unannounced broker is inert, not a throw.
         operation.SetBrokerResult(5, brokerTwo);
         operation.SetBrokerException(5, new KafkaException("ignored"));
+        unanswered.AssertPending();
+        allByBrokerId.AssertPending();
 
         operation.SetBrokerResult(2, brokerTwo);
+        Assert.Same(brokerTwo, await unanswered.Outcome());
 
         IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> map =
-            await TestTimeout.Run(() => result.AllByBrokerId().Get(), s_deadline);
+            Assert.IsAssignableFrom<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(
+                await allByBrokerId.Outcome());
         Assert.Equal(new[] { 1, 2 }, map.Keys.OrderBy(static id => id).ToArray());
         Assert.Same(brokerOne, map[1]);
         Assert.Same(brokerTwo, map[2]);
 
-        IReadOnlyCollection<TransactionListing> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
-        Assert.Equal(2, all.Count);
-        Assert.Contains(first, all);
-        Assert.Contains(second, all);
+        IReadOnlyCollection<TransactionListing> listings =
+            Assert.IsAssignableFrom<IReadOnlyCollection<TransactionListing>>(await all.Outcome());
+        Assert.Equal(2, listings.Count);
+        Assert.Contains(first, listings);
+        Assert.Contains(second, listings);
     }
 
     /// <summary>
