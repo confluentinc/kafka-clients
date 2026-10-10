@@ -2669,7 +2669,7 @@ public sealed class AdminP14SyncCompositionTests
     [MemberData(nameof(ListTransactionsRows))]
     public async Task ListTransactions_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
     {
-        ListTransactionsHarness harness = ListTransactionsHarness.For(flavour);
+        ListTransactionsHarness harness = ListTransactionsHarness.For(FlavourOf(flavour));
         ListTransactionsAdminOperation operation = harness.Operation;
         switch (row)
         {
@@ -4515,72 +4515,6 @@ public sealed class AdminP14SyncCompositionTests
                 new[] { new ProducerState(2_000L + partition.Partition, 2, 7, 1_700_000_000_000L, null, null) });
 
         private bool Answers(TKey key) => CallIndexer(key) is null;
-    }
-
-    /// <summary>
-    /// <see cref="AdminP14SyncCompositionTests.ListTransactions_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter
-    /// (M15/P14 S5f): the three views of a <c>listTransactions</c> Result of either flavour over one operation of that
-    /// flavour, and the per-broker futures of a resolved <c>ByBrokerId()</c> map.
-    /// </summary>
-    private sealed class ListTransactionsHarness
-    {
-        private readonly ListTransactionsResult? _sync;
-        private readonly AsyncListTransactionsResult? _async;
-
-        private ListTransactionsHarness(
-            ListTransactionsAdminOperation operation, ListTransactionsResult? sync, AsyncListTransactionsResult? async)
-        {
-            Operation = operation;
-            _sync = sync;
-            _async = async;
-        }
-
-        internal ListTransactionsAdminOperation Operation { get; }
-
-        internal static ListTransactionsHarness For(string flavour)
-        {
-            AdminFlavour adminFlavour = FlavourOf(flavour);
-            ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(adminFlavour);
-            return adminFlavour == AdminFlavour.Sync
-                ? new ListTransactionsHarness(operation, ListTransactionsResult.From(operation), null)
-                : new ListTransactionsHarness(operation, null, AsyncListTransactionsResult.From(operation));
-        }
-
-        internal FutureProbe ByBrokerId() =>
-            _sync is not null ? FutureProbe.Of(_sync.ByBrokerId()) : FutureProbe.Of(_async!.ByBrokerId());
-
-        internal FutureProbe AllByBrokerId() =>
-            _sync is not null ? FutureProbe.Of(_sync.AllByBrokerId()) : FutureProbe.Of(_async!.AllByBrokerId());
-
-        internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
-
-        /// <summary>The broker ids of a resolved <c>ByBrokerId()</c> map, in its order.</summary>
-        internal IReadOnlyList<int> BrokerIdsOf(object? byBrokerId) =>
-            _sync is not null
-                ? Assert.IsAssignableFrom<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
-                    byBrokerId).Keys.ToList()
-                : Assert.IsAssignableFrom<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
-                    byBrokerId).Keys.ToList();
-
-        /// <summary><paramref name="brokerId"/>'s own future, from a resolved <c>ByBrokerId()</c> map.</summary>
-        internal FutureProbe BrokerOf(object? byBrokerId, int brokerId) =>
-            _sync is not null
-                ? FutureProbe.Of(
-                    Assert.IsAssignableFrom<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
-                        byBrokerId)[brokerId])
-                : FutureProbe.Of(
-                    Assert.IsAssignableFrom<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
-                        byBrokerId)[brokerId]);
-
-        /// <summary>Whether <c>ByBrokerId()</c> hands out an equal future on every call.</summary>
-        internal bool ByBrokerIdEqualAcrossCalls() =>
-            _sync is not null ? _sync.ByBrokerId() == _sync.ByBrokerId() : _async!.ByBrokerId() == _async.ByBrokerId();
-
-        /// <summary>Whether <c>AllByBrokerId()</c> and <c>All()</c> each hand out a new future per call.</summary>
-        internal bool AggregatesFreshPerCall() =>
-            _sync is not null
-                ? _sync.AllByBrokerId() != _sync.AllByBrokerId() && _sync.All() != _sync.All()
-                : _async!.AllByBrokerId() != _async.AllByBrokerId() && _async.All() != _async.All();
     }
 
     /// <summary>
