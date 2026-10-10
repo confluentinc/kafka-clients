@@ -520,7 +520,7 @@ public sealed class AdminConfigsMarshalTests
         internal Drive(ConfigResource[] keys)
         {
             Operation = new KeyedAdminOperation<ConfigResource, Config>(
-                "describeConfigs", keys, EqualityComparer<ConfigResource>.Default);
+                "describeConfigs", keys, EqualityComparer<ConfigResource>.Default, AdminFlavour.Async);
             Done = new CountdownEvent(keys.Length);
             DestroyValue = handle =>
             {

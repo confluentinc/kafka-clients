@@ -266,7 +266,7 @@ public sealed class AdminP2bResultMarshalTests
     public async Task ListTopics_AnUnresolvedAwaiter_IsFaulted_NotLeftHanging()
     {
         SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics");
+            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics", AdminFlavour.Async);
 
         Assert.False(operation.Task.IsCompleted);
 
@@ -279,7 +279,7 @@ public sealed class AdminP2bResultMarshalTests
         // Idempotent: the trampoline calls it on every path, including after a successful
         // walk, so a second call must not disturb a settled result.
         SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> settled =
-            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics");
+            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics", AdminFlavour.Async);
         settled.SetResult(new Dictionary<string, TopicListing>());
         settled.FailUncompleted();
         Assert.Equal(TaskStatus.RanToCompletion, settled.Task.Status);
@@ -288,7 +288,7 @@ public sealed class AdminP2bResultMarshalTests
     private static KeyedAdminOperation<TopicPartition, DeletedRecords> NewOperation(
         params TopicPartition[] partitions) =>
         new KeyedAdminOperation<TopicPartition, DeletedRecords>(
-            "deleteRecords", partitions, EqualityComparer<TopicPartition>.Default);
+            "deleteRecords", partitions, EqualityComparer<TopicPartition>.Default, AdminFlavour.Async);
 
     /// <summary>
     /// Submits <c>delete_records_async</c> directly and hands the caller every per-key

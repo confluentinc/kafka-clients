@@ -130,7 +130,8 @@ public sealed class AdminP4ResultMarshalTests
             VoidKeyedAdminOperation<TopicPartition> perKey = new VoidKeyedAdminOperation<TopicPartition>(
                 "alterPartitionReassignments",
                 new[] { present, missing },
-                EqualityComparer<TopicPartition>.Default);
+                EqualityComparer<TopicPartition>.Default,
+                AdminFlavour.Async);
             SyntheticPerKeyWalk.RunVoid(
                 perKey,
                 AdminCallbacks.AlterPartitionReassignmentsAccessors.Count(result),
@@ -146,7 +147,7 @@ public sealed class AdminP4ResultMarshalTests
             // the VALUE reader — electLeaders' routing. The task SUCCEEDS and the error is
             // an entry in its map. ----
             SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> aggregate =
-                new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders");
+                new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders", AdminFlavour.Async);
             KeyedResultMarshal.CompleteAggregate(
                 result,
                 NativeMethods.AlterPartitionReassignmentsResultCount,
@@ -192,7 +193,7 @@ public sealed class AdminP4ResultMarshalTests
         TopicPartition missing = new TopicPartition("p4-copyout-missing", 0);
 
         SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> aggregate =
-            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders");
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders", AdminFlavour.Async);
 
         IntPtr result = SubmitAndCapture(admin, present, missing);
         try

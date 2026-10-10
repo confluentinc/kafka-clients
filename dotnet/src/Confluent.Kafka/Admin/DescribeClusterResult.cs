@@ -100,6 +100,13 @@ public sealed class DescribeClusterResult
         _authorizedOperations = ProjectAuthorizedOperations(future);
     }
 
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeClusterResult From(SingleAdminOperation<DescribeClusterSnapshot> operation) =>
+        new DescribeClusterResult(operation.Task);
+
     /// <summary>The cluster's nodes — Java's <c>nodes()</c> (<c>:49</c>).</summary>
     /// <returns>A task yielding the nodes, or faulting with the call's own <see cref="KafkaException"/>.</returns>
     /// <remarks>

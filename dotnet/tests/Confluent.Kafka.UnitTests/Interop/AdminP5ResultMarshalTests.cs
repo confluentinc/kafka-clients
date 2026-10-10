@@ -156,7 +156,7 @@ public sealed class AdminP5ResultMarshalTests
         int secondCalls = 0;
 
         SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation =
-            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups");
+            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups", AdminFlavour.Async);
 
         KeyedResultMarshal.CompleteTwoLists(
             s_root,
@@ -261,7 +261,7 @@ public sealed class AdminP5ResultMarshalTests
     public void AReaderThatThrows_PropagatesAndLeavesTheOperationUncompleted(bool fromFirstReader)
     {
         SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation =
-            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups");
+            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups", AdminFlavour.Async);
 
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() =>
             KeyedResultMarshal.CompleteTwoLists(
@@ -289,7 +289,7 @@ public sealed class AdminP5ResultMarshalTests
         Func<IntPtr, int, KafkaException> readError)
     {
         SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation =
-            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups");
+            new SingleAdminOperation<(IReadOnlyCollection<GroupListing>, IReadOnlyCollection<KafkaException>)>("listGroups", AdminFlavour.Async);
 
         KeyedResultMarshal.CompleteTwoLists(
             s_root,
@@ -704,7 +704,8 @@ public sealed class AdminP5ResultMarshalTests
             new KeyedAdminOperation<string, ConsumerGroupDescription>(
                 "describeConsumerGroups",
                 keys,
-                StringComparer.Ordinal);
+                StringComparer.Ordinal,
+                AdminFlavour.Async);
 
         SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
@@ -1040,7 +1041,8 @@ public sealed class AdminP5ResultMarshalTests
             new KeyedAdminOperation<string, ClassicGroupDescription>(
                 "describeClassicGroups",
                 keys,
-                StringComparer.Ordinal);
+                StringComparer.Ordinal,
+                AdminFlavour.Async);
 
         SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
@@ -1358,7 +1360,8 @@ public sealed class AdminP5ResultMarshalTests
             new KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
                 "listConsumerGroupOffsets",
                 keys,
-                StringComparer.Ordinal);
+                StringComparer.Ordinal,
+                AdminFlavour.Async);
 
         SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -140,6 +141,16 @@ public sealed class DeleteTopicsResult
     internal static DeleteTopicsResult OfTopicNames(
         IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer) =>
         new DeleteTopicsResult(null, Erase(values, comparer));
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DeleteTopicsResult From(
+        (VoidKeyedAdminOperation<string>? ByName, VoidKeyedAdminOperation<Uuid>? ById) operation) =>
+        operation.ByName is not null
+            ? OfTopicNames(operation.ByName.Tasks, operation.ByName.KeyComparer)
+            : OfTopicIds(operation.ById!.Tasks, operation.ById.KeyComparer);
 
     /// <summary>
     /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's

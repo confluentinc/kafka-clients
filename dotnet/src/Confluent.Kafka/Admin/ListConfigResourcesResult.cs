@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -57,6 +58,14 @@ public sealed class ListConfigResourcesResult
     {
         _future = future;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ListConfigResourcesResult From(
+        SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation) =>
+        new ListConfigResourcesResult(operation.Task);
 
     /// <summary>
     /// The full set of config resources — Java's <c>all()</c> (<c>:42</c>).

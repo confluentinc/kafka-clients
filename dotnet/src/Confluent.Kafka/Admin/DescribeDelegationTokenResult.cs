@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 using Token = Confluent.Kafka.DelegationToken;
 
@@ -33,6 +34,14 @@ public sealed class DescribeDelegationTokenResult
     {
         _tokens = Project(tokens);
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeDelegationTokenResult From(
+        SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation) =>
+        new DescribeDelegationTokenResult(operation.Task);
 
     /// <summary>The described tokens — Java's <c>delegationTokens()</c> (<c>:38</c>).</summary>
     /// <returns>An awaitable over the token list, in the order the ABI delivered it.</returns>

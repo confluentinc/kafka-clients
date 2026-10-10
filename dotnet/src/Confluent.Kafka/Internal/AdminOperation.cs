@@ -237,12 +237,28 @@ internal abstract class AdminOperation
 }
 
 /// <summary>
-/// The per-key completion bridge for a multi-key admin RPC: <b>one</b>
-/// <see cref="TaskCompletionSource{TResult}"/> per key, all created up front so the
-/// C# method can return its Java-shaped <c>*Result</c> synchronously, and all resolved
-/// by the single aggregate completion callback.
+/// The per-key completion bridge for a multi-key admin RPC: <b>one</b> completion per key
+/// (<see cref="IAdminCompletion{T}"/>), all created up front so the C# method can return its
+/// Java-shaped <c>*Result</c> synchronously, and all resolved by the RPC's completion
+/// callbacks.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>The flavour decides the completion, and nothing else (M15/P14 PLAN §3.1).</b> An
+/// <see cref="AdminFlavour.Async"/> operation creates a <see cref="TaskAdminCompletion{T}"/> per
+/// key and exposes their tasks as <see cref="Tasks"/>; an <see cref="AdminFlavour.Sync"/> one
+/// creates a <see cref="SyncCompletion{T}"/> latch per key (with no owner, PLAN §3.4) and exposes
+/// them as <see cref="SyncSources"/>. Asking for the other flavour's view throws
+/// <see cref="InvalidOperationException"/> — a programming error inside the binding. The
+/// callbacks, the rooting and the countdown are the same for both, and the completions exist
+/// before the submit, so a callback that fires inline on the submitting thread completes them
+/// there.
+/// </para>
+/// <para>
+/// <b>Key order.</b> Both views are filled in one pass over the keys the operation was built
+/// with, and never change afterwards, so they enumerate in that order (a repeated key at its
+/// first position) — the order <c>All()</c> follows on both flavours.
+/// </para>
 /// <para>
 /// <b>Why one callback can serve N awaiters.</b> The ABI's <c>*Result_t</c> is fully
 /// settled when the callback fires — the core harvests every per-key future and awaits
@@ -272,23 +288,23 @@ internal abstract class AdminOperation
 /// </para>
 /// <para>
 /// Per-key <em>granularity</em> and per-key <em>timing independence</em> are both
-/// preserved: each <see cref="Task"/> carries exactly that key's value or that key's
-/// error, and it resolves when that key's own callback fires — so a fast topic's
-/// awaiter completes before a slow one's, as in Java. (Before M15/P9 the ABI resolved
-/// every key from one aggregate callback and the timing half was a recorded deviation;
-/// the per-key ABI removed it.)
+/// preserved: each completion carries exactly that key's value or that key's error, and it
+/// resolves when that key's own callback fires — so a fast topic's awaiter completes before
+/// a slow one's, as in Java. (Before M15/P9 the ABI resolved every key from one aggregate
+/// callback and the timing half was a recorded deviation; the per-key ABI removed it.)
 /// </para>
 /// <para>
-/// <b>Foreign-thread completion.</b> Every source is built with
-/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>. This is
-/// <b>mandatory</b>, and sharper here than for the consumer: an admin callback can fire
-/// <em>synchronously on the submitting thread, before the entry point returns</em> — so
-/// without it an awaiter's continuation would run inside the caller's own P/Invoke. The
-/// header documents that inline path for every admin entry point (trigger: a NULL
-/// <c>admin</c> handle; the by-id entry points add "an unparseable or NULL base64 topic
-/// id"), and the wider family-wide trigger set is stated in
+/// <b>Foreign-thread completion.</b> Every async-flavour source is built with
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>
+/// (<see cref="TaskAdminCompletion{T}"/>). This is <b>mandatory</b>, and sharper here than
+/// for the consumer: an admin callback can fire <em>synchronously on the submitting thread,
+/// before the entry point returns</em> — so without it an awaiter's continuation would run
+/// inside the caller's own P/Invoke. The header documents that inline path for every admin
+/// entry point (trigger: a NULL <c>admin</c> handle; the by-id entry points add "an
+/// unparseable or NULL base64 topic id"), and the wider family-wide trigger set is stated in
 /// <c>rust/src/ffi/admin.rs:56-63</c>, which cbindgen does not emit — see
-/// <see cref="Interop.AdminCallbacks"/>.
+/// <see cref="Interop.AdminCallbacks"/>. A sync-flavour latch runs no continuation at all:
+/// completing it sets it under its own lock and wakes the threads blocked in <c>Get()</c>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The managed per-key key type — <c>string</c> or <see cref="Uuid"/> today.</typeparam>
@@ -296,14 +312,16 @@ internal abstract class AdminOperation
 internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
     where TKey : notnull
 {
-    private readonly Dictionary<TKey, TaskCompletionSource<TValue>> _perKey;
-    private readonly Dictionary<TKey, Task<TValue>> _tasks;
+    private readonly Dictionary<TKey, IAdminCompletion<TValue>> _perKey;
+    private readonly Dictionary<TKey, Task<TValue>>? _tasks;
+    private readonly Dictionary<TKey, SyncFutureSource<TValue>>? _syncSources;
     private readonly IEqualityComparer<TKey> _keyComparer;
     private readonly string _operationName;
+    private readonly AdminFlavour _flavour;
 
     /// <summary>
-    /// Creates one source per distinct key in <paramref name="keys"/>, before anything
-    /// is submitted.
+    /// Creates one completion per distinct key in <paramref name="keys"/>, of the
+    /// <paramref name="flavour"/>'s kind, before anything is submitted.
     /// </summary>
     /// <param name="operationName">
     /// The Java method name (e.g. <c>createTopics</c>), used only to make the
@@ -318,52 +336,93 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
     /// silently fall back to <see cref="EqualityComparer{T}.Default"/>. See the type
     /// remarks.
     /// </param>
+    /// <param name="flavour">
+    /// Which completion each key gets: a <see cref="TaskAdminCompletion{T}"/>
+    /// (<see cref="AdminFlavour.Async"/>, read through <see cref="Tasks"/>) or a
+    /// <see cref="SyncCompletion{T}"/> latch (<see cref="AdminFlavour.Sync"/>, read through
+    /// <see cref="SyncSources"/>).
+    /// </param>
     internal KeyedAdminOperation(
         string operationName,
         IReadOnlyCollection<TKey> keys,
-        IEqualityComparer<TKey> keyComparer)
+        IEqualityComparer<TKey> keyComparer,
+        AdminFlavour flavour)
     {
         _operationName = operationName;
         _keyComparer = keyComparer;
-        _perKey = new Dictionary<TKey, TaskCompletionSource<TValue>>(keys.Count, keyComparer);
-        _tasks = new Dictionary<TKey, Task<TValue>>(keys.Count, keyComparer);
-        foreach (TKey key in keys)
+        _flavour = flavour;
+        _perKey = new Dictionary<TKey, IAdminCompletion<TValue>>(keys.Count, keyComparer);
+        switch (flavour)
         {
-            TaskCompletionSource<TValue> source =
-                new TaskCompletionSource<TValue>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _perKey[key] = source;
-            _tasks[key] = source.Task;
+            case AdminFlavour.Async:
+                _tasks = new Dictionary<TKey, Task<TValue>>(keys.Count, keyComparer);
+                foreach (TKey key in keys)
+                {
+                    TaskAdminCompletion<TValue> completion = new TaskAdminCompletion<TValue>();
+                    _perKey[key] = completion;
+                    _tasks[key] = completion.Task;
+                }
+
+                break;
+
+            case AdminFlavour.Sync:
+                _syncSources = new Dictionary<TKey, SyncFutureSource<TValue>>(keys.Count, keyComparer);
+                foreach (TKey key in keys)
+                {
+                    // No owner: no user code runs on an admin completion thread, so the
+                    // producer's D9 guard has no pump thread to guard (PLAN §3.4, D10).
+                    SyncCompletion<TValue> completion = new SyncCompletion<TValue>(owner: null);
+                    _perKey[key] = completion;
+                    _syncSources[key] = completion;
+                }
+
+                break;
+
+            default:
+                throw AdminFlavourViews.UnknownFlavour(flavour);
         }
     }
 
     /// <summary>
-    /// The per-key awaitables, in the Java <c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c>
-    /// shape the public <c>*Result</c> exposes. Populated before the submit, so the
-    /// synchronous C# method can hand it back immediately.
+    /// The async flavour's per-key awaitables, in the Java
+    /// <c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c> shape the public <c>*Result</c> exposes.
+    /// Populated before the submit, so the synchronous C# method can hand it back
+    /// immediately.
     /// </summary>
-    internal IReadOnlyDictionary<TKey, Task<TValue>> Tasks => _tasks;
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Sync"/>.</exception>
+    internal IReadOnlyDictionary<TKey, Task<TValue>> Tasks =>
+        _tasks ?? throw AdminFlavourViews.WrongView(_operationName, _flavour, nameof(Tasks));
 
     /// <summary>
-    /// The comparer <see cref="Tasks"/> is keyed by, so a <c>*Result</c> deriving a view
-    /// from it uses the same one and the two cannot disagree about key identity.
+    /// The sync flavour's per-key latches, keyed and ordered as <see cref="Tasks"/> would be.
+    /// Populated before the submit, like <see cref="Tasks"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Async"/>.</exception>
+    internal IReadOnlyDictionary<TKey, SyncFutureSource<TValue>> SyncSources =>
+        _syncSources ?? throw AdminFlavourViews.WrongView(_operationName, _flavour, nameof(SyncSources));
+
+    /// <summary>
+    /// The comparer <see cref="Tasks"/> and <see cref="SyncSources"/> are keyed by, so a
+    /// <c>*Result</c> deriving a view from either uses the same one and the two cannot
+    /// disagree about key identity.
     /// </summary>
     internal IEqualityComparer<TKey> KeyComparer => _keyComparer;
 
     /// <summary>Resolves one key successfully with its marshalled value.</summary>
     internal void SetResult(TKey key, TValue value)
     {
-        if (_perKey.TryGetValue(key, out TaskCompletionSource<TValue>? source))
+        if (_perKey.TryGetValue(key, out IAdminCompletion<TValue>? completion))
         {
-            source.TrySetResult(value);
+            completion.TrySetResult(value);
         }
     }
 
     /// <summary>Faults one key with its own error.</summary>
     internal void SetException(TKey key, Exception exception)
     {
-        if (_perKey.TryGetValue(key, out TaskCompletionSource<TValue>? source))
+        if (_perKey.TryGetValue(key, out IAdminCompletion<TValue>? completion))
         {
-            source.TrySetException(exception);
+            completion.TrySetException(exception);
         }
     }
 
@@ -374,23 +433,23 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
     /// </summary>
     internal void FailAll(Exception exception)
     {
-        foreach (KeyValuePair<TKey, TaskCompletionSource<TValue>> entry in _perKey)
+        foreach (KeyValuePair<TKey, IAdminCompletion<TValue>> entry in _perKey)
         {
             entry.Value.TrySetException(exception);
         }
     }
 
     /// <summary>
-    /// Faults any key the result did not account for, so <b>no <see cref="Task"/> can
-    /// ever hang</b>. A no-op on every normal path (the ABI returns one entry per
-    /// requested key); it exists because a caller holding a never-completing
-    /// <see cref="Task"/> is a worse failure than an explicit error.
+    /// Faults any key the result did not account for, so <b>no key's future can ever
+    /// hang</b>. A no-op on every normal path (the ABI returns one entry per requested
+    /// key); it exists because a caller holding a never-completing future is a worse
+    /// failure than an explicit error.
     /// </summary>
     internal void FailUncompleted()
     {
-        foreach (KeyValuePair<TKey, TaskCompletionSource<TValue>> entry in _perKey)
+        foreach (KeyValuePair<TKey, IAdminCompletion<TValue>> entry in _perKey)
         {
-            if (!entry.Value.Task.IsCompleted)
+            if (!entry.Value.IsCompleted)
             {
                 entry.Value.TrySetException(new KafkaException(
                     string.Format(
@@ -429,19 +488,20 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
 internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, bool>
     where TKey : notnull
 {
-    /// <inheritdoc cref="KeyedAdminOperation{TKey, TValue}(string, IReadOnlyCollection{TKey}, IEqualityComparer{TKey})"/>
+    /// <inheritdoc cref="KeyedAdminOperation{TKey, TValue}(string, IReadOnlyCollection{TKey}, IEqualityComparer{TKey}, AdminFlavour)"/>
     internal VoidKeyedAdminOperation(
         string operationName,
         IReadOnlyCollection<TKey> keys,
-        IEqualityComparer<TKey> keyComparer)
-        : base(operationName, keys, keyComparer)
+        IEqualityComparer<TKey> keyComparer,
+        AdminFlavour flavour)
+        : base(operationName, keys, keyComparer, flavour)
     {
     }
 }
 
 /// <summary>
 /// The completion bridge for a <b>non-keyed</b> admin RPC (result shape 3): <b>one</b>
-/// <see cref="TaskCompletionSource{TResult}"/> for the whole call, mirroring Java's single
+/// completion for the whole call (<see cref="IAdminCompletion{T}"/>), mirroring Java's single
 /// <c>KafkaFuture&lt;Map&lt;K, V&gt;&gt;</c>.
 /// </summary>
 /// <remarks>
@@ -460,62 +520,112 @@ internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, 
 /// the span-the-op <see cref="SafeHandle"/> reference,
 /// <see cref="AdminOperation.AbandonBeforeSubmit"/>
 /// and the free-exactly-once discipline all come from <see cref="AdminOperation"/>; only
-/// the completion payload differs. The source uses
-/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> for the same reason
-/// the per-key sources do — an admin callback can fire synchronously on the submitting
-/// thread, so without it a continuation would run inside the caller's own P/Invoke.
+/// the completion payload differs. Like the per-key bridge, the completion is a
+/// <see cref="TaskAdminCompletion{T}"/> (<see cref="AdminFlavour.Async"/>, read through
+/// <see cref="Task"/>) or a <see cref="SyncCompletion{T}"/> latch with no owner
+/// (<see cref="AdminFlavour.Sync"/>, read through <see cref="SyncSource"/>), and the other
+/// flavour's view throws <see cref="InvalidOperationException"/>. The async source uses
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> for the same reason the
+/// per-key sources do — an admin callback can fire synchronously on the submitting thread,
+/// so without it a continuation would run inside the caller's own P/Invoke.
 /// </para>
 /// </remarks>
 /// <typeparam name="TValue">The already-marshalled managed result type.</typeparam>
 internal sealed class SingleAdminOperation<TValue> : AdminOperation
 {
-    private readonly TaskCompletionSource<TValue> _source =
-        new TaskCompletionSource<TValue>(TaskCreationOptions.RunContinuationsAsynchronously);
-
+    private readonly IAdminCompletion<TValue> _completion;
     private readonly string _operationName;
+    private readonly AdminFlavour _flavour;
 
-    /// <summary>Creates the single source, before anything is submitted.</summary>
+    /// <summary>Creates the single completion, before anything is submitted.</summary>
     /// <param name="operationName">
     /// The Java method name (e.g. <c>listTopics</c>), used only to make the
     /// "result was never delivered" message name the operation it came from.
     /// </param>
-    internal SingleAdminOperation(string operationName)
+    /// <param name="flavour">
+    /// Which completion the call gets: a <see cref="TaskAdminCompletion{T}"/>
+    /// (<see cref="AdminFlavour.Async"/>) or a <see cref="SyncCompletion{T}"/> latch
+    /// (<see cref="AdminFlavour.Sync"/>).
+    /// </param>
+    internal SingleAdminOperation(string operationName, AdminFlavour flavour)
     {
         _operationName = operationName;
+        _flavour = flavour;
+        _completion = flavour switch
+        {
+            AdminFlavour.Async => new TaskAdminCompletion<TValue>(),
+
+            // No owner, as for the per-key latches (PLAN §3.4, D10).
+            AdminFlavour.Sync => new SyncCompletion<TValue>(owner: null),
+            _ => throw AdminFlavourViews.UnknownFlavour(flavour),
+        };
     }
 
     /// <summary>
-    /// The awaitable, in the Java <c>KafkaFuture&lt;T&gt;</c> shape the public
-    /// <c>*Result</c> exposes. Available before the submit, so the synchronous C# method
-    /// can hand it back immediately.
+    /// The async flavour's awaitable, in the Java <c>KafkaFuture&lt;T&gt;</c> shape the
+    /// public <c>*Result</c> exposes. Available before the submit, so the synchronous C#
+    /// method can hand it back immediately.
     /// </summary>
-    internal Task<TValue> Task => _source.Task;
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Sync"/>.</exception>
+    internal Task<TValue> Task =>
+        _completion is TaskAdminCompletion<TValue> completion
+            ? completion.Task
+            : throw AdminFlavourViews.WrongView(_operationName, _flavour, nameof(Task));
+
+    /// <summary>The sync flavour's latch. Available before the submit, like <see cref="Task"/>.</summary>
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Async"/>.</exception>
+    internal SyncFutureSource<TValue> SyncSource =>
+        _completion as SyncCompletion<TValue>
+            ?? throw AdminFlavourViews.WrongView(_operationName, _flavour, nameof(SyncSource));
 
     /// <summary>Resolves the call successfully with its marshalled value.</summary>
-    internal void SetResult(TValue value) => _source.TrySetResult(value);
+    internal void SetResult(TValue value) => _completion.TrySetResult(value);
 
     /// <summary>
     /// Faults the call. Used both for the callback's own top-level <c>error</c> and for
     /// any failure during the walk — shape 3 has no per-key channel, so every failure is
     /// a call failure.
     /// </summary>
-    internal void SetException(Exception exception) => _source.TrySetException(exception);
+    internal void SetException(Exception exception) => _completion.TrySetException(exception);
 
     /// <summary>
-    /// Faults the awaiter if nothing completed it, so the <see cref="Task"/> <b>cannot
-    /// hang</b>. A no-op on every normal path; it exists because a caller holding a
-    /// never-completing <see cref="Task"/> is a worse failure than an explicit error.
-    /// The keyed bridge's <c>FailUncompleted</c>, for one source instead of N.
+    /// Faults the call if nothing completed it, so its future <b>cannot hang</b>. A no-op
+    /// on every normal path; it exists because a caller holding a never-completing future
+    /// is a worse failure than an explicit error. The keyed bridge's
+    /// <c>FailUncompleted</c>, for one completion instead of N.
     /// </summary>
     internal void FailUncompleted()
     {
-        if (!_source.Task.IsCompleted)
+        if (!_completion.IsCompleted)
         {
-            _source.TrySetException(new KafkaException(
+            _completion.TrySetException(new KafkaException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "The {0} call completed without delivering a result.",
                     _operationName)));
         }
     }
+}
+
+/// <summary>
+/// The two programming-error exceptions the flavoured operations above share, so their text is written once.
+/// </summary>
+internal static class AdminFlavourViews
+{
+    /// <summary>
+    /// A view of the other flavour was asked for: <c>Tasks</c> / <c>Task</c> of a sync operation, or
+    /// <c>SyncSources</c> / <c>SyncSource</c> of an async one. A programming error inside the binding.
+    /// </summary>
+    internal static InvalidOperationException WrongView(string operationName, AdminFlavour flavour, string view) =>
+        new InvalidOperationException(
+            string.Format(
+                CultureInfo.InvariantCulture,
+                "The {0} admin operation was built for the {1} flavour, so it has no {2} view.",
+                operationName,
+                flavour,
+                view));
+
+    /// <summary>A value outside <see cref="AdminFlavour"/> reached an operation's constructor.</summary>
+    internal static ArgumentOutOfRangeException UnknownFlavour(AdminFlavour flavour) =>
+        new ArgumentOutOfRangeException(nameof(flavour), flavour, "An admin operation is either Sync or Async.");
 }

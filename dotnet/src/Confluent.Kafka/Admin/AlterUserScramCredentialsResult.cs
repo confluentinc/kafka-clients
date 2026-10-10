@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -65,6 +66,13 @@ public sealed class AlterUserScramCredentialsResult
 
         _values = erased;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AlterUserScramCredentialsResult From(VoidKeyedAdminOperation<string> operation) =>
+        new AlterUserScramCredentialsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>One awaitable per requested user — Java's <c>values()</c> (<c>:46</c>).</summary>
     public IReadOnlyDictionary<string, Task> Values => _values;

@@ -710,7 +710,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     {
         SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)> operation =
             new SingleAdminOperation<(IReadOnlyDictionary<TKey, KafkaException?> PerKey, KafkaException? All)>(
-                operationName);
+                operationName, AdminFlavour.Async);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 

@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -96,6 +97,14 @@ public sealed class ListGroupsResult
     {
         _future = future;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ListGroupsResult From(
+        SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation) =>
+        new ListGroupsResult(operation.Task);
 
     /// <summary>
     /// Every group listing, or the first error that occurred — Java's <c>all()</c> (<c>:69</c>).

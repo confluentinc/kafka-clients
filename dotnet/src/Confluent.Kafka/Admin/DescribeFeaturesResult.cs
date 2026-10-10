@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 using Metadata = Confluent.Kafka.Admin.FeatureMetadata;
 
@@ -37,6 +38,13 @@ public sealed class DescribeFeaturesResult
     {
         _featureMetadata = featureMetadata;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeFeaturesResult From(SingleAdminOperation<FeatureMetadata> operation) =>
+        new DescribeFeaturesResult(operation.Task);
 
     /// <summary>
     /// The cluster's feature metadata — Java's <c>featureMetadata()</c> (<c>:34</c>).

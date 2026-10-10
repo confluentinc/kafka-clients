@@ -49,6 +49,17 @@ namespace Confluent.Kafka.Internal;
 /// no managed mirror of one. What each in-flight operation <em>does</em> hold is a
 /// span-the-op reference on the client handle — see <see cref="AdminOperation"/>.
 /// </para>
+/// <para>
+/// <b>One core per RPC, for both flavours (M15/P14 PLAN §3.2, D6).</b> Each RPC's body takes an
+/// <see cref="AdminFlavour"/> and returns the operation it submitted (with any other value its
+/// <c>*Result</c> is built from, as a tuple) instead of a <c>*Result</c>; the flavour only decides
+/// which per-key completions the operation creates. Preconditions, de-duplication, rooting,
+/// marshalling and the submit are written once, here, for the sync and the async surface. Each
+/// <c>*Result</c> builds itself from the operation in one internal <c>From</c> factory. Next to each
+/// core sits an overload with the pre-P14 signature — the same parameters without the flavour —
+/// that returns <c>XxxResult.From(core(…, <see cref="AdminFlavour.Async"/>, …))</c>; the clients and
+/// the interop tests still call those, so this split changes no behaviour.
+/// </para>
 /// </remarks>
 internal sealed class NativeAdminClient : IDisposable
 {
@@ -106,7 +117,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>MockAdminClient</c>) rather than <see cref="Create"/> (Java's
     /// <c>KafkaAdminClient</c>). Both share one handle type and one RPC surface, so this is
     /// read only where Java's two classes disagree on what reaches the core — the empty-map
-    /// guard of <see cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions?, NativeUpdateFeaturesSubmit)"/>
+    /// guard of <see cref="UpdateFeatures(IReadOnlyDictionary{string, FeatureUpdate}, UpdateFeaturesOptions?, AdminFlavour, NativeUpdateFeaturesSubmit)"/>
     /// (M15/P13.5 G6-1) — and to name the public type in <see cref="ThrowIfClosed"/>
     /// (M15/P13.5 X9).
     /// </summary>
@@ -977,6 +988,13 @@ internal sealed class NativeAdminClient : IDisposable
     internal CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options) =>
         CreateTopics(newTopics, options, NativeMethods.AdminClientCreateTopicsAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal CreateTopicsResult CreateTopics(
+        IEnumerable<NewTopic> newTopics,
+        CreateTopicsOptions? options,
+        NativeCreateTopicsSubmit submit) =>
+        CreateTopicsResult.From(CreateTopics(newTopics, options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// The <c>createTopics</c> submit, with the native call injectable. Production calls
     /// the overload above, which supplies the real P/Invoke; the interop tests supply a
@@ -985,9 +1003,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// handles' lifetime — is the one production path either way, so a test cannot
     /// accidentally prove a property of its own fixture.
     /// </summary>
-    internal CreateTopicsResult CreateTopics(
+    internal KeyedAdminOperation<string, TopicMetadataAndConfig> CreateTopics(
         IEnumerable<NewTopic> newTopics,
         CreateTopicsOptions? options,
+        AdminFlavour flavour,
         NativeCreateTopicsSubmit submit)
     {
         ThrowIfClosed();
@@ -1052,7 +1071,7 @@ internal sealed class NativeAdminClient : IDisposable
         // can run on this very thread before the entry point returns.
         KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
             new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                "createTopics", keys, StringComparer.Ordinal);
+                "createTopics", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -1123,7 +1142,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new CreateTopicsResult(operation.Tasks);
+        return operation;
     }
 
     internal DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options) =>
@@ -1133,15 +1152,24 @@ internal sealed class NativeAdminClient : IDisposable
             NativeMethods.AdminClientDeleteTopicsAsync,
             NativeMethods.AdminClientDeleteTopicsByIdsAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DeleteTopicsResult DeleteTopics(
+        TopicCollection topics,
+        DeleteTopicsOptions? options,
+        NativeDeleteTopicsSubmit submitByName,
+        NativeDeleteTopicsSubmit submitByIds) =>
+        DeleteTopicsResult.From(DeleteTopics(topics, options, AdminFlavour.Async, submitByName, submitByIds));
+
     /// <summary>
     /// <b>Entry-point selection is the whole point of <see cref="TopicCollection"/>.</b>
     /// The ABI gives the two forms separate functions rather than a tagged input struct,
     /// so "names xor ids" cannot be violated; this switch is where the C# type's two
     /// inhabitants are mapped onto them.
     /// </summary>
-    internal DeleteTopicsResult DeleteTopics(
+    internal (VoidKeyedAdminOperation<string>? ByName, VoidKeyedAdminOperation<Uuid>? ById) DeleteTopics(
         TopicCollection topics,
         DeleteTopicsOptions? options,
+        AdminFlavour flavour,
         NativeDeleteTopicsSubmit submitByName,
         NativeDeleteTopicsSubmit submitByIds)
     {
@@ -1166,7 +1194,7 @@ internal sealed class NativeAdminClient : IDisposable
                 {
                     List<string> keys = DistinctNames(names.TopicNames(), "topic names", nameof(topics));
                     VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-                        "deleteTopics", keys, StringComparer.Ordinal);
+                        "deleteTopics", keys, StringComparer.Ordinal, flavour);
 
                     Submit(
                         operation,
@@ -1193,14 +1221,14 @@ internal sealed class NativeAdminClient : IDisposable
                             operation.ReleaseSubmitToken();
                         });
 
-                    return DeleteTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
+                    return (operation, null);
                 }
 
             case TopicCollection.TopicIdCollection ids:
                 {
                     List<Uuid> keys = DistinctIds(ids.TopicIds());
                     VoidKeyedAdminOperation<Uuid> operation = new VoidKeyedAdminOperation<Uuid>(
-                        "deleteTopics", keys, EqualityComparer<Uuid>.Default);
+                        "deleteTopics", keys, EqualityComparer<Uuid>.Default, flavour);
 
                     Submit(
                         operation,
@@ -1223,7 +1251,7 @@ internal sealed class NativeAdminClient : IDisposable
                             operation.ReleaseSubmitToken();
                         });
 
-                    return DeleteTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
+                    return (null, operation);
                 }
 
             default:
@@ -1238,10 +1266,19 @@ internal sealed class NativeAdminClient : IDisposable
             NativeMethods.AdminClientDescribeTopicsAsync,
             NativeMethods.AdminClientDescribeTopicsByIdsAsync);
 
-    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
     internal DescribeTopicsResult DescribeTopics(
         TopicCollection topics,
         DescribeTopicsOptions? options,
+        NativeDescribeTopicsSubmit submitByName,
+        NativeDescribeTopicsSubmit submitByIds) =>
+        DescribeTopicsResult.From(DescribeTopics(topics, options, AdminFlavour.Async, submitByName, submitByIds));
+
+    /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?, AdminFlavour, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>
+    internal (KeyedAdminOperation<string, TopicDescription>? ByName, KeyedAdminOperation<Uuid, TopicDescription>? ById) DescribeTopics(
+        TopicCollection topics,
+        DescribeTopicsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeTopicsSubmit submitByName,
         NativeDescribeTopicsSubmit submitByIds)
     {
@@ -1283,7 +1320,7 @@ internal sealed class NativeAdminClient : IDisposable
                     List<string> keys = DistinctNames(names.TopicNames(), "topic names", nameof(topics));
                     KeyedAdminOperation<string, TopicDescription> operation =
                         new KeyedAdminOperation<string, TopicDescription>(
-                            "describeTopics", keys, StringComparer.Ordinal);
+                            "describeTopics", keys, StringComparer.Ordinal, flavour);
 
                     Submit(
                         operation,
@@ -1310,7 +1347,7 @@ internal sealed class NativeAdminClient : IDisposable
                             operation.ReleaseSubmitToken();
                         });
 
-                    return DescribeTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
+                    return (operation, null);
                 }
 
             case TopicCollection.TopicIdCollection ids:
@@ -1318,7 +1355,7 @@ internal sealed class NativeAdminClient : IDisposable
                     List<Uuid> keys = DistinctIds(ids.TopicIds());
                     KeyedAdminOperation<Uuid, TopicDescription> operation =
                         new KeyedAdminOperation<Uuid, TopicDescription>(
-                            "describeTopics", keys, EqualityComparer<Uuid>.Default);
+                            "describeTopics", keys, EqualityComparer<Uuid>.Default, flavour);
 
                     Submit(
                         operation,
@@ -1342,7 +1379,7 @@ internal sealed class NativeAdminClient : IDisposable
                             operation.ReleaseSubmitToken();
                         });
 
-                    return DescribeTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
+                    return (null, operation);
                 }
 
             default:
@@ -1352,6 +1389,10 @@ internal sealed class NativeAdminClient : IDisposable
 
     internal ListTopicsResult ListTopics(ListTopicsOptions? options) =>
         ListTopics(options, NativeMethods.AdminClientListTopicsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListTopicsResult ListTopics(ListTopicsOptions? options, NativeListTopicsSubmit submit) =>
+        ListTopicsResult.From(ListTopics(options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listTopics</c> and returns immediately with the <b>single</b> awaitable
@@ -1364,7 +1405,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// cannot express this RPC. <see cref="SingleAdminOperation{TValue}"/> reuses every
     /// rooting invariant and differs only in the completion payload.
     /// </remarks>
-    internal ListTopicsResult ListTopics(ListTopicsOptions? options, NativeListTopicsSubmit submit)
+    internal SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> ListTopics(
+        ListTopicsOptions? options,
+        AdminFlavour flavour,
+        NativeListTopicsSubmit submit)
     {
         ThrowIfClosed();
 
@@ -1378,7 +1422,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics");
+            new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
         try
@@ -1406,12 +1450,19 @@ internal sealed class NativeAdminClient : IDisposable
             throw;
         }
 
-        return new ListTopicsResult(operation.Task);
+        return operation;
     }
 
     internal CreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options) =>
         CreatePartitions(newPartitions, options, NativeMethods.AdminClientCreatePartitionsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal CreatePartitionsResult CreatePartitions(
+        IReadOnlyDictionary<string, NewPartitions> newPartitions,
+        CreatePartitionsOptions? options,
+        NativeCreatePartitionsSubmit submit) =>
+        CreatePartitionsResult.From(CreatePartitions(newPartitions, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>createPartitions</c> and returns immediately with one awaitable per
@@ -1423,9 +1474,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// distinct — under the caller's own comparer, and therefore under the finer
     /// <see cref="StringComparer.Ordinal"/> the bridge keys by.
     /// </remarks>
-    internal CreatePartitionsResult CreatePartitions(
+    internal VoidKeyedAdminOperation<string> CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions,
         CreatePartitionsOptions? options,
+        AdminFlavour flavour,
         NativeCreatePartitionsSubmit submit)
     {
         ThrowIfClosed();
@@ -1483,7 +1535,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         VoidKeyedAdminOperation<string> operation =
-            new VoidKeyedAdminOperation<string>("createPartitions", keys, StringComparer.Ordinal);
+            new VoidKeyedAdminOperation<string>("createPartitions", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -1562,13 +1614,20 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new CreatePartitionsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options) =>
         DeleteRecords(recordsToDelete, options, NativeMethods.AdminClientDeleteRecordsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DeleteRecordsResult DeleteRecords(
+        IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
+        DeleteRecordsOptions? options,
+        NativeDeleteRecordsSubmit submit) =>
+        DeleteRecordsResult.From(DeleteRecords(recordsToDelete, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>deleteRecords</c> and returns immediately with one awaitable per topic
@@ -1586,9 +1645,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// "truncate to the high watermark", a <em>value</em> rather than an unset sentinel.
     /// </para>
     /// </remarks>
-    internal DeleteRecordsResult DeleteRecords(
+    internal KeyedAdminOperation<TopicPartition, DeletedRecords> DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options,
+        AdminFlavour flavour,
         NativeDeleteRecordsSubmit submit)
     {
         ThrowIfClosed();
@@ -1654,7 +1714,7 @@ internal sealed class NativeAdminClient : IDisposable
         // Uuid-keyed deleteTopics path.
         KeyedAdminOperation<TopicPartition, DeletedRecords> operation =
             new KeyedAdminOperation<TopicPartition, DeletedRecords>(
-                "deleteRecords", keys, EqualityComparer<TopicPartition>.Default);
+                "deleteRecords", keys, EqualityComparer<TopicPartition>.Default, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -1717,11 +1777,16 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DeleteRecordsResult(operation.Tasks);
+        return operation;
     }
 
     internal DescribeClusterResult DescribeCluster(DescribeClusterOptions? options) =>
         DescribeCluster(options, NativeMethods.AdminClientDescribeClusterAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeClusterResult DescribeCluster(
+        DescribeClusterOptions? options, NativeDescribeClusterSubmit submit) =>
+        DescribeClusterResult.From(DescribeCluster(options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeCluster</c> and returns immediately with the four awaitables
@@ -1736,8 +1801,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="DescribeClusterResult"/> (M15/P3 decision D12 — there is deliberately no
     /// public aggregate type).
     /// </remarks>
-    internal DescribeClusterResult DescribeCluster(
-        DescribeClusterOptions? options, NativeDescribeClusterSubmit submit)
+    internal SingleAdminOperation<DescribeClusterSnapshot> DescribeCluster(
+        DescribeClusterOptions? options, AdminFlavour flavour, NativeDescribeClusterSubmit submit)
     {
         ThrowIfClosed();
 
@@ -1753,7 +1818,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<DescribeClusterSnapshot> operation =
-            new SingleAdminOperation<DescribeClusterSnapshot>("describeCluster");
+            new SingleAdminOperation<DescribeClusterSnapshot>("describeCluster", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
         try
@@ -1782,12 +1847,19 @@ internal sealed class NativeAdminClient : IDisposable
             throw;
         }
 
-        return new DescribeClusterResult(operation.Task);
+        return operation;
     }
 
     internal ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes, ListConfigResourcesOptions? options) =>
         ListConfigResources(configResourceTypes, options, NativeMethods.AdminClientListConfigResourcesAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListConfigResourcesResult ListConfigResources(
+        IReadOnlyCollection<ConfigResourceType>? configResourceTypes,
+        ListConfigResourcesOptions? options,
+        NativeListConfigResourcesSubmit submit) =>
+        ListConfigResourcesResult.From(ListConfigResources(configResourceTypes, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listConfigResources</c> and returns immediately with the <b>single</b>
@@ -1808,9 +1880,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// ABI sorts by <c>(type id, name)</c>.
     /// </para>
     /// </remarks>
-    internal ListConfigResourcesResult ListConfigResources(
+    internal SingleAdminOperation<IReadOnlyCollection<ConfigResource>> ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes,
         ListConfigResourcesOptions? options,
+        AdminFlavour flavour,
         NativeListConfigResourcesSubmit submit)
     {
         ThrowIfClosed();
@@ -1824,7 +1897,7 @@ internal sealed class NativeAdminClient : IDisposable
         int[] resourceTypes = DistinctTypeIds(configResourceTypes);
 
         SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources");
+            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
         try
@@ -1852,12 +1925,19 @@ internal sealed class NativeAdminClient : IDisposable
             throw;
         }
 
-        return new ListConfigResourcesResult(operation.Task);
+        return operation;
     }
 
     internal DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options) =>
         DescribeConfigs(resources, options, NativeMethods.AdminClientDescribeConfigsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeConfigsResult DescribeConfigs(
+        IReadOnlyCollection<ConfigResource> resources,
+        DescribeConfigsOptions? options,
+        NativeDescribeConfigsSubmit submit) =>
+        DescribeConfigsResult.From(DescribeConfigs(resources, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeConfigs</c> and returns immediately with one awaitable per
@@ -1872,9 +1952,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// skipped", silently, which would drop a resource whose <see cref="Task"/> the caller
     /// is holding (ffi §B5).
     /// </remarks>
-    internal DescribeConfigsResult DescribeConfigs(
+    internal KeyedAdminOperation<ConfigResource, Config> DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources,
         DescribeConfigsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeConfigsSubmit submit)
     {
         ThrowIfClosed();
@@ -1905,7 +1986,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<ConfigResource, Config> operation =
             new KeyedAdminOperation<ConfigResource, Config>(
-                "describeConfigs", keys, s_configResourceComparer);
+                "describeConfigs", keys, s_configResourceComparer, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -1964,13 +2045,20 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeConfigsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options) =>
         IncrementalAlterConfigs(configs, options, NativeMethods.AdminClientIncrementalAlterConfigsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterConfigsResult IncrementalAlterConfigs(
+        IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
+        AlterConfigsOptions? options,
+        NativeIncrementalAlterConfigsSubmit submit) =>
+        AlterConfigsResult.From(IncrementalAlterConfigs(configs, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>incrementalAlterConfigs</c> and returns immediately with one awaitable
@@ -2017,9 +2105,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see cref="AlterConfigsOptions.ValidateOnly"/> validates it.
     /// </para>
     /// </remarks>
-    internal AlterConfigsResult IncrementalAlterConfigs(
+    internal VoidKeyedAdminOperation<ConfigResource> IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options,
+        AdminFlavour flavour,
         NativeIncrementalAlterConfigsSubmit submit)
     {
         ThrowIfClosed();
@@ -2105,7 +2194,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         VoidKeyedAdminOperation<ConfigResource> operation =
             new VoidKeyedAdminOperation<ConfigResource>(
-                "incrementalAlterConfigs", keys, s_configResourceComparer);
+                "incrementalAlterConfigs", keys, s_configResourceComparer, flavour);
 
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -2210,12 +2299,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new AlterConfigsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options) =>
         DescribeLogDirs(brokers, options, NativeMethods.AdminClientDescribeLogDirsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeLogDirsResult DescribeLogDirs(
+        IReadOnlyCollection<int> brokers,
+        DescribeLogDirsOptions? options,
+        NativeDescribeLogDirsSubmit submit) =>
+        DescribeLogDirsResult.From(DescribeLogDirs(brokers, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeLogDirs</c> and returns immediately with one awaitable per broker.
@@ -2227,9 +2323,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// is <see cref="int"/> — there is no null to reject, which is also why this is the one
     /// Stage-3 input with no silent-skip hazard.
     /// </remarks>
-    internal DescribeLogDirsResult DescribeLogDirs(
+    internal KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> DescribeLogDirs(
         IReadOnlyCollection<int> brokers,
         DescribeLogDirsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeLogDirsSubmit submit)
     {
         ThrowIfClosed();
@@ -2257,7 +2354,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> operation =
             new KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>>(
-                "describeLogDirs", keys, EqualityComparer<int>.Default);
+                "describeLogDirs", keys, EqualityComparer<int>.Default, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
         try
@@ -2292,7 +2389,7 @@ internal sealed class NativeAdminClient : IDisposable
             throw;
         }
 
-        return new DescribeLogDirsResult(operation.Tasks);
+        return operation;
     }
 
     internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
@@ -2300,6 +2397,13 @@ internal sealed class NativeAdminClient : IDisposable
         AlterReplicaLogDirsOptions? options) =>
         AlterReplicaLogDirs(
             replicaAssignment, options, NativeMethods.AdminClientAlterReplicaLogDirsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
+        IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
+        AlterReplicaLogDirsOptions? options,
+        NativeAlterReplicaLogDirsSubmit submit) =>
+        AlterReplicaLogDirsResult.From(AlterReplicaLogDirs(replicaAssignment, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>alterReplicaLogDirs</c> and returns immediately with one awaitable per
@@ -2325,9 +2429,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>FailUncompleted</c> message (ffi §B5).
     /// </para>
     /// </remarks>
-    internal AlterReplicaLogDirsResult AlterReplicaLogDirs(
+    internal VoidKeyedAdminOperation<TopicPartitionReplica> AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
         AlterReplicaLogDirsOptions? options,
+        AdminFlavour flavour,
         NativeAlterReplicaLogDirsSubmit submit)
     {
         ThrowIfClosed();
@@ -2383,7 +2488,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         VoidKeyedAdminOperation<TopicPartitionReplica> operation =
             new VoidKeyedAdminOperation<TopicPartitionReplica>(
-                "alterReplicaLogDirs", keys, s_replicaComparer);
+                "alterReplicaLogDirs", keys, s_replicaComparer, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -2451,13 +2556,20 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new AlterReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas, DescribeReplicaLogDirsOptions? options) =>
         DescribeReplicaLogDirs(
             replicas, options, NativeMethods.AdminClientDescribeReplicaLogDirsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+        IReadOnlyCollection<TopicPartitionReplica> replicas,
+        DescribeReplicaLogDirsOptions? options,
+        NativeDescribeReplicaLogDirsSubmit submit) =>
+        DescribeReplicaLogDirsResult.From(DescribeReplicaLogDirs(replicas, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeReplicaLogDirs</c> and returns immediately with one awaitable per
@@ -2491,9 +2603,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// fabricating an "empty" description would report data the binding does not have.
     /// </para>
     /// </remarks>
-    internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
+    internal KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeReplicaLogDirsSubmit submit)
     {
         ThrowIfClosed();
@@ -2529,7 +2642,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> operation =
             new KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(
-                "describeReplicaLogDirs", keys, s_replicaComparer);
+                "describeReplicaLogDirs", keys, s_replicaComparer, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -2590,7 +2703,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal ElectLeadersResult ElectLeaders(
@@ -2598,6 +2711,14 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<TopicPartition>? partitions,
         ElectLeadersOptions? options) =>
         ElectLeaders(electionType, partitions, options, NativeMethods.AdminClientElectLeadersAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ElectLeadersResult ElectLeaders(
+        ElectionType electionType,
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ElectLeadersOptions? options,
+        NativeElectLeadersSubmit submit) =>
+        ElectLeadersResult.From(ElectLeaders(electionType, partitions, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>electLeaders</c> and returns immediately with the <b>single</b> awaitable
@@ -2626,10 +2747,11 @@ internal sealed class NativeAdminClient : IDisposable
     /// Collapsing the two would silently turn a no-op into a cluster-wide election.
     /// </para>
     /// </remarks>
-    internal ElectLeadersResult ElectLeaders(
+    internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
         ElectLeadersOptions? options,
+        AdminFlavour flavour,
         NativeElectLeadersSubmit submit)
     {
         ThrowIfClosed();
@@ -2663,7 +2785,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders");
+            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -2721,7 +2843,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ElectLeadersResult(operation.Task);
+        return operation;
     }
 
     internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
@@ -2729,6 +2851,13 @@ internal sealed class NativeAdminClient : IDisposable
         AlterPartitionReassignmentsOptions? options) =>
         AlterPartitionReassignments(
             reassignments, options, NativeMethods.AdminClientAlterPartitionReassignmentsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
+        IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
+        AlterPartitionReassignmentsOptions? options,
+        NativeAlterPartitionReassignmentsSubmit submit) =>
+        AlterPartitionReassignmentsResult.From(AlterPartitionReassignments(reassignments, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>alterPartitionReassignments</c> and returns immediately with one
@@ -2759,9 +2888,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// ABI would reject it too, on the inline callback path.
     /// </para>
     /// </remarks>
-    internal AlterPartitionReassignmentsResult AlterPartitionReassignments(
+    internal VoidKeyedAdminOperation<TopicPartition> AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options,
+        AdminFlavour flavour,
         NativeAlterPartitionReassignmentsSubmit submit)
     {
         ThrowIfClosed();
@@ -2844,7 +2974,7 @@ internal sealed class NativeAdminClient : IDisposable
         // disagrees with the public AlterPartitionReassignmentsResult view — the same
         // reasoning as the deleteRecords path.
         VoidKeyedAdminOperation<TopicPartition> operation = new VoidKeyedAdminOperation<TopicPartition>(
-            "alterPartitionReassignments", keys, EqualityComparer<TopicPartition>.Default);
+            "alterPartitionReassignments", keys, EqualityComparer<TopicPartition>.Default, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -2929,7 +3059,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new AlterPartitionReassignmentsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
@@ -2938,6 +3068,14 @@ internal sealed class NativeAdminClient : IDisposable
         AlterConsumerGroupOffsetsOptions? options) =>
         AlterConsumerGroupOffsets(
             groupId, offsets, options, NativeMethods.AdminClientAlterConsumerGroupOffsetsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        AlterConsumerGroupOffsetsOptions? options,
+        NativeAlterConsumerGroupOffsetsSubmit submit) =>
+        AlterConsumerGroupOffsetsResult.From(AlterConsumerGroupOffsets(groupId, offsets, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>alterConsumerGroupOffsets</c> and returns immediately with the
@@ -2962,10 +3100,11 @@ internal sealed class NativeAdminClient : IDisposable
     /// nothing here touches <paramref name="submit"/>'s <c>userData</c> again.
     /// </para>
     /// </remarks>
-    internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
+    internal SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         AlterConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour,
         NativeAlterConsumerGroupOffsetsSubmit submit)
     {
         ThrowIfClosed();
@@ -3029,7 +3168,7 @@ internal sealed class NativeAdminClient : IDisposable
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
             new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
-                "alterConsumerGroupOffsets");
+                "alterConsumerGroupOffsets", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3106,7 +3245,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new AlterConsumerGroupOffsetsResult(operation.Task);
+        return operation;
     }
 
     internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -3115,6 +3254,14 @@ internal sealed class NativeAdminClient : IDisposable
         DeleteConsumerGroupOffsetsOptions? options) =>
         DeleteConsumerGroupOffsets(
             groupId, partitions, options, NativeMethods.AdminClientDeleteConsumerGroupOffsetsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+        string groupId,
+        IReadOnlyCollection<TopicPartition> partitions,
+        DeleteConsumerGroupOffsetsOptions? options,
+        NativeDeleteConsumerGroupOffsetsSubmit submit) =>
+        DeleteConsumerGroupOffsetsResult.From(DeleteConsumerGroupOffsets(groupId, partitions, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>deleteConsumerGroupOffsets</c> and returns immediately with the
@@ -3129,12 +3276,15 @@ internal sealed class NativeAdminClient : IDisposable
     /// (<c>DeleteConsumerGroupOffsetsResult.java:31</c>), and the ABI fires <b>one</b>
     /// callback for it — the same <see cref="SingleAdminOperation{TValue}"/> shape, with the
     /// same no-countdown / no-submit-token rule, as
-    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, AdminFlavour, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </remarks>
-    internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
+    internal (
+        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> Operation,
+        IReadOnlyCollection<TopicPartition> Partitions) DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
         DeleteConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour,
         NativeDeleteConsumerGroupOffsetsSubmit submit)
     {
         ThrowIfClosed();
@@ -3189,7 +3339,7 @@ internal sealed class NativeAdminClient : IDisposable
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
             new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
-                "deleteConsumerGroupOffsets");
+                "deleteConsumerGroupOffsets", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3247,12 +3397,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DeleteConsumerGroupOffsetsResult(operation.Task, keys);
+        return (operation, keys);
     }
 
     internal DeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options) =>
         DeleteConsumerGroups(groupIds, options, NativeMethods.AdminClientDeleteConsumerGroupsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DeleteConsumerGroupsResult DeleteConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DeleteConsumerGroupsOptions? options,
+        NativeDeleteConsumerGroupsSubmit submit) =>
+        DeleteConsumerGroupsResult.From(DeleteConsumerGroups(groupIds, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>deleteConsumerGroups</c> and returns immediately with one awaitable per
@@ -3260,7 +3417,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// (<c>DeleteConsumerGroupsResult.java:30</c>, result shape 2).
     /// </summary>
     /// <remarks>
-    /// Argument-for-argument <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>'s
+    /// Argument-for-argument <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?, AdminFlavour, NativeDeleteTopicsSubmit, NativeDeleteTopicsSubmit)"/>'s
     /// by-name branch — a flat group-id array, no per-key options flag — so this reuses the
     /// same <see cref="Submit"/> helper and <see cref="VoidKeyedAdminOperation{TKey}"/> bridge
     /// rather than hand-rolling a pin/<c>GCHandle</c> sequence. The group ids cross as a pinned
@@ -3269,10 +3426,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// </remarks>
     /// <param name="groupIds">The consumer group ids to delete. Duplicates collapse.</param>
     /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="flavour">Which per-key completions the operation creates (see the type remarks).</param>
     /// <param name="submit">The native submit, injectable for tests.</param>
-    internal DeleteConsumerGroupsResult DeleteConsumerGroups(
+    internal VoidKeyedAdminOperation<string> DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds,
         DeleteConsumerGroupsOptions? options,
+        AdminFlavour flavour,
         NativeDeleteConsumerGroupsSubmit submit)
     {
         ThrowIfClosed();
@@ -3292,7 +3451,7 @@ internal sealed class NativeAdminClient : IDisposable
         List<string> keys = DistinctNames(groupIds, "group ids", nameof(groupIds));
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-            "deleteConsumerGroups", keys, StringComparer.Ordinal);
+            "deleteConsumerGroups", keys, StringComparer.Ordinal, flavour);
 
         Submit(
             operation,
@@ -3313,7 +3472,7 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.ReleaseSubmitToken();
             });
 
-        return new DeleteConsumerGroupsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
@@ -3321,13 +3480,20 @@ internal sealed class NativeAdminClient : IDisposable
         RemoveMembersFromConsumerGroup(
             groupId, options, NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+        string groupId,
+        RemoveMembersFromConsumerGroupOptions options,
+        NativeRemoveMembersFromConsumerGroupSubmit submit) =>
+        RemoveMembersFromConsumerGroupResult.From(RemoveMembersFromConsumerGroup(groupId, options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// Submits <c>removeMembersFromConsumerGroup</c> and returns immediately with the
     /// <b>single</b> awaitable Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
     /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 3) —
     /// plus the original request's member collection, the second stored field Java carries
     /// (<c>memberInfos</c>, <c>:36</c>), the same two-field pattern as
-    /// <see cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions?, NativeDeleteConsumerGroupOffsetsSubmit)"/>.
+    /// <see cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions?, AdminFlavour, NativeDeleteConsumerGroupOffsetsSubmit)"/>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -3335,7 +3501,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>, and the ABI fires <b>one</b>
     /// callback for it in both modes — the same <see cref="SingleAdminOperation{TValue}"/>
     /// shape, with the same no-countdown / no-submit-token rule, as
-    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, AdminFlavour, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </para>
     /// <para>
     /// ⚠ <b>removeAll mode passes no member array at all.</b> When
@@ -3346,9 +3512,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// outcome.
     /// </para>
     /// </remarks>
-    internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
+    internal (
+        SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> Operation,
+        IReadOnlyCollection<MemberToRemove> Members) RemoveMembersFromConsumerGroup(
         string groupId,
         RemoveMembersFromConsumerGroupOptions options,
+        AdminFlavour flavour,
         NativeRemoveMembersFromConsumerGroupSubmit submit)
     {
         ThrowIfClosed();
@@ -3389,7 +3558,7 @@ internal sealed class NativeAdminClient : IDisposable
         // NULL the core would skip.
         SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> operation =
             new SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
-                "removeMembersFromConsumerGroup");
+                "removeMembersFromConsumerGroup", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3457,11 +3626,16 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new RemoveMembersFromConsumerGroupResult(operation.Task, members);
+        return (operation, members);
     }
 
     internal CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options) =>
         CreateAcls(acls, options, NativeMethods.AdminClientCreateAclsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal CreateAclsResult CreateAcls(
+        IEnumerable<AclBinding> acls, CreateAclsOptions? options, NativeCreateAclsSubmit submit) =>
+        CreateAclsResult.From(CreateAcls(acls, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>createAcls</c> and returns immediately with one awaitable per binding
@@ -3486,8 +3660,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>Unknown</c>, so the keys below compare as the core's do.
     /// </para>
     /// </remarks>
-    internal CreateAclsResult CreateAcls(
-        IEnumerable<AclBinding> acls, CreateAclsOptions? options, NativeCreateAclsSubmit submit)
+    internal VoidKeyedAdminOperation<AclBinding> CreateAcls(
+        IEnumerable<AclBinding> acls, CreateAclsOptions? options, AdminFlavour flavour, NativeCreateAclsSubmit submit)
     {
         ThrowIfClosed();
 
@@ -3505,7 +3679,7 @@ internal sealed class NativeAdminClient : IDisposable
         List<AclBinding> keys = DistinctBindings(acls, nameof(acls));
 
         VoidKeyedAdminOperation<AclBinding> operation = new VoidKeyedAdminOperation<AclBinding>(
-            "createAcls", keys, EqualityComparer<AclBinding>.Default);
+            "createAcls", keys, EqualityComparer<AclBinding>.Default, flavour);
 
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -3556,12 +3730,19 @@ internal sealed class NativeAdminClient : IDisposable
             rows?.Dispose();
         }
 
-        return new CreateAclsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options) =>
         DeleteAcls(filters, options, NativeMethods.AdminClientDeleteAclsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DeleteAclsResult DeleteAcls(
+        IEnumerable<AclBindingFilter> filters,
+        DeleteAclsOptions? options,
+        NativeDeleteAclsSubmit submit) =>
+        DeleteAclsResult.From(DeleteAcls(filters, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>deleteAcls</c> and returns immediately with one awaitable per filter
@@ -3585,9 +3766,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// (M15/P13.3 F8).
     /// </para>
     /// </remarks>
-    internal DeleteAclsResult DeleteAcls(
+    internal KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> DeleteAcls(
         IEnumerable<AclBindingFilter> filters,
         DeleteAclsOptions? options,
+        AdminFlavour flavour,
         NativeDeleteAclsSubmit submit)
     {
         ThrowIfClosed();
@@ -3607,7 +3789,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
             new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
-                "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default);
+                "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default, flavour);
 
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -3661,12 +3843,19 @@ internal sealed class NativeAdminClient : IDisposable
             rows?.Dispose();
         }
 
-        return new DeleteAclsResult(operation.Tasks);
+        return operation;
     }
 
     internal DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options) =>
         DescribeAcls(filter, options, NativeMethods.AdminClientDescribeAclsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeAclsResult DescribeAcls(
+        AclBindingFilter filter,
+        DescribeAclsOptions? options,
+        NativeDescribeAclsSubmit submit) =>
+        DescribeAclsResult.From(DescribeAcls(filter, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeAcls</c> and returns immediately with the <b>single</b> awaitable
@@ -3683,9 +3872,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// rejected (header, <c>kafka_admin_AdminClient_describe_acls</c>).
     /// </para>
     /// </remarks>
-    internal DescribeAclsResult DescribeAcls(
+    internal SingleAdminOperation<IReadOnlyCollection<AclBinding>> DescribeAcls(
         AclBindingFilter filter,
         DescribeAclsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeAclsSubmit submit)
     {
         ThrowIfClosed();
@@ -3711,7 +3901,7 @@ internal sealed class NativeAdminClient : IDisposable
         AdminStrings.Validate(entry.Host, nameof(filter));
 
         SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls");
+            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3753,12 +3943,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeAclsResult(operation.Task);
+        return operation;
     }
 
     internal DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options) =>
         DescribeClientQuotas(filter, options, NativeMethods.AdminClientDescribeClientQuotasAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeClientQuotasResult DescribeClientQuotas(
+        ClientQuotaFilter filter,
+        DescribeClientQuotasOptions? options,
+        NativeDescribeClientQuotasSubmit submit) =>
+        DescribeClientQuotasResult.From(DescribeClientQuotas(filter, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeClientQuotas</c> and returns immediately with the <b>single</b>
@@ -3777,9 +3974,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// emptiness guard here.
     /// </para>
     /// </remarks>
-    internal DescribeClientQuotasResult DescribeClientQuotas(
+    internal SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> DescribeClientQuotas(
         ClientQuotaFilter filter,
         DescribeClientQuotasOptions? options,
+        AdminFlavour flavour,
         NativeDescribeClientQuotasSubmit submit)
     {
         ThrowIfClosed();
@@ -3806,7 +4004,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
             new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
-                "describeClientQuotas");
+                "describeClientQuotas", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3845,12 +4043,19 @@ internal sealed class NativeAdminClient : IDisposable
             rows?.Dispose();
         }
 
-        return new DescribeClientQuotasResult(operation.Task);
+        return operation;
     }
 
     internal AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options) =>
         AlterClientQuotas(entries, options, NativeMethods.AdminClientAlterClientQuotasAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterClientQuotasResult AlterClientQuotas(
+        IEnumerable<ClientQuotaAlteration> entries,
+        AlterClientQuotasOptions? options,
+        NativeAlterClientQuotasSubmit submit) =>
+        AlterClientQuotasResult.From(AlterClientQuotas(entries, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>alterClientQuotas</c> and returns immediately with one awaitable per entity
@@ -3895,9 +4100,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// row with a count of 0, which the ABI reads as an empty entity (PLAN §1.4, D3).
     /// </para>
     /// </remarks>
-    internal AlterClientQuotasResult AlterClientQuotas(
+    internal VoidKeyedAdminOperation<ClientQuotaEntity> AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries,
         AlterClientQuotasOptions? options,
+        AdminFlavour flavour,
         NativeAlterClientQuotasSubmit submit)
     {
         ThrowIfClosed();
@@ -3954,7 +4160,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         VoidKeyedAdminOperation<ClientQuotaEntity> operation =
             new VoidKeyedAdminOperation<ClientQuotaEntity>(
-                "alterClientQuotas", keys, EqualityComparer<ClientQuotaEntity>.Default);
+                "alterClientQuotas", keys, EqualityComparer<ClientQuotaEntity>.Default, flavour);
 
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
@@ -4005,7 +4211,7 @@ internal sealed class NativeAdminClient : IDisposable
             rows?.Dispose();
         }
 
-        return new AlterClientQuotasResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     // ====================================================================================
@@ -4016,6 +4222,13 @@ internal sealed class NativeAdminClient : IDisposable
         IReadOnlyCollection<string>? users, DescribeUserScramCredentialsOptions? options) =>
         DescribeUserScramCredentials(
             users, options, NativeMethods.AdminClientDescribeUserScramCredentialsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+        IReadOnlyCollection<string>? users,
+        DescribeUserScramCredentialsOptions? options,
+        NativeDescribeUserScramCredentialsSubmit submit) =>
+        DescribeUserScramCredentialsResult.From(DescribeUserScramCredentials(users, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeUserScramCredentials</c> and returns immediately with the single
@@ -4047,9 +4260,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// broker reads empty as "all" (<c>ScramImage.java:86-87</c>).
     /// </para>
     /// </remarks>
-    internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
+    internal SingleAdminOperation<DescribeUserScramCredentialsViews> DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users,
         DescribeUserScramCredentialsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeUserScramCredentialsSubmit submit)
     {
         ThrowIfClosed();
@@ -4078,7 +4292,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         SingleAdminOperation<DescribeUserScramCredentialsViews> operation =
             new SingleAdminOperation<DescribeUserScramCredentialsViews>(
-                "describeUserScramCredentials");
+                "describeUserScramCredentials", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4114,13 +4328,20 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeUserScramCredentialsResult(operation.Task);
+        return operation;
     }
 
     internal AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations, AlterUserScramCredentialsOptions? options) =>
         AlterUserScramCredentials(
             alterations, options, NativeMethods.AdminClientAlterUserScramCredentialsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AlterUserScramCredentialsResult AlterUserScramCredentials(
+        IEnumerable<UserScramCredentialAlteration> alterations,
+        AlterUserScramCredentialsOptions? options,
+        NativeAlterUserScramCredentialsSubmit submit) =>
+        AlterUserScramCredentialsResult.From(AlterUserScramCredentials(alterations, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>alterUserScramCredentials</c> and returns immediately with one awaitable per
@@ -4136,9 +4357,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// has had the same shape since PR #201 round 70 (M15/P13.3 F7); it used to reject a
     /// repeated entity instead.
     /// </remarks>
-    internal AlterUserScramCredentialsResult AlterUserScramCredentials(
+    internal VoidKeyedAdminOperation<string> AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options,
+        AdminFlavour flavour,
         NativeAlterUserScramCredentialsSubmit submit)
     {
         ThrowIfClosed();
@@ -4174,7 +4396,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-            "alterUserScramCredentials", keys, StringComparer.Ordinal);
+            "alterUserScramCredentials", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4224,19 +4446,24 @@ internal sealed class NativeAdminClient : IDisposable
             pinned?.Dispose();
         }
 
-        return new AlterUserScramCredentialsResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options) =>
         CreateDelegationToken(options, NativeMethods.AdminClientCreateDelegationTokenAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal CreateDelegationTokenResult CreateDelegationToken(
+        CreateDelegationTokenOptions? options, NativeCreateDelegationTokenSubmit submit) =>
+        CreateDelegationTokenResult.From(CreateDelegationToken(options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>createDelegationToken</c> and returns immediately with the single awaitable
     /// over the issued token. The result carries no table, so the completion resolves the
     /// awaiter straight off the root.
     /// </summary>
-    internal CreateDelegationTokenResult CreateDelegationToken(
-        CreateDelegationTokenOptions? options, NativeCreateDelegationTokenSubmit submit)
+    internal SingleAdminOperation<DelegationToken> CreateDelegationToken(
+        CreateDelegationTokenOptions? options, AdminFlavour flavour, NativeCreateDelegationTokenSubmit submit)
     {
         ThrowIfClosed();
 
@@ -4278,7 +4505,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         SingleAdminOperation<DelegationToken> operation =
-            new SingleAdminOperation<DelegationToken>("createDelegationToken");
+            new SingleAdminOperation<DelegationToken>("createDelegationToken", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4325,19 +4552,24 @@ internal sealed class NativeAdminClient : IDisposable
             ownerName?.Dispose();
         }
 
-        return new CreateDelegationTokenResult(operation.Task);
+        return operation;
     }
 
     internal RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options) =>
         RenewDelegationToken(hmac, options, NativeMethods.AdminClientRenewDelegationTokenAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal RenewDelegationTokenResult RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options, NativeRenewDelegationTokenSubmit submit) =>
+        RenewDelegationTokenResult.From(RenewDelegationToken(hmac, options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// Submits <c>renewDelegationToken</c> and returns immediately with the single awaitable
     /// over the token's new expiry timestamp.
     /// </summary>
-    internal RenewDelegationTokenResult RenewDelegationToken(
-        byte[] hmac, RenewDelegationTokenOptions? options, NativeRenewDelegationTokenSubmit submit)
+    internal SingleAdminOperation<long> RenewDelegationToken(
+        byte[] hmac, RenewDelegationTokenOptions? options, AdminFlavour flavour, NativeRenewDelegationTokenSubmit submit)
     {
         ThrowIfClosed();
 
@@ -4354,7 +4586,7 @@ internal sealed class NativeAdminClient : IDisposable
             renewTimePeriodMs = options.RenewTimePeriodMs;
         }
 
-        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("renewDelegationToken");
+        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("renewDelegationToken", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4392,19 +4624,24 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new RenewDelegationTokenResult(operation.Task);
+        return operation;
     }
 
     internal ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options) =>
         ExpireDelegationToken(hmac, options, NativeMethods.AdminClientExpireDelegationTokenAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ExpireDelegationTokenResult ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options, NativeExpireDelegationTokenSubmit submit) =>
+        ExpireDelegationTokenResult.From(ExpireDelegationToken(hmac, options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// Submits <c>expireDelegationToken</c> and returns immediately with the single awaitable
     /// over the token's expiry timestamp.
     /// </summary>
-    internal ExpireDelegationTokenResult ExpireDelegationToken(
-        byte[] hmac, ExpireDelegationTokenOptions? options, NativeExpireDelegationTokenSubmit submit)
+    internal SingleAdminOperation<long> ExpireDelegationToken(
+        byte[] hmac, ExpireDelegationTokenOptions? options, AdminFlavour flavour, NativeExpireDelegationTokenSubmit submit)
     {
         ThrowIfClosed();
 
@@ -4421,7 +4658,7 @@ internal sealed class NativeAdminClient : IDisposable
             expiryTimePeriodMs = options.ExpiryTimePeriodMs;
         }
 
-        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("expireDelegationToken");
+        SingleAdminOperation<long> operation = new SingleAdminOperation<long>("expireDelegationToken", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4459,12 +4696,17 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ExpireDelegationTokenResult(operation.Task);
+        return operation;
     }
 
     internal DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options) =>
         DescribeDelegationToken(options, NativeMethods.AdminClientDescribeDelegationTokenAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeDelegationTokenResult DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options, NativeDescribeDelegationTokenSubmit submit) =>
+        DescribeDelegationTokenResult.From(DescribeDelegationToken(options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeDelegationToken</c> and returns immediately with the single awaitable
@@ -4474,8 +4716,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// ⚠ A <see langword="null"/> <c>Owners</c> and an <b>empty</b> one are different requests,
     /// and the difference travels in <c>has_owners_filter</c>, never in the count.
     /// </remarks>
-    internal DescribeDelegationTokenResult DescribeDelegationToken(
-        DescribeDelegationTokenOptions? options, NativeDescribeDelegationTokenSubmit submit)
+    internal SingleAdminOperation<IReadOnlyCollection<DelegationToken>> DescribeDelegationToken(
+        DescribeDelegationTokenOptions? options, AdminFlavour flavour, NativeDescribeDelegationTokenSubmit submit)
     {
         ThrowIfClosed();
 
@@ -4504,7 +4746,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<DelegationToken>>("describeDelegationToken");
+            new SingleAdminOperation<IReadOnlyCollection<DelegationToken>>("describeDelegationToken", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4541,18 +4783,23 @@ internal sealed class NativeAdminClient : IDisposable
             pinned?.Dispose();
         }
 
-        return new DescribeDelegationTokenResult(operation.Task);
+        return operation;
     }
 
     internal DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options) =>
         DescribeFeatures(options, NativeMethods.AdminClientDescribeFeaturesAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeFeaturesResult DescribeFeatures(
+        DescribeFeaturesOptions? options, NativeDescribeFeaturesSubmit submit) =>
+        DescribeFeaturesResult.From(DescribeFeatures(options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// Submits <c>describeFeatures</c> and returns immediately with the <b>single</b> awaitable
     /// Java publishes, over the whole composite.
     /// </summary>
-    internal DescribeFeaturesResult DescribeFeatures(
-        DescribeFeaturesOptions? options, NativeDescribeFeaturesSubmit submit)
+    internal SingleAdminOperation<FeatureMetadata> DescribeFeatures(
+        DescribeFeaturesOptions? options, AdminFlavour flavour, NativeDescribeFeaturesSubmit submit)
     {
         ThrowIfClosed();
 
@@ -4565,7 +4812,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         SingleAdminOperation<FeatureMetadata> operation =
-            new SingleAdminOperation<FeatureMetadata>("describeFeatures");
+            new SingleAdminOperation<FeatureMetadata>("describeFeatures", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
         try
@@ -4592,12 +4839,19 @@ internal sealed class NativeAdminClient : IDisposable
             throw;
         }
 
-        return new DescribeFeaturesResult(operation.Task);
+        return operation;
     }
 
     internal UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates, UpdateFeaturesOptions? options) =>
         UpdateFeatures(featureUpdates, options, NativeMethods.AdminClientUpdateFeaturesAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal UpdateFeaturesResult UpdateFeatures(
+        IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
+        UpdateFeaturesOptions? options,
+        NativeUpdateFeaturesSubmit submit) =>
+        UpdateFeaturesResult.From(UpdateFeatures(featureUpdates, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>updateFeatures</c> and returns immediately with one awaitable per feature
@@ -4651,9 +4905,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// </para>
     /// </remarks>
     /// <exception cref="KafkaException">The core refused the request before submitting it.</exception>
-    internal UpdateFeaturesResult UpdateFeatures(
+    internal VoidKeyedAdminOperation<string> UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options,
+        AdminFlavour flavour,
         NativeUpdateFeaturesSubmit submit)
     {
         ThrowIfClosed();
@@ -4710,7 +4965,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-            "updateFeatures", keys, StringComparer.Ordinal);
+            "updateFeatures", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4773,12 +5028,19 @@ internal sealed class NativeAdminClient : IDisposable
             throw refused;
         }
 
-        return new UpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options) =>
         FenceProducers(transactionalIds, options, NativeMethods.AdminClientFenceProducersAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal FenceProducersResult FenceProducers(
+        IReadOnlyCollection<string> transactionalIds,
+        FenceProducersOptions? options,
+        NativeFenceProducersSubmit submit) =>
+        FenceProducersResult.From(FenceProducers(transactionalIds, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>fenceProducers</c> and returns immediately with one awaitable per
@@ -4796,9 +5058,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// element is rejected because the header <em>skips</em> one silently.
     /// </para>
     /// </remarks>
-    internal FenceProducersResult FenceProducers(
+    internal KeyedAdminOperation<string, ProducerIdAndEpoch> FenceProducers(
         IReadOnlyCollection<string> transactionalIds,
         FenceProducersOptions? options,
+        AdminFlavour flavour,
         NativeFenceProducersSubmit submit)
     {
         ThrowIfClosed();
@@ -4816,7 +5079,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<string, ProducerIdAndEpoch> operation =
             new KeyedAdminOperation<string, ProducerIdAndEpoch>(
-                "fenceProducers", keys, StringComparer.Ordinal);
+                "fenceProducers", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4859,13 +5122,20 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new FenceProducersResult(operation.Tasks, operation.KeyComparer);
+        return operation;
     }
 
     internal DescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options) =>
         DescribeTransactions(
             transactionalIds, options, NativeMethods.AdminClientDescribeTransactionsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeTransactionsResult DescribeTransactions(
+        IReadOnlyCollection<string> transactionalIds,
+        DescribeTransactionsOptions? options,
+        NativeDescribeTransactionsSubmit submit) =>
+        DescribeTransactionsResult.From(DescribeTransactions(transactionalIds, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeTransactions</c> and returns immediately with one awaitable per
@@ -4877,9 +5147,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// its result on a map, and a null element is rejected because the header skips one
     /// silently.
     /// </remarks>
-    internal DescribeTransactionsResult DescribeTransactions(
+    internal KeyedAdminOperation<string, TransactionDescription> DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds,
         DescribeTransactionsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeTransactionsSubmit submit)
     {
         ThrowIfClosed();
@@ -4897,7 +5168,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<string, TransactionDescription> operation =
             new KeyedAdminOperation<string, TransactionDescription>(
-                "describeTransactions", keys, StringComparer.Ordinal);
+                "describeTransactions", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -4939,12 +5210,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeTransactionsResult(operation.Tasks);
+        return operation;
     }
 
     internal DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options) =>
         DescribeProducers(partitions, options, NativeMethods.AdminClientDescribeProducersAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeProducersResult DescribeProducers(
+        IReadOnlyCollection<TopicPartition> partitions,
+        DescribeProducersOptions? options,
+        NativeDescribeProducersSubmit submit) =>
+        DescribeProducersResult.From(DescribeProducers(partitions, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeProducers</c> and returns immediately with one awaitable per topic
@@ -4956,9 +5234,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// (<c>DescribeProducersOptions.java:29</c>), so no sentinel is free and a negative broker
     /// id is a request the ABI must be able to carry, so it is passed through as asked.
     /// </remarks>
-    internal DescribeProducersResult DescribeProducers(
+    internal KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions,
         DescribeProducersOptions? options,
+        AdminFlavour flavour,
         NativeDescribeProducersSubmit submit)
     {
         ThrowIfClosed();
@@ -4984,7 +5263,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation =
             new KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState>(
-                "describeProducers", keys, EqualityComparer<TopicPartition>.Default);
+                "describeProducers", keys, EqualityComparer<TopicPartition>.Default, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5040,7 +5319,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new DescribeProducersResult(operation.Tasks);
+        return operation;
     }
 
     internal ListTransactionsResult ListTransactions(ListTransactionsOptions? options) =>
@@ -5210,6 +5489,11 @@ internal sealed class NativeAdminClient : IDisposable
         AbortTransactionSpec spec, AbortTransactionOptions? options) =>
         AbortTransaction(spec, options, NativeMethods.AdminClientAbortTransactionAsync);
 
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal AbortTransactionResult AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options, NativeAbortTransactionSubmit submit) =>
+        AbortTransactionResult.From(AbortTransaction(spec, options, AdminFlavour.Async, submit));
+
     /// <summary>
     /// Submits <c>abortTransaction</c> and returns immediately with the single awaitable
     /// Java's <c>AbortTransactionResult</c> publishes (result shape 6 — no result handle).
@@ -5227,8 +5511,8 @@ internal sealed class NativeAdminClient : IDisposable
     /// <see langword="short"/>, so an out-of-16-bit epoch cannot be expressed.
     /// </para>
     /// </remarks>
-    internal AbortTransactionResult AbortTransaction(
-        AbortTransactionSpec spec, AbortTransactionOptions? options, NativeAbortTransactionSubmit submit)
+    internal SingleAdminOperation<bool> AbortTransaction(
+        AbortTransactionSpec spec, AbortTransactionOptions? options, AdminFlavour flavour, NativeAbortTransactionSubmit submit)
     {
         ThrowIfClosed();
 
@@ -5253,7 +5537,7 @@ internal sealed class NativeAdminClient : IDisposable
             timeoutMs = ToNativeTimeoutMs(options.TimeoutMs);
         }
 
-        SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("abortTransaction");
+        SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("abortTransaction", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5289,13 +5573,20 @@ internal sealed class NativeAdminClient : IDisposable
             topic?.Dispose();
         }
 
-        return new AbortTransactionResult(operation.Task);
+        return operation;
     }
 
     internal TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options) =>
         ForceTerminateTransaction(
             transactionalId, options, NativeMethods.AdminClientForceTerminateTransactionAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal TerminateTransactionResult ForceTerminateTransaction(
+        string transactionalId,
+        TerminateTransactionOptions? options,
+        NativeForceTerminateTransactionSubmit submit) =>
+        TerminateTransactionResult.From(ForceTerminateTransaction(transactionalId, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>forceTerminateTransaction</c> and returns immediately with the single
@@ -5307,9 +5598,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// (header, <c>kafka_admin_AdminClient_force_terminate_transaction_async</c>); it is rejected
     /// here first, before any pin.
     /// </remarks>
-    internal TerminateTransactionResult ForceTerminateTransaction(
+    internal SingleAdminOperation<bool> ForceTerminateTransaction(
         string transactionalId,
         TerminateTransactionOptions? options,
+        AdminFlavour flavour,
         NativeForceTerminateTransactionSubmit submit)
     {
         ThrowIfClosed();
@@ -5329,7 +5621,7 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         SingleAdminOperation<bool> operation =
-            new SingleAdminOperation<bool>("forceTerminateTransaction");
+            new SingleAdminOperation<bool>("forceTerminateTransaction", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5361,13 +5653,20 @@ internal sealed class NativeAdminClient : IDisposable
             pinnedId?.Dispose();
         }
 
-        return new TerminateTransactionResult(operation.Task);
+        return operation;
     }
 
     internal ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options) =>
         ListPartitionReassignments(
             partitions, options, NativeMethods.AdminClientListPartitionReassignmentsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListPartitionReassignmentsResult ListPartitionReassignments(
+        IReadOnlyCollection<TopicPartition>? partitions,
+        ListPartitionReassignmentsOptions? options,
+        NativeListPartitionReassignmentsSubmit submit) =>
+        ListPartitionReassignmentsResult.From(ListPartitionReassignments(partitions, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listPartitionReassignments</c> and returns immediately with the
@@ -5395,9 +5694,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// <c>all_partitions</c>. An empty collection asks about no partitions at all.
     /// </para>
     /// </remarks>
-    internal ListPartitionReassignmentsResult ListPartitionReassignments(
+    internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions,
         ListPartitionReassignmentsOptions? options,
+        AdminFlavour flavour,
         NativeListPartitionReassignmentsSubmit submit)
     {
         ThrowIfClosed();
@@ -5415,7 +5715,7 @@ internal sealed class NativeAdminClient : IDisposable
         // ---- Publish everything the callback needs BEFORE the call ----
         SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation =
             new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
-                "listPartitionReassignments");
+                "listPartitionReassignments", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5471,12 +5771,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListPartitionReassignmentsResult(operation.Task);
+        return operation;
     }
 
     internal ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets, ListOffsetsOptions? options) =>
         ListOffsets(topicPartitionOffsets, options, NativeMethods.AdminClientListOffsetsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListOffsetsResult ListOffsets(
+        IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
+        ListOffsetsOptions? options,
+        NativeListOffsetsSubmit submit) =>
+        ListOffsetsResult.From(ListOffsets(topicPartitionOffsets, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listOffsets</c> and returns immediately with one awaitable per topic
@@ -5493,9 +5800,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// cluster the core collapses the pair to the same request, as Java does, but the mock
     /// tells them apart, so collapsing the flag here is a silent wrong-answer defect.
     /// </remarks>
-    internal ListOffsetsResult ListOffsets(
+    internal KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options,
+        AdminFlavour flavour,
         NativeListOffsetsSubmit submit)
     {
         ThrowIfClosed();
@@ -5588,7 +5896,7 @@ internal sealed class NativeAdminClient : IDisposable
         // ListOffsetsResult view — the same reasoning as the deleteRecords path.
         KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation =
             new KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(
-                "listOffsets", keys, EqualityComparer<TopicPartition>.Default);
+                "listOffsets", keys, EqualityComparer<TopicPartition>.Default, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5650,11 +5958,15 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListOffsetsResult(operation.Tasks);
+        return operation;
     }
 
     internal ListGroupsResult ListGroups(ListGroupsOptions? options) =>
         ListGroups(options, NativeMethods.AdminClientListGroupsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListGroupsResult ListGroups(ListGroupsOptions? options, NativeListGroupsSubmit submit) =>
+        ListGroupsResult.From(ListGroups(options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listGroups</c> and returns immediately with the <b>single</b> awaitable
@@ -5684,7 +5996,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// the time the P/Invoke returns.
     /// </para>
     /// </remarks>
-    internal ListGroupsResult ListGroups(ListGroupsOptions? options, NativeListGroupsSubmit submit)
+    internal SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> ListGroups(
+        ListGroupsOptions? options,
+        AdminFlavour flavour,
+        NativeListGroupsSubmit submit)
     {
         ThrowIfClosed();
 
@@ -5728,7 +6043,7 @@ internal sealed class NativeAdminClient : IDisposable
         SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>
             operation =
                 new SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
-                    "listGroups");
+                    "listGroups", flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5784,12 +6099,19 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListGroupsResult(operation.Task);
+        return operation;
     }
 
     internal DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options) =>
         DescribeConsumerGroups(groupIds, options, NativeMethods.AdminClientDescribeConsumerGroupsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeConsumerGroupsResult DescribeConsumerGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeConsumerGroupsOptions? options,
+        NativeDescribeConsumerGroupsSubmit submit) =>
+        DescribeConsumerGroupsResult.From(DescribeConsumerGroups(groupIds, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeConsumerGroups</c> and returns immediately with one awaitable per
@@ -5821,9 +6143,10 @@ internal sealed class NativeAdminClient : IDisposable
     /// running under an in-flight call.
     /// </para>
     /// </remarks>
-    internal DescribeConsumerGroupsResult DescribeConsumerGroups(
+    internal KeyedAdminOperation<string, ConsumerGroupDescription> DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds,
         DescribeConsumerGroupsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeConsumerGroupsSubmit submit)
     {
         ThrowIfClosed();
@@ -5846,7 +6169,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<string, ConsumerGroupDescription> operation =
             new KeyedAdminOperation<string, ConsumerGroupDescription>(
-                "describeConsumerGroups", keys, StringComparer.Ordinal);
+                "describeConsumerGroups", keys, StringComparer.Ordinal, flavour);
 
         Submit(
             operation,
@@ -5868,12 +6191,19 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.ReleaseSubmitToken();
             });
 
-        return new DescribeConsumerGroupsResult(operation.Tasks);
+        return operation;
     }
 
     internal DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options) =>
         DescribeClassicGroups(groupIds, options, NativeMethods.AdminClientDescribeClassicGroupsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal DescribeClassicGroupsResult DescribeClassicGroups(
+        IReadOnlyCollection<string> groupIds,
+        DescribeClassicGroupsOptions? options,
+        NativeDescribeClassicGroupsSubmit submit) =>
+        DescribeClassicGroupsResult.From(DescribeClassicGroups(groupIds, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>describeClassicGroups</c> and returns immediately with one awaitable per
@@ -5883,7 +6213,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// <para>
     /// ⚠⚠ <b>The bridge must be keyed by <see cref="StringComparer.Ordinal"/></b>, for the
-    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, NativeDescribeConsumerGroupsSubmit)"/>:
+    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, AdminFlavour, NativeDescribeConsumerGroupsSubmit)"/>:
     /// <see cref="DescribeClassicGroupsResult"/>'s aggregate hardcodes that comparer and its
     /// constructor is public, so a bridge built with the default comparer would not fail
     /// loudly — it would silently disagree with the result object it feeds, for group ids
@@ -5906,10 +6236,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// </remarks>
     /// <param name="groupIds">The classic group ids to describe. Duplicates collapse.</param>
     /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="flavour">Which per-key completions the operation creates (see the type remarks).</param>
     /// <param name="submit">The native submit, injectable for tests.</param>
-    internal DescribeClassicGroupsResult DescribeClassicGroups(
+    internal KeyedAdminOperation<string, ClassicGroupDescription> DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds,
         DescribeClassicGroupsOptions? options,
+        AdminFlavour flavour,
         NativeDescribeClassicGroupsSubmit submit)
     {
         ThrowIfClosed();
@@ -5932,7 +6264,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<string, ClassicGroupDescription> operation =
             new KeyedAdminOperation<string, ClassicGroupDescription>(
-                "describeClassicGroups", keys, StringComparer.Ordinal);
+                "describeClassicGroups", keys, StringComparer.Ordinal, flavour);
 
         Submit(
             operation,
@@ -5952,7 +6284,7 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.ReleaseSubmitToken();
             });
 
-        return new DescribeClassicGroupsResult(operation.Tasks);
+        return operation;
     }
 
     internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
@@ -5960,6 +6292,13 @@ internal sealed class NativeAdminClient : IDisposable
         ListConsumerGroupOffsetsOptions? options) =>
         ListConsumerGroupOffsets(
             groupSpecs, options, NativeMethods.AdminClientListConsumerGroupOffsetsAsync);
+
+    /// <summary>The pre-P14 <see cref="AdminFlavour.Async"/> overload of the core below (see the type remarks).</summary>
+    internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
+        ListConsumerGroupOffsetsOptions? options,
+        NativeListConsumerGroupOffsetsSubmit submit) =>
+        ListConsumerGroupOffsetsResult.From(ListConsumerGroupOffsets(groupSpecs, options, AdminFlavour.Async, submit));
 
     /// <summary>
     /// Submits <c>listConsumerGroupOffsets</c> and returns immediately with one awaitable per
@@ -5970,7 +6309,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// <para>
     /// ⚠⚠ <b>The bridge must be keyed by <see cref="StringComparer.Ordinal"/></b>, for the
-    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, NativeDescribeConsumerGroupsSubmit)"/>:
+    /// reason spelled out on <see cref="DescribeConsumerGroups(IReadOnlyCollection{string}, DescribeConsumerGroupsOptions?, AdminFlavour, NativeDescribeConsumerGroupsSubmit)"/>:
     /// <see cref="ListConsumerGroupOffsetsResult"/> hardcodes that comparer, so a bridge built
     /// with the default comparer would silently disagree with the result object it feeds.
     /// </para>
@@ -5999,14 +6338,16 @@ internal sealed class NativeAdminClient : IDisposable
     /// </remarks>
     /// <param name="groupSpecs">The per-group partition selections, keyed by group id.</param>
     /// <param name="options">The options, or <see langword="null"/> for the defaults.</param>
+    /// <param name="flavour">Which per-key completions the operation creates (see the type remarks).</param>
     /// <param name="submit">The native submit, injectable for tests.</param>
     /// <exception cref="ArgumentNullException"><paramref name="groupSpecs"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A group id, a spec, or a selected topic is null, or a group id repeats.
     /// </exception>
-    internal ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
+    internal KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options,
+        AdminFlavour flavour,
         NativeListConsumerGroupOffsetsSubmit submit)
     {
         ThrowIfClosed();
@@ -6095,7 +6436,7 @@ internal sealed class NativeAdminClient : IDisposable
 
         KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation =
             new KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
-                "listConsumerGroupOffsets", keys, StringComparer.Ordinal);
+                "listConsumerGroupOffsets", keys, StringComparer.Ordinal, flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -6197,7 +6538,7 @@ internal sealed class NativeAdminClient : IDisposable
             }
         }
 
-        return new ListConsumerGroupOffsetsResult(operation.Tasks);
+        return operation;
     }
 
     /// <summary>

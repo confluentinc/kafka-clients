@@ -257,7 +257,7 @@ public sealed class AdminKeyedResultMarshalTests
         internal Drive(string[] keys, int expectedCallbacks)
         {
             Operation = new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                "createTopics", keys, StringComparer.Ordinal);
+                "createTopics", keys, StringComparer.Ordinal, AdminFlavour.Async);
             Done = new CountdownEvent(expectedCallbacks);
             DestroyValue = handle =>
             {

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -72,6 +73,13 @@ public sealed class DescribeClassicGroupsResult
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeClassicGroupsResult From(KeyedAdminOperation<string, ClassicGroupDescription> operation) =>
+        new DescribeClassicGroupsResult(operation.Tasks);
 
     /// <summary>
     /// One awaitable per requested group id — Java's <c>describedGroups()</c>

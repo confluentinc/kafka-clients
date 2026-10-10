@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -79,6 +80,16 @@ public sealed class DeleteConsumerGroupOffsetsResult
         _future = future;
         _partitions = partitions;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DeleteConsumerGroupOffsetsResult From(
+        (
+            SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> Operation,
+            IReadOnlyCollection<TopicPartition> Partitions) submitted) =>
+        new DeleteConsumerGroupOffsetsResult(submitted.Operation.Task, submitted.Partitions);
 
     /// <summary>
     /// The outcome of deleting the committed offset for one partition — Java's

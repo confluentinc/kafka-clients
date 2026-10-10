@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -55,6 +56,13 @@ public sealed class ListTopicsResult
     {
         _future = future;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ListTopicsResult From(SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation) =>
+        new ListTopicsResult(operation.Task);
 
     /// <summary>
     /// The topic names mapped to their listings — Java's <c>namesToListings()</c>.

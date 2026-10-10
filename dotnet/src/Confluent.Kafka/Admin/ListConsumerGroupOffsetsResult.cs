@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -88,6 +89,14 @@ public sealed class ListConsumerGroupOffsetsResult
     {
         _futures = futures;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ListConsumerGroupOffsetsResult From(
+        KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation) =>
+        new ListConsumerGroupOffsetsResult(operation.Tasks);
 
     /// <summary>
     /// The single requested group's committed offsets keyed by partition — Java's no-argument

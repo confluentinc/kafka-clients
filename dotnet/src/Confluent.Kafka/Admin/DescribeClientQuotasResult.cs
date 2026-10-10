@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -47,6 +48,14 @@ public sealed class DescribeClientQuotasResult
     {
         _future = entities ?? throw new ArgumentNullException(nameof(entities));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeClientQuotasResult From(
+        SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation) =>
+        new DescribeClientQuotasResult(operation.Task);
 
     /// <summary>
     /// The quotas of every entity matching the filter — Java's <c>entities()</c>

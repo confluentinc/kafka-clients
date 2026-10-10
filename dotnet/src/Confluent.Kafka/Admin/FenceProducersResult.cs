@@ -57,6 +57,13 @@ public sealed class FenceProducersResult
     }
 
     /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static FenceProducersResult From(KeyedAdminOperation<string, ProducerIdAndEpoch> operation) =>
+        new FenceProducersResult(operation.Tasks, operation.KeyComparer);
+
+    /// <summary>
     /// One payload-free awaitable per requested transactional id — Java's
     /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <c>KafkaFuture&lt;Void&gt;</c>.
     /// </summary>

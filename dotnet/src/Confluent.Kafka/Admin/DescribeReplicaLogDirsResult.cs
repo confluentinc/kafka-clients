@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -55,6 +56,14 @@ public sealed class DescribeReplicaLogDirsResult
         _values = values;
         _comparer = comparer;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeReplicaLogDirsResult From(
+        KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> operation) =>
+        new DescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
     /// One awaitable per requested replica — Java's <c>values()</c> (<c>:41</c>).

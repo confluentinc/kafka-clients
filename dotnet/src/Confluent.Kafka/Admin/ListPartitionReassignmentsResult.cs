@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -61,6 +62,14 @@ public sealed class ListPartitionReassignmentsResult
     {
         _future = future;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ListPartitionReassignmentsResult From(
+        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation) =>
+        new ListPartitionReassignmentsResult(operation.Task);
 
     /// <summary>
     /// Each partition's ongoing reassignment — Java's <c>reassignments()</c>

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -33,6 +34,13 @@ public sealed class AbortTransactionResult
     {
         _all = all;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AbortTransactionResult From(SingleAdminOperation<bool> operation) =>
+        new AbortTransactionResult(operation.Task);
 
     /// <summary>
     /// Whether the transaction was aborted — Java's <c>all()</c> (<c>:41</c>).

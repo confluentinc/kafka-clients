@@ -58,10 +58,16 @@ namespace Confluent.Kafka.Internal;
 /// pump's thread may wait (Java has no such guard; its <c>get()</c> deadlocks here, and the precedent is
 /// <c>flush()</c>'s I/O-thread guard).
 /// </description></item>
+/// <item><description>
+/// <b>Also an admin key's latch (M15/P14 S2).</b> The sync admin flavour completes one per key through
+/// <see cref="IAdminCompletion{T}"/>, implemented explicitly over the same two methods, so a send's latch neither
+/// gains a field nor changes behaviour. Admin passes no owner: no user code runs on an admin completion thread, so
+/// there is no pump thread for D9 to guard (M15/P14 PLAN §3.4, D10).
+/// </description></item>
 /// </list>
 /// </remarks>
 /// <typeparam name="T">The completion's value: <see cref="RecordMetadata"/> for a producer send.</typeparam>
-internal sealed class SyncCompletion<T> : SyncFutureSource<T>
+internal sealed class SyncCompletion<T> : SyncFutureSource<T>, IAdminCompletion<T>
 {
     private const string GetOnOwningPumpMessage =
         "KafkaFuture.Get() was called on this producer's send-completion thread — from inside a delivery callback — " +
@@ -83,6 +89,9 @@ internal sealed class SyncCompletion<T> : SyncFutureSource<T>
     /// Whether the latch has been completed — a volatile read that never blocks (the latch's <c>isDone()</c>).
     /// </summary>
     internal override bool IsDone => _done;
+
+    /// <inheritdoc/>
+    bool IAdminCompletion<T>.IsCompleted => _done;
 
     /// <summary>
     /// Completes the latch with <paramref name="value"/> and releases every waiter, unless it is already completed.
@@ -124,6 +133,12 @@ internal sealed class SyncCompletion<T> : SyncFutureSource<T>
             return true;
         }
     }
+
+    /// <inheritdoc/>
+    bool IAdminCompletion<T>.TrySetResult(T result) => TrySetResult(result);
+
+    /// <inheritdoc/>
+    bool IAdminCompletion<T>.TrySetException(Exception exception) => TrySetException(exception);
 
     /// <summary>
     /// Returns the value once the latch is completed, blocking the calling thread until then; if it was completed

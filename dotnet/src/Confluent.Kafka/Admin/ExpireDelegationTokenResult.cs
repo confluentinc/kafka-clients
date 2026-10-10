@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -33,6 +34,13 @@ public sealed class ExpireDelegationTokenResult
     {
         _expiryTimestamp = expiryTimestamp;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static ExpireDelegationTokenResult From(SingleAdminOperation<long> operation) =>
+        new ExpireDelegationTokenResult(operation.Task);
 
     /// <summary>
     /// The expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>

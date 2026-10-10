@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 using Token = Confluent.Kafka.DelegationToken;
 
@@ -31,6 +32,13 @@ public sealed class CreateDelegationTokenResult
     {
         _token = token;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static CreateDelegationTokenResult From(SingleAdminOperation<DelegationToken> operation) =>
+        new CreateDelegationTokenResult(operation.Task);
 
     /// <summary>The issued token — Java's <c>delegationToken()</c> (<c>:36</c>).</summary>
     /// <returns>An awaitable over the token.</returns>

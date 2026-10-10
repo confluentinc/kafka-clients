@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -40,6 +41,14 @@ public sealed class DescribeProducersResult
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeProducersResult From(
+        KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation) =>
+        new DescribeProducersResult(operation.Tasks);
 
     /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c> (<c>:36</c>).</summary>
     /// <param name="partition">A topic partition from the request.</param>

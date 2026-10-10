@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -79,6 +80,14 @@ public sealed class AlterConsumerGroupOffsetsResult
     {
         _future = future;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AlterConsumerGroupOffsetsResult From(
+        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation) =>
+        new AlterConsumerGroupOffsetsResult(operation.Task);
 
     /// <summary>
     /// The outcome of altering the offset for one partition — Java's

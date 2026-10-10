@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -59,6 +60,13 @@ public sealed class DeleteRecordsResult
     {
         _futures = lowWatermarks ?? throw new ArgumentNullException(nameof(lowWatermarks));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DeleteRecordsResult From(KeyedAdminOperation<TopicPartition, DeletedRecords> operation) =>
+        new DeleteRecordsResult(operation.Tasks);
 
     /// <summary>
     /// One awaitable per requested topic partition, each carrying that partition's own

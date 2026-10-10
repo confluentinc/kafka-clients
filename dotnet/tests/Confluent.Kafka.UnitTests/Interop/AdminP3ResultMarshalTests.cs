@@ -258,7 +258,7 @@ public sealed class AdminP3ResultMarshalTests
         IntPtr result = SubmitAndCaptureConfigResources(admin, Array.Empty<int>());
 
         SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources");
+            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources", AdminFlavour.Async);
         try
         {
             KeyedResultMarshal.CompleteList(
@@ -296,7 +296,7 @@ public sealed class AdminP3ResultMarshalTests
 
         List<ConfigResource> asDelivered = new List<ConfigResource>();
         SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources");
+            new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources", AdminFlavour.Async);
         try
         {
             int count = NativeMethods.ListConfigResourcesResultCount(result);

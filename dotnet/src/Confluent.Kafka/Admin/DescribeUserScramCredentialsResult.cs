@@ -37,6 +37,14 @@ public sealed class DescribeUserScramCredentialsResult
     }
 
     /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeUserScramCredentialsResult From(
+        SingleAdminOperation<DescribeUserScramCredentialsViews> operation) =>
+        new DescribeUserScramCredentialsResult(operation.Task);
+
+    /// <summary>
     /// Every described user, keyed by name — Java's <c>all()</c> (<c>:54</c>). Faults with the
     /// <b>first</b> per-user failure if any user could not be described (<c>:68-69</c>).
     /// </summary>

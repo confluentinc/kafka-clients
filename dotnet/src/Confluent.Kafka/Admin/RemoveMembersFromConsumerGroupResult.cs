@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -83,6 +84,16 @@ public sealed class RemoveMembersFromConsumerGroupResult
         _future = future;
         _memberInfos = memberInfos;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static RemoveMembersFromConsumerGroupResult From(
+        (
+            SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> Operation,
+            IReadOnlyCollection<MemberToRemove> Members) submitted) =>
+        new RemoveMembersFromConsumerGroupResult(submitted.Operation.Task, submitted.Members);
 
     /// <summary>
     /// <see langword="true"/> when this result came from a removeAll request — Java's private

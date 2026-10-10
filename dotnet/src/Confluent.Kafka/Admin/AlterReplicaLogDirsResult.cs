@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -65,6 +66,13 @@ public sealed class AlterReplicaLogDirsResult
 
         _values = erased;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static AlterReplicaLogDirsResult From(VoidKeyedAdminOperation<TopicPartitionReplica> operation) =>
+        new AlterReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
     /// One awaitable per requested replica — Java's <c>values()</c> (<c>:67</c>).

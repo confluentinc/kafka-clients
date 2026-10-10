@@ -268,7 +268,7 @@ public sealed class AdminP2bOperationLifetimeTests
     [Fact]
     public async Task SingleAdminOperation_CompletesWithRunContinuationsAsynchronously()
     {
-        SingleAdminOperation<int> operation = new SingleAdminOperation<int>("probe");
+        SingleAdminOperation<int> operation = new SingleAdminOperation<int>("probe", AdminFlavour.Async);
 
         using ManualResetEventSlim entered = new ManualResetEventSlim(false);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);

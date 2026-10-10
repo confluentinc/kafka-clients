@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -39,6 +40,13 @@ public sealed class DescribeTransactionsResult
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeTransactionsResult From(KeyedAdminOperation<string, TransactionDescription> operation) =>
+        new DescribeTransactionsResult(operation.Tasks);
 
     /// <summary>One id's description — Java's <c>description(String)</c> (<c>:43</c>).</summary>
     /// <param name="transactionalId">A transactional id from the request.</param>

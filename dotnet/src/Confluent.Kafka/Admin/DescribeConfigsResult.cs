@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -61,6 +62,13 @@ public sealed class DescribeConfigsResult
         _values = values;
         _comparer = comparer;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DescribeConfigsResult From(KeyedAdminOperation<ConfigResource, Config> operation) =>
+        new DescribeConfigsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
     /// One awaitable per requested resource, keyed by resource — Java's <c>values()</c>

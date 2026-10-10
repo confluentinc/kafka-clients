@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -41,6 +42,14 @@ public sealed class DeleteAclsResult
     /// <summary>Wraps the bridge's per-filter awaitables, which are already Java-shaped.</summary>
     internal DeleteAclsResult(IReadOnlyDictionary<AclBindingFilter, Task<FilterResults>> values) =>
         _values = values;
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static DeleteAclsResult From(
+        KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation) =>
+        new DeleteAclsResult(operation.Tasks);
 
     /// <summary>
     /// One awaitable per requested filter, keyed by the filter — Java's <c>values()</c>

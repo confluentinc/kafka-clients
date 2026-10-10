@@ -376,7 +376,8 @@ public sealed class AdminP6ResultMarshalTests
             new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
                 "deleteAcls",
                 new[] { alpha, beta },
-                EqualityComparer<AclBindingFilter>.Default);
+                EqualityComparer<AclBindingFilter>.Default,
+                AdminFlavour.Async);
 
         operation.FailAll(new KafkaException("submit failed"));
         operation.FailUncompleted();
@@ -443,7 +444,7 @@ public sealed class AdminP6ResultMarshalTests
         IntPtr root = SubmitAndCaptureCreateAcls(admin, submitted);
 
         SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls");
+            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls", AdminFlavour.Async);
         try
         {
             KeyedResultMarshal.CompleteList(
@@ -754,7 +755,7 @@ public sealed class AdminP6ResultMarshalTests
         {
             SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
                 new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
-                    "describeClientQuotas");
+                    "describeClientQuotas", AdminFlavour.Async);
 
             ClientQuotaMarshal.EntityAccessors accessors = EntityAccessors;
 
@@ -1021,7 +1022,7 @@ public sealed class AdminP6ResultMarshalTests
 
             KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
                 new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
-                    "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default);
+                    "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default, AdminFlavour.Async);
 
             Func<IntPtr, int, DeleteAclsResult.FilterResults> readValue =
                 DeleteAclsResultMarshal.FilterResultsReader(

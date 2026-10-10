@@ -51,7 +51,7 @@ public sealed class AdminP9CountdownTests
         SafeAdminHandle handle = admin.Handle;
 
         KeyedAdminOperation<string, long> operation = new KeyedAdminOperation<string, long>(
-            "createTopics", new[] { "alpha", "beta", "gamma" }, StringComparer.Ordinal);
+            "createTopics", new[] { "alpha", "beta", "gamma" }, StringComparer.Ordinal, AdminFlavour.Async);
         Arm(operation, handle, callbacks: 3);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
@@ -94,7 +94,7 @@ public sealed class AdminP9CountdownTests
         SafeAdminHandle handle = admin.Handle;
 
         KeyedAdminOperation<string, long> operation = new KeyedAdminOperation<string, long>(
-            "createTopics", Array.Empty<string>(), StringComparer.Ordinal);
+            "createTopics", Array.Empty<string>(), StringComparer.Ordinal, AdminFlavour.Async);
         Arm(operation, handle, callbacks: 0);
 
         TestTimeout.Run(admin.Dispose, s_deadline);
@@ -118,7 +118,7 @@ public sealed class AdminP9CountdownTests
         NativeAdminClient first = NativeAdminClient.CreateMock(1);
         SafeAdminHandle firstHandle = first.Handle;
         KeyedAdminOperation<string, long> completed = new KeyedAdminOperation<string, long>(
-            "createTopics", new[] { "alpha" }, StringComparer.Ordinal);
+            "createTopics", new[] { "alpha" }, StringComparer.Ordinal, AdminFlavour.Async);
         Arm(completed, firstHandle, callbacks: 1);
 
         completed.ReleaseOne();
@@ -137,7 +137,7 @@ public sealed class AdminP9CountdownTests
         NativeAdminClient second = NativeAdminClient.CreateMock(1);
         SafeAdminHandle secondHandle = second.Handle;
         KeyedAdminOperation<string, long> abandoned = new KeyedAdminOperation<string, long>(
-            "createTopics", new[] { "alpha", "beta" }, StringComparer.Ordinal);
+            "createTopics", new[] { "alpha", "beta" }, StringComparer.Ordinal, AdminFlavour.Async);
         Arm(abandoned, secondHandle, callbacks: 2);
 
         abandoned.AbandonBeforeSubmit();
@@ -174,7 +174,7 @@ public sealed class AdminP9CountdownTests
         SafeAdminHandle handle = admin.Handle;
 
         VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-            "incrementalAlterConfigs", new[] { "answered", "unanswered" }, StringComparer.Ordinal);
+            "incrementalAlterConfigs", new[] { "answered", "unanswered" }, StringComparer.Ordinal, AdminFlavour.Async);
         Arm(operation, handle, callbacks: 1);
 
         KeyedResultMarshal.CompleteKey(operation, "answered", IntPtr.Zero);
@@ -199,7 +199,7 @@ public sealed class AdminP9CountdownTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         KeyedAdminOperation<string, long> operation = new KeyedAdminOperation<string, long>(
-            "listOffsets", new[] { "good", "bad", "failed" }, StringComparer.Ordinal);
+            "listOffsets", new[] { "good", "bad", "failed" }, StringComparer.Ordinal, AdminFlavour.Async);
         Arm(operation, admin.Handle, callbacks: 3);
 
         int destroyed = 0;

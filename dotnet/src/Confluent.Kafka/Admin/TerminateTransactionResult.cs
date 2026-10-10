@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -34,6 +35,13 @@ public sealed class TerminateTransactionResult
     {
         _result = result;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static TerminateTransactionResult From(SingleAdminOperation<bool> operation) =>
+        new TerminateTransactionResult(operation.Task);
 
     /// <summary>
     /// Whether the transaction was terminated — Java's <c>result()</c> (<c>:36</c>).

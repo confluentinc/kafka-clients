@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -58,6 +59,13 @@ public sealed class CreatePartitionsResult
 
         _values = erased;
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static CreatePartitionsResult From(VoidKeyedAdminOperation<string> operation) =>
+        new CreatePartitionsResult(operation.Tasks, operation.KeyComparer);
 
     /// <summary>
     /// One awaitable per requested topic, keyed by topic name — Java's <c>values()</c>.

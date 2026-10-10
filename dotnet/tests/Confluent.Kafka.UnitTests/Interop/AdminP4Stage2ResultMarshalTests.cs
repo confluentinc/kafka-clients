@@ -157,7 +157,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
 
         KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation =
             new KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(
-                "listOffsets", new[] { good, bad }, EqualityComparer<TopicPartition>.Default);
+                "listOffsets", new[] { good, bad }, EqualityComparer<TopicPartition>.Default, AdminFlavour.Async);
 
         foreach (OffsetsCapture capture in captures)
         {

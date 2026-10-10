@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
@@ -63,6 +64,13 @@ public sealed class CreateTopicsResult
     {
         _values = futures ?? throw new ArgumentNullException(nameof(futures));
     }
+
+    /// <summary>
+    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// from an admin operation (M15/P14).
+    /// </summary>
+    internal static CreateTopicsResult From(KeyedAdminOperation<string, TopicMetadataAndConfig> operation) =>
+        new CreateTopicsResult(operation.Tasks);
 
     /// <summary>
     /// One awaitable per requested topic, keyed by topic name — Java's
