@@ -239,27 +239,27 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
-        CreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Async));
+        CreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
-        DeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Async));
+        DeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null) =>
-        DescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Async));
+        DescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
-        DescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Async));
+        DescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
-        AlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Async));
+        AlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeUserScramCredentialsResult DescribeUserScramCredentials(

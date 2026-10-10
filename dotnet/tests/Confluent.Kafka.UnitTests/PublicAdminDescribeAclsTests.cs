@@ -58,10 +58,16 @@ public sealed class PublicAdminDescribeAclsTests
         Assert.Contains(declared, method => method.Name == nameof(DescribeAclsResult.Values));
         Assert.DoesNotContain(declared, method => method.Name == "All");
 
+        // M15/P14 S5d: the sync flavour hands out a KafkaFuture, its async twin an AsyncKafkaFuture.
         Assert.Equal(
-            typeof(Task<IReadOnlyCollection<AclBinding>>),
+            typeof(KafkaFuture<IReadOnlyCollection<AclBinding>>),
             typeof(DescribeAclsResult)
                 .GetMethod(nameof(DescribeAclsResult.Values))!
+                .ReturnType);
+        Assert.Equal(
+            typeof(AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>),
+            typeof(AsyncDescribeAclsResult)
+                .GetMethod(nameof(AsyncDescribeAclsResult.Values))!
                 .ReturnType);
     }
 

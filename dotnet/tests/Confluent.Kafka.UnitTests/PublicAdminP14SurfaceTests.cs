@@ -95,6 +95,11 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(RemoveMembersFromConsumerGroupResult),
         nameof(AlterConsumerGroupOffsetsResult),
         nameof(DeleteConsumerGroupOffsetsResult),
+        nameof(CreateAclsResult),
+        nameof(DeleteAclsResult),
+        nameof(DescribeAclsResult),
+        nameof(DescribeClientQuotasResult),
+        nameof(AlterClientQuotasResult),
     };
 
     /// <summary>
@@ -128,6 +133,11 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.RemoveMembersFromConsumerGroup),
         nameof(IAdmin.AlterConsumerGroupOffsets),
         nameof(IAdmin.DeleteConsumerGroupOffsets),
+        nameof(IAdmin.CreateAcls),
+        nameof(IAdmin.DeleteAcls),
+        nameof(IAdmin.DescribeAcls),
+        nameof(IAdmin.DescribeClientQuotas),
+        nameof(IAdmin.AlterClientQuotas),
     };
 
     private static readonly string[] s_mockOnly =

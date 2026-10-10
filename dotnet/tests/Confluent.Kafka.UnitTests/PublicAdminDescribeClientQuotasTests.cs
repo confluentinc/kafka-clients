@@ -58,10 +58,16 @@ public sealed class PublicAdminDescribeClientQuotasTests
             declared, method => method.Name == nameof(DescribeClientQuotasResult.Entities));
         Assert.DoesNotContain(declared, method => method.Name == "All");
 
+        // M15/P14 S5d: the sync flavour hands out a KafkaFuture, its async twin an AsyncKafkaFuture.
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
             typeof(DescribeClientQuotasResult)
                 .GetMethod(nameof(DescribeClientQuotasResult.Entities))!
+                .ReturnType);
+        Assert.Equal(
+            typeof(AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
+            typeof(AsyncDescribeClientQuotasResult)
+                .GetMethod(nameof(AsyncDescribeClientQuotasResult.Entities))!
                 .ReturnType);
     }
 

@@ -268,10 +268,10 @@ public sealed class MockAdminClient : IAdmin
     /// <c>UnsupportedOperationException("Not implemented yet")</c>
     /// (<c>MockAdminClient.java:806-808</c>); the Rust mock mirrors that as one exceptional
     /// future <em>per binding</em> rather than a panic (<c>admin-client.md</c> §9), so every
-    /// binding's awaitable faults with that message instead of succeeding.
+    /// binding's future fails with that message instead of succeeding.
     /// </remarks>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
-        CreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Async));
+        CreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>
@@ -279,11 +279,11 @@ public sealed class MockAdminClient : IAdmin
     /// <c>UnsupportedOperationException("Not implemented yet")</c>
     /// (<c>MockAdminClient.java:816-818</c>); the Rust mock mirrors that as one exceptional
     /// future <em>per filter</em> rather than a panic (<c>admin-client.md</c> §9), so every
-    /// filter's awaitable faults with that message instead of succeeding.
+    /// filter's future fails with that message instead of succeeding.
     /// </remarks>
     public DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
-        DeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Async));
+        DeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>
@@ -291,11 +291,11 @@ public sealed class MockAdminClient : IAdmin
     /// <c>UnsupportedOperationException("Not implemented yet")</c>
     /// (<c>MockAdminClient.java:811-813</c>); the Rust mock mirrors that as one exceptional
     /// future for the whole call (<c>admin-client.md</c> §9), so
-    /// <see cref="DescribeAclsResult.Values"/> faults with that message.
+    /// <see cref="DescribeAclsResult.Values"/> fails with that message.
     /// </remarks>
     public DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null) =>
-        DescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Async));
+        DescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>
@@ -303,23 +303,23 @@ public sealed class MockAdminClient : IAdmin
     /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
     /// (<c>MockAdminClient.java:1244-1246</c>); the Rust mock surfaces that as one exceptional
     /// future for the whole call (<c>admin-client.md</c> §9), so
-    /// <see cref="DescribeClientQuotasResult.Entities"/> faults with that message.
+    /// <see cref="DescribeClientQuotasResult.Entities"/> fails with that message.
     /// </remarks>
     public DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
-        DescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Async));
+        DescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>
     /// Java's <c>MockAdminClient.alterClientQuotas</c> throws
     /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
     /// (<c>MockAdminClient.java:1249-1251</c>); the Rust mock surfaces that as one exceptional
-    /// future <em>per entity</em> (<c>admin-client.md</c> §9), so every entity's awaitable
-    /// faults with that message instead of succeeding.
+    /// future <em>per entity</em> (<c>admin-client.md</c> §9), so every entity's future
+    /// fails with that message instead of succeeding.
     /// </remarks>
     public AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
-        AlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Async));
+        AlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>

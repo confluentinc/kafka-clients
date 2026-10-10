@@ -1089,7 +1089,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Creates ACL bindings on the cluster — Java's
     /// <c>createAcls(Collection&lt;AclBinding&gt;, CreateAclsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/> per binding, whose <c>Get()</c> blocks the calling thread until
+    /// that binding completes.
     /// </summary>
     /// <param name="acls">
     /// The ACL bindings to create. Duplicates collapse, because Java keys its result on a
@@ -1097,14 +1099,14 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// and MATCH values at construction. Those constructors also store an enum value that is
     /// not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two bindings
     /// that differ only in such values are duplicates (M15/P13.3 F8). A binding with an
-    /// <c>Unknown</c> field still constructs, and fails its own task, as in Java
+    /// <c>Unknown</c> field still constructs, and fails its own future, as in Java
     /// (<c>KafkaAdminClient.java:2615-2621</c>).
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per binding — Java's
+    /// One future per binding — Java's
     /// <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="CreateAclsResult"/>.
     /// </returns>
@@ -1115,12 +1117,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.CreateAcls"/>
     CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null);
 
     /// <summary>
     /// Deletes every ACL matching any of the given filters — Java's
     /// <c>deleteAcls(Collection&lt;AclBindingFilter&gt;, DeleteAclsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/> per filter, whose <c>Get()</c> blocks the calling thread until
+    /// that filter completes.
     /// </summary>
     /// <param name="filters">
     /// The filters to apply. Duplicates collapse, because Java keys its result on a map. A
@@ -1134,7 +1139,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per filter — Java's
+    /// One future per filter — Java's
     /// <c>Map&lt;AclBindingFilter, KafkaFuture&lt;FilterResults&gt;&gt;</c>. See
     /// <see cref="DeleteAclsResult"/>.
     /// </returns>
@@ -1146,13 +1151,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// accepted.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteAcls"/>
     DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null);
 
     /// <summary>
     /// Lists every ACL matching the given filter — Java's
     /// <c>describeAcls(AclBindingFilter, DescribeAclsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// description completes.
     /// </summary>
     /// <param name="filter">
     /// The filter to apply — a <b>single</b> filter, as Java takes. A
@@ -1163,7 +1171,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable over the whole matching collection — Java's
+    /// One future over the whole matching collection — Java's
     /// <c>KafkaFuture&lt;Collection&lt;AclBinding&gt;&gt;</c>. See
     /// <see cref="DescribeAclsResult"/>.
     /// </returns>
@@ -1174,13 +1182,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <em>not</em> rejected.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeAcls"/>
     DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null);
 
     /// <summary>
     /// Describes the quotas of every entity matching the given filter — Java's
     /// <c>describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// description completes.
     /// </summary>
     /// <param name="filter">
     /// The filter to apply. An empty, non-strict filter is
@@ -1190,7 +1201,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable over the whole map — Java's
+    /// One future over the whole map — Java's
     /// <c>KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;</c>. See
     /// <see cref="DescribeClientQuotasResult"/>.
     /// </returns>
@@ -1201,20 +1212,23 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeClientQuotas"/>
     DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null);
 
     /// <summary>
     /// Alters the quotas of the given entities — Java's
     /// <c>alterClientQuotas(Collection&lt;ClientQuotaAlteration&gt;, AlterClientQuotasOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/> per entity, whose <c>Get()</c> blocks the calling thread until
+    /// that entity completes.
     /// </summary>
     /// <param name="entries">
     /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
     /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
     /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it
     /// (<c>KafkaAdminClient.java:4314-4318</c>): every alteration is sent, in order, and the
-    /// entity has one awaitable in the result, as Java's per-entity future map collapses it.
+    /// entity has one future in the result, as Java's per-entity future map collapses it.
     /// An alteration whose entity has <b>no</b> entity types is sent as given, as Java does,
     /// and is answered for that entity alone.
     /// </param>
@@ -1222,7 +1236,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per entity — Java's <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>.
+    /// One future per entity — Java's <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// See <see cref="AlterClientQuotasResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
@@ -1232,6 +1246,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AlterClientQuotas"/>
     AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null);
 
