@@ -7,6 +7,49 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 15 / Phase 14 — "split the .NET Admin client into a sync and an async flavour": DONE (2026-10-11); not pushed. N=95. Mode A (no Mode B).** Branch `prashah_dev_dotnet_binding`, base `2d73a746` (= `origin/prashah_dev_dotnet_binding`, PR #196). The commits are not squashed:
+  - Plan `29c78576`. S1 `cca34729`. S2 `70a68577`. S3a `3af5532b` `d6566235`. S3b `a6f09dde` `72c801c0`. S4 `fbe72c47` `ef96b747` `6fba2aa6`. Q5 `2730fc93` (the checkpoint rulings in the plan).
+  - S5a `b868682f` `b7ea260b` `f4c4cd1f`. S5b `e716d3b9` `7e2daecf`. S5c `221ef160` `3f17adc9`. S5d `95188252` `d3b739b1`. S5e `f802dee0` `6d31a881`. S5f `f2bfc9fd` `a617eb5a` `19cd4d23`. S5g `ac61d1ae` `98167351`.
+  - Critic-2 fixes `696927ac` `fce1aacb`. S6 `b3bb9fb3` `e871d03e`. S7 `6243491a` (the rule texts) `1567d020` (the xmldoc sweep). Then this close.
+
+  Plan and review record: `design/history/M15/P14-admin-sync-async-split/PLAN.md` (its §0 Approval record holds the rulings). Proof of Mode A: `git diff --stat 2d73a746 -- rust/src rust/cbindgen.toml rust/build.rs` is empty; `internal static extern` stays 219 (`NativeMethods.cs`) + 357 (`NativeMethods.Admin.cs`); the header SHA-1 is unchanged (`7c27280e…`). The Rust test harness is touched only in `rust/tests/common/` (G8 clean).
+  - **What shipped.**
+    - Two flavours. Sync `IAdmin` (`KafkaAdminClient` / `MockAdminClient`): its `*Result` types hold `KafkaFuture` / `KafkaFuture<T>`, whose `Get()` blocks. Async `IAsyncAdmin` (`AsyncKafkaAdminClient` / `AsyncMockAdminClient`): its `Async*Result` types hold `AsyncKafkaFuture` / `AsyncKafkaFuture<T>`, whose `Get()` is awaited. The non-generic `KafkaFuture` / `AsyncKafkaFuture` stand for Java's `KafkaFuture<Void>`.
+    - One internal core per RPC (`NativeAdminClient.X(..., AdminFlavour)`), wrapped by each flavour's `From`. The flavour is chosen inside the per-key completion: `IAdminCompletion<T>`, implemented by `SyncCompletion<T>` and `TaskAdminCompletion<T>`, selected by `AdminFlavour`. `AdminCallbacks`, the countdown and the DllImports are unchanged.
+    - The sync composites run over latches, not Tasks: `SyncFutureSource`, `ProjectedSyncFuture`, `AllOfSyncFuture`, `GatheringAllOfSyncFuture`, `FailFastGroupSyncFuture`. A sync `Get()` needs no thread-pool thread.
+    - A sync `Close(TimeSpan)` over the existing sync `kafka_admin_AdminClient_close`. `IAdmin : IDisposable` only; `IAsyncAdmin : IAsyncDisposable, IDisposable`.
+    - The grpc-server serves admin on both flavours (the sync `AdminServiceImpl` plus `AsyncAdminServiceImpl`), and the Rust harness has a `dotnet_async` admin arm.
+  - **Rulings.** PLAN §0: D1–D19, Q1–Q8, the a/b rule, the Q5 checkpoint rulings, and the rule-file texts S7 applied in `6243491a`. ⚠ **Text 1 is not applied and is pending a ruling.** Appended at `dotnet/CLAUDE.md:59-61` (after "…`MockAdminClient`, M15)"), its closing period lands before the existing "; producer transactions are **not** exposed yet." and reads ").;". The proposed fix is to drop the text's final period, so the existing clause continues the sentence.
+  - **⚠ Breaking (R8, pre-publish).** Every existing .NET admin user breaks: `KafkaAdminClient` / `MockAdminClient` / `IAdmin` are now sync, and `await` on a `KafkaFuture` does not compile. Async users move to `AsyncKafkaAdminClient` / `IAsyncAdmin`. This is allowed before 1.0.
+  - **Q3 parity deviation.** The 10 Result constructors that Java makes public (7) or protected (3) are internal on both flavours, so all 88 Result constructors are internal. Each one's xmldoc says so and points at FU-5.
+  - **ListTransactions fail-fast rule.** `AllByBrokerId()` / `All()` compose per call, as Java and the async flavour do. Brokers already complete when the view is requested are examined in discovery order, and the first faulted one wins. Otherwise the first broker to fail in time wins. Zero brokers complete with an empty map.
+  - **Supersessions** (the records themselves are left as written):
+    - M15 D2 ("ONE `IAdmin`, no `IAsyncAdmin`"): the M15/P1 entry at line 702 and its "Public surface" bullet at line 708.
+    - M15/P12 D1 ("the admin harness has a sync arm only"): the M15/P12 entry's residual (a) at line 478.
+    - The M11/P4.2 D10 naming note (Java's Admin `KafkaFuture` "maps to `Task<T>`"): the `dotnet/CLAUDE.md` idiom row now carries the M15/P14 mapping (text 3), and the matching remark in `IAsyncProducer`'s xmldoc is replaced (`1567d020`).
+  - **Closed.** The Admin-xmldoc half of the M11/P4.2 entry's "For the user" item 4 (line 123): `IAdmin.cs:32`, `CreateTopicsResult.cs:30`, `ListTopicsResult.cs:105` and `DescribeClusterResult.cs:49-50`, by the S7 sweep (D18). Its `dotnet/CLAUDE.md:195` half stays open.
+  - **Gates at close:**
+    - Unit tests 3010 → **3791** on net8.0 and net10.0; soak 165/165; grpc-server 101; perf-unit 47.
+    - Native gRPC harness 169 → **248**: `__grpc_dotnet` 124, and `__grpc_dotnet_async` 45 → **124**, with `DOTNET_GRPC_SKIPS` (raw `--list` 127 / 127). The admin share is **79** per backend; the plan's 78 / 247 was corrected at Q5.
+    - Mode B: none (see the Mode A proof above).
+    - `AdminP14SyncStarvationTests`, and the mutation checks M1–M12 of PLAN §7.7; the results are in the slice commit bodies.
+    - S7: 0 warnings and 0 errors on all three TFMs (every xmldoc cref resolves); `dotnet format` clean.
+  - **Review.**
+    - Critic pass 1 (after S4): zero findings.
+    - Critic pass 2 (after S5g): the sync ListTransactions countdown sweep was untested, fixed in `696927ac`. Verifying that fix found a second item, the sync repeated-broker-id de-duplication untested, fixed in `fce1aacb`. Both verified resolved.
+    - Critic pass 3 (after S7): recorded by the Manager at close.
+  - **Known, not fixed (out of scope):**
+    - The async flavour's `ObjectDisposedException` names the sync client type. The core picks the name from `_isMock`; cosmetic, and pinned by a test.
+    - A second concurrent sync `Close` returns at once, where Java joins the thread. Pre-P14 (the `TryBeginClose` latch).
+    - For the six producer / transaction RPCs, the core mock fails every key, where Java's `MockAdminClient` throws "Not implemented yet" from the call. Pre-P14 (the Rust core mock).
+    - The known flake `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` failed twice in a row once during S5e.
+  - **For the user:**
+    1. Follow-ups: FU-5 (tracked) — revisit making the 10 Result constructors public again, together with a public `KafkaFuture<T>.CompletedFuture(T)` (Java's `KafkaFuture.completedFuture`) and an async analog, so users can build Results (for example to mock `IAdmin`). It sits alongside FU-1 to FU-4, defined in the M11/P4.2 entry's "For the user" item 1 (line 120).
+    2. Text 1 (see Rulings) needs a ruling.
+  - **M18/P1 is pushed** (`origin/prashah_dev_dotnet_binding` = `2d73a746` at this phase's base, PR #196). Its "not pushed" text below is historical and is left as written.
+  - **Next unused dotnet N = 96.**
+  - **Not pushed.** The user pushes with `git push-external`.
+
 - **Milestone 18 / Phase 1 — ".NET backends for the chaos harness": DONE (2026-10-09); not pushed. N=94. Mode A.** Branch `prashah_dev_dotnet_binding`, base `918219ac` (= `origin/prashah_dev_dotnet_binding`, PR #196). The commits are not squashed:
   - Plan `231625cb`. S0 `9c088d82` (merge of master `5d4c6b80`, upstream #184's chaos harness; no conflicts, `--remerge-diff` empty).
   - S1 `594e8643` (the `dotnet` / `dotnet-async` backends in `rust/tests/chaos/{workload.rs,config.rs,README.md}`, `rust/xtask/src/main.rs`, `design/current/chaos-parity-gap.md` and the server csproj's `chaos_service.proto` line).
