@@ -51,7 +51,7 @@ use crate::common::multilanguage_producer::MultilanguageProducer;
 /// rather than like [`ConsumerBackendFactory`]: `AdminBackend`'s methods are
 /// `async fn` in the trait, which is not dyn-compatible, so there is no
 /// `Box<dyn AdminBackend>` to hand back. Test bodies are written generically
-/// over `<F: AdminBackendFactory>` and quintuplicated by
+/// over `<F: AdminBackendFactory>` and expanded once per backend by
 /// [`crate::multilanguage_admin_test`].
 pub trait AdminBackendFactory {
     /// The concrete admin backend this factory constructs.
@@ -558,8 +558,9 @@ mod grpc_backends {
     /// identical wiring, only the backend label (used in logs / client-id defaults) differs,
     /// mirroring [`PythonGrpcFactory`] vs [`PythonAsyncGrpcFactory`].
     ///
-    /// Serves BOTH services, same as [`DotnetGrpcFactory`]: this implements both
-    /// [`ProducerBackendFactory`] (M12/P1) and [`ConsumerBackendFactory`] (M8/P2).
+    /// Serves the same three services as [`DotnetGrpcFactory`]: this implements
+    /// [`ProducerBackendFactory`] (M12/P1), [`ConsumerBackendFactory`] (M8/P2) and
+    /// [`AdminBackendFactory`] (M15/P14, over the binding's `IAsyncAdmin`).
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
     }
@@ -636,9 +637,9 @@ mod grpc_backends {
         }
     }
 
-    /// M15/P12: the sync .NET image also serves `AdminService`. There is no
-    /// [`DotnetAsyncGrpcFactory`] twin — .NET has no async admin surface, so an
-    /// async arm would drive the same `AdminServiceImpl` over the same `IAdmin`.
+    /// M15/P12: the sync .NET image also serves `AdminService`, through the sync
+    /// `AdminServiceImpl` over the binding's `IAdmin` (blocking `KafkaFuture`s since
+    /// M15/P14). Its [`DotnetAsyncGrpcFactory`] twin follows.
     impl AdminBackendFactory for DotnetGrpcFactory {
         type Admin = MultilanguageAdmin;
 
@@ -652,6 +653,31 @@ mod grpc_backends {
 
         fn name(&self) -> &'static str {
             "dotnet"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
+
+    /// M15/P14: the async .NET image serves `AdminService` too, through
+    /// `AsyncAdminServiceImpl` over the binding's `IAsyncAdmin` (awaited
+    /// `AsyncKafkaFuture`s). Since the sync/async split the two flavours run different
+    /// managed code, so each gets its own arm, as `python` / `python_async` do. Identical
+    /// wiring to [`DotnetGrpcFactory`]'s admin impl; only the backend label differs.
+    impl AdminBackendFactory for DotnetAsyncGrpcFactory {
+        type Admin = MultilanguageAdmin;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, Error> {
+            MultilanguageAdmin::new(self.channel.clone(), config, "dotnet_async").await
+        }
+
+        async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, Error> {
+            MultilanguageAdmin::new_mock(self.channel.clone(), num_brokers, "dotnet_async").await
+        }
+
+        fn name(&self) -> &'static str {
+            "dotnet_async"
         }
 
         fn needs_container_bootstrap(&self) -> bool {
