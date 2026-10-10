@@ -12,40 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.ExpireDelegationToken"/> — Java's
-/// <c>org.apache.kafka.clients.admin.ExpireDelegationTokenResult</c>: one awaitable over the
+/// <c>org.apache.kafka.clients.admin.ExpireDelegationTokenResult</c>: one future over the
 /// token's expiry timestamp (<c>:26</c>).
 /// </summary>
 /// <remarks>
+/// <para>
 /// ⚠ See <see cref="RenewDelegationTokenResult"/> on the byte-identical accessor sets and the
 /// wiring guard that keeps the two readers apart.
+/// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the expiry has completed, and
+/// needs no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncExpireDelegationTokenResult"/>
 public sealed class ExpireDelegationTokenResult
 {
-    private readonly Task<long> _expiryTimestamp;
+    private readonly KafkaFuture<long> _expiryTimestamp;
 
-    internal ExpireDelegationTokenResult(Task<long> expiryTimestamp)
+    internal ExpireDelegationTokenResult(KafkaFuture<long> expiryTimestamp)
     {
         _expiryTimestamp = expiryTimestamp;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ExpireDelegationTokenResult From(SingleAdminOperation<long> operation) =>
-        new ExpireDelegationTokenResult(operation.Task);
+        new ExpireDelegationTokenResult(new KafkaFuture<long>(operation.SyncSource));
 
     /// <summary>
     /// The expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>
     /// (<c>:35</c>).
     /// </summary>
-    /// <returns>An awaitable over the timestamp.</returns>
-    public Task<long> ExpiryTimestamp() => _expiryTimestamp;
+    /// <returns>A future over the timestamp.</returns>
+    /// <remarks>
+    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
+    /// completion.
+    /// </remarks>
+    public KafkaFuture<long> ExpiryTimestamp() => _expiryTimestamp;
 }

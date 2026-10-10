@@ -1253,7 +1253,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Describes users' SASL/SCRAM credentials — Java's
     /// <c>describeUserScramCredentials(List&lt;String&gt;, DescribeUserScramCredentialsOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries three
+    /// <see cref="KafkaFuture{T}"/> accessors, whose <c>Get()</c> blocks the calling thread until
+    /// the description completes.
     /// </summary>
     /// <param name="users">
     /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b>
@@ -1271,6 +1273,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials"/>
     DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
         DescribeUserScramCredentialsOptions? options = null);
@@ -1278,7 +1281,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Upserts and deletes users' SASL/SCRAM credentials — Java's
     /// <c>alterUserScramCredentials(List&lt;UserScramCredentialAlteration&gt;, AlterUserScramCredentialsOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/> per user, whose <c>Get()</c> blocks the calling thread until that
+    /// user completes.
     /// </summary>
     /// <param name="alterations">
     /// The alterations to apply. ⚠ A repeated user is <b>passed through</b>, as Java does: both
@@ -1287,7 +1292,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable per user — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
+    /// One future per user — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="AlterUserScramCredentialsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="alterations"/> is null.</exception>
@@ -1297,6 +1302,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AlterUserScramCredentials"/>
     AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options = null);
@@ -1304,11 +1310,12 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Creates a delegation token — Java's
     /// <c>createDelegationToken(CreateDelegationTokenOptions)</c>. Returns <b>immediately</b>,
-    /// without waiting for the broker.
+    /// without waiting for the broker; the result carries one <see cref="KafkaFuture{T}"/>, whose
+    /// <c>Get()</c> blocks the calling thread until the token is issued.
     /// </summary>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable over the issued token. See <see cref="CreateDelegationTokenResult"/>.
+    /// One future over the issued token. See <see cref="CreateDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <c>options.Renewers</c> is null or contains a null element, or a renewer's or
@@ -1316,12 +1323,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.CreateDelegationToken"/>
     CreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options = null);
 
     /// <summary>
     /// Renews a delegation token — Java's
     /// <c>renewDelegationToken(byte[], RenewDelegationTokenOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// renewal completes.
     /// </summary>
     /// <param name="hmac">
     /// The token's MAC, passed back <b>verbatim</b> from
@@ -1330,34 +1340,40 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable over the new expiry timestamp. See <see cref="RenewDelegationTokenResult"/>.
+    /// One future over the new expiry timestamp. See <see cref="RenewDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.RenewDelegationToken"/>
     RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null);
 
     /// <summary>
     /// Expires a delegation token — Java's
     /// <c>expireDelegationToken(byte[], ExpireDelegationTokenOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// expiry completes.
     /// </summary>
     /// <param name="hmac">
     /// The token's MAC, passed back verbatim — see <see cref="RenewDelegationToken"/>.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable over the expiry timestamp. See <see cref="ExpireDelegationTokenResult"/>.
+    /// One future over the expiry timestamp. See <see cref="ExpireDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ExpireDelegationToken"/>
     ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null);
 
     /// <summary>
     /// Describes delegation tokens — Java's
     /// <c>describeDelegationToken(DescribeDelegationTokenOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// description completes.
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. ⚠ A null
@@ -1365,7 +1381,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// filters by nothing.
     /// </param>
     /// <returns>
-    /// One awaitable over the token list. See <see cref="DescribeDelegationTokenResult"/>.
+    /// One future over the token list. See <see cref="DescribeDelegationTokenResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <c>options.Owners</c> contains a null element, or an owner whose principal type or
@@ -1373,31 +1389,36 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeDelegationToken"/>
     DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null);
 
     /// <summary>
     /// Describes the cluster's finalized and supported features — Java's
     /// <c>describeFeatures(DescribeFeaturesOptions)</c>. Returns <b>immediately</b>, without
-    /// waiting for the broker.
+    /// waiting for the broker; the result carries one <see cref="KafkaFuture{T}"/>, whose
+    /// <c>Get()</c> blocks the calling thread until the description completes.
     /// </summary>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// The <b>single</b> awaitable Java publishes, over the whole composite. See
+    /// The <b>single</b> future Java publishes, over the whole composite. See
     /// <see cref="DescribeFeaturesResult"/>.
     /// </returns>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeFeatures"/>
     DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null);
 
     /// <summary>
     /// Applies feature updates — Java's
     /// <c>updateFeatures(Map&lt;String, FeatureUpdate&gt;, UpdateFeaturesOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/> per feature, whose <c>Get()</c> blocks the calling thread until
+    /// that feature completes.
     /// </summary>
     /// <param name="featureUpdates">The update to apply to each feature, keyed by feature name.</param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable per feature — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
+    /// One future per feature — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>. See
     /// <see cref="UpdateFeaturesResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
@@ -1418,6 +1439,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// appear twice (<see cref="KafkaException.Code"/> <c>-3</c>, local illegal argument).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.UpdateFeatures"/>
     UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null);

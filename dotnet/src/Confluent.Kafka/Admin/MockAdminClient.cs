@@ -326,57 +326,57 @@ public sealed class MockAdminClient : IAdmin
     /// Java's <c>MockAdminClient.describeUserScramCredentials</c> throws
     /// <c>UnsupportedOperationException("Not implemented yet")</c>
     /// (<c>MockAdminClient.java:1254</c>); the Rust mock mirrors that as one exceptional future
-    /// for the whole call (<c>admin-client.md</c> §9), so every accessor faults with that
+    /// for the whole call (<c>admin-client.md</c> §9), so every accessor fails with that
     /// message. This is faithful, not a gap.
     /// </remarks>
     public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
         DescribeUserScramCredentialsOptions? options = null) =>
         DescribeUserScramCredentialsResult.From(
-            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Async));
+            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     /// <remarks>
     /// Java's <c>MockAdminClient.alterUserScramCredentials</c> throws
     /// <c>UnsupportedOperationException("Not implemented yet")</c>
     /// (<c>MockAdminClient.java:1259</c>); the Rust mock mirrors that <em>per user</em>, so
-    /// every user's awaitable faults with that message.
+    /// every user's future fails with that message.
     /// </remarks>
     public AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options = null) =>
         AlterUserScramCredentialsResult.From(
-            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Async));
+            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public CreateDelegationTokenResult CreateDelegationToken(
         CreateDelegationTokenOptions? options = null) =>
-        CreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Async));
+        CreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null) =>
-        RenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Async));
+        RenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
-        ExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Async));
+        ExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null) =>
-        DescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Async));
+        DescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
-        DescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Async));
+        DescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null) =>
-        UpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Async));
+        UpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public FenceProducersResult FenceProducers(

@@ -127,18 +127,21 @@ public sealed class PublicAdminP7ShapeParityTests
     /// <summary>
     /// The two <b>per-key void</b> results publish Java's <c>values()</c> + <c>all()</c> pair
     /// and nothing more (<c>AlterUserScramCredentialsResult.java:31</c>,
-    /// <c>UpdateFeaturesResult.java:29</c>) — a per-key <see cref="Task"/>, not
-    /// <c>Task&lt;T&gt;</c>, because Java's future is <c>KafkaFuture&lt;Void&gt;</c>.
+    /// <c>UpdateFeaturesResult.java:29</c>) — a per-key <see cref="KafkaFuture"/> on the sync flavour and
+    /// <see cref="AsyncKafkaFuture"/> on the async one, never a valued future, because Java's future is
+    /// <c>KafkaFuture&lt;Void&gt;</c> (M15/P14 S5e).
     /// </summary>
     [Theory]
-    [InlineData(typeof(AlterUserScramCredentialsResult))]
-    [InlineData(typeof(UpdateFeaturesResult))]
-    public void PerKeyVoidResults_PublishValuesAndAll(Type resultType)
+    [InlineData(typeof(AlterUserScramCredentialsResult), typeof(KafkaFuture))]
+    [InlineData(typeof(UpdateFeaturesResult), typeof(KafkaFuture))]
+    [InlineData(typeof(AsyncAlterUserScramCredentialsResult), typeof(AsyncKafkaFuture))]
+    [InlineData(typeof(AsyncUpdateFeaturesResult), typeof(AsyncKafkaFuture))]
+    public void PerKeyVoidResults_PublishValuesAndAll(Type resultType, Type futureType)
     {
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task>),
+            typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(string), futureType),
             resultType.GetProperty("Values")!.PropertyType);
-        Assert.Equal(typeof(Task), resultType.GetMethod("All", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(futureType, resultType.GetMethod("All", Type.EmptyTypes)!.ReturnType);
 
         Assert.Equal(
             new[] { "All", "Values" },
@@ -147,13 +150,18 @@ public sealed class PublicAdminP7ShapeParityTests
 
     /// <summary>
     /// The four <b>single-root-value</b> results publish exactly one accessor each, named for
-    /// the Java method that returns it.
+    /// the Java method that returns it — a <see cref="KafkaFuture{T}"/> on the sync flavour and an
+    /// <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
     /// </summary>
     [Theory]
-    [InlineData(typeof(CreateDelegationTokenResult), "DelegationToken", typeof(Task<DelegationToken>))]
-    [InlineData(typeof(RenewDelegationTokenResult), "ExpiryTimestamp", typeof(Task<long>))]
-    [InlineData(typeof(ExpireDelegationTokenResult), "ExpiryTimestamp", typeof(Task<long>))]
-    [InlineData(typeof(DescribeFeaturesResult), "FeatureMetadata", typeof(Task<FeatureMetadata>))]
+    [InlineData(typeof(CreateDelegationTokenResult), "DelegationToken", typeof(KafkaFuture<DelegationToken>))]
+    [InlineData(typeof(RenewDelegationTokenResult), "ExpiryTimestamp", typeof(KafkaFuture<long>))]
+    [InlineData(typeof(ExpireDelegationTokenResult), "ExpiryTimestamp", typeof(KafkaFuture<long>))]
+    [InlineData(typeof(DescribeFeaturesResult), "FeatureMetadata", typeof(KafkaFuture<FeatureMetadata>))]
+    [InlineData(typeof(AsyncCreateDelegationTokenResult), "DelegationToken", typeof(AsyncKafkaFuture<DelegationToken>))]
+    [InlineData(typeof(AsyncRenewDelegationTokenResult), "ExpiryTimestamp", typeof(AsyncKafkaFuture<long>))]
+    [InlineData(typeof(AsyncExpireDelegationTokenResult), "ExpiryTimestamp", typeof(AsyncKafkaFuture<long>))]
+    [InlineData(typeof(AsyncDescribeFeaturesResult), "FeatureMetadata", typeof(AsyncKafkaFuture<FeatureMetadata>))]
     public void SingleValueResults_PublishExactlyOneAccessor(
         Type resultType, string accessor, Type returnType)
     {
@@ -163,44 +171,71 @@ public sealed class PublicAdminP7ShapeParityTests
 
     /// <summary>
     /// <see cref="DescribeDelegationTokenResult"/> publishes Java's single collection accessor
-    /// (<c>DescribeDelegationTokenResult.java:37</c>).
+    /// (<c>DescribeDelegationTokenResult.java:37</c>) — a <see cref="KafkaFuture{T}"/> on the sync flavour and an
+    /// <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
     /// </summary>
-    [Fact]
-    public void DescribeDelegationTokenResult_PublishesOneCollectionAccessor()
+    [Theory]
+    [InlineData(typeof(DescribeDelegationTokenResult), typeof(KafkaFuture<IReadOnlyList<DelegationToken>>))]
+    [InlineData(typeof(AsyncDescribeDelegationTokenResult), typeof(AsyncKafkaFuture<IReadOnlyList<DelegationToken>>))]
+    public void DescribeDelegationTokenResult_PublishesOneCollectionAccessor(Type resultType, Type returnType)
     {
         Assert.Equal(
-            typeof(Task<IReadOnlyList<DelegationToken>>),
-            typeof(DescribeDelegationTokenResult)
-                .GetMethod(nameof(DescribeDelegationTokenResult.DelegationTokens), Type.EmptyTypes)!
-                .ReturnType);
+            returnType,
+            resultType.GetMethod(nameof(DescribeDelegationTokenResult.DelegationTokens), Type.EmptyTypes)!.ReturnType);
 
-        Assert.Equal(new[] { "DelegationTokens" }, PublicMembers(typeof(DescribeDelegationTokenResult)));
+        Assert.Equal(new[] { "DelegationTokens" }, PublicMembers(resultType));
     }
 
     /// <summary>
     /// <see cref="DescribeUserScramCredentialsResult"/> publishes Java's <b>three</b>
     /// accessors, with <c>Description</c> taking the user name
-    /// (<c>DescribeUserScramCredentialsResult.java:47,61,84</c>).
+    /// (<c>DescribeUserScramCredentialsResult.java:47,61,84</c>) — each a <see cref="KafkaFuture{T}"/> on the
+    /// sync flavour and an <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
     /// </summary>
-    [Fact]
-    public void DescribeUserScramCredentialsResult_PublishesJavasThreeAccessors()
+    /// <param name="result">The Result type of one flavour.</param>
+    /// <param name="future">That flavour's open generic future type.</param>
+    [Theory]
+    [InlineData(typeof(DescribeUserScramCredentialsResult), typeof(KafkaFuture<>))]
+    [InlineData(typeof(AsyncDescribeUserScramCredentialsResult), typeof(AsyncKafkaFuture<>))]
+    public void DescribeUserScramCredentialsResult_PublishesJavasThreeAccessors(Type result, Type future)
     {
-        Type result = typeof(DescribeUserScramCredentialsResult);
-
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<string, UserScramCredentialsDescription>>),
+            future.MakeGenericType(typeof(IReadOnlyDictionary<string, UserScramCredentialsDescription>)),
             result.GetMethod(nameof(DescribeUserScramCredentialsResult.All), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
-            typeof(Task<IReadOnlyList<string>>),
+            future.MakeGenericType(typeof(IReadOnlyList<string>)),
             result.GetMethod(nameof(DescribeUserScramCredentialsResult.Users), Type.EmptyTypes)!.ReturnType);
 
         MethodInfo description = result.GetMethod(
             nameof(DescribeUserScramCredentialsResult.Description), new[] { typeof(string) })!;
-        Assert.Equal(typeof(Task<UserScramCredentialsDescription>), description.ReturnType);
+        Assert.Equal(future.MakeGenericType(typeof(UserScramCredentialsDescription)), description.ReturnType);
 
         // ⚠ No per-key `Values` here: the keys come back IN the response (an empty request
         // describes every user), so there is nothing to key a future on before the submit.
         Assert.Equal(new[] { "All", "Description", "Users" }, PublicMembers(result));
+    }
+
+    /// <summary>
+    /// Java's constructor is <b>public</b> (<c>AlterUserScramCredentialsResult.java:38</c>); the sync one here is
+    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
+    /// <see cref="KafkaFuture"/> per user, and it still rejects a null map before anything can dereference it
+    /// (reached through <c>InternalsVisibleTo</c>).
+    /// </summary>
+    [Fact]
+    public void AlterUserScramCredentialsResult_Constructor_IsInternalAndRejectsNull()
+    {
+        Assert.Empty(typeof(AlterUserScramCredentialsResult).GetConstructors());
+        ConstructorInfo constructor = Assert.Single(
+            typeof(AlterUserScramCredentialsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
+        Assert.Equal(
+            typeof(IReadOnlyDictionary<string, KafkaFuture>),
+            Assert.Single(constructor.GetParameters()).ParameterType);
+
+        ArgumentNullException error =
+            Assert.Throws<ArgumentNullException>(() => new AlterUserScramCredentialsResult(null!));
+        Assert.Equal("futures", error.ParamName);
+        Assert.Equal(new ArgumentNullException("futures").Message, error.Message);
     }
 
     /// <summary>

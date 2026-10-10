@@ -266,44 +266,44 @@ public sealed class KafkaAdminClient : IAdmin
         IReadOnlyCollection<string>? users = null,
         DescribeUserScramCredentialsOptions? options = null) =>
         DescribeUserScramCredentialsResult.From(
-            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Async));
+            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options = null) =>
         AlterUserScramCredentialsResult.From(
-            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Async));
+            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public CreateDelegationTokenResult CreateDelegationToken(
         CreateDelegationTokenOptions? options = null) =>
-        CreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Async));
+        CreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null) =>
-        RenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Async));
+        RenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
-        ExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Async));
+        ExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null) =>
-        DescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Async));
+        DescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
-        DescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Async));
+        DescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null) =>
-        UpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Async));
+        UpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public FenceProducersResult FenceProducers(

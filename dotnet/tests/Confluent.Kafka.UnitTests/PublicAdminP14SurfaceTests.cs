@@ -100,6 +100,14 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(DescribeAclsResult),
         nameof(DescribeClientQuotasResult),
         nameof(AlterClientQuotasResult),
+        nameof(DescribeUserScramCredentialsResult),
+        nameof(AlterUserScramCredentialsResult),
+        nameof(CreateDelegationTokenResult),
+        nameof(RenewDelegationTokenResult),
+        nameof(ExpireDelegationTokenResult),
+        nameof(DescribeDelegationTokenResult),
+        nameof(DescribeFeaturesResult),
+        nameof(UpdateFeaturesResult),
     };
 
     /// <summary>
@@ -138,6 +146,14 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.DescribeAcls),
         nameof(IAdmin.DescribeClientQuotas),
         nameof(IAdmin.AlterClientQuotas),
+        nameof(IAdmin.DescribeUserScramCredentials),
+        nameof(IAdmin.AlterUserScramCredentials),
+        nameof(IAdmin.CreateDelegationToken),
+        nameof(IAdmin.RenewDelegationToken),
+        nameof(IAdmin.ExpireDelegationToken),
+        nameof(IAdmin.DescribeDelegationToken),
+        nameof(IAdmin.DescribeFeatures),
+        nameof(IAdmin.UpdateFeatures),
     };
 
     private static readonly string[] s_mockOnly =

@@ -14,7 +14,6 @@
 
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 using Token = Confluent.Kafka.DelegationToken;
@@ -23,35 +22,37 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.DescribeDelegationToken"/> — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one awaitable over the
+/// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one future over the
 /// whole token list (<c>:29</c>). Java declares no <c>all()</c> here.
 /// </summary>
+/// <remarks>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the description has completed, and
+/// needs no thread-pool thread: the future here is composed on the waiting thread, never over a <c>Task</c>.
+/// </remarks>
+/// <seealso cref="AsyncDescribeDelegationTokenResult"/>
 public sealed class DescribeDelegationTokenResult
 {
-    private readonly Task<IReadOnlyList<Token>> _tokens;
+    private readonly KafkaFuture<IReadOnlyList<Token>> _tokens;
 
-    internal DescribeDelegationTokenResult(Task<IReadOnlyCollection<Token>> tokens)
+    internal DescribeDelegationTokenResult(KafkaFuture<IReadOnlyCollection<Token>> tokens)
     {
-        _tokens = Project(tokens);
+        // Java's accessor is List-typed (:38) while the collection walker produces
+        // IReadOnlyCollection, so the one list it built is re-presented rather than rebuilt. The
+        // projection is built once and memoized, so every call returns the same future and every
+        // Get() the same list.
+        _tokens = SyncAdminFutures.Project(
+            tokens, described => described as IReadOnlyList<Token> ?? described.ToList());
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static DescribeDelegationTokenResult From(
         SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation) =>
-        new DescribeDelegationTokenResult(operation.Task);
+        new DescribeDelegationTokenResult(new KafkaFuture<IReadOnlyCollection<Token>>(operation.SyncSource));
 
     /// <summary>The described tokens — Java's <c>delegationTokens()</c> (<c>:38</c>).</summary>
-    /// <returns>An awaitable over the token list, in the order the ABI delivered it.</returns>
-    public Task<IReadOnlyList<Token>> DelegationTokens() => _tokens;
-
-    // Java's accessor is List-typed (:38) while the collection walker produces
-    // IReadOnlyCollection, so the one list it built is re-presented rather than rebuilt.
-    private static async Task<IReadOnlyList<Token>> Project(Task<IReadOnlyCollection<Token>> tokens)
-    {
-        IReadOnlyCollection<Token> described = await tokens.ConfigureAwait(false);
-        return described as IReadOnlyList<Token> ?? described.ToList();
-    }
+    /// <returns>A future over the token list, in the order the ABI delivered it.</returns>
+    public KafkaFuture<IReadOnlyList<Token>> DelegationTokens() => _tokens;
 }
