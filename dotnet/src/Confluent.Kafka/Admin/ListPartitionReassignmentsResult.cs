@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -22,14 +21,14 @@ namespace Confluent.Kafka.Admin;
 /// The result of
 /// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
 /// — the .NET realization of
-/// Java's <c>ListPartitionReassignmentsResult</c>: <b>one</b> awaitable over the whole
+/// Java's <c>ListPartitionReassignmentsResult</c>: <b>one</b> future over the whole
 /// listing (<c>ListPartitionReassignmentsResult.java:31, :40</c>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// ⚠ <b>The name is a false parallel with
 /// <see cref="AlterPartitionReassignmentsResult"/> — the shapes are different.</b> That one
-/// holds <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>, one awaitable per
+/// holds <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>, one future per
 /// partition with a per-partition error. This one holds a <b>single</b>
 /// <c>KafkaFuture&lt;Map&lt;TopicPartition, PartitionReassignment&gt;&gt;</c>
 /// (<c>:31</c>), and the ABI agrees: <c>kafka_admin_ListPartitionReassignmentsResult_t</c>
@@ -47,43 +46,49 @@ namespace Confluent.Kafka.Admin;
 /// <b>Java publishes exactly one accessor</b> (<c>:40</c>), so there is no second view
 /// here either.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
+/// no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListPartitionReassignmentsResult"/>
 public sealed class ListPartitionReassignmentsResult
 {
-    private readonly Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> _future;
+    private readonly KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListPartitionReassignmentsResult(KafkaFuture&lt;Map&lt;…&gt;&gt;)</c>
     /// (<c>:33-35</c>).
     /// </summary>
     internal ListPartitionReassignmentsResult(
-        Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> future)
+        KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> future)
     {
         _future = future;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ListPartitionReassignmentsResult From(
         SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation) =>
-        new ListPartitionReassignmentsResult(operation.Task);
+        new ListPartitionReassignmentsResult(
+            new KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(operation.SyncSource));
 
     /// <summary>
     /// Each partition's ongoing reassignment — Java's <c>reassignments()</c>
     /// (<c>:40</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the map, or faulting with the call's own
+    /// A future yielding the map, or failing with the call's own
     /// <see cref="KafkaException"/>. Partitions with no ongoing reassignment are absent
     /// rather than present-and-empty.
     /// </returns>
     /// <remarks>
-    /// This is the underlying future itself, so every call returns the <b>same</b>
-    /// <see cref="Task"/> instance — matching Java, whose accessor returns the stored
+    /// This is the underlying future itself, so every call returns an <b>equal</b>
+    /// <see cref="KafkaFuture{T}"/> — the same latch, matching Java, whose accessor returns the stored
     /// future field.
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments() => _future;
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments() => _future;
 }

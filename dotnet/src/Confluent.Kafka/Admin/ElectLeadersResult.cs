@@ -13,25 +13,24 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.ElectLeaders"/> — the .NET realization of Java's
-/// <c>ElectLeadersResult</c>: <b>one</b> awaitable over a map whose values are the
+/// <c>ElectLeadersResult</c>: <b>one</b> future over a map whose values are the
 /// per-partition outcomes (<c>ElectLeadersResult.java:47, :54</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted awaitable.</b> Java's
+/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a failed future.</b> Java's
 /// field is
 /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;</c>
 /// (<c>:36</c>), and the javadoc on <c>partitions()</c> spells the semantics out: "If the
 /// election succeeded then the value for a topic partition will be the empty Optional.
 /// Otherwise the election failed and the Optional will be set with the error"
-/// (<c>:43-46</c>). So a failed partition resolves the <em>same</em> successful task as
+/// (<c>:43-46</c>). So a failed partition resolves the <em>same</em> successful future as
 /// every other partition, carrying its error as
 /// <c>Optional&lt;Throwable&gt;</c> → <see cref="KafkaException"/>?.
 /// </para>
@@ -42,73 +41,79 @@ namespace Confluent.Kafka.Admin;
 /// accessor sets — <c>count</c>, <c>get_topic</c>, <c>get_partition</c>,
 /// <c>get_error</c>, <c>destroy</c> — yet
 /// <see cref="AlterPartitionReassignmentsResult"/> really is the ordinary per-key
-/// shape whose <c>get_error(i)</c> faults that partition's own awaitable. The Java
+/// shape whose <c>get_error(i)</c> fails that partition's own future. The Java
 /// return type is what separates them. See <c>AdminCallbacks.ElectLeadersOptionalError</c>
 /// for the reader that carries this, and the swap-detection tests that pin it.
 /// </para>
 /// <para>
-/// <b>Why one awaitable and not one per partition.</b> Java holds a single future, and
+/// <b>Why one future and not one per partition.</b> Java holds a single future, and
 /// the ABI agrees for a second reason: the request may name <em>no</em> partitions at all
 /// (<see cref="IAdmin.ElectLeaders"/> with a <see langword="null"/> selection means
 /// "every partition in the cluster"), so the result's keys are discovered from the
 /// response and cannot be pre-registered. The per-key bridge, which creates one source
 /// per requested key before the submit, cannot express that.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the election has completed, and
+/// needs no thread-pool thread: the futures here are composed on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncElectLeadersResult"/>
 public sealed class ElectLeadersResult
 {
-    private readonly Task<IReadOnlyDictionary<TopicPartition, KafkaException?>> _future;
+    private readonly KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ElectLeadersResult(KafkaFuture&lt;Map&lt;TopicPartition, Optional&lt;Throwable&gt;&gt;&gt;)</c>
     /// (<c>:38-40</c>).
     /// </summary>
-    internal ElectLeadersResult(Task<IReadOnlyDictionary<TopicPartition, KafkaException?>> future)
+    internal ElectLeadersResult(KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>> future)
     {
         _future = future;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ElectLeadersResult From(
         SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation) =>
-        new ElectLeadersResult(operation.Task);
+        new ElectLeadersResult(
+            new KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>>(operation.SyncSource));
 
     /// <summary>
     /// The partitions an election was attempted for, each mapped to its outcome — Java's
     /// <c>partitions()</c> (<c>:47</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the map. A <see langword="null"/> value means that partition's
+    /// A future yielding the map. A <see langword="null"/> value means that partition's
     /// election <b>succeeded</b> (Java's empty <c>Optional</c>); a non-null value is that
-    /// partition's own failure and does <b>not</b> fault this task. The task itself faults
+    /// partition's own failure and does <b>not</b> fail this future. The future itself fails
     /// only when the election could not be run at all.
     /// </returns>
     /// <remarks>
-    /// This is the underlying future itself, so every call returns the <b>same</b>
-    /// <see cref="Task"/> instance — matching Java, whose accessor returns the stored
+    /// This is the underlying future itself, so every call returns an <b>equal</b>
+    /// <see cref="KafkaFuture{T}"/> — the same latch, matching Java, whose accessor returns the stored
     /// future field. A method rather than a property, following the shape every
     /// future-returning admin accessor uses (<see cref="ListTopicsResult.NamesToListings"/>,
     /// <see cref="DescribeClusterResult.Nodes"/>).
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, KafkaException?>> Partitions() => _future;
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>> Partitions() => _future;
 
     /// <summary>
-    /// Completes when every partition's election succeeded, and faults with the first
+    /// Completes when every partition's election succeeded, and fails with the first
     /// failure among them otherwise — Java's <c>all()</c> (<c>:54</c>).
     /// </summary>
-    /// <returns>A task representing the whole election.</returns>
+    /// <returns>A future representing the whole election. Its <c>Get()</c> waits for the election.</returns>
     /// <remarks>
     /// <para>
-    /// ⚠ <b>Not an aggregate over N awaitables.</b> Java does not call
+    /// ⚠ <b>Not an aggregate over N futures.</b> Java does not call
     /// <c>KafkaFuture.allOf</c> here — it cannot, because there is only one future. It
     /// chains <c>whenComplete</c> on <c>partitions()</c>, forwards a call-level failure,
     /// and otherwise walks the map's <em>values</em> completing exceptionally with the
     /// first present <c>Optional</c> (<c>:56-68</c>). That loop is what is translated
-    /// below.
+    /// below, as a projection of <see cref="Partitions"/>.
     /// </para>
     /// <para>
     /// <b>Which failure "first" names.</b> Java iterates a <c>HashMap</c>, whose order it
@@ -119,25 +124,27 @@ public sealed class ElectLeadersResult
     /// <see cref="Partitions"/>, where they all remain.
     /// </para>
     /// <para>
-    /// A fresh task per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per
-    /// <c>all()</c> call. Admin is batch/administrative, so there is no per-record path to
-    /// budget (<c>admin-client.md</c> §10).
+    /// A fresh future per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per
+    /// <c>all()</c> call. Within one such future the walk runs once, on the first <c>Get()</c>'s thread, and every
+    /// later <c>Get()</c> rethrows the same <see cref="KafkaException"/> instance. Admin is batch/administrative, so
+    /// there is no per-record path to budget (<c>admin-client.md</c> §10).
     /// </para>
     /// </remarks>
-    public async Task All()
-    {
-        // A call-level failure propagates by the await itself — Java's `throwable != null`
-        // branch (:59-60).
-        IReadOnlyDictionary<TopicPartition, KafkaException?> partitions = await _future.ConfigureAwait(false);
-
-        foreach (KafkaException? exception in partitions.Values)
+    public KafkaFuture All() =>
+        SyncAdminFutures.Project(_future, static partitions =>
         {
-            if (exception is not null)
+            // A call-level failure propagates through the projection's source — Java's `throwable != null`
+            // branch (:59-60).
+            foreach (KafkaException? exception in partitions.Values)
             {
-                // Java's `result.completeExceptionally(exception.get()); return;` (:63-65)
-                // — the FIRST present Optional wins and the rest are not inspected.
-                throw exception;
+                if (exception is not null)
+                {
+                    // Java's `result.completeExceptionally(exception.get()); return;` (:63-65)
+                    // — the FIRST present Optional wins and the rest are not inspected.
+                    throw exception;
+                }
             }
-        }
-    }
+
+            return true;
+        }).Erase();
 }

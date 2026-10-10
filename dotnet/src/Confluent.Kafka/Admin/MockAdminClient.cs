@@ -147,14 +147,14 @@ public sealed class MockAdminClient : IAdmin
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
         ElectLeadersOptions? options = null) =>
-        ElectLeadersResult.From(_native.ElectLeaders(electionType, partitions, options, AdminFlavour.Async));
+        ElectLeadersResult.From(_native.ElectLeaders(electionType, partitions, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options = null) =>
         AlterPartitionReassignmentsResult.From(
-            _native.AlterPartitionReassignments(reassignments, options, AdminFlavour.Async));
+            _native.AlterPartitionReassignments(reassignments, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
@@ -177,19 +177,19 @@ public sealed class MockAdminClient : IAdmin
         IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null) =>
         ListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(partitions, options, AdminFlavour.Async));
+            _native.ListPartitionReassignments(partitions, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options) =>
         ListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(null, options, AdminFlavour.Async));
+            _native.ListPartitionReassignments(null, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null) =>
-        ListOffsetsResult.From(_native.ListOffsets(topicPartitionOffsets, options, AdminFlavour.Async));
+        ListOffsetsResult.From(_native.ListOffsets(topicPartitionOffsets, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>

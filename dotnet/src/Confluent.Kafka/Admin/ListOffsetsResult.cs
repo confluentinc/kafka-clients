@@ -15,14 +15,13 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.ListOffsets"/> — the .NET realization of Java's
-/// <c>ListOffsetsResult</c>: one awaitable <b>per partition</b>
+/// <c>ListOffsetsResult</c>: one future <b>per partition</b>
 /// (<c>ListOffsetsResult.java:32, :41, :54</c>).
 /// </summary>
 /// <remarks>
@@ -30,61 +29,70 @@ namespace Confluent.Kafka.Admin;
 /// ⚠ <b>Shape 1, not shape 3 — despite sharing a "list" name with
 /// <see cref="ListPartitionReassignmentsResult"/>.</b> Java stores
 /// <c>Map&lt;TopicPartition, KafkaFuture&lt;ListOffsetsResultInfo&gt;&gt;</c>
-/// (<c>:32</c>), so each partition has its own awaitable carrying its own value or its own
+/// (<c>:32</c>), so each partition has its own future carrying its own value or its own
 /// failure; the ABI agrees by declaring <b>both</b> a <c>get_error</c> and a
-/// <c>get_value</c>. A partition that fails faults only <em>its own</em> awaitable.
+/// <c>get_value</c>. A partition that fails fails only <em>its own</em> future.
 /// </para>
 /// <para>
 /// ⚠ <b><see cref="PartitionResult"/> THROWS for a partition that was not requested</b>,
 /// rather than returning <see langword="null"/> — Java's <c>:43-46</c>. See its own
 /// remarks.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its partition (or, for
+/// <see cref="All"/>, every partition) has completed, and needs no thread-pool thread: the futures here are composed
+/// on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListOffsetsResult"/>
 public sealed class ListOffsetsResult
 {
-    private readonly IReadOnlyDictionary<TopicPartition, Task<ListOffsetsResultInfo>> _futures;
+    private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per topic partition — Java's <b>public</b>
+    /// Wraps one future per topic partition — Java's <b>public</b>
     /// <c>ListOffsetsResult(Map&lt;TopicPartition, KafkaFuture&lt;ListOffsetsResultInfo&gt;&gt;)</c>
     /// (<c>:34</c>). ⚠ Java declares this one <b>public</b>, unlike most <c>*Result</c>
-    /// constructors, which are package-private — so it is mirrored as public rather than
-    /// narrowed. (Counted, because an earlier draft of this sentence claimed there were
-    /// exactly two such classes: across Java's 60 <c>*Result</c> types <b>9</b> have a
-    /// public constructor. Among the ones this binding has bound so far the other is
-    /// <see cref="DeleteRecordsResult"/>, but that is a fact about coverage, not about
-    /// Java.)
+    /// constructors, which are package-private. (Counted, because an earlier draft of this
+    /// sentence claimed there were exactly two such classes: across Java's 60 <c>*Result</c>
+    /// types <b>9</b> have a public constructor. Among the ones this binding has bound so far
+    /// the other is <see cref="DeleteRecordsResult"/>, but that is a fact about coverage, not
+    /// about Java.)
     /// </summary>
-    /// <param name="futures">One awaitable per topic partition.</param>
+    /// <remarks>
+    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
+    /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map.
+    /// </remarks>
+    /// <param name="futures">One future per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
-    public ListOffsetsResult(IReadOnlyDictionary<TopicPartition, Task<ListOffsetsResultInfo>> futures)
+    internal ListOffsetsResult(IReadOnlyDictionary<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> futures)
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ListOffsetsResult From(
         KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation) =>
-        new ListOffsetsResult(operation.Tasks);
+        new ListOffsetsResult(SyncAdminFutures.Wrap(operation.SyncSources));
 
     /// <summary>
-    /// The awaitable for one requested partition — Java's <c>partitionResult(TopicPartition)</c>
+    /// The future for one requested partition — Java's <c>partitionResult(TopicPartition)</c>
     /// (<c>:41</c>).
     /// </summary>
     /// <param name="partition">A partition that was part of the request.</param>
-    /// <returns>That partition's awaitable, carrying its own value or its own failure.</returns>
+    /// <returns>That partition's future, carrying its own value or its own failure.</returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="partition"/> was not requested. ⚠ <b>Java throws here rather than
     /// returning null</b> (<c>:43-46</c>, <c>IllegalArgumentException</c>), and the message
     /// is carried across verbatim — returning <see langword="null"/> would turn a
     /// programming error into a <see cref="NullReferenceException"/> somewhere else.
     /// </exception>
-    public Task<ListOffsetsResultInfo> PartitionResult(TopicPartition partition)
+    public KafkaFuture<ListOffsetsResultInfo> PartitionResult(TopicPartition partition)
     {
-        if (!_futures.TryGetValue(partition, out Task<ListOffsetsResultInfo>? future))
+        if (!_futures.TryGetValue(partition, out KafkaFuture<ListOffsetsResultInfo> future))
         {
             throw new ArgumentException(
                 string.Format(
@@ -101,33 +109,24 @@ public sealed class ListOffsetsResult
     /// Completes when <b>every</b> requested partition has resolved, yielding the whole
     /// map — Java's <c>all()</c> (<c>:54</c>).
     /// </summary>
-    /// <returns>A task yielding every partition's offset information.</returns>
+    /// <returns>A future yielding every partition's offset information. Its <c>Get()</c> waits for every
+    /// partition.</returns>
     /// <remarks>
+    /// <para>
     /// ⚠ Java's <c>all()</c> yields the <b>map</b>
     /// (<c>KafkaFuture&lt;Map&lt;TopicPartition, ListOffsetsResultInfo&gt;&gt;</c>,
     /// <c>allOf(...).thenApply(...)</c> at <c>:55-67</c>) — unlike
     /// <see cref="DeleteRecordsResult.All"/>, whose Java counterpart is a bare
     /// <c>KafkaFuture&lt;Void&gt;</c>. The two look alike and are not.
+    /// </para>
+    /// <para>
+    /// Every partition is waited for first, so a failure fails this future with the first failure in key order exactly
+    /// as Java's <c>allOf(...).thenApply(...)</c> chain does, rather than surfacing whichever key happens to complete
+    /// first. The gathered map is built once per call to this method, on the first <c>Get()</c>'s thread.
+    /// </para>
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, ListOffsetsResultInfo>> All() => Gather(_futures);
-
-    private static async Task<IReadOnlyDictionary<TopicPartition, ListOffsetsResultInfo>> Gather(
-        IReadOnlyDictionary<TopicPartition, Task<ListOffsetsResultInfo>> futures)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever
-        // key happens to be enumerated first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<TopicPartition, ListOffsetsResultInfo> offsets =
-            new Dictionary<TopicPartition, ListOffsetsResultInfo>(futures.Count);
-        foreach (KeyValuePair<TopicPartition, Task<ListOffsetsResultInfo>> entry in futures)
-        {
-            offsets.Add(entry.Key, entry.Value.Result);
-        }
-
-        return offsets;
-    }
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, ListOffsetsResultInfo>> All() =>
+        SyncAdminFutures.GatherAll(_futures, EqualityComparer<TopicPartition>.Default);
 
     /// <summary>
     /// One partition's offset information — the .NET realization of Java's

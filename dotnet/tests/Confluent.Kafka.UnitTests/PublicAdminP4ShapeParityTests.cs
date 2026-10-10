@@ -138,14 +138,16 @@ public sealed class PublicAdminP4ShapeParityTests
             nameof(ElectLeadersResult.Partitions), Type.EmptyTypes)!;
         MethodInfo all = typeof(ElectLeadersResult).GetMethod(nameof(ElectLeadersResult.All), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(Task<IReadOnlyDictionary<TopicPartition, KafkaException>>), partitions.ReturnType);
-        Assert.Equal(typeof(Task), all.ReturnType);
+        // M15/P14 S5b: the sync flavour hands out KafkaFutures; the async twin keeps the awaitables.
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException>>), partitions.ReturnType);
+        Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        // Flattened positions of Task<IReadOnlyDictionary<TopicPartition, KafkaException?>>:
-        // 0 = the Task (never null), 1 = the dictionary, 2 = the map's VALUE. TopicPartition
-        // is a value type and takes no position. Position 2 is the one under test — an
+        // Flattened positions of KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>>:
+        // 0 = the KafkaFuture (a generic struct, so oblivious — its own nullability is the CLR
+        // type asserted above), 1 = the dictionary, 2 = the map's VALUE. TopicPartition is a
+        // non-generic value type and takes no position. Position 2 is the one under test — an
         // assertion at 0 or 1 is green however the value is widened.
-        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 0));
+        Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(partitions.ReturnParameter, 0));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 1));
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(partitions.ReturnParameter, 2));
 
@@ -170,10 +172,10 @@ public sealed class PublicAdminP4ShapeParityTests
         MethodInfo all = typeof(AlterPartitionReassignmentsResult).GetMethod(
             nameof(AlterPartitionReassignmentsResult.All), Type.EmptyTypes)!;
 
-        // Java's per-partition future is KafkaFuture<Void>, so the erased Task carries no
-        // value — the void bridge's internal Task<bool> must not reach the public surface.
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, Task>), values.PropertyType);
-        Assert.Equal(typeof(Task), all.ReturnType);
+        // Java's per-partition future is KafkaFuture<Void>, so the erased KafkaFuture carries no
+        // value — the void bridge's internal bool latch must not reach the public surface.
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(KafkaFuture), all.ReturnType);
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(values));
         Assert.Null(values.SetMethod);
 

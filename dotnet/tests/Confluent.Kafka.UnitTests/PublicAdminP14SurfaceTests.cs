@@ -83,6 +83,10 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(DescribeLogDirsResult),
         nameof(AlterReplicaLogDirsResult),
         nameof(DescribeReplicaLogDirsResult),
+        nameof(ElectLeadersResult),
+        nameof(AlterPartitionReassignmentsResult),
+        nameof(ListPartitionReassignmentsResult),
+        nameof(ListOffsetsResult),
     };
 
     /// <summary>
@@ -104,6 +108,10 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.DescribeLogDirs),
         nameof(IAdmin.AlterReplicaLogDirs),
         nameof(IAdmin.DescribeReplicaLogDirs),
+        nameof(IAdmin.ElectLeaders),
+        nameof(IAdmin.AlterPartitionReassignments),
+        nameof(IAdmin.ListPartitionReassignments),
+        nameof(IAdmin.ListOffsets),
     };
 
     private static readonly string[] s_mockOnly =

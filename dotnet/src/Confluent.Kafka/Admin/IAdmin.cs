@@ -573,7 +573,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Elects a leader for the given partitions — Java's
     /// <c>electLeaders(ElectionType, Set&lt;TopicPartition&gt;, ElectLeadersOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// election completes.
     /// </summary>
     /// <param name="electionType">The kind of election to conduct.</param>
     /// <param name="partitions">
@@ -587,10 +589,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole election, and a per-partition failure is a
-    /// <b>value in its map</b> rather than a faulted awaitable — Java's
-    /// <c>Optional&lt;Throwable&gt;</c>. See <see cref="ElectLeadersResult"/>; the task
-    /// itself faults only when the election could not be run at all.
+    /// ⚠ <b>One</b> future over the whole election, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a failed future — Java's
+    /// <c>Optional&lt;Throwable&gt;</c>. See <see cref="ElectLeadersResult"/>; the future
+    /// itself fails only when the election could not be run at all.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="electionType"/> is not one of <see cref="ElectionType.Preferred"/>
@@ -603,6 +605,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ElectLeaders"/>
     ElectLeadersResult ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
@@ -612,7 +615,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Changes or reverts the reassignment of one or more partitions — Java's
     /// <c>alterPartitionReassignments(Map&lt;TopicPartition, Optional&lt;NewPartitionReassignment&gt;&gt;,
     /// AlterPartitionReassignmentsOptions)</c>. Returns <b>immediately</b>, without waiting
-    /// for the broker; the result carries one awaitable per partition.
+    /// for the broker; the result carries one <see cref="KafkaFuture"/> per partition, whose
+    /// <c>Get()</c> blocks the calling thread until that partition completes.
     /// </summary>
     /// <param name="reassignments">
     /// Topic partition → its new target replicas, or <see langword="null"/> to
@@ -627,10 +631,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see langword="true"/>.
     /// </param>
     /// <returns>
-    /// One awaitable per partition, each reporting only whether <em>that</em>
+    /// One future per partition, each reporting only whether <em>that</em>
     /// reassignment was initiated — Java's per-partition future is
-    /// <c>KafkaFuture&lt;Void&gt;</c>. A partition that fails faults only its own
-    /// awaitable; a partially failed batch is not a failed call.
+    /// <c>KafkaFuture&lt;Void&gt;</c>. A partition that fails fails only its own
+    /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -639,6 +643,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AlterPartitionReassignments"/>
     AlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options = null);
@@ -714,7 +719,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Lists the cluster's ongoing partition reassignments — Java's
     /// <c>listPartitionReassignments(Optional&lt;Set&lt;TopicPartition&gt;&gt;,
     /// ListPartitionReassignmentsOptions)</c>. Returns <b>immediately</b>, without waiting
-    /// for the broker.
+    /// for the broker; the result carries one <see cref="KafkaFuture{T}"/>, whose
+    /// <c>Get()</c> blocks the calling thread until the listing completes.
     /// </summary>
     /// <param name="partitions">
     /// The partitions to ask about, or <see langword="null"/> for <b>every ongoing
@@ -727,7 +733,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole listing, rather than one per key — Java holds
+    /// ⚠ <b>One</b> future over the whole listing, rather than one per key — Java holds
     /// a single future here. ⚠ A requested partition with <b>no</b> ongoing reassignment is
     /// simply <b>absent</b> from the map, so the result can be shorter than the request;
     /// that is not an error.
@@ -750,6 +756,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Write <c>ListPartitionReassignments()</c> for "every reassignment".
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
     ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null);
@@ -760,14 +767,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// (<c>Admin.java:1248</c>), which passes <c>Optional.empty()</c> for the partitions.
     /// Exactly
     /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
-    /// with a <see langword="null"/> partition set.
+    /// with a <see langword="null"/> partition set: the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// listing completes.
     /// </summary>
     /// <param name="options">
     /// Request options. A <see langword="null"/> one is forwarded unchanged and means
     /// Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable over the whole listing — see
+    /// One future over the whole listing — see
     /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
     /// </returns>
     /// <remarks>
@@ -775,6 +784,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>
     ListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options);
 
@@ -782,7 +792,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Lists offsets for the given partitions — Java's
     /// <c>listOffsets(Map&lt;TopicPartition, OffsetSpec&gt;, ListOffsetsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per partition.
+    /// <see cref="KafkaFuture{T}"/> per partition, whose <c>Get()</c> blocks the calling thread
+    /// until that partition completes.
     /// </summary>
     /// <param name="topicPartitionOffsets">
     /// Topic partition → which offset to retrieve for it. ⚠ Against a cluster,
@@ -799,9 +810,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/>.
     /// </param>
     /// <returns>
-    /// One awaitable per partition, each carrying that partition's own
+    /// One future per partition, each carrying that partition's own
     /// <see cref="ListOffsetsResult.ListOffsetsResultInfo"/> or its own failure. A
-    /// partition that fails faults only <em>its own</em> awaitable.
+    /// partition that fails fails only <em>its own</em> future.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -816,6 +827,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// parameter cannot express, but a C# cast can.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListOffsets"/>
     ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null);

@@ -110,15 +110,18 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         MethodInfo reassignments = typeof(ListPartitionReassignmentsResult).GetMethod(
             nameof(ListPartitionReassignmentsResult.Reassignments), Type.EmptyTypes)!;
 
+        // M15/P14 S5b: the sync flavour hands out a KafkaFuture; the async twin keeps the awaitable.
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>),
             reassignments.ReturnType);
 
-        // Positions of Task<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>:
-        // 0 = the Task, 1 = the dictionary, 2 = the VALUE (TopicPartition, a value type,
-        // takes no position). None is nullable — a missing reassignment is an absent KEY,
-        // not a null value.
-        for (int position = 0; position <= 2; position++)
+        // Positions of KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>:
+        // 0 = the KafkaFuture (a generic struct, so oblivious — its own nullability is the CLR
+        // type asserted above), 1 = the dictionary, 2 = the VALUE (TopicPartition, a non-generic
+        // value type, takes no position). Neither 1 nor 2 is nullable — a missing reassignment is
+        // an absent KEY, not a null value.
+        Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(reassignments.ReturnParameter, 0));
+        for (int position = 1; position <= 2; position++)
         {
             Assert.Equal(
                 NullableAnnotation.NotAnnotated,
@@ -134,38 +137,43 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     }
 
     /// <summary>
-    /// <see cref="ListOffsetsResult"/> publishes Java's public constructor,
-    /// <c>partitionResult</c> and <c>all</c> — and <c>all</c> yields the MAP, unlike
-    /// <see cref="DeleteRecordsResult.All"/>.
+    /// <see cref="ListOffsetsResult"/> publishes Java's <c>partitionResult</c> and <c>all</c> —
+    /// and <c>all</c> yields the MAP, unlike <see cref="DeleteRecordsResult.All"/>. Java makes
+    /// its constructor <b>public</b> (<c>ListOffsetsResult.java:34</c>); since M15/P14 S5b this
+    /// one is <b>internal on purpose</b>, a recorded Java-parity deviation (follow-up FU-5), so
+    /// the test pins the internal constructor's shape instead.
     /// </summary>
     [Fact]
-    public void ListOffsetsResult_PublishesJavasConstructorAndTwoAccessors()
+    public void ListOffsetsResult_PublishesJavasTwoAccessors_AndItsConstructorIsInternal()
     {
-        ConstructorInfo only = Assert.Single(typeof(ListOffsetsResult).GetConstructors());
-        // ⚠ Task<Info>, not Info — Java's is Map<TopicPartition, KafkaFuture<Info>> (:34).
+        Assert.Empty(typeof(ListOffsetsResult).GetConstructors());
+        ConstructorInfo only = Assert.Single(
+            typeof(ListOffsetsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
+        // ⚠ KafkaFuture<Info>, not Info — Java's is Map<TopicPartition, KafkaFuture<Info>> (:34).
         // The futures ARE the value; a map of plain values would be a different contract.
         Assert.Equal(
             new[]
             {
-                typeof(IReadOnlyDictionary<TopicPartition, Task<ListOffsetsResult.ListOffsetsResultInfo>>),
+                typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>),
             },
             only.GetParameters().Select(parameter => parameter.ParameterType));
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => new ListOffsetsResult(null!));
+        Assert.Equal("futures", rejected.ParamName);
 
         MethodInfo partitionResult = typeof(ListOffsetsResult).GetMethod(
             nameof(ListOffsetsResult.PartitionResult))!;
         MethodInfo all = typeof(ListOffsetsResult).GetMethod(nameof(ListOffsetsResult.All), Type.EmptyTypes)!;
 
         Assert.Equal(
-            typeof(Task<ListOffsetsResult.ListOffsetsResultInfo>), partitionResult.ReturnType);
+            typeof(KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>), partitionResult.ReturnType);
         Assert.Equal(new[] { typeof(TopicPartition) }, partitionResult.GetParameters().Select(p => p.ParameterType));
 
         // ⚠ Java's all() is KafkaFuture<Map<…>>, NOT KafkaFuture<Void> — the opposite of
         // DeleteRecordsResult.All(), which they otherwise resemble.
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>),
             all.ReturnType);
-        // (DeleteRecordsResult moved to KafkaFuture in M15/P14 S4, ahead of this result; the
-        // contrast pinned here is void versus the map.)
         Assert.Equal(typeof(KafkaFuture), typeof(DeleteRecordsResult).GetMethod(nameof(DeleteRecordsResult.All))!.ReturnType);
 
         Assert.Equal(
