@@ -19,7 +19,7 @@ Newest first.
     - The sync composites run over latches, not Tasks: `SyncFutureSource`, `ProjectedSyncFuture`, `AllOfSyncFuture`, `GatheringAllOfSyncFuture`, `FailFastGroupSyncFuture`. A sync `Get()` needs no thread-pool thread.
     - A sync `Close(TimeSpan)` over the existing sync `kafka_admin_AdminClient_close`. `IAdmin : IDisposable` only; `IAsyncAdmin : IAsyncDisposable, IDisposable`.
     - The grpc-server serves admin on both flavours (the sync `AdminServiceImpl` plus `AsyncAdminServiceImpl`), and the Rust harness has a `dotnet_async` admin arm.
-  - **Rulings.** PLAN §0: D1–D19, Q1–Q8, the a/b rule, the Q5 checkpoint rulings, and the rule-file texts S7 applied in `6243491a`. ⚠ **Text 1 is not applied and is pending a ruling.** Appended at `dotnet/CLAUDE.md:59-61` (after "…`MockAdminClient`, M15)"), its closing period lands before the existing "; producer transactions are **not** exposed yet." and reads ").;". The proposed fix is to drop the text's final period, so the existing clause continues the sentence.
+  - **Rulings.** PLAN §0: D1–D19, Q1–Q8, the a/b rule, the Q5 checkpoint rulings, and the rule-file texts S7 applied in `6243491a`. Text 1 (`dotnet/CLAUDE.md:59-61`) was applied at close with its final period dropped: it is spliced mid-sentence, before the existing "; producer transactions are **not** exposed yet.", and the words are unchanged.
   - **⚠ Breaking (R8, pre-publish).** Every existing .NET admin user breaks: `KafkaAdminClient` / `MockAdminClient` / `IAdmin` are now sync, and `await` on a `KafkaFuture` does not compile. Async users move to `AsyncKafkaAdminClient` / `IAsyncAdmin`. This is allowed before 1.0.
   - **Q3 parity deviation.** The 10 Result constructors that Java makes public (7) or protected (3) are internal on both flavours, so all 88 Result constructors are internal. Each one's xmldoc says so and points at FU-5.
   - **ListTransactions fail-fast rule.** `AllByBrokerId()` / `All()` compose per call, as Java and the async flavour do. Brokers already complete when the view is requested are examined in discovery order, and the first faulted one wins. Otherwise the first broker to fail in time wins. Zero brokers complete with an empty map.
@@ -45,7 +45,6 @@ Newest first.
     - The known flake `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` failed twice in a row once during S5e.
   - **For the user:**
     1. Follow-ups: FU-5 (tracked) — revisit making the 10 Result constructors public again, together with a public `KafkaFuture<T>.CompletedFuture(T)` (Java's `KafkaFuture.completedFuture`) and an async analog, so users can build Results (for example to mock `IAdmin`). It sits alongside FU-1 to FU-4, defined in the M11/P4.2 entry's "For the user" item 1 (line 120).
-    2. Text 1 (see Rulings) needs a ruling.
   - **M18/P1 is pushed** (`origin/prashah_dev_dotnet_binding` = `2d73a746` at this phase's base, PR #196). Its "not pushed" text below is historical and is left as written.
   - **Next unused dotnet N = 96.**
   - **Not pushed.** The user pushes with `git push-external`.

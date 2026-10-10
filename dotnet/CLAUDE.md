@@ -57,8 +57,9 @@ timed *async* close, §4 Disposal). ⚠ `Consumer_commit_async`
 is Java's `commitAsync` — a *sync* call returning `KafkaError*`, **not** a push
 variant (the push variant of `commitSync` is `commit_sync_async`);
 `poll_async` is the only `_async` fn taking a timeout. The admin client is exposed
-as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); producer transactions
-are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); since M15/P14 that is
+the sync flavour, beside the async `IAsyncAdmin` (`AsyncKafkaAdminClient` /
+`AsyncMockAdminClient`); producer transactions are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
 `cbindgen.toml` (the header is generated, not checked in).
 
 ---
