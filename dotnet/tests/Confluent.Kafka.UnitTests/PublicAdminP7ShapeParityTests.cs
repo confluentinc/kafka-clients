@@ -112,17 +112,16 @@ public sealed class PublicAdminP7ShapeParityTests
     }
 
     /// <summary>
-    /// <c>Close</c> is still the only <see cref="Task"/>-returning member on
-    /// <see cref="IAdmin"/> — P7 added eight RPCs and none of them is <c>async</c>.
+    /// <see cref="IAdmin"/> has no <see cref="Task"/>-returning member — P7 added eight RPCs and none of them is
+    /// <c>async</c>, and <c>Close</c>, the one exception until M15/P14 S5g, is now <c>void</c>
+    /// (<see cref="IAsyncAdmin"/> is the async twin).
     /// </summary>
     [Fact]
-    public void Close_RemainsTheOnlyTaskReturningMember() =>
-        Assert.Equal(
-            new[] { nameof(IAdmin.Close) },
+    public void IAdmin_HasNoTaskReturningMember() =>
+        Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
-                .Select(method => method.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+                .Select(method => method.Name));
 
     /// <summary>
     /// The two <b>per-key void</b> results publish Java's <c>values()</c> + <c>all()</c> pair

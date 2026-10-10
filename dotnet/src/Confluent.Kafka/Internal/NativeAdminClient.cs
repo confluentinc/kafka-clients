@@ -6761,14 +6761,40 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// Validates and converts Java's <c>close(Duration)</c> timeout, then closes. Shared
-    /// by both public clients so the guard and the millisecond conversion exist once.
+    /// Validates and converts Java's <c>close(Duration)</c> timeout, then closes — the async
+    /// flavour's <c>Task Close(TimeSpan)</c>. The guard and the millisecond conversion are
+    /// <see cref="ToCloseTimeoutMs"/>, shared with <see cref="CloseSync(TimeSpan)"/>.
     /// </summary>
     /// <param name="timeout">
     /// How long to wait for the background task. <see cref="TimeSpan.Zero"/> is valid.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    internal Task Close(TimeSpan timeout)
+    internal Task Close(TimeSpan timeout) => Close(ToCloseTimeoutMs(timeout));
+
+    /// <summary>
+    /// The sync flavour's <c>void Close(TimeSpan)</c> (M15/P14 §3.6): validates the timeout,
+    /// then closes through the <b>synchronous</b> <c>AdminClient_close</c> — the same blocking
+    /// teardown as <see cref="Dispose"/>, bounded by <paramref name="timeout"/> instead of
+    /// Java's "wait indefinitely".
+    /// </summary>
+    /// <remarks>
+    /// Not built on <c>close_async</c>: blocking on that <see cref="Task"/> would need a
+    /// thread-pool thread to run its continuation (the bridge completes with
+    /// <c>RunContinuationsAsynchronously</c>), so a saturated pool would starve the close.
+    /// The sync ABI parks the calling thread inside the core's own runtime instead.
+    /// </remarks>
+    /// <param name="timeout">
+    /// How long to wait for the background task. <see cref="TimeSpan.Zero"/> is valid.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
+    internal void CloseSync(TimeSpan timeout) => CloseSync(ToCloseTimeoutMs(timeout));
+
+    /// <summary>
+    /// Java's <c>close(Duration)</c> timeout in the ABI's milliseconds. Shared by both
+    /// flavours' <c>Close</c> so the guard and the conversion exist once.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
+    private static long ToCloseTimeoutMs(TimeSpan timeout)
     {
         // Validate BEFORE the native call (ffi §B5). A negative timeout must not simply
         // be forwarded: the ABI reads a negative timeout_ms as "wait indefinitely", so
@@ -6778,7 +6804,7 @@ internal sealed class NativeAdminClient : IDisposable
             throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must not be negative.");
         }
 
-        return Close((long)timeout.TotalMilliseconds);
+        return (long)timeout.TotalMilliseconds;
     }
 
     /// <summary>
@@ -6840,27 +6866,42 @@ internal sealed class NativeAdminClient : IDisposable
     /// The blocking teardown fallback: the <b>synchronous</b> <c>AdminClient_close</c>
     /// with Java's no-argument <c>close()</c> semantics, then the handle release.
     /// </summary>
+    public void Dispose() => CloseSync(UnsetTimeoutMs);
+
+    /// <summary>
+    /// The blocking teardown behind <see cref="Dispose"/> and <see cref="CloseSync(TimeSpan)"/>:
+    /// the <b>synchronous</b> <c>AdminClient_close</c>, awaiting the background task for up to
+    /// <paramref name="timeoutMs"/> (negative = wait indefinitely, Java's no-argument
+    /// <c>close()</c>), then the handle release. Idempotent: a second call is a no-op.
+    /// </summary>
     /// <remarks>
     /// The sync ABI is called directly — no <c>Task.Run</c>, no
     /// <c>GetAwaiter().GetResult()</c>. The wait happens inside the core's own
     /// multi-thread runtime, so the calling thread simply parks; that is the shipped
     /// sync-op precedent, not the sync-over-async this binding forbids. The handle is
     /// passed as the <see cref="SafeHandle"/> so the marshaller holds a call-scoped
-    /// reference for the whole blocking call.
+    /// reference for the whole blocking call. The ABI returns nothing (Java's
+    /// <c>close(Duration)</c> is <c>void</c>), so there is no close failure to surface.
+    /// Pending operations are the core's to fail once the timeout passes; their callbacks
+    /// complete their own futures, and each keeps its span-the-op reference, so the
+    /// release below is deferred until the last of them has dropped it.
     /// </remarks>
-    public void Dispose()
+    private void CloseSync(long timeoutMs)
     {
         if (!TryBeginClose())
         {
+            // A prior teardown already won the latch — closing again would double-close.
             return;
         }
 
         try
         {
-            NativeMethods.AdminClientClose(_handle, UnsetTimeoutMs);
+            NativeMethods.AdminClientClose(_handle, timeoutMs);
         }
         finally
         {
+            // Requests ReleaseHandle → AdminClient_destroy, deferred to the last in-flight
+            // operation's callback when any still holds a reference.
             _handle.Dispose();
         }
     }
@@ -7348,7 +7389,8 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// Wins the one-shot teardown latch, so exactly one of
-    /// <see cref="Dispose"/> / <see cref="DisposeAsync"/> / <see cref="Close(long)"/>
+    /// <see cref="Dispose"/> / <see cref="CloseSync(TimeSpan)"/> (both through
+    /// <see cref="CloseSync(long)"/>) / <see cref="DisposeAsync"/> / <see cref="Close(long)"/>
     /// performs the close and the handle release.
     /// </summary>
     private bool TryBeginClose() => Interlocked.Exchange(ref _closed, 1) == 0;

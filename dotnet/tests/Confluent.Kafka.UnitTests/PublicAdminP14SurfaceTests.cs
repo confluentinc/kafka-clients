@@ -26,13 +26,14 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P14's async admin flavour — <see cref="IAsyncAdmin"/>, its two clients and
-/// the 44 <c>Async*Result</c> types — against the flavour it twins (<see cref="IAdmin"/> and today's Results).
+/// Pins the <b>public shape</b> of M15/P14's two admin flavours — the sync <see cref="IAdmin"/> and the async
+/// <see cref="IAsyncAdmin"/>, their four clients and their 44 + 44 <c>*Result</c> types — against each other.
 /// </summary>
 /// <remarks>
 /// The flavours must offer the same RPCs and the same Result members, differing only in the future type at the
 /// public boundary. These tests compare the two by reflection with every future type folded into one
-/// flavour-neutral token, so a member added to, dropped from or re-typed on one flavour only turns them red.
+/// flavour-neutral token, so a member added to, dropped from or re-typed on one flavour only turns them red; and
+/// each flavour's whole surface is swept for the other flavour's future types (and for <see cref="Task"/>).
 /// </remarks>
 public sealed class PublicAdminP14SurfaceTests
 {
@@ -62,110 +63,6 @@ public sealed class PublicAdminP14SurfaceTests
     private static readonly Type[] s_forbiddenOnSync =
     {
         typeof(Task), typeof(Task<>), typeof(ValueTask), typeof(ValueTask<>), typeof(AsyncKafkaFuture), typeof(AsyncKafkaFuture<>),
-    };
-
-    /// <summary>
-    /// The sync Results converted to <see cref="KafkaFuture"/>s so far. Each M15/P14 S5a-f session adds its
-    /// family's names; S5g replaces this set with every sync <c>*Result</c>.
-    /// </summary>
-    private static readonly string[] s_syncConvertedResults =
-    {
-        nameof(CreateTopicsResult),
-        nameof(DeleteTopicsResult),
-        nameof(DescribeTopicsResult),
-        nameof(ListTopicsResult),
-        nameof(CreatePartitionsResult),
-        nameof(DeleteRecordsResult),
-        nameof(DescribeClusterResult),
-        nameof(ListConfigResourcesResult),
-        nameof(DescribeConfigsResult),
-        nameof(AlterConfigsResult),
-        nameof(DescribeLogDirsResult),
-        nameof(AlterReplicaLogDirsResult),
-        nameof(DescribeReplicaLogDirsResult),
-        nameof(ElectLeadersResult),
-        nameof(AlterPartitionReassignmentsResult),
-        nameof(ListPartitionReassignmentsResult),
-        nameof(ListOffsetsResult),
-        nameof(ListGroupsResult),
-        nameof(DescribeConsumerGroupsResult),
-        nameof(DescribeClassicGroupsResult),
-        nameof(ListConsumerGroupOffsetsResult),
-        nameof(DeleteConsumerGroupsResult),
-        nameof(RemoveMembersFromConsumerGroupResult),
-        nameof(AlterConsumerGroupOffsetsResult),
-        nameof(DeleteConsumerGroupOffsetsResult),
-        nameof(CreateAclsResult),
-        nameof(DeleteAclsResult),
-        nameof(DescribeAclsResult),
-        nameof(DescribeClientQuotasResult),
-        nameof(AlterClientQuotasResult),
-        nameof(DescribeUserScramCredentialsResult),
-        nameof(AlterUserScramCredentialsResult),
-        nameof(CreateDelegationTokenResult),
-        nameof(RenewDelegationTokenResult),
-        nameof(ExpireDelegationTokenResult),
-        nameof(DescribeDelegationTokenResult),
-        nameof(DescribeFeaturesResult),
-        nameof(UpdateFeaturesResult),
-        nameof(FenceProducersResult),
-        nameof(DescribeTransactionsResult),
-        nameof(DescribeProducersResult),
-        nameof(ListTransactionsResult),
-        nameof(AbortTransactionResult),
-        nameof(TerminateTransactionResult),
-    };
-
-    /// <summary>
-    /// The <see cref="IAdmin"/> RPCs converted to the sync Results so far, by name (every overload of a name is
-    /// covered). Each M15/P14 S5a-f session adds its family's names; S5g replaces this set with every RPC.
-    /// </summary>
-    private static readonly string[] s_syncConvertedRpcs =
-    {
-        nameof(IAdmin.CreateTopics),
-        nameof(IAdmin.DeleteTopics),
-        nameof(IAdmin.DescribeTopics),
-        nameof(IAdmin.ListTopics),
-        nameof(IAdmin.CreatePartitions),
-        nameof(IAdmin.DeleteRecords),
-        nameof(IAdmin.DescribeCluster),
-        nameof(IAdmin.ListConfigResources),
-        nameof(IAdmin.DescribeConfigs),
-        nameof(IAdmin.IncrementalAlterConfigs),
-        nameof(IAdmin.DescribeLogDirs),
-        nameof(IAdmin.AlterReplicaLogDirs),
-        nameof(IAdmin.DescribeReplicaLogDirs),
-        nameof(IAdmin.ElectLeaders),
-        nameof(IAdmin.AlterPartitionReassignments),
-        nameof(IAdmin.ListPartitionReassignments),
-        nameof(IAdmin.ListOffsets),
-        nameof(IAdmin.ListGroups),
-        nameof(IAdmin.DescribeConsumerGroups),
-        nameof(IAdmin.DescribeClassicGroups),
-        nameof(IAdmin.ListConsumerGroupOffsets),
-        nameof(IAdmin.DeleteConsumerGroups),
-        nameof(IAdmin.RemoveMembersFromConsumerGroup),
-        nameof(IAdmin.AlterConsumerGroupOffsets),
-        nameof(IAdmin.DeleteConsumerGroupOffsets),
-        nameof(IAdmin.CreateAcls),
-        nameof(IAdmin.DeleteAcls),
-        nameof(IAdmin.DescribeAcls),
-        nameof(IAdmin.DescribeClientQuotas),
-        nameof(IAdmin.AlterClientQuotas),
-        nameof(IAdmin.DescribeUserScramCredentials),
-        nameof(IAdmin.AlterUserScramCredentials),
-        nameof(IAdmin.CreateDelegationToken),
-        nameof(IAdmin.RenewDelegationToken),
-        nameof(IAdmin.ExpireDelegationToken),
-        nameof(IAdmin.DescribeDelegationToken),
-        nameof(IAdmin.DescribeFeatures),
-        nameof(IAdmin.UpdateFeatures),
-        nameof(IAdmin.FenceProducers),
-        nameof(IAdmin.DescribeTransactions),
-        nameof(IAdmin.DescribeProducers),
-        nameof(IAdmin.ListTransactions),
-        nameof(IAdmin.AbortTransaction),
-        nameof(IAdmin.ForceTerminateTransaction),
     };
 
     private static readonly string[] s_mockOnly =
@@ -202,19 +99,25 @@ public sealed class PublicAdminP14SurfaceTests
     }
 
     /// <summary>
-    /// <c>Close(TimeSpan)</c> is a <see cref="Task"/> on both flavours — Java's <c>close(Duration)</c> blocks — and
-    /// disposal comes from the two interfaces <see cref="IAsyncAdmin"/> extends, which are exactly those.
+    /// <c>Close(TimeSpan)</c> — Java's <c>close(Duration)</c>, which blocks — is <c>void</c> on the sync flavour and a
+    /// <see cref="Task"/> on the async one, and each is the only member besides the 48 RPCs. Disposal comes from the
+    /// interfaces each extends, which are exactly <see cref="IDisposable"/> for <see cref="IAdmin"/> and
+    /// <see cref="IAsyncDisposable"/> plus <see cref="IDisposable"/> for <see cref="IAsyncAdmin"/>.
     /// </summary>
     [Fact]
-    public void Close_IsATaskOnBothFlavours_AndAsyncAdminExtendsExactlyTheTwoDisposables()
+    public void Close_IsVoidOnTheSyncFlavourAndATaskOnTheAsync_AndEachInterfaceExtendsExactlyItsDisposables()
     {
-        Assert.Equal(typeof(Task), typeof(IAdmin).GetMethod(nameof(IAdmin.Close), new[] { typeof(TimeSpan) })!.ReturnType);
+        Assert.Equal(typeof(void), typeof(IAdmin).GetMethod(nameof(IAdmin.Close), new[] { typeof(TimeSpan) })!.ReturnType);
         Assert.Equal(
             typeof(Task), typeof(IAsyncAdmin).GetMethod(nameof(IAsyncAdmin.Close), new[] { typeof(TimeSpan) })!.ReturnType);
 
+        Assert.Equal(49, typeof(IAdmin).GetMethods(PublicDeclared).Length);
+        Assert.Equal(49, typeof(IAsyncAdmin).GetMethods(PublicDeclared).Length);
+
+        Assert.Equal(new[] { typeof(IDisposable).FullName }, InterfaceNames(typeof(IAdmin)));
         Assert.Equal(
             new[] { typeof(IAsyncDisposable).FullName, typeof(IDisposable).FullName }.OrderBy(static n => n, StringComparer.Ordinal),
-            typeof(IAsyncAdmin).GetInterfaces().Select(static i => i.FullName).OrderBy(static n => n, StringComparer.Ordinal));
+            InterfaceNames(typeof(IAsyncAdmin)));
     }
 
     /// <summary>
@@ -273,48 +176,60 @@ public sealed class PublicAdminP14SurfaceTests
     }
 
     /// <summary>
-    /// The sync flavour's converted members expose no <see cref="Task"/>, no <see cref="ValueTask"/> and no
-    /// <see cref="AsyncKafkaFuture"/> at any generic depth: each converted Result's public members, and each
-    /// converted RPC on <see cref="IAdmin"/> and on both sync clients, hand out <see cref="KafkaFuture"/>s only.
-    /// The set is explicit (<see cref="s_syncConvertedResults"/>, <see cref="s_syncConvertedRpcs"/>) because the
-    /// sync flavour is converted one family per session (M15/P14 S4-S5g); every name must resolve, so a misspelt
-    /// or renamed entry cannot pass vacuously.
+    /// No public member of the sync flavour exposes a <see cref="Task"/>, a <see cref="ValueTask"/> or an
+    /// <see cref="AsyncKafkaFuture"/> at any generic depth, with no exemption: every member <see cref="IAdmin"/>
+    /// declares (<c>Close</c> included), every public method and constructor of its two clients, and every sync
+    /// <c>*Result</c> — found by reflection, so a Result added later is covered without editing a list, and pinned
+    /// at 44 with the same names as the async twins, so the sweep cannot pass by finding nothing.
     /// </summary>
     [Fact]
-    public void SyncFlavour_ConvertedMembers_ExposeNoTaskNorAsyncFuture_AtAnyDepth()
+    public void SyncFlavour_ExposesNoTaskNorAsyncFuture_AtAnyDepth()
     {
         List<string> offenders = new List<string>();
 
-        foreach (string name in s_syncConvertedResults)
+        foreach (MethodInfo method in typeof(IAdmin).GetMethods(PublicDeclared))
         {
-            Type? result = s_assembly.GetType(AdminNamespace + "." + name);
-            Assert.True(result is not null && result.IsPublic, $"{name} is not a public admin type");
-            CheckResult(result!, s_forbiddenOnSync, offenders);
+            CheckSignature(method, s_forbiddenOnSync, offenders);
         }
 
-        foreach (Type admin in new[] { typeof(IAdmin), typeof(KafkaAdminClient), typeof(MockAdminClient) })
+        foreach (Type client in new[] { typeof(KafkaAdminClient), typeof(MockAdminClient) })
         {
-            foreach (string name in s_syncConvertedRpcs)
+            foreach (MethodInfo method in client.GetMethods(PublicDeclared))
             {
-                MethodInfo[] overloads = admin.GetMethods(PublicDeclared).Where(m => m.Name == name).ToArray();
-                Assert.True(overloads.Length > 0, $"{admin.Name}.{name} does not exist");
+                CheckSignature(method, s_forbiddenOnSync, offenders);
+            }
 
-                foreach (MethodInfo method in overloads)
+            foreach (ConstructorInfo constructor in client.GetConstructors(BindingFlags.Public | BindingFlags.Instance))
+            {
+                foreach (ParameterInfo parameter in constructor.GetParameters())
                 {
-                    CheckSignature(method, s_forbiddenOnSync, offenders);
+                    Check(parameter.ParameterType, client.Name + ".ctor(" + parameter.Name + ")", s_forbiddenOnSync, offenders);
                 }
             }
+        }
+
+        List<Type> syncResults = SyncResults();
+        Assert.Equal(44, syncResults.Count);
+        Assert.Equal(
+            AsyncResults().Select(static t => t.Name.Substring("Async".Length)),
+            syncResults.Select(static t => t.Name));
+
+        foreach (Type result in syncResults)
+        {
+            CheckResult(result, s_forbiddenOnSync, offenders);
         }
 
         Assert.Empty(offenders);
     }
 
     /// <summary>
-    /// The four clients are sealed, the async two implement <see cref="IAsyncAdmin"/> only, and no
-    /// <c>Async*Result</c> has a public constructor (follow-up FU-5).
+    /// The four clients are sealed and implement exactly their own flavour's interfaces — the sync two
+    /// <see cref="IAdmin"/> and <see cref="IDisposable"/> (so no <see cref="IAsyncDisposable"/>, not even explicitly),
+    /// the async two <see cref="IAsyncAdmin"/>, <see cref="IAsyncDisposable"/> and <see cref="IDisposable"/> — and no
+    /// <c>*Result</c> of either flavour has a public constructor (Q3 (b), follow-up FU-5).
     /// </summary>
     [Fact]
-    public void Clients_AreSealed_AndAsyncResults_HaveNoPublicConstructor()
+    public void Clients_AreSealed_ImplementOnlyTheirFlavour_AndNoResultHasAPublicConstructor()
     {
         foreach (Type client in new[]
                  {
@@ -325,13 +240,25 @@ public sealed class PublicAdminP14SurfaceTests
             Assert.True(client.IsSealed, $"{client.Name} is not sealed");
         }
 
+        foreach (Type client in new[] { typeof(KafkaAdminClient), typeof(MockAdminClient) })
+        {
+            Assert.Equal(
+                new[] { typeof(IAdmin).FullName, typeof(IDisposable).FullName }.OrderBy(static n => n, StringComparer.Ordinal),
+                InterfaceNames(client));
+            Assert.False(typeof(IAsyncAdmin).IsAssignableFrom(client), $"{client.Name} is an IAsyncAdmin");
+            Assert.False(typeof(IAsyncDisposable).IsAssignableFrom(client), $"{client.Name} is an IAsyncDisposable");
+        }
+
         foreach (Type client in new[] { typeof(AsyncKafkaAdminClient), typeof(AsyncMockAdminClient) })
         {
-            Assert.True(typeof(IAsyncAdmin).IsAssignableFrom(client), $"{client.Name} is not an IAsyncAdmin");
+            Assert.Equal(
+                new[] { typeof(IAsyncAdmin).FullName, typeof(IAsyncDisposable).FullName, typeof(IDisposable).FullName }
+                    .OrderBy(static n => n, StringComparer.Ordinal),
+                InterfaceNames(client));
             Assert.False(typeof(IAdmin).IsAssignableFrom(client), $"{client.Name} is an IAdmin");
         }
 
-        foreach (Type result in AsyncResults())
+        foreach (Type result in AsyncResults().Concat(SyncResults()))
         {
             Assert.Empty(result.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
         }
@@ -366,6 +293,17 @@ public sealed class PublicAdminP14SurfaceTests
                 && t.Name.EndsWith("Result", StringComparison.Ordinal))
             .OrderBy(static t => t.Name, StringComparer.Ordinal)
             .ToList();
+
+    private static List<Type> SyncResults() =>
+        s_assembly.GetExportedTypes()
+            .Where(static t => t.Namespace == AdminNamespace && t.DeclaringType is null
+                && !t.Name.StartsWith("Async", StringComparison.Ordinal)
+                && t.Name.EndsWith("Result", StringComparison.Ordinal))
+            .OrderBy(static t => t.Name, StringComparer.Ordinal)
+            .ToList();
+
+    private static IEnumerable<string?> InterfaceNames(Type type) =>
+        type.GetInterfaces().Select(static i => i.FullName).OrderBy(static n => n, StringComparer.Ordinal);
 
     private static string RpcSignature(MethodInfo method) =>
         method.Name + "(" + string.Join(", ", method.GetParameters().Select(static p =>

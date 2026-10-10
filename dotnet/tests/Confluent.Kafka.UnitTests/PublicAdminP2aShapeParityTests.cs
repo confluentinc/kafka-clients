@@ -195,13 +195,11 @@ public sealed class PublicAdminP2aShapeParityTests
         Assert.True(delete.GetParameters()[1].IsOptional);
         Assert.True(describe.GetParameters()[1].IsOptional);
 
-        // Close remains the only Task-returning member on IAdmin.
-        Assert.Equal(
-            new[] { nameof(IAdmin.Close) },
+        // IAdmin has NO Task-returning member (Close is void since M15/P14 S5g; IAsyncAdmin is the async twin).
+        Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
-                .Select(method => method.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+                .Select(method => method.Name));
     }
 
     /// <summary>

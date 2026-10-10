@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 
@@ -26,9 +25,11 @@ namespace Confluent.Kafka.Admin;
 /// configuration map (Java's <c>Admin.create(Properties)</c>).
 /// </summary>
 /// <remarks>
-/// Every RPC returns immediately with one awaitable per key; only
-/// <see cref="Close(TimeSpan)"/> is awaited for the operation itself. See
-/// <see cref="IAdmin"/> for why.
+/// The synchronous flavour: every RPC returns its result at once, holding one
+/// <see cref="KafkaFuture{T}"/> per key whose <c>Get()</c> blocks the calling thread;
+/// <see cref="Close(TimeSpan)"/> and <see cref="Dispose"/> block too. See
+/// <see cref="IAdmin"/> for why, and <see cref="AsyncKafkaAdminClient"/> for the
+/// asynchronous twin.
 /// </remarks>
 public sealed class KafkaAdminClient : IAdmin
 {
@@ -337,11 +338,17 @@ public sealed class KafkaAdminClient : IAdmin
             _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
-    public Task Close(TimeSpan timeout) => _native.Close(timeout);
+    public void Close(TimeSpan timeout) => _native.CloseSync(timeout);
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Closes the client with Java's no-argument <c>close()</c> semantics — <b>blocking the
+    /// calling thread</b>, without a bound, until the background task finishes — then releases
+    /// it. Idempotent, and a no-op after <see cref="Close(TimeSpan)"/>.
+    /// </summary>
+    /// <remarks>
+    /// Called from <c>async</c> code this ties up a pool thread for as long as the close waits;
+    /// async callers should use <see cref="AsyncKafkaAdminClient"/> and
+    /// <c>await using</c>.
+    /// </remarks>
     public void Dispose() => _native.Dispose();
-
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() => _native.DisposeAsync();
 }

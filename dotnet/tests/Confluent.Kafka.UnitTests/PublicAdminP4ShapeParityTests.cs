@@ -108,14 +108,12 @@ public sealed class PublicAdminP4ShapeParityTests
             NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 0));
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 1));
 
-        // Close remains the ONLY Task-returning member on IAdmin — the P1..P3 invariant,
-        // re-asserted because two new members just landed beside it.
-        Assert.Equal(
-            new[] { nameof(IAdmin.Close) },
+        // IAdmin has NO Task-returning member — re-asserted because two new members just landed.
+        // Close was the one exception until M15/P14 S5g made it void; IAsyncAdmin is the async twin.
+        Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
-                .Select(method => method.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+                .Select(method => method.Name));
     }
 
     /// <summary>

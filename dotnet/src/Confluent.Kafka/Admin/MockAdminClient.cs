@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 
@@ -410,13 +409,19 @@ public sealed class MockAdminClient : IAdmin
             _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
-    public Task Close(TimeSpan timeout) => _native.Close(timeout);
+    public void Close(TimeSpan timeout) => _native.CloseSync(timeout);
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Closes the client with Java's no-argument <c>close()</c> semantics — <b>blocking the
+    /// calling thread</b>, without a bound, until the background task finishes — then releases
+    /// it. Idempotent, and a no-op after <see cref="Close(TimeSpan)"/>.
+    /// </summary>
+    /// <remarks>
+    /// Called from <c>async</c> code this ties up a pool thread for as long as the close waits;
+    /// async callers should use <see cref="AsyncMockAdminClient"/> and
+    /// <c>await using</c>.
+    /// </remarks>
     public void Dispose() => _native.Dispose();
-
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() => _native.DisposeAsync();
 
     // ---- Seeding — inherent, never on IAdmin (admin-client.md §9) ----
 

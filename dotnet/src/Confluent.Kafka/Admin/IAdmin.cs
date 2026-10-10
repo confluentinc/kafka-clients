@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Admin;
 
@@ -26,23 +25,27 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Every RPC method is synchronous and returns a <c>*Result</c> holding one
-/// awaitable per key.</b> Java's <c>Admin</c> methods do not block: <c>createTopics</c>
-/// hands work to a background thread and returns instantly with a result object whose
-/// <c>KafkaFuture</c>s the caller may await individually. Mapping such a method to
-/// <c>Task&lt;CreateTopicsResult&gt;</c> would invent blocking Java does not have and
-/// would collapse N per-key futures into one, so the <see cref="Task"/> mapping belongs
-/// on the futures <em>inside</em> the result — not on the method.
+/// <b>This is the synchronous flavour; <see cref="IAsyncAdmin"/> is its asynchronous
+/// twin.</b> Both are siblings over the same native client — the producer and consumer
+/// ship the same sync/async pair — and differ only in how a caller waits.
 /// </para>
 /// <para>
-/// That is also why there is a single interface here, where the producer and consumer
-/// each ship a sync/async pair. Those pairs exist because their Java methods block,
-/// leaving two defensible mappings; admin's do not, so a second interface would be a
-/// synonym rather than a choice.
+/// <b>Every RPC returns its <c>*Result</c> at once, holding one future per key.</b>
+/// Java's <c>Admin</c> methods do not block: <c>createTopics</c> hands work to a
+/// background thread and returns instantly with a result object whose
+/// <c>KafkaFuture</c>s the caller waits on individually. So the methods here do not
+/// block either, and the wait lives on the futures <em>inside</em> the result — one
+/// <see cref="KafkaFuture{T}"/> (or <see cref="KafkaFuture"/>) per key, never collapsed
+/// into one. Their <c>Get()</c> is Java's <c>KafkaFuture.get()</c>: it <b>blocks the
+/// calling thread</b> on a latch the completion sets directly, so it needs no
+/// thread-pool thread and still returns while the pool is saturated.
 /// </para>
 /// <para>
-/// <see cref="Close(TimeSpan)"/> is the one exception: Java's <c>close(Duration)</c>
-/// joins the background thread, so it blocks, so it maps to a <see cref="Task"/>.
+/// <see cref="Close(TimeSpan)"/> and <see cref="IDisposable.Dispose"/> <b>block</b> too:
+/// Java's <c>close(Duration)</c> joins the background thread. Calling any of these blocking
+/// members from <c>async</c> code ties up a pool thread for as long as it waits; async
+/// callers should use <see cref="IAsyncAdmin"/>, whose futures and <c>Close</c> are
+/// awaitable.
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Concurrent operations on one client are permitted — the admin
@@ -86,7 +89,8 @@ namespace Confluent.Kafka.Admin;
 /// outcome for the other keys, leave the null ones out of the call.
 /// </para>
 /// </remarks>
-public interface IAdmin : IDisposable, IAsyncDisposable
+/// <seealso cref="IAsyncAdmin"/>
+public interface IAdmin : IDisposable
 {
     /// <summary>
     /// Creates topics — Java's <c>createTopics(Collection&lt;NewTopic&gt;,
@@ -1588,17 +1592,30 @@ public interface IAdmin : IDisposable, IAsyncDisposable
         string transactionalId, TerminateTransactionOptions? options = null);
 
     /// <summary>
-    /// Closes the client, waiting up to <paramref name="timeout"/> for the background
-    /// task to finish — Java's <c>close(Duration)</c>. Idempotent: closing an
-    /// already-closed client completes without error.
+    /// Closes the client, <b>blocking the calling thread</b> for up to
+    /// <paramref name="timeout"/> while the background task finishes — Java's
+    /// <c>close(Duration)</c>. Idempotent: closing an already-closed client returns at once,
+    /// without error.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Operations still pending when the timeout passes are failed by the core, as Java's
+    /// <c>close(Duration)</c> fails them; their futures complete with that error, so a thread
+    /// blocked in a future's <c>Get()</c> wakes and throws it.
+    /// </para>
+    /// <para>
+    /// The wait parks the calling thread inside the native client and needs no thread-pool
+    /// thread. Called from <c>async</c> code it therefore ties up a pool thread for up to
+    /// <paramref name="timeout"/>; async callers should use <see cref="IAsyncAdmin"/>, whose
+    /// <see cref="IAsyncAdmin.Close(TimeSpan)"/> is awaitable. The same holds for
+    /// <see cref="IDisposable.Dispose"/>, which waits without a bound.
+    /// </para>
+    /// </remarks>
     /// <param name="timeout">
     /// How long to wait. <see cref="TimeSpan.Zero"/> is valid (do not wait); for Java's
-    /// no-argument <c>close()</c> — wait indefinitely — use
-    /// <see cref="IDisposable.Dispose"/> or <see cref="IAsyncDisposable.DisposeAsync"/>.
+    /// no-argument <c>close()</c> — wait indefinitely — use <see cref="IDisposable.Dispose"/>.
     /// </param>
-    /// <returns>A task that completes when the client is closed.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="KafkaException">The core reported a close failure.</exception>
-    Task Close(TimeSpan timeout);
+    /// <seealso cref="IAsyncAdmin.Close(TimeSpan)"/>
+    void Close(TimeSpan timeout);
 }
