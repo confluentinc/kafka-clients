@@ -10,7 +10,7 @@ Newest first.
 - **Milestone 15 / Phase 14 — "split the .NET Admin client into a sync and an async flavour": DONE (2026-10-11); not pushed. N=95. Mode A (no Mode B).** Branch `prashah_dev_dotnet_binding`, base `2d73a746` (= `origin/prashah_dev_dotnet_binding`, PR #196). The commits are not squashed:
   - Plan `29c78576`. S1 `cca34729`. S2 `70a68577`. S3a `3af5532b` `d6566235`. S3b `a6f09dde` `72c801c0`. S4 `fbe72c47` `ef96b747` `6fba2aa6`. Q5 `2730fc93` (the checkpoint rulings in the plan).
   - S5a `b868682f` `b7ea260b` `f4c4cd1f`. S5b `e716d3b9` `7e2daecf`. S5c `221ef160` `3f17adc9`. S5d `95188252` `d3b739b1`. S5e `f802dee0` `6d31a881`. S5f `f2bfc9fd` `a617eb5a` `19cd4d23`. S5g `ac61d1ae` `98167351`.
-  - Critic-2 fixes `696927ac` `fce1aacb`. S6 `b3bb9fb3` `e871d03e`. S7 `6243491a` (the rule texts) `1567d020` (the xmldoc sweep). Then this close.
+  - Critic-2 fixes `696927ac` `fce1aacb`. S6 `b3bb9fb3` `e871d03e`. S7 `6243491a` (the rule texts) `1567d020` (the xmldoc sweep) `b85784fa` (this entry) `aad18a0c` (text 1) `a5d9a35a` (the Critic-3 fixes). Then the archive of `COMMENTS.DONE.95.md`.
 
   Plan and review record: `design/history/M15/P14-admin-sync-async-split/PLAN.md` (its §0 Approval record holds the rulings). Proof of Mode A: `git diff --stat 2d73a746 -- rust/src rust/cbindgen.toml rust/build.rs` is empty; `internal static extern` stays 219 (`NativeMethods.cs`) + 357 (`NativeMethods.Admin.cs`); the header SHA-1 is unchanged (`7c27280e…`). The Rust test harness is touched only in `rust/tests/common/` (G8 clean).
   - **What shipped.**
@@ -37,7 +37,7 @@ Newest first.
   - **Review.**
     - Critic pass 1 (after S4): zero findings.
     - Critic pass 2 (after S5g): the sync ListTransactions countdown sweep was untested, fixed in `696927ac`. Verifying that fix found a second item, the sync repeated-broker-id de-duplication untested, fixed in `fce1aacb`. Both verified resolved.
-    - Critic pass 3 (after S7): recorded by the Manager at close.
+    - Critic pass 3 (after S7): three LOW items (this entry's line cites, the image and Makefile comments on the async admin servicer, the xmldoc of three shared admin types), fixed in `a5d9a35a` and verified. Passes 2 and 3 are archived as `design/history/M15/P14-admin-sync-async-split/COMMENTS.DONE.95.md`, with the Critic's one rule-text suggestion, not applied.
   - **Known, not fixed (out of scope):**
     - The async flavour's `ObjectDisposedException` names the sync client type. The core picks the name from `_isMock`; cosmetic, and pinned by a test.
     - A second concurrent sync `Close` returns at once, where Java joins the thread. Pre-P14 (the `TryBeginClose` latch).
