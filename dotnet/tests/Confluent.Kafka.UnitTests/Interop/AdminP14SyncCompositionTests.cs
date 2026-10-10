@@ -57,6 +57,16 @@ public sealed class AdminP14SyncCompositionTests
 
     private static readonly string[] s_flavours = { Sync, Async };
 
+    /// <summary>
+    /// The group ids of the S5c group Results: distinct under the ordinal comparer every one of them keys by, and equal
+    /// under a case-insensitive one, so an aggregate gathered with any other comparer loses keys and fails the
+    /// all-succeed rows.
+    /// </summary>
+    private static readonly string[] s_groups = { "group", "Group", "GROUP" };
+
+    /// <summary>A group id none of <see cref="s_groups"/> equals ordinally.</summary>
+    private const string UnknownGroup = "gRoUp";
+
     public static TheoryData<string, string> CreateTopicsRows => Rows(
         "all-succeed",
         "one-fails",
@@ -1117,6 +1127,612 @@ public sealed class AdminP14SyncCompositionTests
     }
 
     /// <summary>
+    /// <see cref="ListGroupsResult"/> / <see cref="AsyncListGroupsResult"/> (M15/P14 S5c): one completion and three
+    /// projections over it, no keys. A per-group error is a <b>value</b> of the completion (Java's <c>errors</c>
+    /// collection), so the one-fails / two-fail rows put errors there and only <c>All()</c> turns one into a failure;
+    /// "fails" is the call-level failure. "errors-guard-at-get" pins the timing of <c>All()</c>'s error guard: at
+    /// <c>Get()</c>, never at the call. Omitted: all-fail (the errors are one collection, so it is the two-fail row);
+    /// unknown-key, null-key and per-key independence (no keys); erasure identity (no void view; each accessor is a fresh
+    /// future per call, which the memoization row pins).
+    /// </summary>
+    public static TheoryData<string, string> ListGroupsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-order",
+        "fails",
+        "errors-guard-at-get",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="DescribeConsumerGroupsResult"/> / <see cref="AsyncDescribeConsumerGroupsResult"/> (M15/P14 S5c). The
+    /// group ids differ only in case (<see cref="s_groups"/>), so every gathered row also pins <c>All()</c>'s ordinal
+    /// key comparer. Omitted: erasure identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeConsumerGroupsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="DescribeClassicGroupsResult"/> / <see cref="AsyncDescribeClassicGroupsResult"/> (M15/P14 S5c): the rows
+    /// and omissions of <see cref="DescribeConsumerGroupsRows"/>.
+    /// </summary>
+    public static TheoryData<string, string> DescribeClassicGroupsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="ListConsumerGroupOffsetsResult"/> / <see cref="AsyncListConsumerGroupOffsetsResult"/> (M15/P14 S5c).
+    /// The per-key member is <c>PartitionsToOffsetAndMetadata(groupId)</c>, so the unknown-key and null-key rows assert
+    /// its own guards (at the call, before and after completion) rather than a dictionary's; "no-arg-guard" pins the
+    /// no-argument overload's count guard at the call, and that with one group it is that group's own future. Omitted:
+    /// erasure identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> ListConsumerGroupOffsetsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity",
+        "no-arg-guard");
+
+    /// <summary>
+    /// <see cref="DeleteConsumerGroupsResult"/> / <see cref="AsyncDeleteConsumerGroupsResult"/> (M15/P14 S5c). Omitted:
+    /// memoization (no projection — its only composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> DeleteConsumerGroupsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="AlterConsumerGroupOffsetsResult"/> / <see cref="AsyncAlterConsumerGroupOffsetsResult"/> (M15/P14 S5c):
+    /// one completion carrying the per-partition outcomes and the core's own aggregate, with <c>PartitionResult</c> and
+    /// <c>All()</c> projections over it. "unknown-key-at-get" pins the unknown-partition guard's timing: inside the
+    /// future, as Java's is (<c>AlterConsumerGroupOffsetsResult.java:48-50</c>), so the call succeeds and <c>Get()</c>
+    /// throws; and a call-level failure wins over it (Java tests <c>throwable</c> first, <c>:46-47</c>). Omitted:
+    /// two-fail / all-fail (<c>All()</c> rethrows the core's stored aggregate rather than composing per-partition
+    /// failures, so there is no binding-side order to pin — the one-fails row pins that it is the stored one); null-key
+    /// (<see cref="TopicPartition"/> is a value type); per-key independence (one completion: every partition completes at
+    /// once); erasure identity (no per-key void view: <c>PartitionResult</c> is a fresh future per call, which the
+    /// memoization row pins); missing-row (the unknown-key row is it: the map is the request set).
+    /// </summary>
+    public static TheoryData<string, string> AlterConsumerGroupOffsetsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "fails",
+        "unknown-key-at-get",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="DeleteConsumerGroupOffsetsResult"/> / <see cref="AsyncDeleteConsumerGroupOffsetsResult"/> (M15/P14 S5c):
+    /// the shape of <see cref="AlterConsumerGroupOffsetsRows"/>, but the unknown-partition guard is Java's synchronous
+    /// precondition (<c>DeleteConsumerGroupOffsetsResult.java:44-46</c>), pinned at the call by "unknown-key-at-call";
+    /// "missing-row-at-get" pins that a requested partition the completion has no row for fails at <c>Get()</c>. Omitted:
+    /// two-fail / all-fail, null-key, per-key independence and erasure identity, as for AlterConsumerGroupOffsets.
+    /// </summary>
+    public static TheoryData<string, string> DeleteConsumerGroupOffsetsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "fails",
+        "unknown-key-at-call",
+        "missing-row-at-get",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/> / <see cref="AsyncRemoveMembersFromConsumerGroupResult"/>
+    /// (M15/P14 S5c): the shape of <see cref="DeleteConsumerGroupOffsetsRows"/>, keyed by member. Its three guards are
+    /// Java's synchronous preconditions (<c>RemoveMembersFromConsumerGroupResult.java:82-87</c>), each pinned at the
+    /// call by its own row: a null member, removeAll mode, and an unrequested member. Omitted: two-fail / all-fail
+    /// (<c>All()</c> rethrows the core's stored aggregate); per-key independence and erasure identity, as for
+    /// AlterConsumerGroupOffsets.
+    /// </summary>
+    public static TheoryData<string, string> RemoveMembersFromConsumerGroupRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "fails",
+        "null-key-at-call",
+        "remove-all-at-call",
+        "unknown-key-at-call",
+        "missing-row-at-get",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="ListGroupsResult"/> and <see cref="AsyncListGroupsResult"/>: <c>All()</c>, <c>Valid()</c> and
+    /// <c>Errors()</c> over the one completion compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListGroupsRows))]
+    public async Task ListGroups_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListGroupsHarness harness = ListGroupsHarness.For(flavour);
+        IReadOnlyCollection<GroupListing> valid = new[] { Listing("group"), Listing("Group") };
+        IReadOnlyCollection<KafkaException> none = Array.Empty<KafkaException>();
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe all = harness.All();
+                    FutureProbe listed = harness.Valid();
+                    FutureProbe errors = harness.Errors();
+                    all.AssertPending();
+                    listed.AssertPending();
+                    errors.AssertPending();
+
+                    harness.Operation.SetResult((valid, none));
+
+                    // With no error, All() yields exactly what Valid() does.
+                    Assert.Same(valid, await all.Outcome());
+                    Assert.Same(valid, await listed.Outcome());
+                    Assert.Same(none, await errors.Outcome());
+                    break;
+                }
+
+            case "one-fails":
+                {
+                    // A group's error is a VALUE: Valid() and Errors() succeed, and only All() turns it into a failure.
+                    KafkaException failure = new KafkaException(15, "the second coordinator is not available", isRetriable: true);
+                    IReadOnlyCollection<KafkaException> errors = new[] { failure };
+                    harness.Operation.SetResult((valid, errors));
+
+                    Assert.Same(failure, await harness.All().Outcome());
+                    Assert.Same(valid, await harness.Valid().Outcome());
+                    Assert.Same(errors, await harness.Errors().Outcome());
+                    break;
+                }
+
+            case "two-fail-first-in-order":
+                {
+                    // All() rethrows the first error in the collection's order (Java's errorsResult.get(0)), not the last.
+                    KafkaException first = new KafkaException(15, "the first coordinator is not available", isRetriable: true);
+                    KafkaException last = new KafkaException(16, "the last coordinator is loading", isRetriable: true);
+                    IReadOnlyCollection<KafkaException> errors = new[] { first, last };
+                    harness.Operation.SetResult((valid, errors));
+
+                    Assert.Same(first, await harness.All().Outcome());
+                    Assert.Same(errors, await harness.Errors().Outcome());
+                    Assert.Same(valid, await harness.Valid().Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    // The call-level failure fails all three with the call's own instance (see the type remarks: Java would
+                    // leave them incomplete).
+                    KafkaException failure = new KafkaException(7, "listGroups failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.All().Outcome());
+                    Assert.Same(failure, await harness.Valid().Outcome());
+                    Assert.Same(failure, await harness.Errors().Outcome());
+                    break;
+                }
+
+            case "errors-guard-at-get":
+                {
+                    // The guard is inside the future: neither the call nor its probe throws, before completion or after it,
+                    // and Get() fails with the error.
+                    KafkaException failure = new KafkaException(15, "the second coordinator is not available", isRetriable: true);
+                    FutureProbe? before = null;
+                    Assert.Null(Thrown(() => before = harness.All()));
+                    before!.AssertPending();
+
+                    harness.Operation.SetResult((valid, new[] { failure }));
+
+                    FutureProbe? after = null;
+                    Assert.Null(Thrown(() => after = harness.All()));
+                    Assert.Same(failure, await before.Outcome());
+                    Assert.Same(failure, await after!.Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    KafkaException failure = new KafkaException(15, "the second coordinator is not available", isRetriable: true);
+                    harness.Operation.SetResult((valid, new[] { failure }));
+
+                    // One All() future checks once, so every Get() of it rethrows the same instance ...
+                    FutureProbe all = harness.All();
+                    Assert.Same(failure, await all.Outcome());
+                    Assert.Same(failure, await all.Outcome());
+                    FutureProbe listed = harness.Valid();
+                    Assert.Same(valid, await listed.Outcome());
+                    Assert.Same(valid, await listed.Outcome());
+
+                    // ... and every accessor is a fresh future per call, on both flavours.
+                    (bool fresh, FutureProbe first, FutureProbe second) = harness.TwoAlls();
+                    Assert.True(fresh, "two All() calls returned an equal future");
+                    Assert.Same(failure, await first.Outcome());
+                    Assert.Same(failure, await second.Outcome());
+                    Assert.True(harness.ValidAndErrorsFreshPerCall(), "Valid() or Errors() returned an equal future twice");
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeConsumerGroupsResult"/> and <see cref="AsyncDescribeConsumerGroupsResult"/>: the per-group
+    /// futures and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeConsumerGroupsRows))]
+    public Task DescribeConsumerGroups_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(row, ValuedHarness<string, ConsumerGroupDescription>.DescribeConsumerGroups(flavour, s_groups), UnknownGroup);
+
+    /// <summary>
+    /// <see cref="DescribeClassicGroupsResult"/> and <see cref="AsyncDescribeClassicGroupsResult"/>: the per-group
+    /// futures and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeClassicGroupsRows))]
+    public Task DescribeClassicGroups_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(row, ValuedHarness<string, ClassicGroupDescription>.DescribeClassicGroups(flavour, s_groups), UnknownGroup);
+
+    /// <summary>
+    /// <see cref="ListConsumerGroupOffsetsResult"/> and <see cref="AsyncListConsumerGroupOffsetsResult"/>: the per-group
+    /// futures <c>PartitionsToOffsetAndMetadata</c> hands out, its no-argument form and the gathered <c>All()</c>
+    /// compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListConsumerGroupOffsetsRows))]
+    public async Task ListConsumerGroupOffsets_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListConsumerGroupOffsetsHarness harness = ListConsumerGroupOffsetsHarness.For(flavour, s_groups);
+        switch (row)
+        {
+            case "unknown-key":
+                {
+                    // Java's guard (ListConsumerGroupOffsetsResult.java:63-64): at the call, before completion and after it,
+                    // an ArgumentException naming the parameter — not a dictionary's KeyNotFoundException.
+                    string expected = new ArgumentException(
+                        "Offsets for consumer group '" + UnknownGroup + "' were not requested.", "groupId").Message;
+                    AssertArgument(harness.CallIndexer(UnknownGroup), "groupId", expected);
+                    Assert.False(harness.ContainsKey(UnknownGroup));
+                    Assert.True(harness.ContainsKey(s_groups[0]));
+
+                    SucceedEvery(harness);
+                    AssertArgument(harness.CallIndexer(UnknownGroup), "groupId", expected);
+                    break;
+                }
+
+            case "null-key":
+                {
+                    AssertNullArgument(harness.CallIndexer(null!), "groupId");
+                    SucceedEvery(harness);
+                    AssertNullArgument(harness.CallIndexer(null!), "groupId");
+                    break;
+                }
+
+            case "no-arg-guard":
+                {
+                    // Java's guard is `futures.size() != 1` (:50-53): at the call, before completion and after it, for three
+                    // groups ...
+                    const string Expected =
+                        "Offsets from multiple consumer groups were requested. "
+                        + "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.";
+                    Assert.Equal(Expected, Assert.IsType<InvalidOperationException>(harness.CallNoArgument()).Message);
+                    SucceedEvery(harness);
+                    Assert.Equal(Expected, Assert.IsType<InvalidOperationException>(harness.CallNoArgument()).Message);
+
+                    // ... and for none.
+                    ListConsumerGroupOffsetsHarness empty = ListConsumerGroupOffsetsHarness.For(flavour, Array.Empty<string>());
+                    Assert.Equal(Expected, Assert.IsType<InvalidOperationException>(empty.CallNoArgument()).Message);
+
+                    // With exactly one group it is that group's own future: equal to the by-id one, done when it is.
+                    ListConsumerGroupOffsetsHarness single = ListConsumerGroupOffsetsHarness.For(flavour, new[] { s_groups[0] });
+                    Assert.True(single.NoArgumentIsTheGroupsOwn(s_groups[0]));
+                    FutureProbe only = single.NoArgument();
+                    Assert.False(only.IsDone);
+                    single.Succeed(s_groups[0]);
+                    Assert.True(only.IsDone);
+                    Assert.Same(single.Expected(s_groups[0]), await only.Outcome());
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, harness, UnknownGroup);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DeleteConsumerGroupsResult"/> and <see cref="AsyncDeleteConsumerGroupsResult"/>: the per-group void
+    /// futures and <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DeleteConsumerGroupsRows))]
+    public Task DeleteConsumerGroups_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(row, VoidHarness<string>.DeleteConsumerGroups(flavour, s_groups), UnknownGroup);
+
+    /// <summary>
+    /// <see cref="AlterConsumerGroupOffsetsResult"/> and <see cref="AsyncAlterConsumerGroupOffsetsResult"/>:
+    /// <c>PartitionResult</c> and <c>All()</c> over the one completion compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterConsumerGroupOffsetsRows))]
+    public async Task AlterConsumerGroupOffsets_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        TopicPartition[] partitions = TopicPartitions();
+        OutcomeMapHarness<TopicPartition, TopicPartition> harness =
+            OutcomeMapHarness<TopicPartition, TopicPartition>.AlterConsumerGroupOffsets(flavour, partitions);
+        if (row != "unknown-key-at-get")
+        {
+            await RunOutcomeMapRow(row, harness);
+            return;
+        }
+
+        // Java's guard is inside the future (AlterConsumerGroupOffsetsResult.java:48-50): the call succeeds, before
+        // completion and after it, and Get() throws Java's message (no parameter name).
+        TopicPartition unknown = new TopicPartition("gamma", 0);
+        const string Expected = "Alter offset for partition \"gamma-0\" was not attempted";
+        FutureProbe? before = null;
+        Assert.Null(Thrown(() => before = harness.Key(unknown)));
+        before!.AssertPending();
+
+        harness.SucceedEvery();
+
+        FutureProbe? after = null;
+        Assert.Null(Thrown(() => after = harness.Key(unknown)));
+        AssertArgument(await before.Outcome(), null, Expected);
+        AssertArgument(await after!.Outcome(), null, Expected);
+        AssertReturned(await harness.All().Outcome());
+
+        // A call-level failure wins over the guard: Java tests `throwable` before the map (:46-50).
+        OutcomeMapHarness<TopicPartition, TopicPartition> failed =
+            OutcomeMapHarness<TopicPartition, TopicPartition>.AlterConsumerGroupOffsets(flavour, partitions);
+        KafkaException failure = new KafkaException(7, "the request failed", isRetriable: true);
+        failed.Operation.SetException(failure);
+        Assert.Same(failure, await failed.Key(unknown).Outcome());
+    }
+
+    /// <summary>
+    /// <see cref="DeleteConsumerGroupOffsetsResult"/> and <see cref="AsyncDeleteConsumerGroupOffsetsResult"/>:
+    /// <c>PartitionResult</c> and <c>All()</c> over the one completion compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DeleteConsumerGroupOffsetsRows))]
+    public async Task DeleteConsumerGroupOffsets_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        TopicPartition[] partitions = TopicPartitions();
+        OutcomeMapHarness<TopicPartition, TopicPartition> harness =
+            OutcomeMapHarness<TopicPartition, TopicPartition>.DeleteConsumerGroupOffsets(flavour, partitions);
+        if (row != "unknown-key-at-call")
+        {
+            await RunOutcomeMapRow(row, harness);
+            return;
+        }
+
+        // Java's precondition (DeleteConsumerGroupOffsetsResult.java:44-46) runs before the future is consulted: at the
+        // call, before completion, after it, and after a call-level failure alike, with Java's message.
+        TopicPartition unknown = new TopicPartition("gamma", 0);
+        const string Expected = "Partition gamma-0 was not included in the original request";
+        AssertArgument(harness.CallKey(unknown), null, Expected);
+        harness.SucceedEvery();
+        AssertArgument(harness.CallKey(unknown), null, Expected);
+        AssertReturned(await harness.Key(partitions[0]).Outcome());
+
+        OutcomeMapHarness<TopicPartition, TopicPartition> failed =
+            OutcomeMapHarness<TopicPartition, TopicPartition>.DeleteConsumerGroupOffsets(flavour, partitions);
+        KafkaException failure = new KafkaException(7, "the request failed", isRetriable: true);
+        failed.Operation.SetException(failure);
+        AssertArgument(failed.CallKey(unknown), null, Expected);
+        Assert.Same(failure, await failed.Key(partitions[0]).Outcome());
+    }
+
+    /// <summary>
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/> and <see cref="AsyncRemoveMembersFromConsumerGroupResult"/>:
+    /// <c>MemberResult</c> and <c>All()</c> over the one completion compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RemoveMembersFromConsumerGroupRows))]
+    public async Task RemoveMembersFromConsumerGroup_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        MemberToRemove[] members = Members();
+        OutcomeMapHarness<MemberToRemove, string> harness =
+            OutcomeMapHarness<MemberToRemove, string>.RemoveMembersFromConsumerGroup(flavour, members);
+        switch (row)
+        {
+            case "null-key-at-call":
+                {
+                    // Java's preconditions run before the future (RemoveMembersFromConsumerGroupResult.java:82-87): at the
+                    // call, before completion and after it.
+                    AssertNullArgument(harness.CallKey(null!), "member");
+                    harness.SucceedEvery();
+                    AssertNullArgument(harness.CallKey(null!), "member");
+                    break;
+                }
+
+            case "remove-all-at-call":
+                {
+                    const string Expected = "The method: memberResult is not applicable in 'removeAll' mode";
+                    OutcomeMapHarness<MemberToRemove, string> removeAll =
+                        OutcomeMapHarness<MemberToRemove, string>.RemoveMembersFromConsumerGroup(
+                            flavour, Array.Empty<MemberToRemove>());
+                    AssertArgument(removeAll.CallKey(members[0]), null, Expected);
+
+                    // All() still answers in removeAll mode, with the core's own aggregate (see the type remarks).
+                    KafkaException aggregate = new KafkaException(25, "the second member is unknown", isRetriable: false);
+                    removeAll.Settle(Array.Empty<KafkaException?>(), aggregate);
+                    AssertArgument(removeAll.CallKey(members[0]), null, Expected);
+                    Assert.Same(aggregate, await removeAll.All().Outcome());
+                    break;
+                }
+
+            case "unknown-key-at-call":
+                {
+                    // GroupInstanceId stands in for Java's identity-hash toString (see the type remarks).
+                    MemberToRemove unknown = new MemberToRemove("instance-9");
+                    const string Expected = "Member instance-9 was not included in the original request";
+                    AssertArgument(harness.CallKey(unknown), null, Expected);
+
+                    // An equal member is accepted: the request set compares by group instance id, not by reference.
+                    FutureProbe equal = harness.Key(new MemberToRemove(members[0].GroupInstanceId));
+                    harness.SucceedEvery();
+                    AssertArgument(harness.CallKey(unknown), null, Expected);
+                    AssertReturned(await equal.Outcome());
+                    break;
+                }
+
+            default:
+                await RunOutcomeMapRow(row, harness);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The rows every Result over one per-key outcome map shares, over <paramref name="harness"/>'s three keys.
+    /// </summary>
+    private static async Task RunOutcomeMapRow<TKey, TRow>(string row, OutcomeMapHarness<TKey, TRow> harness)
+        where TRow : notnull
+    {
+        IReadOnlyList<TKey> keys = harness.Keys;
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe first = harness.Key(keys[0]);
+                    FutureProbe all = harness.All();
+                    first.AssertPending();
+                    all.AssertPending();
+
+                    harness.SucceedEvery();
+
+                    AssertReturned(await first.Outcome());
+                    foreach (TKey key in keys)
+                    {
+                        AssertReturned(await harness.Key(key).Outcome());
+                    }
+
+                    AssertReturned(await all.Outcome());
+                    break;
+                }
+
+            case "one-fails":
+                {
+                    // A key's failure is a VALUE of the one completion, and All() rethrows the core's stored aggregate — not
+                    // the per-key error, which the binding does not compose.
+                    KafkaException failure = new KafkaException(25, "the second key failed", isRetriable: false);
+                    KafkaException aggregate = new KafkaException(25, "the request had a failed key", isRetriable: false);
+                    harness.Settle(new KafkaException?[] { null, failure, null }, aggregate);
+
+                    AssertReturned(await harness.Key(keys[0]).Outcome());
+                    Assert.Same(failure, await harness.Key(keys[1]).Outcome());
+                    AssertReturned(await harness.Key(keys[2]).Outcome());
+                    Assert.Same(aggregate, await harness.All().Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    // A call-level failure fails every member alike, with the call's own instance.
+                    KafkaException failure = new KafkaException(7, "the request failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    foreach (TKey key in keys)
+                    {
+                        Assert.Same(failure, await harness.Key(key).Outcome());
+                    }
+
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "missing-row-at-get":
+                {
+                    // A requested key the completion has no row for — a core contract violation — fails at Get() with the
+                    // dictionary's own exception rather than succeeding: the call itself succeeds, before completion.
+                    FutureProbe? missing = null;
+                    Assert.Null(Thrown(() => missing = harness.Key(keys[2])));
+                    harness.Settle(new KafkaException?[] { null, null }, null);
+
+                    KeyNotFoundException failure = Assert.IsType<KeyNotFoundException>(await missing!.Outcome());
+                    Assert.Equal($"The given key '{harness.RowOf(keys[2])}' was not present in the dictionary.", failure.Message);
+                    AssertReturned(await harness.Key(keys[0]).Outcome());
+                    AssertReturned(await harness.All().Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    KafkaException failure = new KafkaException(25, "the second key failed", isRetriable: false);
+                    KafkaException aggregate = new KafkaException(25, "the request had a failed key", isRetriable: false);
+                    harness.Settle(new KafkaException?[] { null, failure, null }, aggregate);
+
+                    // One future projects once, so every Get() of it rethrows the same instance ...
+                    FutureProbe second = harness.Key(keys[1]);
+                    Assert.Same(failure, await second.Outcome());
+                    Assert.Same(failure, await second.Outcome());
+                    FutureProbe all = harness.All();
+                    Assert.Same(aggregate, await all.Outcome());
+                    Assert.Same(aggregate, await all.Outcome());
+
+                    // ... and each call is a new future, as Java allocates a fresh KafkaFutureImpl per call.
+                    (bool fresh, FutureProbe first, FutureProbe again) = harness.TwoKeys(keys[1]);
+                    Assert.True(fresh, "two per-key calls returned an equal future");
+                    Assert.Same(failure, await first.Outcome());
+                    Assert.Same(failure, await again.Outcome());
+                    (bool freshAll, FutureProbe firstAll, FutureProbe secondAll) = harness.TwoAlls();
+                    Assert.True(freshAll, "two All() calls returned an equal future");
+                    Assert.Same(aggregate, await firstAll.Outcome());
+                    Assert.Same(aggregate, await secondAll.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    private static void SucceedEvery<TKey>(KeyedHarness<TKey> harness)
+        where TKey : notnull
+    {
+        foreach (TKey key in harness.Keys)
+        {
+            harness.Succeed(key);
+        }
+    }
+
+    private static void AssertArgument(object? thrown, string? parameterName, string message)
+    {
+        ArgumentException failure = Assert.IsType<ArgumentException>(thrown);
+        Assert.Equal(parameterName, failure.ParamName);
+        Assert.Equal(message, failure.Message);
+    }
+
+    private static void AssertNullArgument(object? thrown, string parameterName)
+    {
+        ArgumentNullException failure = Assert.IsType<ArgumentNullException>(thrown);
+        Assert.Equal(parameterName, failure.ParamName);
+        Assert.Equal(new ArgumentNullException(parameterName).Message, failure.Message);
+    }
+
+    /// <summary>
     /// The rows every keyed Result shares, over <paramref name="harness"/>'s three keys in their key order.
     /// </summary>
     private static async Task RunKeyedRow<TKey>(string row, KeyedHarness<TKey> harness, TKey unknown)
@@ -1331,6 +1947,16 @@ public sealed class AdminP14SyncCompositionTests
         new TopicPartition("alpha", 1),
         new TopicPartition("beta", 0),
     };
+
+    private static MemberToRemove[] Members() => new[]
+    {
+        new MemberToRemove("instance-1"),
+        new MemberToRemove("instance-2"),
+        new MemberToRemove("instance-3"),
+    };
+
+    private static GroupListing Listing(string groupId) =>
+        new GroupListing(groupId, GroupType.Consumer, "consumer", GroupState.Stable);
 
     /// <summary>An election map in <paramref name="partitions"/>' order, each partition mapped to its outcome.</summary>
     private static Dictionary<TopicPartition, KafkaException?> Outcomes(
@@ -1626,6 +2252,22 @@ public sealed class AdminP14SyncCompositionTests
                 operation, partitions, true, null, null, () => asyncResult.Values, asyncResult.All);
         }
 
+        internal static VoidHarness<string> DeleteConsumerGroups(string flavour, IReadOnlyList<string> groups)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<string> operation =
+                new VoidKeyedAdminOperation<string>("deleteConsumerGroups", groups, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DeleteConsumerGroupsResult result = DeleteConsumerGroupsResult.From(operation);
+                return new VoidHarness<string>(operation, groups, true, () => result.DeletedGroups, result.All, null, null);
+            }
+
+            AsyncDeleteConsumerGroupsResult asyncResult = AsyncDeleteConsumerGroupsResult.From(operation);
+            return new VoidHarness<string>(
+                operation, groups, true, null, null, () => asyncResult.DeletedGroups, asyncResult.All);
+        }
+
         internal override void Succeed(TKey key) => _operation.SetResult(key, true);
 
         internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
@@ -1870,6 +2512,72 @@ public sealed class AdminP14SyncCompositionTests
                 allGathers: true);
         }
 
+        internal static ValuedHarness<string, ConsumerGroupDescription> DescribeConsumerGroups(
+            string flavour, IReadOnlyList<string> groups)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, ConsumerGroupDescription> operation =
+                new KeyedAdminOperation<string, ConsumerGroupDescription>(
+                    "describeConsumerGroups", groups, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeConsumerGroupsResult result = DescribeConsumerGroupsResult.From(operation);
+                return new ValuedHarness<string, ConsumerGroupDescription>(
+                    operation,
+                    groups,
+                    ConsumerGroup,
+                    true,
+                    () => result.DescribedGroups,
+                    null,
+                    () => FutureProbe.Of(result.All()),
+                    allGathers: true);
+            }
+
+            AsyncDescribeConsumerGroupsResult asyncResult = AsyncDescribeConsumerGroupsResult.From(operation);
+            return new ValuedHarness<string, ConsumerGroupDescription>(
+                operation,
+                groups,
+                ConsumerGroup,
+                true,
+                null,
+                () => asyncResult.DescribedGroups,
+                () => FutureProbe.Of(asyncResult.All()),
+                allGathers: true);
+        }
+
+        internal static ValuedHarness<string, ClassicGroupDescription> DescribeClassicGroups(
+            string flavour, IReadOnlyList<string> groups)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, ClassicGroupDescription> operation =
+                new KeyedAdminOperation<string, ClassicGroupDescription>(
+                    "describeClassicGroups", groups, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeClassicGroupsResult result = DescribeClassicGroupsResult.From(operation);
+                return new ValuedHarness<string, ClassicGroupDescription>(
+                    operation,
+                    groups,
+                    ClassicGroup,
+                    true,
+                    () => result.DescribedGroups,
+                    null,
+                    () => FutureProbe.Of(result.All()),
+                    allGathers: true);
+            }
+
+            AsyncDescribeClassicGroupsResult asyncResult = AsyncDescribeClassicGroupsResult.From(operation);
+            return new ValuedHarness<string, ClassicGroupDescription>(
+                operation,
+                groups,
+                ClassicGroup,
+                true,
+                null,
+                () => asyncResult.DescribedGroups,
+                () => FutureProbe.Of(asyncResult.All()),
+                allGathers: true);
+        }
+
         internal override void Succeed(TKey key) => _operation.SetResult(key, _values[key]);
 
         internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
@@ -1921,6 +2629,13 @@ public sealed class AdminP14SyncCompositionTests
 
         private static DescribeReplicaLogDirsResult.ReplicaLogDirInfo ReplicaLogDir(TopicPartitionReplica replica) =>
             new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId, 0L, null, -1L);
+
+        private static ConsumerGroupDescription ConsumerGroup(string groupId) =>
+            new ConsumerGroupDescription(
+                groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
+
+        private static ClassicGroupDescription ClassicGroup(string groupId) =>
+            new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.Stable, null);
     }
 
     /// <summary>
@@ -2234,5 +2949,326 @@ public sealed class AdminP14SyncCompositionTests
         internal override bool ContainsKey(TopicPartition key) => Answers(key);
 
         private bool Answers(TopicPartition key) => CallIndexer(key) is null;
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListGroups_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
+    /// </summary>
+    private sealed class ListGroupsHarness
+    {
+        private readonly ListGroupsResult? _sync;
+        private readonly AsyncListGroupsResult? _async;
+
+        private ListGroupsHarness(
+            SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation,
+            ListGroupsResult? sync,
+            AsyncListGroupsResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> Operation
+        {
+            get;
+        }
+
+        internal static ListGroupsHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation =
+                new SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
+                    "listGroups", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListGroupsHarness(operation, ListGroupsResult.From(operation), null)
+                : new ListGroupsHarness(operation, null, AsyncListGroupsResult.From(operation));
+        }
+
+        internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal FutureProbe Valid() => _sync is not null ? FutureProbe.Of(_sync.Valid()) : FutureProbe.Of(_async!.Valid());
+
+        internal FutureProbe Errors() => _sync is not null ? FutureProbe.Of(_sync.Errors()) : FutureProbe.Of(_async!.Errors());
+
+        /// <summary>
+        /// Two <c>All()</c> calls: whether they are different futures, and both, so the caller observes each outcome
+        /// (an async one left unobserved would fault on the finalizer).
+        /// </summary>
+        internal (bool Fresh, FutureProbe First, FutureProbe Second) TwoAlls()
+        {
+            if (_sync is not null)
+            {
+                KafkaFuture<IReadOnlyCollection<GroupListing>> first = _sync.All();
+                KafkaFuture<IReadOnlyCollection<GroupListing>> second = _sync.All();
+                return (first != second, FutureProbe.Of(first), FutureProbe.Of(second));
+            }
+
+            AsyncKafkaFuture<IReadOnlyCollection<GroupListing>> asyncFirst = _async!.All();
+            AsyncKafkaFuture<IReadOnlyCollection<GroupListing>> asyncSecond = _async.All();
+            return (asyncFirst != asyncSecond, FutureProbe.Of(asyncFirst), FutureProbe.Of(asyncSecond));
+        }
+
+        /// <summary>Whether <c>Valid()</c> and <c>Errors()</c> each hand out a new future per call (neither fails).</summary>
+        internal bool ValidAndErrorsFreshPerCall() =>
+            _sync is not null
+                ? _sync.Valid() != _sync.Valid() && _sync.Errors() != _sync.Errors()
+                : _async!.Valid() != _async.Valid() && _async.Errors() != _async.Errors();
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListConsumerGroupOffsets_SyncAndAsyncResults_ComposeAlike"/>'s flavour
+    /// adapter: a keyed Result with no per-key dictionary, so its per-key member is
+    /// <c>PartitionsToOffsetAndMetadata(groupId)</c>, and the keys it answers for are those that member does not reject.
+    /// </summary>
+    private sealed class ListConsumerGroupOffsetsHarness : KeyedHarness<string>
+    {
+        private readonly KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> _operation;
+        private readonly Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> _values;
+        private readonly ListConsumerGroupOffsetsResult? _sync;
+        private readonly AsyncListConsumerGroupOffsetsResult? _async;
+
+        private ListConsumerGroupOffsetsHarness(
+            KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation,
+            IReadOnlyList<string> groups,
+            ListConsumerGroupOffsetsResult? sync,
+            AsyncListConsumerGroupOffsetsResult? async)
+            : base(groups, true)
+        {
+            _operation = operation;
+
+            // A distinct map per group, each with an uncommitted (null) partition alongside a committed one.
+            _values = groups.ToDictionary(
+                group => group,
+                group => (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>)new Dictionary<TopicPartition, OffsetAndMetadata?>
+                {
+                    [new TopicPartition("alpha", 0)] = new OffsetAndMetadata(7L, group),
+                    [new TopicPartition("alpha", 1)] = null,
+                },
+                StringComparer.Ordinal);
+            _sync = sync;
+            _async = async;
+        }
+
+        internal static ListConsumerGroupOffsetsHarness For(string flavour, IReadOnlyList<string> groups)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation =
+                new KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
+                    "listConsumerGroupOffsets", groups, StringComparer.Ordinal, adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListConsumerGroupOffsetsHarness(operation, groups, ListConsumerGroupOffsetsResult.From(operation), null)
+                : new ListConsumerGroupOffsetsHarness(operation, groups, null, AsyncListConsumerGroupOffsetsResult.From(operation));
+        }
+
+        internal override void Succeed(string key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(string key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(string key) => _values[key];
+
+        internal override IEnumerable<string> ValuesKeys() => Keys.Where(Answers).ToList();
+
+        internal override FutureProbe Value(string key) =>
+            _sync is not null
+                ? FutureProbe.Of(_sync.PartitionsToOffsetAndMetadata(key))
+                : FutureProbe.Of(_async!.PartitionsToOffsetAndMetadata(key));
+
+        internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal override void AssertAllSucceeded(object? outcome)
+        {
+            // The gathered map: every group, in key order, each value the very instance its group completed with.
+            IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> gathered =
+                Assert.IsAssignableFrom<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(outcome);
+            Assert.Equal(Keys, gathered.Keys);
+            foreach (string key in Keys)
+            {
+                Assert.Same(_values[key], gathered[key]);
+            }
+        }
+
+        internal override bool ValueEqualAcrossReads(string key) =>
+            _sync is not null
+                ? _sync.PartitionsToOffsetAndMetadata(key) == _sync.PartitionsToOffsetAndMetadata(key)
+                : _async!.PartitionsToOffsetAndMetadata(key) == _async.PartitionsToOffsetAndMetadata(key);
+
+        internal override bool TryGetValue(string key) => Answers(key);
+
+        internal override bool ContainsKey(string key) => Answers(key);
+
+        /// <summary>The no-argument <c>PartitionsToOffsetAndMetadata()</c>.</summary>
+        internal FutureProbe NoArgument() =>
+            _sync is not null
+                ? FutureProbe.Of(_sync.PartitionsToOffsetAndMetadata())
+                : FutureProbe.Of(_async!.PartitionsToOffsetAndMetadata());
+
+        internal Exception? CallNoArgument() => Thrown(() => _ = NoArgument());
+
+        /// <summary>Whether the no-argument form is <paramref name="key"/>'s own future.</summary>
+        internal bool NoArgumentIsTheGroupsOwn(string key) =>
+            _sync is not null
+                ? _sync.PartitionsToOffsetAndMetadata() == _sync.PartitionsToOffsetAndMetadata(key)
+                : _async!.PartitionsToOffsetAndMetadata() == _async.PartitionsToOffsetAndMetadata(key);
+
+        private bool Answers(string key) => CallIndexer(key) is null;
+    }
+
+    /// <summary>
+    /// A Result over one completion carrying a per-key outcome map and the core's own aggregate —
+    /// <c>AlterConsumerGroupOffsets</c>, <c>DeleteConsumerGroupOffsets</c> and <c>RemoveMembersFromConsumerGroup</c>
+    /// (M15/P14 S5c) — of either flavour: its per-key member (<c>PartitionResult</c> / <c>MemberResult</c>) and
+    /// <c>All()</c>, both void projections of that completion.
+    /// </summary>
+    /// <typeparam name="TKey">What the per-key member takes.</typeparam>
+    /// <typeparam name="TRow">What the completion's outcome map is keyed by.</typeparam>
+    private sealed class OutcomeMapHarness<TKey, TRow>
+        where TRow : notnull
+    {
+        private readonly Func<TKey, TRow> _rowOf;
+        private readonly Func<TKey, KafkaFuture>? _syncKey;
+        private readonly Func<KafkaFuture>? _syncAll;
+        private readonly Func<TKey, AsyncKafkaFuture>? _asyncKey;
+        private readonly Func<AsyncKafkaFuture>? _asyncAll;
+
+        private OutcomeMapHarness(
+            SingleAdminOperation<(IReadOnlyDictionary<TRow, KafkaException?> PerKey, KafkaException? All)> operation,
+            IReadOnlyList<TKey> keys,
+            Func<TKey, TRow> rowOf,
+            Func<TKey, KafkaFuture>? syncKey,
+            Func<KafkaFuture>? syncAll,
+            Func<TKey, AsyncKafkaFuture>? asyncKey,
+            Func<AsyncKafkaFuture>? asyncAll)
+        {
+            Operation = operation;
+            Keys = keys;
+            _rowOf = rowOf;
+            _syncKey = syncKey;
+            _syncAll = syncAll;
+            _asyncKey = asyncKey;
+            _asyncAll = asyncAll;
+        }
+
+        internal SingleAdminOperation<(IReadOnlyDictionary<TRow, KafkaException?> PerKey, KafkaException? All)> Operation { get; }
+
+        internal IReadOnlyList<TKey> Keys { get; }
+
+        internal static OutcomeMapHarness<TopicPartition, TopicPartition> AlterConsumerGroupOffsets(
+            string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
+                new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+                    "alterConsumerGroupOffsets", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterConsumerGroupOffsetsResult result = AlterConsumerGroupOffsetsResult.From(operation);
+                return new OutcomeMapHarness<TopicPartition, TopicPartition>(
+                    operation, partitions, static partition => partition, result.PartitionResult, result.All, null, null);
+            }
+
+            AsyncAlterConsumerGroupOffsetsResult asyncResult = AsyncAlterConsumerGroupOffsetsResult.From(operation);
+            return new OutcomeMapHarness<TopicPartition, TopicPartition>(
+                operation, partitions, static partition => partition, null, null, asyncResult.PartitionResult, asyncResult.All);
+        }
+
+        internal static OutcomeMapHarness<TopicPartition, TopicPartition> DeleteConsumerGroupOffsets(
+            string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation =
+                new SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
+                    "deleteConsumerGroupOffsets", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DeleteConsumerGroupOffsetsResult result = DeleteConsumerGroupOffsetsResult.From((operation, partitions));
+                return new OutcomeMapHarness<TopicPartition, TopicPartition>(
+                    operation, partitions, static partition => partition, result.PartitionResult, result.All, null, null);
+            }
+
+            AsyncDeleteConsumerGroupOffsetsResult asyncResult = AsyncDeleteConsumerGroupOffsetsResult.From((operation, partitions));
+            return new OutcomeMapHarness<TopicPartition, TopicPartition>(
+                operation, partitions, static partition => partition, null, null, asyncResult.PartitionResult, asyncResult.All);
+        }
+
+        internal static OutcomeMapHarness<MemberToRemove, string> RemoveMembersFromConsumerGroup(
+            string flavour, IReadOnlyList<MemberToRemove> members)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> operation =
+                new SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
+                    "removeMembersFromConsumerGroup", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                RemoveMembersFromConsumerGroupResult result = RemoveMembersFromConsumerGroupResult.From((operation, members));
+                return new OutcomeMapHarness<MemberToRemove, string>(
+                    operation, members, static member => member.GroupInstanceId, result.MemberResult, result.All, null, null);
+            }
+
+            AsyncRemoveMembersFromConsumerGroupResult asyncResult =
+                AsyncRemoveMembersFromConsumerGroupResult.From((operation, members));
+            return new OutcomeMapHarness<MemberToRemove, string>(
+                operation, members, static member => member.GroupInstanceId, null, null, asyncResult.MemberResult, asyncResult.All);
+        }
+
+        internal TRow RowOf(TKey key) => _rowOf(key);
+
+        /// <summary>
+        /// Completes the operation with the first <paramref name="outcomes"/>.Length keys, in order, mapped to their
+        /// outcomes (a shorter array leaves the later keys without a row), and <paramref name="all"/> as the core's
+        /// aggregate.
+        /// </summary>
+        internal void Settle(KafkaException?[] outcomes, KafkaException? all)
+        {
+            Dictionary<TRow, KafkaException?> perKey = new Dictionary<TRow, KafkaException?>();
+            for (int index = 0; index < outcomes.Length; index++)
+            {
+                perKey.Add(_rowOf(Keys[index]), outcomes[index]);
+            }
+
+            Operation.SetResult((perKey, all));
+        }
+
+        /// <summary>Completes the operation with every key succeeded and no aggregate failure.</summary>
+        internal void SucceedEvery() => Settle(new KafkaException?[Keys.Count], null);
+
+        internal FutureProbe Key(TKey key) => _syncKey is not null ? FutureProbe.Of(_syncKey(key)) : FutureProbe.Of(_asyncKey!(key));
+
+        internal Exception? CallKey(TKey key) => Thrown(() => _ = Key(key));
+
+        internal FutureProbe All() => _syncAll is not null ? FutureProbe.Of(_syncAll()) : FutureProbe.Of(_asyncAll!());
+
+        /// <summary>
+        /// Two per-key calls for <paramref name="key"/>: whether they are different futures, and both, so the caller
+        /// observes each outcome.
+        /// </summary>
+        internal (bool Fresh, FutureProbe First, FutureProbe Second) TwoKeys(TKey key)
+        {
+            if (_syncKey is not null)
+            {
+                KafkaFuture first = _syncKey(key);
+                KafkaFuture second = _syncKey(key);
+                return (first != second, FutureProbe.Of(first), FutureProbe.Of(second));
+            }
+
+            AsyncKafkaFuture asyncFirst = _asyncKey!(key);
+            AsyncKafkaFuture asyncSecond = _asyncKey(key);
+            return (asyncFirst != asyncSecond, FutureProbe.Of(asyncFirst), FutureProbe.Of(asyncSecond));
+        }
+
+        /// <summary>Two <c>All()</c> calls: whether they are different futures, and both.</summary>
+        internal (bool Fresh, FutureProbe First, FutureProbe Second) TwoAlls()
+        {
+            if (_syncAll is not null)
+            {
+                KafkaFuture first = _syncAll();
+                KafkaFuture second = _syncAll();
+                return (first != second, FutureProbe.Of(first), FutureProbe.Of(second));
+            }
+
+            AsyncKafkaFuture asyncFirst = _asyncAll!();
+            AsyncKafkaFuture asyncSecond = _asyncAll();
+            return (asyncFirst != asyncSecond, FutureProbe.Of(asyncFirst), FutureProbe.Of(asyncSecond));
+        }
     }
 }

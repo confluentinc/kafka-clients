@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4, S5a and S5b: each converted RPC, called with the same arguments on a
+/// The differential rows of M15/P14 S4, S5a, S5b and S5c: each converted RPC, called with the same arguments on a
 /// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
 /// same outcome through every member of its Result — equal values, or an exception of the same type with the same
 /// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
@@ -55,6 +55,16 @@ public sealed class PublicAdminP14DifferentialTests
     private const int LocalIllegalStateCode = -4;
 
     private const string NotImplementedYet = "Not implemented yet";
+
+    // Java's mock alterConsumerGroupOffsets refusal, with Java's own typo (MockAdminClient.java:1213), which the core
+    // mock carries verbatim (M15/P14 S5c).
+    private const string NotImplementYet = "Not implement yet";
+
+    // ListConsumerGroupOffsetsResult's no-argument accessor over anything but one group (Java's
+    // IllegalStateException, ListConsumerGroupOffsetsResult.java:51) (M15/P14 S5c).
+    private const string MultipleGroupsRequested =
+        "Offsets from multiple consumer groups were requested. " +
+        "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.";
 
     // The core's default message for UNKNOWN_TOPIC_OR_PARTITION, which the core mock's reassignment of an unknown
     // partition carries (Java's mock throws a message-less UnknownTopicOrPartitionException).
@@ -1049,6 +1059,475 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>ListGroups</c> (M15/P14 S5c): with the same groups seeded on both mocks — a group config each, which is what
+    /// makes either mock list a group (Java's mock lists its <c>groupConfigs</c> keys,
+    /// <c>MockAdminClient.java:727-731</c>) — <c>Valid()</c> and <c>All()</c> agree on both mocks and list exactly the
+    /// seeded groups, and <c>Errors()</c> is empty on both.
+    /// </summary>
+    [Fact]
+    public async Task ListGroups_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await SeedGroups(sync, async, "diff-w-b", "diff-w-a");
+
+        ListGroupsResult syncResult = sync.ListGroups();
+        AsyncListGroupsResult asyncResult = async.ListGroups();
+
+        const string Seeded = "diff-w-a/Consumer/Stable/consumer,diff-w-b/Consumer/Stable/consumer";
+        IReadOnlyCollection<GroupListing> valid = Assert.IsAssignableFrom<IReadOnlyCollection<GroupListing>>(
+            await Agree(
+                FutureProbe.Of(syncResult.Valid()),
+                FutureProbe.Of(asyncResult.Valid()),
+                static outcome => Listings((IReadOnlyCollection<GroupListing>)outcome)));
+        Assert.Equal(Seeded, Listings(valid));
+        IReadOnlyCollection<GroupListing> all = Assert.IsAssignableFrom<IReadOnlyCollection<GroupListing>>(
+            await Agree(
+                FutureProbe.Of(syncResult.All()),
+                FutureProbe.Of(asyncResult.All()),
+                static outcome => Listings((IReadOnlyCollection<GroupListing>)outcome)));
+        Assert.Equal(Seeded, Listings(all));
+        IReadOnlyCollection<KafkaException> errors = Assert.IsAssignableFrom<IReadOnlyCollection<KafkaException>>(
+            await Agree(
+                FutureProbe.Of(syncResult.Errors()),
+                FutureProbe.Of(asyncResult.Errors()),
+                static outcome => string.Join(",", ((IReadOnlyCollection<KafkaException>)outcome).Select(static e => e.Message))));
+        Assert.Empty(errors);
+    }
+
+    /// <summary>
+    /// <c>DescribeConsumerGroups</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:735</c> throws from the call; the core mock fails every group instead): both mocks key
+    /// the result by the requested ids, in request order, and each group's future and the gathered <c>All()</c> fail
+    /// alike.
+    /// </summary>
+    [Fact]
+    public async Task DescribeConsumerGroups_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] groups = { "diff-x-b", "diff-x-a" };
+
+        DescribeConsumerGroupsResult syncResult = sync.DescribeConsumerGroups(groups);
+        AsyncDescribeConsumerGroupsResult asyncResult = async.DescribeConsumerGroups(groups);
+        Assert.Equal(groups, syncResult.DescribedGroups.Keys);
+        Assert.Equal(groups, asyncResult.DescribedGroups.Keys);
+
+        foreach (string group in groups)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>DescribeClassicGroups</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1480</c> throws from the call; the core mock fails every group instead): both mocks key
+    /// the result by the requested ids, in request order, and each group's future and the gathered <c>All()</c> fail
+    /// alike.
+    /// </summary>
+    [Fact]
+    public async Task DescribeClassicGroups_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] groups = { "diff-xc-b", "diff-xc-a" };
+
+        DescribeClassicGroupsResult syncResult = sync.DescribeClassicGroups(groups);
+        AsyncDescribeClassicGroupsResult asyncResult = async.DescribeClassicGroups(groups);
+        Assert.Equal(groups, syncResult.DescribedGroups.Keys);
+        Assert.Equal(groups, asyncResult.DescribedGroups.Keys);
+
+        foreach (string group in groups)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>ListConsumerGroupOffsets(groupId)</c> (M15/P14 S5c): with the same offsets committed on both mocks, the
+    /// single-group path Java's mock implements (<c>MockAdminClient.java:753-759</c>). The no-argument accessor, the
+    /// by-id accessor and <c>All()</c> agree on both mocks and carry every committed partition, and an unrequested
+    /// group is rejected alike, at the call.
+    /// </summary>
+    [Fact]
+    public async Task ListConsumerGroupOffsets_ByGroupId_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
+        {
+            [new TopicPartition("diff-y", 1)] = 9L,
+            [new TopicPartition("diff-y", 0)] = 7L,
+        };
+        sync.UpdateConsumerGroupOffsets(committed);
+        async.UpdateConsumerGroupOffsets(committed);
+
+        ListConsumerGroupOffsetsResult syncResult = sync.ListConsumerGroupOffsets("diff-y-group");
+        AsyncListConsumerGroupOffsetsResult asyncResult = async.ListConsumerGroupOffsets("diff-y-group");
+
+        const string Committed = "diff-y-0=7/none/'',diff-y-1=9/none/''";
+        Assert.Equal(
+            Committed,
+            GroupOffsets(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
+                await Agree(
+                    FutureProbe.Of(syncResult.PartitionsToOffsetAndMetadata()),
+                    FutureProbe.Of(asyncResult.PartitionsToOffsetAndMetadata()),
+                    static outcome => GroupOffsets((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>)outcome)))));
+        Assert.Equal(
+            Committed,
+            GroupOffsets(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
+                await Agree(
+                    FutureProbe.Of(syncResult.PartitionsToOffsetAndMetadata("diff-y-group")),
+                    FutureProbe.Of(asyncResult.PartitionsToOffsetAndMetadata("diff-y-group")),
+                    static outcome => GroupOffsets((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>)outcome)))));
+        Assert.Equal(
+            "diff-y-group:" + Committed,
+            AllGroupOffsets(
+                Assert.IsAssignableFrom<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
+                    await Agree(
+                        FutureProbe.Of(syncResult.All()),
+                        FutureProbe.Of(asyncResult.All()),
+                        static outcome => AllGroupOffsets(
+                            (IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>)outcome)))));
+
+        AssertThrowAlike<ArgumentException>(
+            () => { _ = syncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); },
+            () => { _ = asyncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); });
+        ArgumentException unknown = Assert.Throws<ArgumentException>(
+            () => { _ = syncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); });
+        Assert.Equal("groupId", unknown.ParamName);
+        Assert.Equal(
+            new ArgumentException("Offsets for consumer group 'diff-y-absent' were not requested.", "groupId").Message,
+            unknown.Message);
+    }
+
+    /// <summary>
+    /// <c>ListConsumerGroupOffsets(groupSpecs)</c> (M15/P14 S5c), with the same offsets committed on both mocks. One
+    /// spec selecting one partition takes the single-group path (<c>MockAdminClient.java:753-759</c>, filtered by the
+    /// selection) and agrees on both mocks; several specs are what Java's mock refuses
+    /// (<c>MockAdminClient.java:750-751</c> throws from the call; the core mock fails every group instead), so each
+    /// group's future and <c>All()</c> fail alike, and the no-argument accessor is rejected alike, at the call.
+    /// </summary>
+    [Fact]
+    public async Task ListConsumerGroupOffsets_BySpecs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition selected = new TopicPartition("diff-z", 0);
+        Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
+        {
+            [selected] = 3L,
+            [new TopicPartition("diff-z", 1)] = 4L,
+        };
+        sync.UpdateConsumerGroupOffsets(committed);
+        async.UpdateConsumerGroupOffsets(committed);
+
+        Dictionary<string, ListConsumerGroupOffsetsSpec> one = new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+        {
+            ["diff-z-one"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { selected } },
+        };
+        ListConsumerGroupOffsetsResult syncOne = sync.ListConsumerGroupOffsets(one);
+        AsyncListConsumerGroupOffsetsResult asyncOne = async.ListConsumerGroupOffsets(one);
+        Assert.Equal(
+            "diff-z-0=3/none/''",
+            GroupOffsets(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
+                await Agree(
+                    FutureProbe.Of(syncOne.PartitionsToOffsetAndMetadata("diff-z-one")),
+                    FutureProbe.Of(asyncOne.PartitionsToOffsetAndMetadata("diff-z-one")),
+                    static outcome => GroupOffsets((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>)outcome)))));
+
+        string[] groups = { "diff-z-b", "diff-z-a" };
+        Dictionary<string, ListConsumerGroupOffsetsSpec> several = new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+        {
+            [groups[0]] = new ListConsumerGroupOffsetsSpec(),
+            [groups[1]] = new ListConsumerGroupOffsetsSpec(),
+        };
+        ListConsumerGroupOffsetsResult syncSeveral = sync.ListConsumerGroupOffsets(several);
+        AsyncListConsumerGroupOffsetsResult asyncSeveral = async.ListConsumerGroupOffsets(several);
+        foreach (string group in groups)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(
+                    FutureProbe.Of(syncSeveral.PartitionsToOffsetAndMetadata(group)),
+                    FutureProbe.Of(asyncSeveral.PartitionsToOffsetAndMetadata(group))));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncSeveral.All()), FutureProbe.Of(asyncSeveral.All())));
+
+        InvalidOperationException syncNoArgument = Assert.Throws<InvalidOperationException>(
+            () => { _ = syncSeveral.PartitionsToOffsetAndMetadata(); });
+        InvalidOperationException asyncNoArgument = Assert.Throws<InvalidOperationException>(
+            () => { _ = asyncSeveral.PartitionsToOffsetAndMetadata(); });
+        Assert.Equal(MultipleGroupsRequested, syncNoArgument.Message);
+        Assert.Equal(syncNoArgument.Message, asyncNoArgument.Message);
+    }
+
+    /// <summary>
+    /// <c>DeleteConsumerGroups</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:774</c> throws from the call; the core mock fails every group instead): both mocks key
+    /// the result by the requested ids, in request order, and each group's future and <c>All()</c> fail alike.
+    /// </summary>
+    [Fact]
+    public async Task DeleteConsumerGroups_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] groups = { "diff-aa-b", "diff-aa-a" };
+
+        DeleteConsumerGroupsResult syncResult = sync.DeleteConsumerGroups(groups);
+        AsyncDeleteConsumerGroupsResult asyncResult = async.DeleteConsumerGroups(groups);
+        Assert.Equal(groups, syncResult.DeletedGroups.Keys);
+        Assert.Equal(groups, asyncResult.DeletedGroups.Keys);
+
+        foreach (string group in groups)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.DeletedGroups[group]), FutureProbe.Of(asyncResult.DeletedGroups[group])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>RemoveMembersFromConsumerGroup</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:802</c> throws from the call; the core mock fails the request instead), in both modes.
+    /// Naming members, each member's future and <c>All()</c> fail alike, and an unrequested or null member is rejected
+    /// alike, at the call. In <c>removeAll</c> mode <c>All()</c> fails alike and <c>MemberResult</c> is rejected alike,
+    /// at the call.
+    /// </summary>
+    [Fact]
+    public async Task RemoveMembersFromConsumerGroup_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        MemberToRemove[] members = { new MemberToRemove("diff-ab-2"), new MemberToRemove("diff-ab-1") };
+
+        RemoveMembersFromConsumerGroupOptions named = new RemoveMembersFromConsumerGroupOptions(members);
+        RemoveMembersFromConsumerGroupResult syncResult = sync.RemoveMembersFromConsumerGroup("diff-ab-group", named);
+        AsyncRemoveMembersFromConsumerGroupResult asyncResult = async.RemoveMembersFromConsumerGroup("diff-ab-group", named);
+        foreach (MemberToRemove member in members)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.MemberResult(member)), FutureProbe.Of(asyncResult.MemberResult(member))));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        MemberToRemove unrequested = new MemberToRemove("diff-ab-3");
+        AssertThrowAlike<ArgumentException>(
+            () => { _ = syncResult.MemberResult(unrequested); },
+            () => { _ = asyncResult.MemberResult(unrequested); });
+        Assert.Equal(
+            "Member diff-ab-3 was not included in the original request",
+            Assert.Throws<ArgumentException>(() => { _ = syncResult.MemberResult(unrequested); }).Message);
+        AssertThrowAlike(() => { _ = syncResult.MemberResult(null!); }, () => { _ = asyncResult.MemberResult(null!); });
+        Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => { _ = syncResult.MemberResult(null!); }).ParamName);
+
+        RemoveMembersFromConsumerGroupOptions everyone = new RemoveMembersFromConsumerGroupOptions();
+        RemoveMembersFromConsumerGroupResult syncAll = sync.RemoveMembersFromConsumerGroup("diff-ab-group", everyone);
+        AsyncRemoveMembersFromConsumerGroupResult asyncAll = async.RemoveMembersFromConsumerGroup("diff-ab-group", everyone);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncAll.All()), FutureProbe.Of(asyncAll.All())));
+        AssertThrowAlike<ArgumentException>(
+            () => { _ = syncAll.MemberResult(members[0]); },
+            () => { _ = asyncAll.MemberResult(members[0]); });
+        Assert.Equal(
+            "The method: memberResult is not applicable in 'removeAll' mode",
+            Assert.Throws<ArgumentException>(() => { _ = syncAll.MemberResult(members[0]); }).Message);
+    }
+
+    /// <summary>
+    /// <c>AlterConsumerGroupOffsets</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1213</c> throws from the call, with its own "Not implement yet" typo; the core mock
+    /// fails the request instead): the partition's future and <c>All()</c> fail alike. An unrequested partition is
+    /// accepted at the call on both, and its future fails alike at <c>Get()</c> with the request's failure, which wins
+    /// over the not-attempted guard.
+    /// </summary>
+    [Fact]
+    public async Task AlterConsumerGroupOffsets_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition partition = new TopicPartition("diff-ac", 0);
+        Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
+        {
+            [partition] = new OffsetAndMetadata(10L),
+        };
+
+        AlterConsumerGroupOffsetsResult syncResult = sync.AlterConsumerGroupOffsets("diff-ac-group", offsets);
+        AsyncAlterConsumerGroupOffsetsResult asyncResult = async.AlterConsumerGroupOffsets("diff-ac-group", offsets);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementYet,
+            await Agree(FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        TopicPartition unrequested = new TopicPartition("diff-ac", 7);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementYet,
+            await Agree(FutureProbe.Of(syncResult.PartitionResult(unrequested)), FutureProbe.Of(asyncResult.PartitionResult(unrequested))));
+    }
+
+    /// <summary>
+    /// <c>DeleteConsumerGroupOffsets</c> (M15/P14 S5c), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:784</c> throws from the call; the core mock fails the request instead): the
+    /// partition's future and <c>All()</c> fail alike, and an unrequested partition is rejected alike, at the call.
+    /// </summary>
+    [Fact]
+    public async Task DeleteConsumerGroupOffsets_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition partition = new TopicPartition("diff-ad", 0);
+
+        DeleteConsumerGroupOffsetsResult syncResult = sync.DeleteConsumerGroupOffsets("diff-ad-group", new[] { partition });
+        AsyncDeleteConsumerGroupOffsetsResult asyncResult = async.DeleteConsumerGroupOffsets("diff-ad-group", new[] { partition });
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        TopicPartition unrequested = new TopicPartition("diff-ad", 7);
+        AssertThrowAlike<ArgumentException>(
+            () => { _ = syncResult.PartitionResult(unrequested); },
+            () => { _ = asyncResult.PartitionResult(unrequested); });
+        Assert.Equal(
+            "Partition diff-ad-7 was not included in the original request",
+            Assert.Throws<ArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); }).Message);
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the group and group-offset members (M15/P14 S5c) throw alike on both
+    /// mocks — the same type, parameter name and message — before any future exists: an undefined enum value in the
+    /// <c>ListGroups</c> options, a null argument where a member takes a required reference, and a null element (a null
+    /// group id, a null spec, a null topic, a null offset) where it takes a collection.
+    /// </summary>
+    [Fact]
+    public void GroupsGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition nullTopic = default;
+        TopicPartition partition = new TopicPartition("diff-ae", 0);
+        string?[] nullGroup = { "diff-ae-group", null };
+        RemoveMembersFromConsumerGroupOptions everyone = new RemoveMembersFromConsumerGroupOptions();
+        Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
+        {
+            [partition] = new OffsetAndMetadata(0L),
+        };
+
+        AssertThrowAlike<ArgumentOutOfRangeException>(
+            () => sync.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }),
+            () => async.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }));
+
+        AssertThrowAlike(() => sync.DescribeConsumerGroups(null!), () => async.DescribeConsumerGroups(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeConsumerGroups(nullGroup!), () => async.DescribeConsumerGroups(nullGroup!));
+        AssertThrowAlike(() => sync.DescribeClassicGroups(null!), () => async.DescribeClassicGroups(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeClassicGroups(nullGroup!), () => async.DescribeClassicGroups(nullGroup!));
+        AssertThrowAlike(() => sync.DeleteConsumerGroups(null!), () => async.DeleteConsumerGroups(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DeleteConsumerGroups(nullGroup!), () => async.DeleteConsumerGroups(nullGroup!));
+
+        AssertThrowAlike(
+            () => sync.ListConsumerGroupOffsets((string)null!), () => async.ListConsumerGroupOffsets((string)null!));
+        AssertThrowAlike(
+            () => sync.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!),
+            () => async.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ListConsumerGroupOffsets(
+                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["diff-ae-group"] = null! }),
+            () => async.ListConsumerGroupOffsets(
+                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["diff-ae-group"] = null! }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ListConsumerGroupOffsets(
+                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+                {
+                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { nullTopic } },
+                }),
+            () => async.ListConsumerGroupOffsets(
+                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+                {
+                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { nullTopic } },
+                }));
+
+        AssertThrowAlike(
+            () => sync.RemoveMembersFromConsumerGroup(null!, everyone),
+            () => async.RemoveMembersFromConsumerGroup(null!, everyone));
+        AssertThrowAlike(
+            () => sync.RemoveMembersFromConsumerGroup("diff-ae-group", null!),
+            () => async.RemoveMembersFromConsumerGroup("diff-ae-group", null!));
+
+        AssertThrowAlike(
+            () => sync.AlterConsumerGroupOffsets(null!, offsets), () => async.AlterConsumerGroupOffsets(null!, offsets));
+        AssertThrowAlike(
+            () => sync.AlterConsumerGroupOffsets("diff-ae-group", null!),
+            () => async.AlterConsumerGroupOffsets("diff-ae-group", null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }),
+            () => async.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }),
+            () => async.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }));
+
+        AssertThrowAlike(
+            () => sync.DeleteConsumerGroupOffsets(null!, new[] { partition }),
+            () => async.DeleteConsumerGroupOffsets(null!, new[] { partition }));
+        AssertThrowAlike(
+            () => sync.DeleteConsumerGroupOffsets("diff-ae-group", null!),
+            () => async.DeleteConsumerGroupOffsets("diff-ae-group", null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DeleteConsumerGroupOffsets("diff-ae-group", new[] { nullTopic }),
+            () => async.DeleteConsumerGroupOffsets("diff-ae-group", new[] { nullTopic }));
+    }
+
+    /// <summary>
     /// Runs both probes to their outcomes and asserts they agree: equal values, or exceptions of the same type with
     /// the same message (and code). Returns the sync outcome for the row's own pin.
     /// </summary>
@@ -1142,6 +1621,53 @@ public sealed class PublicAdminP14DifferentialTests
 
     private static string Offsets(ListOffsetsResult.ListOffsetsResultInfo info) =>
         info.Offset + "/" + info.Timestamp + "/" + (info.LeaderEpoch?.ToString() ?? "none");
+
+    /// <summary>Group listings, comparable across mocks: each group id, sorted, with its type, state and protocol.</summary>
+    private static string Listings(IEnumerable<GroupListing> listings) =>
+        string.Join(
+            ",",
+            Sorted(listings.Select(static listing =>
+                listing.GroupId + "/" + listing.Type + "/" + listing.GroupState + "/" + listing.Protocol)));
+
+    /// <summary>
+    /// One group's committed offsets, comparable across mocks: each partition, sorted, with its offset, leader epoch
+    /// and quoted metadata, or <c>null</c> for a partition with no committed offset.
+    /// </summary>
+    private static string GroupOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets) =>
+        string.Join(
+            ",",
+            Sorted(offsets.Select(static entry =>
+                entry.Key + "="
+                + (entry.Value is null
+                    ? "null"
+                    : entry.Value.Offset + "/" + (entry.Value.LeaderEpoch?.ToString() ?? "none") + "/'" + entry.Value.Metadata + "'"))));
+
+    /// <summary>Every group's committed offsets, comparable across mocks: each group id, sorted, with its offsets.</summary>
+    private static string AllGroupOffsets(
+        IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> groups) =>
+        string.Join(
+            "|",
+            groups.OrderBy(static entry => entry.Key, StringComparer.Ordinal)
+                .Select(static entry => entry.Key + ":" + GroupOffsets(entry.Value)));
+
+    /// <summary>
+    /// Gives each of <paramref name="groupIds"/> a group config on both mocks, asserting both agree — a group config is
+    /// what makes either mock list a group.
+    /// </summary>
+    private static async Task SeedGroups(MockAdminClient sync, AsyncMockAdminClient async, params string[] groupIds)
+    {
+        Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request = groupIds.ToDictionary(
+            static groupId => new ConfigResource(ConfigResourceType.Group, groupId),
+            static _ => (IReadOnlyCollection<AlterConfigOp>)new[]
+            {
+                new AlterConfigOp(new ConfigEntry("consumer.session.timeout.ms", "45000"), AlterConfigOpType.Set),
+            });
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(
+                FutureProbe.Of(sync.IncrementalAlterConfigs(request).All()),
+                FutureProbe.Of(async.IncrementalAlterConfigs(request).All())));
+    }
 
     /// <summary>
     /// Creates <paramref name="topic"/> on both mocks and reassigns <paramref name="partition"/> to
