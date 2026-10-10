@@ -63,7 +63,7 @@ public sealed class DescribeClassicGroupsResult
     /// constructors, which are package-private — so it is mirrored as public rather than
     /// narrowed, the same call <see cref="DescribeConsumerGroupsResult"/> already makes. It
     /// follows that no key comparer is threaded in from the bridge the way
-    /// <see cref="DescribeConfigsResult(IReadOnlyDictionary{ConfigResource, Task{Config}}, IEqualityComparer{ConfigResource})"/>
+    /// <see cref="DescribeConfigsResult(IReadOnlyDictionary{ConfigResource, KafkaFuture{Config}}, IEqualityComparer{ConfigResource})"/>
     /// does: the map here can come from a caller, so there is no bridge comparer to
     /// thread. See <see cref="All"/> for what that means for the aggregate.
     /// </remarks>

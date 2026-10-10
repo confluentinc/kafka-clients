@@ -13,19 +13,18 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.IncrementalAlterConfigs"/> — the .NET realization of
-/// Java's <c>AlterConfigsResult</c>: one awaitable <b>per resource</b>, handed back the
+/// Java's <c>AlterConfigsResult</c>: one future <b>per resource</b>, handed back the
 /// moment the request is submitted (<c>AlterConfigsResult.java:39, :46</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b><see cref="All"/> here is a bare <see cref="Task"/></b> — Java's
+/// ⚠ <b><see cref="All"/> here is a bare <see cref="KafkaFuture"/></b> — Java's
 /// <c>KafkaFuture&lt;Void&gt;</c> — whereas <see cref="DescribeConfigsResult.All"/> yields
 /// the whole map. The two results are otherwise the same shape.
 /// </para>
@@ -38,59 +37,57 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// Java publishes <c>Map&lt;ConfigResource, KafkaFuture&lt;Void&gt;&gt; values()</c>, so
-/// awaiting one of these tells you whether that resource was altered and hands back
-/// nothing; a resource that fails faults only <em>its own</em> <see cref="Task"/>. The
+/// waiting for one of these tells you whether that resource was altered and hands back
+/// nothing; a resource that fails fails only <em>its own</em> <see cref="KafkaFuture"/>. The
 /// per-resource error is <b>owned</b>: it arrives with that resource's own callback and is
 /// freed once it has been copied into the <see cref="KafkaException"/>.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its resource (or, for
+/// <see cref="All"/>, every resource) has completed, and needs no thread-pool thread: the futures here are composed
+/// on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncAlterConfigsResult"/>
 public sealed class AlterConfigsResult
 {
-    private readonly IReadOnlyDictionary<ConfigResource, Task> _values;
+    private readonly IReadOnlyDictionary<ConfigResource, KafkaFuture> _values;
 
     /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal
-    /// success token (result shape 2 — the ABI has no <c>get_value</c> here, which its own
-    /// header states, so a null per-key error <em>is</em> the success value) and must not
-    /// reach the public surface.
+    /// Wraps one future per resource — Java's package-private
+    /// <c>AlterConfigsResult(Map&lt;ConfigResource, KafkaFuture&lt;Void&gt;&gt;)</c> (<c>:32</c>). The dictionary is
+    /// held by reference, as Java holds its map.
     /// </summary>
-    /// <remarks>
-    /// The erasure is a reference upcast, so each entry is the <b>same</b>
-    /// <see cref="Task"/> instance as the bridge's — no per-key allocation, and no second
-    /// task whose fault could go unobserved. It reuses the bridge's own comparer so the
-    /// view and the sources cannot disagree about key identity.
-    /// </remarks>
-    internal AlterConfigsResult(
-        IReadOnlyDictionary<ConfigResource, Task<bool>> values, IEqualityComparer<ConfigResource> comparer)
+    internal AlterConfigsResult(IReadOnlyDictionary<ConfigResource, KafkaFuture> values)
     {
-        Dictionary<ConfigResource, Task> erased = new Dictionary<ConfigResource, Task>(values.Count, comparer);
-        foreach (KeyValuePair<ConfigResource, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, entry.Value);
-        }
-
-        _values = erased;
+        _values = values;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
+    /// <remarks>
+    /// Presents the bridge's <c>bool</c> latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the
+    /// void bridge's internal success token (result shape 2 — the ABI has no <c>get_value</c> here, which its own
+    /// header states, so a null per-key error <em>is</em> the success value) and must not reach the public surface.
+    /// Each void future is erased over its key's <b>same</b> latch — no second completion — with the bridge's own
+    /// comparer, so the view and the sources cannot disagree about key identity.
+    /// </remarks>
     internal static AlterConfigsResult From(VoidKeyedAdminOperation<ConfigResource> operation) =>
-        new AlterConfigsResult(operation.Tasks, operation.KeyComparer);
+        new AlterConfigsResult(SyncAdminFutures.Erase(operation.SyncSources, operation.KeyComparer));
 
     /// <summary>
-    /// One awaitable per requested resource, keyed by resource — Java's <c>values()</c>
+    /// One future per requested resource, keyed by resource — Java's <c>values()</c>
     /// (<c>:39</c>).
     /// </summary>
-    public IReadOnlyDictionary<ConfigResource, Task> Values => _values;
+    public IReadOnlyDictionary<ConfigResource, KafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> resource has been altered, and faults with the first
-    /// failure if any resource failed — Java's <c>all()</c> (<c>:46</c>,
+    /// Completes when <b>every</b> resource has been altered, and fails with the first
+    /// failure in key order if any resource failed — Java's <c>all()</c> (<c>:46</c>,
     /// <c>KafkaFuture.allOf</c>).
     /// </summary>
-    /// <returns>A task representing the whole batch.</returns>
-    public Task All() => Task.WhenAll(_values.Values);
+    /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every resource.</returns>
+    public KafkaFuture All() => SyncAdminFutures.AllOf(_values.Values);
 }

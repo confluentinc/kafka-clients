@@ -13,14 +13,13 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.ListConfigResources"/> — the .NET realization of Java's
-/// <c>ListConfigResourcesResult</c>: <b>one</b> awaitable over the whole listing, handed
+/// <c>ListConfigResourcesResult</c>: <b>one</b> future over the whole listing, handed
 /// back the moment the request is submitted (<c>ListConfigResourcesResult.java:42</c>).
 /// </summary>
 /// <remarks>
@@ -44,42 +43,47 @@ namespace Confluent.Kafka.Admin;
 /// unchanged. Java returns a <c>Collection</c>, so order is not part of the contract —
 /// do not rely on it, but nothing here shuffles or re-sorts it either.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
+/// no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListConfigResourcesResult"/>
 public sealed class ListConfigResourcesResult
 {
-    private readonly Task<IReadOnlyCollection<ConfigResource>> _future;
+    private readonly KafkaFuture<IReadOnlyCollection<ConfigResource>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListConfigResourcesResult(KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;)</c>
     /// (<c>:32</c>).
     /// </summary>
-    internal ListConfigResourcesResult(Task<IReadOnlyCollection<ConfigResource>> future)
+    internal ListConfigResourcesResult(KafkaFuture<IReadOnlyCollection<ConfigResource>> future)
     {
         _future = future;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ListConfigResourcesResult From(
         SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation) =>
-        new ListConfigResourcesResult(operation.Task);
+        new ListConfigResourcesResult(new KafkaFuture<IReadOnlyCollection<ConfigResource>>(operation.SyncSource));
 
     /// <summary>
     /// The full set of config resources — Java's <c>all()</c> (<c>:42</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the resources, or faulting with the call's own
+    /// A future yielding the resources, or failing with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <remarks>
-    /// This is the underlying task itself, so every call returns the <b>same</b> instance —
-    /// no second task whose fault could go unobserved. Java's <c>all()</c> re-wraps the
+    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
+    /// completion. Java's <c>all()</c> re-wraps the
     /// field in a fresh <c>KafkaFutureImpl</c> via <c>whenComplete</c> (<c>:43-51</c>),
     /// which yields an identical outcome; returning the source directly is the shipped
     /// <see cref="ListTopicsResult.NamesToListings"/> reading of the same pattern.
     /// </remarks>
-    public Task<IReadOnlyCollection<ConfigResource>> All() => _future;
+    public KafkaFuture<IReadOnlyCollection<ConfigResource>> All() => _future;
 }

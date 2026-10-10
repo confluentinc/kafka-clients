@@ -103,44 +103,44 @@ public sealed class MockAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
-        DescribeClusterResult.From(_native.DescribeCluster(options, AdminFlavour.Async));
+        DescribeClusterResult.From(_native.DescribeCluster(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
         ListConfigResourcesOptions? options = null) =>
         ListConfigResourcesResult.From(
-            _native.ListConfigResources(configResourceTypes, options, AdminFlavour.Async));
+            _native.ListConfigResources(configResourceTypes, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
-        DescribeConfigsResult.From(_native.DescribeConfigs(resources, options, AdminFlavour.Async));
+        DescribeConfigsResult.From(_native.DescribeConfigs(resources, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options = null) =>
-        AlterConfigsResult.From(_native.IncrementalAlterConfigs(configs, options, AdminFlavour.Async));
+        AlterConfigsResult.From(_native.IncrementalAlterConfigs(configs, options, AdminFlavour.Sync));
 
 
     /// <inheritdoc/>
     public DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null) =>
-        DescribeLogDirsResult.From(_native.DescribeLogDirs(brokers, options, AdminFlavour.Async));
+        DescribeLogDirsResult.From(_native.DescribeLogDirs(brokers, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
         AlterReplicaLogDirsOptions? options = null) =>
         AlterReplicaLogDirsResult.From(
-            _native.AlterReplicaLogDirs(replicaAssignment, options, AdminFlavour.Async));
+            _native.AlterReplicaLogDirs(replicaAssignment, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options = null) =>
-        DescribeReplicaLogDirsResult.From(_native.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Async));
+        DescribeReplicaLogDirsResult.From(_native.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ElectLeadersResult ElectLeaders(

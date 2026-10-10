@@ -96,12 +96,12 @@ public sealed class PublicAdminP3ShapeParityTests
 
     /// <summary>
     /// <see cref="DescribeClusterResult"/> publishes Java's four accessors as <b>methods</b>
-    /// yielding tasks, three of them nullable.
+    /// yielding futures (<see cref="KafkaFuture{T}"/> since M15/P14 S5a), three of them nullable.
     /// </summary>
     /// <remarks>
     /// ⚠ <b>The three nullable returns are the point of this test.</b> A binding that read the
     /// authorized-operations <em>count</em> instead of the gate would still compile against
-    /// a non-nullable <c>Task&lt;IReadOnlyCollection&lt;AclOperation&gt;&gt;</c>, so the
+    /// a non-nullable <c>KafkaFuture&lt;IReadOnlyCollection&lt;AclOperation&gt;&gt;</c>, so the
     /// annotation is what forces the null to remain expressible at all. The cluster id joined
     /// them in M15/P13.3 (D15): the ABI now returns NULL where Java's <c>clusterId()</c> is null
     /// (the old-broker <c>Metadata</c> fallback), which no mock can produce — so the
@@ -119,19 +119,16 @@ public sealed class PublicAdminP3ShapeParityTests
         MethodInfo authorizedOperations = typeof(DescribeClusterResult).GetMethod(
             nameof(DescribeClusterResult.AuthorizedOperations), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(Task<IReadOnlyCollection<Node>>), nodes.ReturnType);
-        Assert.Equal(typeof(Task<Node>), controller.ReturnType);
-        Assert.Equal(typeof(Task<string>), clusterId.ReturnType);
-        Assert.Equal(typeof(Task<IReadOnlyCollection<AclOperation>>), authorizedOperations.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<Node>>), nodes.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<Node>), controller.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<string>), clusterId.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<AclOperation>>), authorizedOperations.ReturnType);
 
-        // ⚠ The nullability under test is the TASK'S VALUE, i.e. position 1 of the
-        // flattened return type — position 0 is the Task itself, which is never null and
-        // is identical for Task<Node> and Task<Node?>. An assertion written against
-        // position 0 here would be green however the value is widened.
-        foreach (MethodInfo accessor in new[] { nodes, controller, clusterId, authorizedOperations })
-        {
-            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter));
-        }
+        // ⚠ The nullability under test is the FUTURE'S VALUE, i.e. position 1 of the
+        // flattened return type. The future is a struct since M15/P14 S5a, so the exact CLR
+        // types above are what rule out a Nullable<> wrapper; position 0 of a generic struct
+        // carries no annotation, and an assertion written against it would be green however
+        // the value is widened.
 
         // Non-null value: Java's nodes() future always carries one.
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(nodes.ReturnParameter, 1));
@@ -186,10 +183,11 @@ public sealed class PublicAdminP3ShapeParityTests
     {
         MethodInfo configResources = typeof(ListConfigResourcesResult).GetMethod(
             nameof(ListConfigResourcesResult.All), Type.EmptyTypes)!;
-        Assert.Equal(typeof(Task<IReadOnlyCollection<ConfigResource>>), configResources.ReturnType);
-        Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(configResources.ReturnParameter));
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<ConfigResource>>), configResources.ReturnType);
 
-        // Position 1 — the task's VALUE. Java's all() always carries a collection.
+        // Position 1 — the future's VALUE (a struct since M15/P14 S5a, so position 0 carries
+        // no annotation and the exact CLR type rules out a Nullable<> wrapper). Java's all()
+        // always carries a collection.
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(configResources.ReturnParameter, 1));
         Assert.Empty(typeof(ListConfigResourcesResult).GetProperties());
         Assert.Empty(typeof(ListConfigResourcesResult).GetConstructors());

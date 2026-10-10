@@ -13,20 +13,19 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.AlterReplicaLogDirs"/> — the .NET realization of Java's
-/// <c>AlterReplicaLogDirsResult</c>: one awaitable <b>per replica</b>, handed back the
+/// <c>AlterReplicaLogDirsResult</c>: one future <b>per replica</b>, handed back the
 /// moment the request is submitted (<c>AlterReplicaLogDirsResult.java:67, :75</c>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// Java publishes <c>Map&lt;TopicPartitionReplica, KafkaFuture&lt;Void&gt;&gt; values()</c>,
-/// so awaiting one tells you whether <em>that</em> replica's move was accepted and hands
+/// so waiting for one tells you whether <em>that</em> replica's move was accepted and hands
 /// back nothing. Java documents the failures it can carry (<c>:53-64</c>) —
 /// authorization, an over-long topic name, an unknown log directory, a replica that does
 /// not exist on the broker, a disk error.
@@ -37,52 +36,49 @@ namespace Confluent.Kafka.Admin;
 /// carries no value, which the header states outright — "Java's per-replica future is
 /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <em>is</em> the success value".
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its replica (or, for
+/// <see cref="All"/>, every replica) has completed, and needs no thread-pool thread: the futures here are composed
+/// on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncAlterReplicaLogDirsResult"/>
 public sealed class AlterReplicaLogDirsResult
 {
-    private readonly IReadOnlyDictionary<TopicPartitionReplica, Task> _values;
+    private readonly IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> _values;
 
     /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal success
-    /// token and must not reach the public surface.
+    /// Wraps one future per replica — Java's package-private
+    /// <c>AlterReplicaLogDirsResult(Map&lt;TopicPartitionReplica, KafkaFuture&lt;Void&gt;&gt;)</c> (<c>:41</c>).
+    /// The dictionary is held by reference, as Java holds its map.
     /// </summary>
-    /// <remarks>
-    /// The erasure is a reference upcast, so each entry is the <b>same</b>
-    /// <see cref="Task"/> instance as the bridge's — no per-key allocation, and no second
-    /// task whose fault could go unobserved. It reuses the bridge's own comparer so the
-    /// view and the sources cannot disagree about key identity.
-    /// </remarks>
-    internal AlterReplicaLogDirsResult(
-        IReadOnlyDictionary<TopicPartitionReplica, Task<bool>> values,
-        IEqualityComparer<TopicPartitionReplica> comparer)
+    internal AlterReplicaLogDirsResult(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> values)
     {
-        Dictionary<TopicPartitionReplica, Task> erased =
-            new Dictionary<TopicPartitionReplica, Task>(values.Count, comparer);
-        foreach (KeyValuePair<TopicPartitionReplica, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, entry.Value);
-        }
-
-        _values = erased;
+        _values = values;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
+    /// <remarks>
+    /// Presents the bridge's <c>bool</c> latches as Java's <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the
+    /// void bridge's internal success token and must not reach the public surface. Each void future is erased over
+    /// its key's <b>same</b> latch — no second completion — with the bridge's own comparer, so the view and the
+    /// sources cannot disagree about key identity.
+    /// </remarks>
     internal static AlterReplicaLogDirsResult From(VoidKeyedAdminOperation<TopicPartitionReplica> operation) =>
-        new AlterReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+        new AlterReplicaLogDirsResult(SyncAdminFutures.Erase(operation.SyncSources, operation.KeyComparer));
 
     /// <summary>
-    /// One awaitable per requested replica — Java's <c>values()</c> (<c>:67</c>).
+    /// One future per requested replica — Java's <c>values()</c> (<c>:67</c>).
     /// </summary>
-    public IReadOnlyDictionary<TopicPartitionReplica, Task> Values => _values;
+    public IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> replica move has been accepted, and faults with the
-    /// first failure if any was rejected — Java's <c>all()</c> (<c>:75</c>).
+    /// Completes when <b>every</b> replica move has been accepted, and fails with the
+    /// first failure in key order if any was rejected — Java's <c>all()</c> (<c>:75</c>).
     /// </summary>
-    /// <returns>A task representing the whole batch.</returns>
-    public Task All() => Task.WhenAll(_values.Values);
+    /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every replica.</returns>
+    public KafkaFuture All() => SyncAdminFutures.AllOf(_values.Values);
 }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 
@@ -21,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.DescribeCluster"/> — the .NET realization of Java's
-/// <c>DescribeClusterResult</c>: four awaitables over the cluster's attributes, handed
+/// <c>DescribeClusterResult</c>: four futures over the cluster's attributes, handed
 /// back the moment the request is submitted
 /// (<c>DescribeClusterResult.java:49, :59, :66, :74</c>).
 /// </summary>
@@ -48,7 +47,7 @@ namespace Confluent.Kafka.Admin;
 /// recorded deviation (<c>definition-of-done.md</c> §7). Java holds four independent
 /// <c>KafkaFuture</c> fields which the client completes separately; the C ABI settles the
 /// whole result together and has no <c>KafkaFuture</c> type with which to express
-/// independent timing, so the four tasks here derive from one source. The consequence is
+/// independent timing, so the four futures here derive from one source. The consequence is
 /// <em>stronger</em> than Java's, not weaker: four projections of one completion cannot
 /// report four different cluster states.
 /// </para>
@@ -60,91 +59,87 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// <b>Each projection is created once, in the constructor, and cached</b> — so repeated
-/// calls return the <b>same</b> <see cref="Task"/> instance, matching Java, whose
+/// calls return an <b>equal</b> <see cref="KafkaFuture{T}"/>, over the same projection, matching Java, whose
 /// accessors return the stored future field every time. (Contrast
-/// <see cref="ListTopicsResult.Listings"/>, which allocates per call because Java's
-/// <c>listings()</c> is a fresh <c>thenApply</c> each call — the difference is Java's.)
+/// <see cref="ListTopicsResult.Listings"/>, which builds a new projection per call because Java's
+/// <c>listings()</c> is a fresh <c>thenApply</c> each call — the difference is Java's.) A projection runs on the
+/// first <c>Get()</c>'s thread and at most once, so every <c>Get()</c> of one accessor's future returns the same
+/// value instance.
 /// </para>
 /// <para>
-/// ⚠ <b>The unobserved-faulted-task consideration, and how it was resolved.</b> Creating
-/// all four eagerly means a failed call produces four faulted tasks, of which a caller
-/// awaiting only <see cref="Nodes"/> observes one; the other three would raise
-/// <c>TaskScheduler.UnobservedTaskException</c> when finalized. That is accepted here, for
-/// three reasons. It is exactly Java's own situation — four futures fault together and a
-/// caller awaits the one it wants. Unobserved task exceptions are non-fatal by default on
-/// every target framework in this binding's matrix (net462 needs an explicit
-/// <c>ThrowUnobservedTaskExceptions</c> opt-in; .NET Core never rethrows). And the
-/// alternative — creating each projection lazily on first access — buys only a smaller
-/// count of unobserved tasks in exchange for a synchronization dance on a public accessor,
-/// which is a poor trade for a benign, Java-identical condition. Eager creation also makes
-/// "the same instance every call" true by construction rather than by a lock.
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the description has completed, and
+/// needs no thread-pool thread: the futures here are composed on the waiting thread, never over a <c>Task</c>. A
+/// failed call fails all four with the call's own <see cref="KafkaException"/>; a future that is never read raises
+/// nothing, so the async twin's unobserved-task consideration has no counterpart here.
 /// </para>
 /// </remarks>
+/// <seealso cref="AsyncDescribeClusterResult"/>
 public sealed class DescribeClusterResult
 {
-    private readonly Task<IReadOnlyCollection<Node>> _nodes;
-    private readonly Task<Node?> _controller;
-    private readonly Task<string?> _clusterId;
-    private readonly Task<IReadOnlyCollection<AclOperation>?> _authorizedOperations;
+    private readonly KafkaFuture<IReadOnlyCollection<Node>> _nodes;
+    private readonly KafkaFuture<Node?> _controller;
+    private readonly KafkaFuture<string?> _clusterId;
+    private readonly KafkaFuture<IReadOnlyCollection<AclOperation>?> _authorizedOperations;
 
     /// <summary>
     /// Wraps the single completion — Java's package-private four-future constructor
     /// (<c>DescribeClusterResult.java:36-44</c>), collapsed onto one source per the
     /// recorded deviation above.
     /// </summary>
-    internal DescribeClusterResult(Task<DescribeClusterSnapshot> future)
+    internal DescribeClusterResult(KafkaFuture<DescribeClusterSnapshot> future)
     {
-        _nodes = ProjectNodes(future);
-        _controller = ProjectController(future);
-        _clusterId = ProjectClusterId(future);
-        _authorizedOperations = ProjectAuthorizedOperations(future);
+        // Java's `thenApply`, once per accessor: each projection is a field read of the snapshot.
+        _nodes = SyncAdminFutures.Project(future, static snapshot => snapshot.Nodes);
+        _controller = SyncAdminFutures.Project(future, static snapshot => snapshot.Controller);
+        _clusterId = SyncAdminFutures.Project(future, static snapshot => snapshot.ClusterId);
+        _authorizedOperations = SyncAdminFutures.Project(future, static snapshot => snapshot.AuthorizedOperations);
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static DescribeClusterResult From(SingleAdminOperation<DescribeClusterSnapshot> operation) =>
-        new DescribeClusterResult(operation.Task);
+        new DescribeClusterResult(new KafkaFuture<DescribeClusterSnapshot>(operation.SyncSource));
 
     /// <summary>The cluster's nodes — Java's <c>nodes()</c> (<c>:49</c>).</summary>
-    /// <returns>A task yielding the nodes, or faulting with the call's own <see cref="KafkaException"/>.</returns>
+    /// <returns>A future yielding the nodes, or failing with the call's own <see cref="KafkaException"/>.</returns>
     /// <remarks>
     /// Java returns a <c>Collection&lt;Node&gt;</c>, so this is an
     /// <c>IReadOnlyCollection&lt;Node&gt;</c> directly rather than by the
     /// <c>IReadOnlySet</c> substitution the name-set accessors need.
     /// </remarks>
-    public Task<IReadOnlyCollection<Node>> Nodes() => _nodes;
+    public KafkaFuture<IReadOnlyCollection<Node>> Nodes() => _nodes;
 
     /// <summary>
     /// The current controller node, or <see langword="null"/> when the cluster reports
     /// none — Java's <c>controller()</c> (<c>:59</c>).
     /// </summary>
-    /// <returns>A task yielding the controller or <see langword="null"/>.</returns>
+    /// <returns>A future yielding the controller or <see langword="null"/>.</returns>
     /// <remarks>
-    /// ⚠ <b>A null controller is a successful outcome, not a failure</b> — the task
-    /// completes with <see langword="null"/> rather than faulting.
+    /// ⚠ <b>A null controller is a successful outcome, not a failure</b> — the future
+    /// completes with <see langword="null"/> rather than failing.
     /// </remarks>
-    public Task<Node?> Controller() => _controller;
+    public KafkaFuture<Node?> Controller() => _controller;
 
     /// <summary>
     /// The cluster id, or <see langword="null"/> when the cluster reported none — Java's
     /// <c>clusterId()</c> (<c>:66</c>).
     /// </summary>
-    /// <returns>A task yielding the cluster id or <see langword="null"/>.</returns>
+    /// <returns>A future yielding the cluster id or <see langword="null"/>.</returns>
     /// <remarks>
     /// ⚠ <b>A null id is a successful outcome, not a failure</b>, and it is not the empty
-    /// string: the task completes with <see langword="null"/> when the answer came through the
+    /// string: the future completes with <see langword="null"/> when the answer came through the
     /// old-broker <c>Metadata</c> fallback without an id (see the type remarks).
     /// </remarks>
-    public Task<string?> ClusterId() => _clusterId;
+    public KafkaFuture<string?> ClusterId() => _clusterId;
 
     /// <summary>
     /// The cluster's authorized operations, or <see langword="null"/> when the broker did
     /// not supply them — Java's <c>authorizedOperations()</c> (<c>:74</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the operations, an <b>empty</b> collection when the broker reported
+    /// A future yielding the operations, an <b>empty</b> collection when the broker reported
     /// an empty set, or <see langword="null"/> when it reported nothing at all. The three
     /// are distinct; see the type remarks.
     /// </returns>
@@ -155,21 +150,5 @@ public sealed class DescribeClusterResult
     /// <see cref="TopicDescription.AuthorizedOperations"/> and
     /// <see cref="ListTopicsResult.Names"/> already make (CLAUDE.md §3's idiom map).
     /// </remarks>
-    public Task<IReadOnlyCollection<AclOperation>?> AuthorizedOperations() => _authorizedOperations;
-
-    // Java's `thenApply`, in C#: an `async` method rather than ContinueWith, so a faulted
-    // projection carries the same KafkaException as the source instead of an extra
-    // AggregateException wrapper — the ListTopicsResult.Project precedent.
-    private static async Task<IReadOnlyCollection<Node>> ProjectNodes(Task<DescribeClusterSnapshot> future) =>
-        (await future.ConfigureAwait(false)).Nodes;
-
-    private static async Task<Node?> ProjectController(Task<DescribeClusterSnapshot> future) =>
-        (await future.ConfigureAwait(false)).Controller;
-
-    private static async Task<string?> ProjectClusterId(Task<DescribeClusterSnapshot> future) =>
-        (await future.ConfigureAwait(false)).ClusterId;
-
-    private static async Task<IReadOnlyCollection<AclOperation>?> ProjectAuthorizedOperations(
-        Task<DescribeClusterSnapshot> future) =>
-        (await future.ConfigureAwait(false)).AuthorizedOperations;
+    public KafkaFuture<IReadOnlyCollection<AclOperation>?> AuthorizedOperations() => _authorizedOperations;
 }

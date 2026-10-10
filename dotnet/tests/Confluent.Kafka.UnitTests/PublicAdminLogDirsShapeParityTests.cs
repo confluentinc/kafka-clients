@@ -98,7 +98,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
     /// DESCRIPTIONS, not <c>values</c>/<c>all</c></b> — Java names them
     /// <c>descriptions()</c> and <c>allDescriptions()</c>
     /// (<c>DescribeLogDirsResult.java:41, :50</c>) and has no others, so borrowing the
-    /// sibling results' names would invent a surface Java does not have.
+    /// sibling results' names would invent a surface Java does not have. Since M15/P14 S5a the
+    /// futures are <see cref="KafkaFuture{T}"/>.
     /// </summary>
     [Fact]
     public void DescribeLogDirsResult_MatchesJavasTwoAccessors()
@@ -109,14 +110,14 @@ public sealed class PublicAdminLogDirsShapeParityTests
         // ⚠ The key is a BARE int — Java's Map<Integer, …> — not a TopicPartition or a
         // string, and the value is a whole map per broker.
         Assert.Equal(
-            typeof(IReadOnlyDictionary<int, Task<IReadOnlyDictionary<string, LogDirDescription>>>),
+            typeof(IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>),
             descriptions.PropertyType);
         Assert.Null(descriptions.SetMethod);
 
         MethodInfo allDescriptions = typeof(DescribeLogDirsResult).GetMethod(
             nameof(DescribeLogDirsResult.AllDescriptions), Type.EmptyTypes)!;
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>),
             allDescriptions.ReturnType);
 
         // Java's constructor is package-private; nothing public builds one.
@@ -136,7 +137,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
     /// ⚠ <b>The two replica results differ exactly as Java's do</b>:
     /// <see cref="AlterReplicaLogDirsResult"/> is <c>KafkaFuture&lt;Void&gt;</c> per replica
     /// while <see cref="DescribeReplicaLogDirsResult"/> carries a value. Both shapes are
-    /// pinned together, because that is where the confusion lives.
+    /// pinned together, because that is where the confusion lives. Since M15/P14 S5a the futures
+    /// are <see cref="KafkaFuture"/> / <see cref="KafkaFuture{T}"/>.
     /// </summary>
     [Fact]
     public void TheTwoReplicaResults_DifferExactlyAsJavasDo()
@@ -144,27 +146,27 @@ public sealed class PublicAdminLogDirsShapeParityTests
         PropertyInfo alterValues =
             typeof(AlterReplicaLogDirsResult).GetProperty(nameof(AlterReplicaLogDirsResult.Values))!;
 
-        // ⚠ Task, not Task<bool>: the void bridge's success token must not leak out.
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, Task>), alterValues.PropertyType);
+        // ⚠ KafkaFuture, not KafkaFuture<bool>: the void bridge's success token must not leak out.
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.PropertyType);
         Assert.Null(alterValues.SetMethod);
 
         MethodInfo alterAll =
             typeof(AlterReplicaLogDirsResult).GetMethod(nameof(AlterReplicaLogDirsResult.All), Type.EmptyTypes)!;
 
-        // ⚠ A BARE Task — this is the line that differs from the describe result.
-        Assert.Equal(typeof(Task), alterAll.ReturnType);
+        // ⚠ A BARE KafkaFuture — this is the line that differs from the describe result.
+        Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
         PropertyInfo describeValues =
             typeof(DescribeReplicaLogDirsResult).GetProperty(nameof(DescribeReplicaLogDirsResult.Values))!;
         Assert.Equal(
-            typeof(IReadOnlyDictionary<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>),
+            typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>),
             describeValues.PropertyType);
         Assert.Null(describeValues.SetMethod);
 
         MethodInfo describeAll = typeof(DescribeReplicaLogDirsResult).GetMethod(
             nameof(DescribeReplicaLogDirsResult.All), Type.EmptyTypes)!;
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<TopicPartitionReplica,
+            typeof(KafkaFuture<IReadOnlyDictionary<TopicPartitionReplica,
                 DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>),
             describeAll.ReturnType);
 

@@ -89,30 +89,31 @@ public sealed class PublicAdminConfigsShapeParityTests
     /// ⚠ <b>The two results are one line apart in Java and easy to swap</b>:
     /// <c>DescribeConfigsResult.all()</c> carries the whole map, while
     /// <c>AlterConfigsResult.all()</c> is <c>KafkaFuture&lt;Void&gt;</c>. Both shapes are
-    /// pinned here, together, because that is where the confusion lives.
+    /// pinned here, together, because that is where the confusion lives. Since M15/P14 S5a the
+    /// futures are <see cref="KafkaFuture{T}"/> / <see cref="KafkaFuture"/>.
     /// </summary>
     [Fact]
     public void TheTwoResults_DifferExactlyAsJavasDo()
     {
         PropertyInfo describeValues = typeof(DescribeConfigsResult).GetProperty(
             nameof(DescribeConfigsResult.Values))!;
-        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, Task<Config>>), describeValues.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>>), describeValues.PropertyType);
         Assert.Null(describeValues.SetMethod);
 
         MethodInfo describeAll = typeof(DescribeConfigsResult).GetMethod(
             nameof(DescribeConfigsResult.All), Type.EmptyTypes)!;
-        Assert.Equal(typeof(Task<IReadOnlyDictionary<ConfigResource, Config>>), describeAll.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>), describeAll.ReturnType);
 
         PropertyInfo alterValues = typeof(AlterConfigsResult).GetProperty(nameof(AlterConfigsResult.Values))!;
 
-        // ⚠ Task, not Task<bool>: the void bridge's success token must not leak out.
-        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, Task>), alterValues.PropertyType);
+        // ⚠ KafkaFuture, not KafkaFuture<bool>: the void bridge's success token must not leak out.
+        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture>), alterValues.PropertyType);
         Assert.Null(alterValues.SetMethod);
 
         MethodInfo alterAll = typeof(AlterConfigsResult).GetMethod(nameof(AlterConfigsResult.All), Type.EmptyTypes)!;
 
-        // ⚠ A BARE Task — this is the line that differs from DescribeConfigsResult.
-        Assert.Equal(typeof(Task), alterAll.ReturnType);
+        // ⚠ A BARE KafkaFuture — this is the line that differs from DescribeConfigsResult.
+        Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
         // Java's constructors are package-private / protected; nothing public builds one.
         Assert.Empty(typeof(DescribeConfigsResult).GetConstructors());

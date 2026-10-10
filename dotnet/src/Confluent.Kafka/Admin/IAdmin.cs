@@ -370,7 +370,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Describes the cluster — Java's <c>describeCluster(DescribeClusterOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries four
+    /// <see cref="KafkaFuture{T}"/>s, whose <c>Get()</c> blocks the calling thread until the
+    /// description completes.
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
@@ -379,19 +381,22 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// yields <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// ⚠ <b>Four</b> awaitables — one per cluster attribute — rather than one per key. Three
+    /// ⚠ <b>Four</b> futures — one per cluster attribute — rather than one per key. Three
     /// of them are genuinely nullable — <see cref="DescribeClusterResult.Controller"/>,
     /// <see cref="DescribeClusterResult.ClusterId"/> and
     /// <see cref="DescribeClusterResult.AuthorizedOperations"/>: see
     /// <see cref="DescribeClusterResult"/>.
     /// </returns>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeCluster"/>
     DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null);
 
     /// <summary>
     /// Lists the cluster's configuration resources — Java's
     /// <c>listConfigResources(Set&lt;ConfigResource.Type&gt;, ListConfigResourcesOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// listing completes.
     /// </summary>
     /// <param name="configResourceTypes">
     /// The resource types to list. ⚠ <see langword="null"/> or an <b>empty</b> collection
@@ -404,9 +409,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole listing, and a <em>collection</em> rather than
+    /// ⚠ <b>One</b> future over the whole listing, and a <em>collection</em> rather than
     /// a map: there is no per-resource outcome to report, so either the call fails and the
-    /// task faults, or the whole listing succeeds.
+    /// future fails, or the whole listing succeeds.
     /// </returns>
     /// <remarks>
     /// Java also declares a no-argument <c>listConfigResources()</c> convenience overload,
@@ -415,6 +420,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// methods need .NET Standard 2.1, above this binding's floor).
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListConfigResources"/>
     ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
         ListConfigResourcesOptions? options = null);
@@ -423,7 +429,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Describes the configuration of the given resources — Java's
     /// <c>describeConfigs(Collection&lt;ConfigResource&gt;, DescribeConfigsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per resource.
+    /// <see cref="KafkaFuture{T}"/> per resource, whose <c>Get()</c> blocks the calling thread
+    /// until that resource completes.
     /// </summary>
     /// <param name="resources">
     /// The resources to describe. A repeated resource yields one entry, as Java's
@@ -437,8 +444,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="ConfigEntry.Documentation"/> <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// One awaitable per resource, each carrying that resource's own <see cref="Config"/>
-    /// or its own failure. A resource that fails faults only <em>its own</em> awaitable;
+    /// One future per resource, each carrying that resource's own <see cref="Config"/>
+    /// or its own failure. A resource that fails fails only <em>its own</em> future;
     /// a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="resources"/> is null.</exception>
@@ -447,6 +454,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeConfigs"/>
     DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null);
 
@@ -454,7 +462,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Incrementally alters the configuration of the given resources — Java's
     /// <c>incrementalAlterConfigs(Map&lt;ConfigResource, Collection&lt;AlterConfigOp&gt;&gt;,
     /// AlterConfigsOptions)</c>. Returns <b>immediately</b>, without waiting for the
-    /// broker; the result carries one awaitable per resource.
+    /// broker; the result carries one <see cref="KafkaFuture"/> per resource, whose <c>Get()</c>
+    /// blocks the calling thread until that resource completes.
     /// </summary>
     /// <param name="configs">
     /// Resource → the operations to apply to it, in order. ⚠ An
@@ -466,7 +475,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per resource, each reporting only whether <em>that</em> resource was
+    /// One future per resource, each reporting only whether <em>that</em> resource was
     /// altered — Java's per-resource future is <c>KafkaFuture&lt;Void&gt;</c>.
     /// </returns>
     /// <remarks>
@@ -482,6 +491,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// config value (<see cref="AlterConfigOpType.Delete"/>'s) is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.IncrementalAlterConfigs"/>
     AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options = null);
@@ -489,8 +499,9 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Queries the log directories of the given brokers — Java's
     /// <c>describeLogDirs(Collection&lt;Integer&gt;, DescribeLogDirsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker; the result carries one awaitable
-    /// per broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/> per broker, whose <c>Get()</c> blocks the calling thread
+    /// until that broker completes.
     /// </summary>
     /// <param name="brokers">
     /// The broker ids to query. A repeated broker yields one entry, as Java's map-keyed
@@ -498,12 +509,13 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable per broker, each yielding that broker's log directories keyed by path.
-    /// ⚠ A <b>log directory</b> that is offline does not fault anything — the awaitable
+    /// One future per broker, each yielding that broker's log directories keyed by path.
+    /// ⚠ A <b>log directory</b> that is offline does not fail anything — the future
     /// succeeds and that directory's <see cref="LogDirDescription.Error"/> is non-null.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeLogDirs"/>
     DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null);
 
@@ -511,23 +523,25 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Moves the given replicas to new log directories — Java's
     /// <c>alterReplicaLogDirs(Map&lt;TopicPartitionReplica, String&gt;,
     /// AlterReplicaLogDirsOptions)</c>. Returns <b>immediately</b>, without waiting for the
-    /// broker; the result carries one awaitable per replica.
+    /// broker; the result carries one <see cref="KafkaFuture"/> per replica, whose <c>Get()</c>
+    /// blocks the calling thread until that replica completes.
     /// </summary>
     /// <param name="replicaAssignment">Replica → the log directory to move it to.</param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// One awaitable per replica, each reporting only whether <em>that</em> move was
+    /// One future per replica, each reporting only whether <em>that</em> move was
     /// accepted — Java's per-replica future is <c>KafkaFuture&lt;Void&gt;</c>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicaAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory —
-    /// the ABI would silently skip such a row, leaving the caller holding an awaitable for a
+    /// the ABI would silently skip such a row, leaving the caller holding a future for a
     /// replica the broker was never asked about. Also thrown for a replica whose topic, or a
     /// log directory, contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AlterReplicaLogDirs"/>
     AlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
         AlterReplicaLogDirsOptions? options = null);
@@ -536,20 +550,22 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Queries the log directories of the given replicas — Java's
     /// <c>describeReplicaLogDirs(Collection&lt;TopicPartitionReplica&gt;,
     /// DescribeReplicaLogDirsOptions)</c>. Returns <b>immediately</b>, without waiting for
-    /// the broker; the result carries one awaitable per replica.
+    /// the broker; the result carries one <see cref="KafkaFuture{T}"/> per replica, whose
+    /// <c>Get()</c> blocks the calling thread until that replica completes.
     /// </summary>
     /// <param name="replicas">
     /// The replicas to query. A repeated replica yields one entry, as Java's map-keyed
     /// result does.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
-    /// <returns>One awaitable per replica, each carrying where that replica's log lives.</returns>
+    /// <returns>One future per replica, each carrying where that replica's log lives.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicas"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="replicas"/> contains a null element, or a replica whose topic
     /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeReplicaLogDirs"/>
     DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options = null);

@@ -76,6 +76,13 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(ListTopicsResult),
         nameof(CreatePartitionsResult),
         nameof(DeleteRecordsResult),
+        nameof(DescribeClusterResult),
+        nameof(ListConfigResourcesResult),
+        nameof(DescribeConfigsResult),
+        nameof(AlterConfigsResult),
+        nameof(DescribeLogDirsResult),
+        nameof(AlterReplicaLogDirsResult),
+        nameof(DescribeReplicaLogDirsResult),
     };
 
     /// <summary>
@@ -90,6 +97,13 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.ListTopics),
         nameof(IAdmin.CreatePartitions),
         nameof(IAdmin.DeleteRecords),
+        nameof(IAdmin.DescribeCluster),
+        nameof(IAdmin.ListConfigResources),
+        nameof(IAdmin.DescribeConfigs),
+        nameof(IAdmin.IncrementalAlterConfigs),
+        nameof(IAdmin.DescribeLogDirs),
+        nameof(IAdmin.AlterReplicaLogDirs),
+        nameof(IAdmin.DescribeReplicaLogDirs),
     };
 
     private static readonly string[] s_mockOnly =
@@ -388,7 +402,13 @@ public sealed class PublicAdminP14SurfaceTests
             Check(field.FieldType, result.Name + "." + field.Name, forbidden, offenders);
         }
 
-        Assert.Empty(result.GetNestedTypes(BindingFlags.Public));
+        // A public nested type is part of the Result's surface (Java nests some value types in their Result, e.g.
+        // DescribeReplicaLogDirsResult.ReplicaLogDirInfo), so its members are walked by the same rules rather than
+        // left unchecked.
+        foreach (Type nested in result.GetNestedTypes(BindingFlags.Public))
+        {
+            CheckResult(nested, forbidden, offenders);
+        }
     }
 
     private static void CheckSignature(MethodInfo method, Type[] forbidden, List<string> offenders)
