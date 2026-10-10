@@ -1606,6 +1606,364 @@ public sealed class AdminP14SyncCompositionTests
     }
 
     /// <summary>
+    /// <see cref="CreateAclsResult"/> / <see cref="AsyncCreateAclsResult"/> (M15/P14 S5d), keyed by binding. Each Result
+    /// is built over one <see cref="Bindings"/> call and read with another's, so every keyed row also pins that its
+    /// dictionary looks bindings up by value. Omitted: memoization (no projection — its only composite is
+    /// <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> CreateAclsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="DeleteAclsResult"/> / <see cref="AsyncDeleteAclsResult"/> (M15/P14 S5d), keyed by filter and read
+    /// by value as for <see cref="CreateAclsRows"/>. <c>All()</c> is Java's
+    /// <c>allOf(...).thenApply(getAclBindings)</c> (<c>DeleteAclsResult.java:99-121</c>), every filter's matched
+    /// bindings flattened in filter order. "inner-failure-at-get" pins the timing of its
+    /// <see cref="DeleteAclsResult.FilterResult.Exception"/> guard (<c>:115-116</c>): at <c>Get()</c>, never at the
+    /// call, and the first in filter order, not completion order. "outer-failure-before-inner" pins that a filter's own
+    /// failure wins over an earlier filter's <c>FilterResult</c> exception, since <c>allOf</c> fails before the
+    /// projection runs; "empty-filter-results" that filters matching nothing are not an error (<c>:96-97</c>).
+    /// Omitted: erasure identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DeleteAclsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity",
+        "inner-failure-at-get",
+        "outer-failure-before-inner",
+        "empty-filter-results");
+
+    /// <summary>
+    /// <see cref="DescribeAclsResult"/> / <see cref="AsyncDescribeAclsResult"/> (M15/P14 S5d): one future,
+    /// <c>Values()</c>, and no keys. Omitted: one-fails / two-fail / all-fail (one future, so they collapse into the
+    /// fails row); unknown-key, null-key and per-key independence (no keys); memoization (no projection or aggregate:
+    /// <c>Values()</c> is the operation's own future); erasure identity (no void view; the identity row pins
+    /// <c>Values()</c>).
+    /// </summary>
+    public static TheoryData<string, string> DescribeAclsRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="DescribeClientQuotasResult"/> / <see cref="AsyncDescribeClientQuotasResult"/> (M15/P14 S5d): the rows
+    /// and omissions of <see cref="DescribeAclsRows"/>, over <c>Entities()</c>, plus "constructor-default-guard": the
+    /// internal constructor's guard (FU-5) throws at construction, alike on both flavours.
+    /// </summary>
+    public static TheoryData<string, string> DescribeClientQuotasRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity",
+        "constructor-default-guard");
+
+    /// <summary>
+    /// <see cref="AlterClientQuotasResult"/> / <see cref="AsyncAlterClientQuotasResult"/> (M15/P14 S5d), keyed by entity
+    /// (one of them the default user, a null name) and read by value as for <see cref="CreateAclsRows"/>. Two rows pin
+    /// the internal constructor (FU-5): "constructor-null-guard", its guard at construction, alike on both flavours;
+    /// and "constructor-by-reference", that it holds the map it is given as Java's does
+    /// (<c>AlterClientQuotasResult.java:38-40</c>). Omitted: memoization (no projection — its only composite is
+    /// <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> AlterClientQuotasRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity",
+        "constructor-null-guard",
+        "constructor-by-reference");
+
+    /// <summary>
+    /// <see cref="CreateAclsResult"/> and <see cref="AsyncCreateAclsResult"/>: the per-binding void futures and
+    /// <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(CreateAclsRows))]
+    public Task CreateAcls_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            VoidHarness<AclBinding>.CreateAcls(flavour, Bindings(), Bindings()),
+            Binding(ResourceType.Topic, "beta", "User:alice"));
+
+    /// <summary>
+    /// <see cref="DeleteAclsResult"/> and <see cref="AsyncDeleteAclsResult"/>: the per-filter futures and the
+    /// flattening <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DeleteAclsRows))]
+    public async Task DeleteAcls_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        AclBindingFilter[] filters = Filters();
+        DeleteAclsHarness harness = DeleteAclsHarness.For(flavour, Filters(), filters);
+        switch (row)
+        {
+            case "inner-failure-at-get":
+                {
+                    // Java's guard is inside all()'s thenApply (DeleteAclsResult.java:115-116): the call succeeds, before
+                    // completion and after it, each filter's own future succeeds with its results, and Get() throws the
+                    // first FilterResult exception in filter order. The filters complete in the reverse order.
+                    KafkaException first = new KafkaException(31, "the first filter's second delete failed", isRetriable: false);
+                    KafkaException second = new KafkaException(32, "the second filter's delete failed", isRetriable: true);
+                    DeleteAclsResult.FilterResults firstResults = Matched(
+                        Deleted(Binding(ResourceType.Topic, "alpha", "User:alice")),
+                        Failed(Binding(ResourceType.Topic, "alpha", "User:bob"), first));
+                    DeleteAclsResult.FilterResults secondResults = Matched(
+                        Failed(Binding(ResourceType.Topic, "beta", "User:alice"), second));
+                    FutureProbe? before = null;
+                    Assert.Null(Thrown(() => before = harness.All()));
+                    before!.AssertPending();
+
+                    harness.Succeed(filters[2]);
+                    harness.Succeed(filters[1], secondResults);
+                    harness.Succeed(filters[0], firstResults);
+
+                    Assert.Same(firstResults, await harness.Value(filters[0]).Outcome());
+                    Assert.Same(secondResults, await harness.Value(filters[1]).Outcome());
+                    FutureProbe? after = null;
+                    Assert.Null(Thrown(() => after = harness.All()));
+
+                    // One future walks once, so every Get() of it rethrows the same instance.
+                    Assert.Same(first, await before.Outcome());
+                    Assert.Same(first, await before.Outcome());
+                    Assert.Same(first, await after!.Outcome());
+                    break;
+                }
+
+            case "outer-failure-before-inner":
+                {
+                    // The first filter carries a FilterResult exception, the second fails outright: allOf fails first
+                    // (:100), so the projection never runs and the outer failure wins although it is later in filter order.
+                    KafkaException inner = new KafkaException(31, "the first filter's delete failed", isRetriable: false);
+                    KafkaException outer = new KafkaException(7, "the second filter failed", isRetriable: true);
+                    harness.Succeed(filters[0], Matched(Failed(Binding(ResourceType.Topic, "alpha", "User:alice"), inner)));
+                    harness.Fail(filters[1], outer);
+                    harness.Succeed(filters[2]);
+
+                    Assert.Same(outer, await harness.All().Outcome());
+                    break;
+                }
+
+            case "empty-filter-results":
+                {
+                    // Filters matching nothing are not an error (:96-97): All() succeeds, with what the others matched ...
+                    harness.Succeed(filters[0], Matched());
+                    harness.Succeed(filters[1]);
+                    harness.Succeed(filters[2], Matched());
+                    AclBinding[] matched = harness.Bindings(filters[1]);
+                    IReadOnlyCollection<AclBinding> some =
+                        Assert.IsAssignableFrom<IReadOnlyCollection<AclBinding>>(await harness.All().Outcome());
+                    Assert.Equal(matched.Length, some.Count);
+                    Assert.Same(matched[0], some.ElementAt(0));
+                    Assert.Same(matched[1], some.ElementAt(1));
+
+                    // ... and with an empty collection when none matched anything.
+                    DeleteAclsHarness none = DeleteAclsHarness.For(flavour, Filters(), filters);
+                    foreach (AclBindingFilter filter in filters)
+                    {
+                        none.Succeed(filter, Matched());
+                    }
+
+                    Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<AclBinding>>(await none.All().Outcome()));
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, harness, Filter("delta"));
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeAclsResult"/> and <see cref="AsyncDescribeAclsResult"/>: <c>Values()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeAclsRows))]
+    public Task DescribeAcls_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        IReadOnlyCollection<AclBinding> bindings = Bindings();
+        return RunSingleRow(row, SingleHarness<IReadOnlyCollection<AclBinding>>.DescribeAcls(flavour), bindings);
+    }
+
+    /// <summary>
+    /// <see cref="DescribeClientQuotasResult"/> and <see cref="AsyncDescribeClientQuotasResult"/>: <c>Entities()</c>
+    /// and the internal constructor compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeClientQuotasRows))]
+    public Task DescribeClientQuotas_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        if (row == "constructor-default-guard")
+        {
+            // A default future, bound to no source, is this constructor's null: rejected at construction, before any
+            // accessor, with the same type, parameter name and message on both flavours.
+            AssertNullArgument(
+                FlavourOf(flavour) == AdminFlavour.Sync
+                    ? Thrown(() => _ = new DescribeClientQuotasResult(default))
+                    : Thrown(() => _ = new AsyncDescribeClientQuotasResult(default)),
+                "entities");
+            return Task.CompletedTask;
+        }
+
+        IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> quotas =
+            new Dictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>
+            {
+                [Entity(ClientQuotaEntity.User, "alice")] =
+                    new Dictionary<string, double>(StringComparer.Ordinal) { ["producer_byte_rate"] = 1024d },
+            };
+        return RunSingleRow(
+            row,
+            SingleHarness<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>.DescribeClientQuotas(flavour),
+            quotas);
+    }
+
+    /// <summary>
+    /// <see cref="AlterClientQuotasResult"/> and <see cref="AsyncAlterClientQuotasResult"/>: the per-entity void
+    /// futures, <c>All()</c> and the internal constructor compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterClientQuotasRows))]
+    public async Task AlterClientQuotas_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        switch (row)
+        {
+            case "constructor-null-guard":
+                {
+                    // Rejected at construction, where Java stores the null and fails on first use: the same type,
+                    // parameter name and message on both flavours.
+                    AssertNullArgument(
+                        FlavourOf(flavour) == AdminFlavour.Sync
+                            ? Thrown(() => _ = new AlterClientQuotasResult(null!))
+                            : Thrown(() => _ = new AsyncAlterClientQuotasResult(null!)),
+                        "futures");
+                    break;
+                }
+
+            case "constructor-by-reference":
+                await AlterClientQuotasByReference(flavour);
+                break;
+
+            default:
+                await RunKeyedRow(
+                    row,
+                    VoidHarness<ClientQuotaEntity>.AlterClientQuotas(flavour, Entities(), Entities()),
+                    Entity(ClientQuotaEntity.User, "bob"));
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AlterClientQuotas_SyncAndAsyncResults_ComposeAlike"/>'s "constructor-by-reference" row: the
+    /// constructor holds the map it is given (<c>AlterClientQuotasResult.java:38-40</c>), so <c>Values</c> is that very
+    /// map and <c>All()</c> reads whatever it holds when called. One entity's future is the map's only entry at first; a
+    /// second, failed one is added after construction.
+    /// </summary>
+    private static async Task AlterClientQuotasByReference(string flavour)
+    {
+        ClientQuotaEntity[] entities = Entities();
+        AdminFlavour adminFlavour = FlavourOf(flavour);
+        VoidKeyedAdminOperation<ClientQuotaEntity> operation = new VoidKeyedAdminOperation<ClientQuotaEntity>(
+            "alterClientQuotas", entities, EqualityComparer<ClientQuotaEntity>.Default, adminFlavour);
+        KafkaException failure = new KafkaException(38, "the second entity failed", isRetriable: false);
+        if (adminFlavour == AdminFlavour.Sync)
+        {
+            IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> erased =
+                SyncAdminFutures.Erase(operation.SyncSources, operation.KeyComparer);
+            Dictionary<ClientQuotaEntity, KafkaFuture> map =
+                new Dictionary<ClientQuotaEntity, KafkaFuture> { [entities[0]] = erased[entities[0]] };
+            AlterClientQuotasResult result = new AlterClientQuotasResult(map);
+            Assert.Same(map, result.Values);
+
+            operation.SetResult(entities[0], true);
+            AssertReturned(await FutureProbe.Of(result.All()).Outcome());
+
+            map.Add(entities[1], erased[entities[1]]);
+            operation.SetException(entities[1], failure);
+            Assert.Same(map, result.Values);
+            Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
+            return;
+        }
+
+        Dictionary<ClientQuotaEntity, AsyncKafkaFuture> asyncMap =
+            new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [entities[0]] = new AsyncKafkaFuture(operation.Tasks[entities[0]]) };
+        AsyncAlterClientQuotasResult asyncResult = new AsyncAlterClientQuotasResult(asyncMap);
+        Assert.Same(asyncMap, asyncResult.Values);
+
+        operation.SetResult(entities[0], true);
+        AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
+
+        asyncMap.Add(entities[1], new AsyncKafkaFuture(operation.Tasks[entities[1]]));
+        operation.SetException(entities[1], failure);
+        Assert.Same(asyncMap, asyncResult.Values);
+        Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
+    }
+
+    /// <summary>The rows every Result over one future and no keys shares.</summary>
+    private static async Task RunSingleRow<T>(string row, SingleHarness<T> harness, T value)
+        where T : class
+    {
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe future = harness.Future();
+                    future.AssertPending();
+
+                    harness.Operation.SetResult(value);
+
+                    Assert.Same(value, await future.Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    // The call-level failure is the one future's own, the same instance on every Get().
+                    KafkaException failure = new KafkaException(7, "the request failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    FutureProbe future = harness.Future();
+                    Assert.Same(failure, await future.Outcome());
+                    Assert.Same(failure, await future.Outcome());
+                    break;
+                }
+
+            case "identity":
+                {
+                    // The accessor hands out the operation's own future: equal on every call, done the moment it is.
+                    Assert.True(harness.EqualAcrossCalls());
+                    FutureProbe future = harness.Future();
+                    Assert.False(future.IsDone);
+
+                    harness.Operation.SetResult(value);
+
+                    Assert.True(future.IsDone);
+                    Assert.True(harness.Future().IsDone);
+                    Assert.True(harness.EqualAcrossCalls());
+                    Assert.Same(value, await future.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
     /// The rows every Result over one per-key outcome map shares, over <paramref name="harness"/>'s three keys.
     /// </summary>
     private static async Task RunOutcomeMapRow<TKey, TRow>(string row, OutcomeMapHarness<TKey, TRow> harness)
@@ -1955,6 +2313,54 @@ public sealed class AdminP14SyncCompositionTests
         new MemberToRemove("instance-3"),
     };
 
+    /// <summary>
+    /// Three ACL bindings, each differing from another in one field (M15/P14 S5d). Every call builds new instances, so a
+    /// Result built over one call and read with another's looks its keys up by value.
+    /// </summary>
+    private static AclBinding[] Bindings() => new[]
+    {
+        Binding(ResourceType.Topic, "alpha", "User:alice"),
+        Binding(ResourceType.Topic, "alpha", "User:bob"),
+        Binding(ResourceType.Group, "alpha", "User:alice"),
+    };
+
+    private static AclBinding Binding(ResourceType resourceType, string name, string principal) =>
+        new AclBinding(
+            new ResourcePattern(resourceType, name, PatternType.Literal),
+            new AccessControlEntry(principal, "*", AclOperation.Read, AclPermissionType.Allow));
+
+    /// <summary>Three ACL filters, new instances on every call (see <see cref="Bindings"/>).</summary>
+    private static AclBindingFilter[] Filters() => new[] { Filter("alpha"), Filter("beta"), Filter("gamma") };
+
+    private static AclBindingFilter Filter(string name) =>
+        new AclBindingFilter(
+            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+
+    /// <summary>
+    /// Three quota entities — a named user, the default user (a null name) and a client id — new instances on every
+    /// call (see <see cref="Bindings"/>).
+    /// </summary>
+    private static ClientQuotaEntity[] Entities() => new[]
+    {
+        Entity(ClientQuotaEntity.User, "alice"),
+        Entity(ClientQuotaEntity.User, null),
+        Entity(ClientQuotaEntity.ClientId, "alice"),
+    };
+
+    private static ClientQuotaEntity Entity(string entityType, string? name) =>
+        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [entityType] = name });
+
+    /// <summary>What one filter matched (<see cref="DeleteAclsResult.FilterResults"/>), in the given order.</summary>
+    private static DeleteAclsResult.FilterResults Matched(params DeleteAclsResult.FilterResult[] results) =>
+        new DeleteAclsResult.FilterResults(results);
+
+    private static DeleteAclsResult.FilterResult Deleted(AclBinding binding) => new DeleteAclsResult.FilterResult(binding, null);
+
+    /// <summary>A matched binding whose delete failed: Java stores both (see <see cref="DeleteAclsResult.FilterResult"/>).</summary>
+    private static DeleteAclsResult.FilterResult Failed(AclBinding binding, KafkaException failure) =>
+        new DeleteAclsResult.FilterResult(binding, failure);
+
     private static GroupListing Listing(string groupId) =>
         new GroupListing(groupId, GroupType.Consumer, "consumer", GroupState.Stable);
 
@@ -2266,6 +2672,48 @@ public sealed class AdminP14SyncCompositionTests
             AsyncDeleteConsumerGroupsResult asyncResult = AsyncDeleteConsumerGroupsResult.From(operation);
             return new VoidHarness<string>(
                 operation, groups, true, null, null, () => asyncResult.DeletedGroups, asyncResult.All);
+        }
+
+        /// <summary>
+        /// <c>CreateAcls</c> (M15/P14 S5d): the operation is built over <paramref name="requested"/>, and the rows read
+        /// it with the value-equal <paramref name="keys"/>.
+        /// </summary>
+        internal static VoidHarness<AclBinding> CreateAcls(
+            string flavour, IReadOnlyList<AclBinding> requested, IReadOnlyList<AclBinding> keys)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<AclBinding> operation = new VoidKeyedAdminOperation<AclBinding>(
+                "createAcls", requested, EqualityComparer<AclBinding>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                CreateAclsResult result = CreateAclsResult.From(operation);
+                return new VoidHarness<AclBinding>(operation, keys, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncCreateAclsResult asyncResult = AsyncCreateAclsResult.From(operation);
+            return new VoidHarness<AclBinding>(
+                operation, keys, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        /// <summary>
+        /// <c>AlterClientQuotas</c> (M15/P14 S5d): the operation is built over <paramref name="requested"/>, and the rows
+        /// read it with the value-equal <paramref name="keys"/>.
+        /// </summary>
+        internal static VoidHarness<ClientQuotaEntity> AlterClientQuotas(
+            string flavour, IReadOnlyList<ClientQuotaEntity> requested, IReadOnlyList<ClientQuotaEntity> keys)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<ClientQuotaEntity> operation = new VoidKeyedAdminOperation<ClientQuotaEntity>(
+                "alterClientQuotas", requested, EqualityComparer<ClientQuotaEntity>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterClientQuotasResult result = AlterClientQuotasResult.From(operation);
+                return new VoidHarness<ClientQuotaEntity>(operation, keys, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncAlterClientQuotasResult asyncResult = AsyncAlterClientQuotasResult.From(operation);
+            return new VoidHarness<ClientQuotaEntity>(
+                operation, keys, true, null, null, () => asyncResult.Values, asyncResult.All);
         }
 
         internal override void Succeed(TKey key) => _operation.SetResult(key, true);
@@ -3112,6 +3560,161 @@ public sealed class AdminP14SyncCompositionTests
                 : _async!.PartitionsToOffsetAndMetadata() == _async.PartitionsToOffsetAndMetadata(key);
 
         private bool Answers(string key) => CallIndexer(key) is null;
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.DeleteAcls_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter
+    /// (M15/P14 S5d): the per-filter futures, and an <c>All()</c> that flattens every filter's matched bindings in
+    /// filter order. A succeeded filter matched two bindings unless the row hands it its own results.
+    /// </summary>
+    private sealed class DeleteAclsHarness : KeyedHarness<AclBindingFilter>
+    {
+        private readonly KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> _operation;
+        private readonly Dictionary<AclBindingFilter, DeleteAclsResult.FilterResults> _values;
+        private readonly DeleteAclsResult? _sync;
+        private readonly AsyncDeleteAclsResult? _async;
+
+        private DeleteAclsHarness(
+            KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation,
+            IReadOnlyList<AclBindingFilter> keys,
+            DeleteAclsResult? sync,
+            AsyncDeleteAclsResult? async)
+            : base(keys, otherSideIsNull: true)
+        {
+            _operation = operation;
+            _values = new Dictionary<AclBindingFilter, DeleteAclsResult.FilterResults>();
+            for (int index = 0; index < keys.Count; index++)
+            {
+                _values.Add(
+                    keys[index],
+                    Matched(
+                        Deleted(Binding(ResourceType.Topic, s_topics[index], "User:alice")),
+                        Deleted(Binding(ResourceType.Topic, s_topics[index], "User:bob"))));
+            }
+
+            _sync = sync;
+            _async = async;
+        }
+
+        /// <summary>
+        /// The operation is built over <paramref name="requested"/>, and the rows read it with the value-equal
+        /// <paramref name="keys"/>.
+        /// </summary>
+        internal static DeleteAclsHarness For(
+            string flavour, IReadOnlyList<AclBindingFilter> requested, IReadOnlyList<AclBindingFilter> keys)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
+                new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
+                    "deleteAcls", requested, EqualityComparer<AclBindingFilter>.Default, adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new DeleteAclsHarness(operation, keys, DeleteAclsResult.From(operation), null)
+                : new DeleteAclsHarness(operation, keys, null, AsyncDeleteAclsResult.From(operation));
+        }
+
+        /// <summary>The bindings a filter's default results matched, in their order.</summary>
+        internal AclBinding[] Bindings(AclBindingFilter key) => _values[key].Values.Select(result => result.Binding!).ToArray();
+
+        internal void Succeed(AclBindingFilter key, DeleteAclsResult.FilterResults results) =>
+            _operation.SetResult(key, results);
+
+        internal override void Succeed(AclBindingFilter key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(AclBindingFilter key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(AclBindingFilter key) => _values[key];
+
+        internal override IEnumerable<AclBindingFilter> ValuesKeys() =>
+            _sync is not null ? _sync.Values.Keys.ToList() : _async!.Values.Keys.ToList();
+
+        internal override FutureProbe Value(AclBindingFilter key) =>
+            _sync is not null ? FutureProbe.Of(_sync.Values[key]) : FutureProbe.Of(_async!.Values[key]);
+
+        internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal override void AssertAllSucceeded(object? outcome)
+        {
+            // Every filter's matched bindings, flattened in filter order, each the very instance its filter completed with.
+            AclBinding[] expected = Keys.SelectMany(Bindings).ToArray();
+            AclBinding[] flattened = Assert.IsAssignableFrom<IReadOnlyCollection<AclBinding>>(outcome).ToArray();
+            Assert.Equal(expected.Length, flattened.Length);
+            for (int index = 0; index < expected.Length; index++)
+            {
+                Assert.Same(expected[index], flattened[index]);
+            }
+        }
+
+        internal override bool ValueEqualAcrossReads(AclBindingFilter key) =>
+            _sync is not null ? _sync.Values[key] == _sync.Values[key] : _async!.Values[key] == _async.Values[key];
+
+        internal override bool TryGetValue(AclBindingFilter key) =>
+            _sync is not null ? _sync.Values.TryGetValue(key, out _) : _async!.Values.TryGetValue(key, out _);
+
+        internal override bool ContainsKey(AclBindingFilter key) =>
+            _sync is not null ? _sync.Values.ContainsKey(key) : _async!.Values.ContainsKey(key);
+    }
+
+    /// <summary>
+    /// A Result over one future and no keys, of either flavour (M15/P14 S5d) — <see cref="DescribeAclsResult"/>'s
+    /// <c>Values()</c> or <see cref="DescribeClientQuotasResult"/>'s <c>Entities()</c> — driven through its operation's
+    /// own <c>SetResult</c> / <c>SetException</c>.
+    /// </summary>
+    private sealed class SingleHarness<T>
+        where T : class
+    {
+        private readonly Func<FutureProbe> _future;
+        private readonly Func<bool> _equalAcrossCalls;
+
+        private SingleHarness(SingleAdminOperation<T> operation, Func<FutureProbe> future, Func<bool> equalAcrossCalls)
+        {
+            Operation = operation;
+            _future = future;
+            _equalAcrossCalls = equalAcrossCalls;
+        }
+
+        internal SingleAdminOperation<T> Operation { get; }
+
+        internal static SingleHarness<IReadOnlyCollection<AclBinding>> DescribeAcls(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
+                new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeAclsResult result = DescribeAclsResult.From(operation);
+                return new SingleHarness<IReadOnlyCollection<AclBinding>>(
+                    operation, () => FutureProbe.Of(result.Values()), () => result.Values() == result.Values());
+            }
+
+            AsyncDescribeAclsResult asyncResult = AsyncDescribeAclsResult.From(operation);
+            return new SingleHarness<IReadOnlyCollection<AclBinding>>(
+                operation, () => FutureProbe.Of(asyncResult.Values()), () => asyncResult.Values() == asyncResult.Values());
+        }
+
+        internal static SingleHarness<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>
+            DescribeClientQuotas(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
+                new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
+                    "describeClientQuotas", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeClientQuotasResult result = DescribeClientQuotasResult.From(operation);
+                return new SingleHarness<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
+                    operation, () => FutureProbe.Of(result.Entities()), () => result.Entities() == result.Entities());
+            }
+
+            AsyncDescribeClientQuotasResult asyncResult = AsyncDescribeClientQuotasResult.From(operation);
+            return new SingleHarness<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
+                operation,
+                () => FutureProbe.Of(asyncResult.Entities()),
+                () => asyncResult.Entities() == asyncResult.Entities());
+        }
+
+        internal FutureProbe Future() => _future();
+
+        internal bool EqualAcrossCalls() => _equalAcrossCalls();
     }
 
     /// <summary>

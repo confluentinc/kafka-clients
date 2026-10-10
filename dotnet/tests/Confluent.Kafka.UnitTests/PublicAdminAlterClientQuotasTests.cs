@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -373,6 +374,28 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.AlterClientQuotas(new[] { Alteration("gone", 1d) }));
+    }
+
+    /// <summary>
+    /// Java's constructor is <b>public</b> (<c>AlterClientQuotasResult.java:38</c>); the sync one here is
+    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
+    /// <see cref="KafkaFuture"/> per entity, and it still rejects a null map before anything can dereference it
+    /// (reached through <c>InternalsVisibleTo</c>).
+    /// </summary>
+    [Fact]
+    public void Constructor_IsInternalAndRejectsNull()
+    {
+        Assert.Empty(typeof(AlterClientQuotasResult).GetConstructors());
+        ConstructorInfo constructor = Assert.Single(
+            typeof(AlterClientQuotasResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
+        Assert.Equal(
+            typeof(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture>),
+            Assert.Single(constructor.GetParameters()).ParameterType);
+
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => new AlterClientQuotasResult(null!));
+        Assert.Equal("futures", error.ParamName);
+        Assert.Equal(new ArgumentNullException("futures").Message, error.Message);
     }
 
     /// <summary>

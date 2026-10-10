@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4, S5a, S5b and S5c: each converted RPC, called with the same arguments on a
+/// The differential rows of M15/P14 S4, S5a, S5b, S5c and S5d: each converted RPC, called with the same arguments on a
 /// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
 /// same outcome through every member of its Result — equal values, or an exception of the same type with the same
 /// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
@@ -1528,6 +1528,215 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>CreateAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:806-808</c> throws
+    /// from the call; the core mock fails every binding instead): both mocks key the result by the requested bindings,
+    /// in request order and once per distinct binding, and each binding's future and <c>All()</c> fail alike.
+    /// </summary>
+    [Fact]
+    public async Task CreateAcls_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AclBinding[] bindings = { Acl("diff-af-b", "User:bob"), Acl("diff-af-a", "User:alice") };
+        AclBinding[] requested = { bindings[0], bindings[1], Acl("diff-af-b", "User:bob") };
+
+        CreateAclsResult syncResult = sync.CreateAcls(requested);
+        AsyncCreateAclsResult asyncResult = async.CreateAcls(requested);
+        Assert.Equal(bindings, syncResult.Values.Keys);
+        Assert.Equal(bindings, asyncResult.Values.Keys);
+
+        foreach (AclBinding binding in bindings)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.Values[binding]), FutureProbe.Of(asyncResult.Values[binding])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>DeleteAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:816-818</c> throws
+    /// from the call; the core mock fails every filter instead): both mocks key the result by the requested filters, in
+    /// request order and once per distinct filter, and each filter's future and <c>All()</c> fail alike.
+    /// </summary>
+    [Fact]
+    public async Task DeleteAcls_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AclBindingFilter[] filters = { AclFilter("diff-ag-b"), AclFilter("diff-ag-a") };
+        AclBindingFilter[] requested = { filters[0], filters[1], AclFilter("diff-ag-b") };
+
+        DeleteAclsResult syncResult = sync.DeleteAcls(requested);
+        AsyncDeleteAclsResult asyncResult = async.DeleteAcls(requested);
+        Assert.Equal(filters, syncResult.Values.Keys);
+        Assert.Equal(filters, asyncResult.Values.Keys);
+
+        foreach (AclBindingFilter filter in filters)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.Values[filter]), FutureProbe.Of(asyncResult.Values[filter])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>DescribeAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:811-813</c>
+    /// throws from the call; the core mock fails the request instead): <c>Values()</c> fails alike.
+    /// </summary>
+    [Fact]
+    public async Task DescribeAcls_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AclBindingFilter filter = AclFilter("diff-ah");
+
+        DescribeAclsResult syncResult = sync.DescribeAcls(filter);
+        AsyncDescribeAclsResult asyncResult = async.DescribeAcls(filter);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.Values()), FutureProbe.Of(asyncResult.Values())));
+    }
+
+    /// <summary>
+    /// <c>DescribeClientQuotas</c> (M15/P14 S5d), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1244-1246</c> throws from the call, with its own "Not implement yet" typo; the core mock
+    /// fails the request instead): <c>Entities()</c> fails alike.
+    /// </summary>
+    [Fact]
+    public async Task DescribeClientQuotas_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        ClientQuotaFilter filter = ClientQuotaFilter.ContainsOnly(
+            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff-ai") });
+
+        DescribeClientQuotasResult syncResult = sync.DescribeClientQuotas(filter);
+        AsyncDescribeClientQuotasResult asyncResult = async.DescribeClientQuotas(filter);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementYet,
+            await Agree(FutureProbe.Of(syncResult.Entities()), FutureProbe.Of(asyncResult.Entities())));
+    }
+
+    /// <summary>
+    /// <c>AlterClientQuotas</c> (M15/P14 S5d), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1249-1251</c> throws from the call, with its own "Not implement yet" typo; the core mock
+    /// fails every entity instead): both mocks key the result by the altered entities, in request order and once per
+    /// distinct entity (a second alteration of one entity is sent, not keyed again), and each entity's future and
+    /// <c>All()</c> fail alike.
+    /// </summary>
+    [Fact]
+    public async Task AlterClientQuotas_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        ClientQuotaEntity[] entities = { QuotaEntity("diff-aj"), QuotaEntity(null) };
+        ClientQuotaAlteration[] alterations =
+        {
+            QuotaAlteration(entities[0], "producer_byte_rate", 1024d),
+            QuotaAlteration(entities[1], "consumer_byte_rate", 2048d),
+            QuotaAlteration(QuotaEntity("diff-aj"), "consumer_byte_rate", null),
+        };
+
+        AlterClientQuotasResult syncResult = sync.AlterClientQuotas(alterations);
+        AsyncAlterClientQuotasResult asyncResult = async.AlterClientQuotas(alterations);
+        Assert.Equal(entities, syncResult.Values.Keys);
+        Assert.Equal(entities, asyncResult.Values.Keys);
+
+        foreach (ClientQuotaEntity entity in entities)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementYet,
+                await Agree(FutureProbe.Of(syncResult.Values[entity]), FutureProbe.Of(asyncResult.Values[entity])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the ACL and quota members (M15/P14 S5d) throw alike on both mocks — the same
+    /// type, parameter name and message — before any future exists: a null argument where a member takes a required
+    /// reference, a null element where it takes a collection, and a request string the native client cannot take
+    /// unchanged (an embedded NUL).
+    /// </summary>
+    [Fact]
+    public void AclsAndQuotasGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AclBinding?[] nullBinding = { Acl("diff-ak", "User:alice"), null };
+        AclBinding[] nulBinding = { Acl("diff\0ak", "User:alice") };
+        AclBindingFilter?[] nullFilter = { AclFilter("diff-ak"), null };
+        AclBindingFilter[] nulFilter = { AclFilter("diff\0ak") };
+        ClientQuotaFilter nulQuotaFilter = ClientQuotaFilter.ContainsOnly(
+            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff\0ak") });
+        ClientQuotaAlteration?[] nullAlteration = { QuotaAlteration(QuotaEntity("diff-ak"), "producer_byte_rate", 1d), null };
+        ClientQuotaAlteration[] nulAlteration = { QuotaAlteration(QuotaEntity("diff-ak"), "producer\0byte_rate", 1d) };
+
+        AssertThrowAlike(() => sync.CreateAcls(null!), () => async.CreateAcls(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.CreateAcls(nullBinding!), () => async.CreateAcls(nullBinding!));
+        AssertThrowAlike<ArgumentException>(() => sync.CreateAcls(nulBinding), () => async.CreateAcls(nulBinding));
+
+        AssertThrowAlike(() => sync.DeleteAcls(null!), () => async.DeleteAcls(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.DeleteAcls(nullFilter!), () => async.DeleteAcls(nullFilter!));
+        AssertThrowAlike<ArgumentException>(() => sync.DeleteAcls(nulFilter), () => async.DeleteAcls(nulFilter));
+
+        AssertThrowAlike(() => sync.DescribeAcls(null!), () => async.DescribeAcls(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.DescribeAcls(nulFilter[0]), () => async.DescribeAcls(nulFilter[0]));
+
+        AssertThrowAlike(() => sync.DescribeClientQuotas(null!), () => async.DescribeClientQuotas(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeClientQuotas(nulQuotaFilter), () => async.DescribeClientQuotas(nulQuotaFilter));
+
+        AssertThrowAlike(() => sync.AlterClientQuotas(null!), () => async.AlterClientQuotas(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterClientQuotas(nullAlteration!), () => async.AlterClientQuotas(nullAlteration!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterClientQuotas(nulAlteration), () => async.AlterClientQuotas(nulAlteration));
+
+        // The rows' own pins: the null-element and request-string guards are the core's, with its messages.
+        AssertArgument("The ACL bindings must not contain a null element.", "acls", () => sync.CreateAcls(nullBinding!));
+        AssertArgument("The ACL filters must not contain a null element.", "filters", () => sync.DeleteAcls(nullFilter!));
+        AssertArgument(
+            "The client quota alterations must not contain a null element.",
+            "entries",
+            () => sync.AlterClientQuotas(nullAlteration!));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "acls", () => sync.CreateAcls(nulBinding));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "filters", () => sync.DeleteAcls(nulFilter));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "filter", () => sync.DescribeAcls(nulFilter[0]));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "filter", () => sync.DescribeClientQuotas(nulQuotaFilter));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "entries", () => sync.AlterClientQuotas(nulAlteration));
+    }
+
+    /// <summary>
+    /// <paramref name="call"/> throws exactly <see cref="ArgumentException"/>, naming <paramref name="parameterName"/>
+    /// with <paramref name="message"/>.
+    /// </summary>
+    private static void AssertArgument(string message, string parameterName, Action call)
+    {
+        ArgumentException failure = Assert.Throws<ArgumentException>(call);
+        Assert.Equal(parameterName, failure.ParamName);
+        Assert.Equal(new ArgumentException(message, parameterName).Message, failure.Message);
+    }
+
+    /// <summary>
     /// Runs both probes to their outcomes and asserts they agree: equal values, or exceptions of the same type with
     /// the same message (and code). Returns the sync outcome for the row's own pin.
     /// </summary>
@@ -1733,6 +1942,24 @@ public sealed class PublicAdminP14DifferentialTests
                 static outcome => string.Join(",", Sorted((IReadOnlyCollection<string>)outcome))));
         return Sorted(names);
     }
+
+    private static AclBinding Acl(string topic, string principal) =>
+        new AclBinding(
+            new ResourcePattern(ResourceType.Topic, topic, PatternType.Literal),
+            new AccessControlEntry(principal, "*", AclOperation.Write, AclPermissionType.Allow));
+
+    private static AclBindingFilter AclFilter(string topic) =>
+        new AclBindingFilter(
+            new ResourcePatternFilter(ResourceType.Topic, topic, PatternType.Literal),
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.Any, AclPermissionType.Any));
+
+    /// <summary>A user entity; a <see langword="null"/> name is the default user.</summary>
+    private static ClientQuotaEntity QuotaEntity(string? user) =>
+        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = user });
+
+    /// <summary>One quota of <paramref name="entity"/> set to <paramref name="value"/>, or removed when it is null.</summary>
+    private static ClientQuotaAlteration QuotaAlteration(ClientQuotaEntity entity, string quota, double? value) =>
+        new ClientQuotaAlteration(entity, new[] { new ClientQuotaAlteration.Op(quota, value) });
 
     /// <summary>
     /// Both calls throw synchronously, alike: an <see cref="ArgumentNullException"/> with the same message and

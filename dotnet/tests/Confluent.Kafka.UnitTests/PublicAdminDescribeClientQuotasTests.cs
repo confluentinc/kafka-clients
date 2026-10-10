@@ -164,6 +164,29 @@ public sealed class PublicAdminDescribeClientQuotasTests
             () => admin.DescribeClientQuotas(ClientQuotaFilter.All()));
     }
 
+    /// <summary>
+    /// Java's constructor is <b>public</b> (<c>DescribeClientQuotasResult.java:39</c>); the sync one here is
+    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
+    /// <see cref="KafkaFuture{T}"/>, and it still rejects a default future, bound to no source, before anything can
+    /// read it (reached through <c>InternalsVisibleTo</c>).
+    /// </summary>
+    [Fact]
+    public void Constructor_IsInternalAndRejectsDefault()
+    {
+        Assert.Empty(typeof(DescribeClientQuotasResult).GetConstructors());
+        ConstructorInfo constructor = Assert.Single(
+            typeof(DescribeClientQuotasResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
+        Assert.Equal(
+            typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
+            Assert.Single(constructor.GetParameters()).ParameterType);
+
+        ArgumentNullException error =
+            Assert.Throws<ArgumentNullException>(() => new DescribeClientQuotasResult(default));
+        Assert.Equal("entities", error.ParamName);
+        Assert.Equal(new ArgumentNullException("entities").Message, error.Message);
+    }
+
     /// <summary>The options default to Java's defaults — an unset timeout.</summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() =>
