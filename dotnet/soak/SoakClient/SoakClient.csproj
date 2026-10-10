@@ -4,7 +4,7 @@
     The .NET soak-test client (M16/P1) — a long-running producer/consumer endurance
     harness driven through the binding's PUBLIC API, the analog of the Python soak
     at python/soak/. It is an operational tool, not a test of the binding's
-    internals: it constructs AsyncKafkaProducer / AsyncKafkaConsumer / KafkaAdminClient
+    internals: it constructs AsyncKafkaProducer / AsyncKafkaConsumer / AsyncKafkaAdminClient
     exactly as a user would.
 
     Kept OUT of Confluent.Kafka.sln (PLAN D11), following the grpc-server / PerfV2 /

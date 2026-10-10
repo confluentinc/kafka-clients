@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Soak;
 /// C extension raises <c>TypeError</c> on a non-string configuration value, so an int
 /// <c>linger.ms</c> from a profile would abort startup. Here the parsed configuration is
 /// <c>IReadOnlyDictionary&lt;string, string&gt;</c> by construction — both the file
-/// parser and <c>KafkaProducer</c>/<c>KafkaConsumer</c>/<c>KafkaAdminClient</c> take
+/// parser and <c>KafkaProducer</c>/<c>KafkaConsumer</c>/<c>AsyncKafkaAdminClient</c> take
 /// string values — so a coercion helper would have nothing to coerce.
 /// </para>
 /// <para>
@@ -37,7 +37,7 @@ namespace Confluent.Kafka.Soak;
 /// ported (PLAN D6). It exists in Python only because its topic creation used to go
 /// through librdkafka's AdminClient, whose configuration namespace had no
 /// <c>sasl.jaas.config</c> and errored on unknown keys. This binding's
-/// <c>KafkaAdminClient</c> — like the Python soak's admin client today — takes the SAME
+/// <c>AsyncKafkaAdminClient</c> — like the Python soak's admin client today — takes the SAME
 /// Java-shaped config the producer and consumer take, so <c>sasl.jaas.config</c> flows
 /// through untouched and there is nothing to translate.
 /// </para>

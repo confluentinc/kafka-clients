@@ -56,7 +56,7 @@ internal static class TranslateAdmin
     /// <summary>
     /// The normative mock-selection rule of <c>admin_service.proto</c>'s
     /// <c>CreateAdminRequest</c>: an empty config, or one whose every value is empty, selects
-    /// <see cref="MockAdminClient"/>. Port of <c>_admin_selects_mock</c>.
+    /// <see cref="AsyncMockAdminClient"/>. Port of <c>_admin_selects_mock</c>.
     /// </summary>
     internal static bool SelectsMock(IReadOnlyDictionary<string, string> config)
     {
@@ -126,11 +126,11 @@ internal static class TranslateAdmin
     /// propagates to the handler's whole-call <c>catch</c>, which is where a failure with no
     /// per-key future belongs.
     /// </summary>
-    internal static async Task<(TValue Value, Proto.KafkaError? Error)> Resolve<TValue>(Task<TValue> future)
+    internal static async Task<(TValue Value, Proto.KafkaError? Error)> Resolve<TValue>(AsyncKafkaFuture<TValue> future)
     {
         try
         {
-            return (await future.ConfigureAwait(false), null);
+            return (await future.Get().ConfigureAwait(false), null);
         }
         catch (KafkaException ex)
         {
@@ -142,11 +142,11 @@ internal static class TranslateAdmin
     /// The void-valued twin of <see cref="Resolve{TValue}"/>: <see langword="null"/> means that
     /// key succeeded, there being no value to distinguish success by.
     /// </summary>
-    internal static async Task<Proto.KafkaError?> ResolveVoid(Task future)
+    internal static async Task<Proto.KafkaError?> ResolveVoid(AsyncKafkaFuture future)
     {
         try
         {
-            await future.ConfigureAwait(false);
+            await future.Get().ConfigureAwait(false);
             return null;
         }
         catch (KafkaException ex)
@@ -156,14 +156,14 @@ internal static class TranslateAdmin
     }
 
     /// <summary>
-    /// <c>{key: Task}</c> -&gt; <c>VoidKeyedResponse</c>, the response every per-key-void admin
+    /// <c>{key: future}</c> -&gt; <c>VoidKeyedResponse</c>, the response every per-key-void admin
     /// RPC answers with (port of <c>_admin_void_response</c>).
     /// </summary>
     internal static async Task<Proto.VoidKeyedResponse> VoidResponse<TKey>(
-        IReadOnlyDictionary<TKey, Task> futures, Func<TKey, Proto.ResultKey> keyFn)
+        IReadOnlyDictionary<TKey, AsyncKafkaFuture> futures, Func<TKey, Proto.ResultKey> keyFn)
     {
         Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
-        foreach (KeyValuePair<TKey, Task> pair in futures)
+        foreach (KeyValuePair<TKey, AsyncKafkaFuture> pair in futures)
         {
             Proto.VoidResultEntry entry = new Proto.VoidResultEntry { Key = keyFn(pair.Key) };
             Proto.KafkaError? error = await ResolveVoid(pair.Value).ConfigureAwait(false);

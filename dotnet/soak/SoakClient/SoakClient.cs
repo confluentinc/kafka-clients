@@ -287,7 +287,7 @@ internal sealed class SoakClient : IDisposable
             //
             // ⚠ RECORDED ASYMMETRY, deliberately preserved from the Python original: the
             // admin config is routed but NOT strict-validated against a key catalog (only
-            // the producer and consumer are). KafkaAdminClient takes the same Java-shaped
+            // the producer and consumer are). AsyncKafkaAdminClient takes the same Java-shaped
             // config those two take, so there is no translation layer either — PLAN D6
             // deletes Python's librdkafka_admin_config outright, and `sasl.jaas.config`
             // flows through untouched. What IS ported is the fail-fast credential check
@@ -1452,7 +1452,7 @@ internal sealed class SoakClient : IDisposable
         SoakOptions options,
         SoakLogger logger)
     {
-        using var admin = new KafkaAdminClient(adminConfig);
+        using var admin = new AsyncKafkaAdminClient(adminConfig);
 
         if (options.RecreateTopic)
         {
@@ -1471,10 +1471,10 @@ internal sealed class SoakClient : IDisposable
             options.Partitions <= 0 ? (int?)null : options.Partitions,
             options.ReplicationFactor <= 0 ? (short?)null : (short)options.ReplicationFactor);
 
-        CreateTopicsResult result = admin.CreateTopics(new[] { newTopic });
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[] { newTopic });
         try
         {
-            await result.Values[options.Topic].ConfigureAwait(false);
+            await result.Values[options.Topic].Get().ConfigureAwait(false);
             logger.Info(string.Format(
                 CultureInfo.InvariantCulture,
                 "Created topic {0} (partitions={1}, rf={2})",
@@ -1517,18 +1517,18 @@ internal sealed class SoakClient : IDisposable
         }
     }
 
-    private static async Task DeleteTopicAsync(KafkaAdminClient admin, string topic, SoakLogger logger)
+    private static async Task DeleteTopicAsync(AsyncKafkaAdminClient admin, string topic, SoakLogger logger)
     {
-        DeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { topic }));
-        IReadOnlyDictionary<string, Task>? values = deleted.TopicNameValues;
-        if (values is null || !values.TryGetValue(topic, out Task? deletion))
+        AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { topic }));
+        IReadOnlyDictionary<string, AsyncKafkaFuture>? values = deleted.TopicNameValues;
+        if (values is null || !values.TryGetValue(topic, out AsyncKafkaFuture deletion))
         {
             return;
         }
 
         try
         {
-            await deletion.ConfigureAwait(false);
+            await deletion.Get().ConfigureAwait(false);
             logger.Info("deleted topic " + topic);
         }
         catch (KafkaException ex)
