@@ -69,20 +69,20 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     [Fact]
     public async Task AlterConsumerGroupOffsets_SurfacesTheMocksDocumentedRefusal()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         TopicPartition tp = new TopicPartition("p5-acgo", 0);
-        AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+        AsyncAlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
             "p5-group",
             new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(10) });
 
         KafkaException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromPartitionResult.Code);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
@@ -91,7 +91,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
     [Fact]
     public async Task AlterConsumerGroupOffsets_ThrowsAfterDispose()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => admin.AlterConsumerGroupOffsets(
@@ -121,12 +121,12 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             [bad] = error,
         };
 
-        AlterConsumerGroupOffsetsResult result = Resolved(outcomes, all: null);
+        AsyncAlterConsumerGroupOffsetsResult result = Resolved(outcomes, all: null);
 
-        await TestTimeout.Run(() => result.PartitionResult(good), s_deadline);
+        await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
@@ -143,11 +143,11 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         TopicPartition known = new TopicPartition("p5-known", 0);
         TopicPartition unknown = new TopicPartition("p5-unknown", 7);
 
-        AlterConsumerGroupOffsetsResult result = Resolved(
+        AsyncAlterConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?> { [known] = null }, all: null);
 
         ArgumentException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ArgumentException>(() => result.PartitionResult(unknown)), s_deadline);
+            () => Assert.ThrowsAsync<ArgumentException>(() => result.PartitionResult(unknown).Get()), s_deadline);
         Assert.Equal(
             "Alter offset for partition \"" + unknown + "\" was not attempted",
             thrown.Message);
@@ -170,7 +170,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             "Failed altering group offsets for the following partitions: [p5-all-1, p5-all-2]",
             isRetriable: true);
 
-        AlterConsumerGroupOffsetsResult result = Resolved(
+        AsyncAlterConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?>
             {
                 [bad] = new KafkaException(11, "first failure", isRetriable: true),
@@ -179,7 +179,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             stored);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(stored, thrown);
     }
 
@@ -195,15 +195,15 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         TopicPartition bad = new TopicPartition("p5-all-null", 0);
         KafkaException perPartition = new KafkaException(11, "partition failure", isRetriable: false);
 
-        AlterConsumerGroupOffsetsResult result = Resolved(
+        AsyncAlterConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?> { [bad] = perPartition }, all: null);
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // The map value is still what PartitionResult reports — the two accessors read
         // different halves of one outcome.
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
         Assert.Same(perPartition, thrown);
     }
 
@@ -222,24 +222,24 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             new TaskCompletionSource<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>();
         source.SetException(callLevel);
 
-        AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(source.Task);
+        AsyncAlterConsumerGroupOffsetsResult result = new AsyncAlterConsumerGroupOffsetsResult(source.Task);
 
         KafkaException fromPartitionResult = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
-                () => result.PartitionResult(new TopicPartition("p5-fault", 0))),
+                () => result.PartitionResult(new TopicPartition("p5-fault", 0)).Get()),
             s_deadline);
         Assert.Same(callLevel, fromPartitionResult);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(callLevel, fromAll);
     }
 
     /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>
-    private static AlterConsumerGroupOffsetsResult Resolved(
+    private static AsyncAlterConsumerGroupOffsetsResult Resolved(
         IReadOnlyDictionary<TopicPartition, KafkaException?> perKey,
         KafkaException? all) =>
-        new AlterConsumerGroupOffsetsResult(
+        new AsyncAlterConsumerGroupOffsetsResult(
             Task.FromResult<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
                 (perKey, all)));
 }

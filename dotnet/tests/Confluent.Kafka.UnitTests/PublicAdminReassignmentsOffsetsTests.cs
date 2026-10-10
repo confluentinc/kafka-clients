@@ -72,14 +72,14 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_ForTimestampAtTheEarliestSentinel_DiffersFromEarliest()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-collide", 2, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-collide", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition viaTimestamp = new TopicPartition("p4s2-collide", 0);
         TopicPartition viaEarliest = new TopicPartition("p4s2-collide", 1);
 
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec>
             {
                 // ⚠ -2 IS the earliest sentinel. This is still a timestamp query.
@@ -88,12 +88,12 @@ public sealed class PublicAdminReassignmentsOffsetsTests
             });
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(viaTimestamp)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
         ListOffsetsResult.ListOffsetsResultInfo earliest =
-            await TestTimeout.Run(() => result.PartitionResult(viaEarliest), s_deadline);
+            await TestTimeout.Run(() => result.PartitionResult(viaEarliest).Get(), s_deadline);
         Assert.NotNull(earliest);
     }
 
@@ -117,9 +117,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [InlineData("earliestPendingUpload")]
     public async Task ListOffsets_EverySentinelKindIsAccepted(string kind)
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-kinds", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-kinds", 1, 1) }).All().Get(), s_deadline);
 
         TopicPartition partition = new TopicPartition("p4s2-kinds", 0);
         OffsetSpec spec = kind switch
@@ -132,13 +132,13 @@ public sealed class PublicAdminReassignmentsOffsetsTests
             _ => OffsetSpec.EarliestPendingUpload(),
         };
 
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec });
 
         // The mock seeds no offsets through the ABI, so -1 is the expected value; what is
         // under test is that the call was ACCEPTED and the partition resolved.
         ListOffsetsResult.ListOffsetsResultInfo info =
-            await TestTimeout.Run(() => result.PartitionResult(partition), s_deadline);
+            await TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline);
         Assert.Equal(-1, info.Offset);
         Assert.Equal(-1, info.Timestamp);
 
@@ -154,24 +154,24 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_FaultsOnlyTheFailingPartition()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-granular", 2, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-granular", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition good = new TopicPartition("p4s2-granular", 0);
         TopicPartition bad = new TopicPartition("p4s2-granular", 1);
 
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec>
             {
                 [good] = OffsetSpec.Latest(),
                 [bad] = OffsetSpec.ForTimestamp(123456789L),
             });
 
-        Assert.NotNull(await TestTimeout.Run(() => result.PartitionResult(good), s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline));
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>
@@ -182,12 +182,12 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListOffsets_PartitionResultThrowsForAnUnrequestedPartition()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-unrequested", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-unrequested", 1, 1) }).All().Get(), s_deadline);
 
         TopicPartition requested = new TopicPartition("p4s2-unrequested", 0);
-        ListOffsetsResult result = admin.ListOffsets(
+        AsyncListOffsetsResult result = admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [requested] = OffsetSpec.Latest() });
 
         // ⚠ A STATEMENT lambda, so this binds to the Action overload. `PartitionResult`
@@ -203,7 +203,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
             rejected.Message,
             StringComparison.Ordinal);
 
-        await TestTimeout.Run(() => result.PartitionResult(requested), s_deadline);
+        await TestTimeout.Run(() => result.PartitionResult(requested).Get(), s_deadline);
     }
 
     /// <summary>
@@ -219,9 +219,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_ReturnsTheReassignmentJustCreated()
     {
-        await using MockAdminClient admin = new MockAdminClient(3);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-lpr", 1, 2) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-lpr", 1, 2) }).All().Get(), s_deadline);
 
         TopicPartition partition = new TopicPartition("p4s2-lpr", 0);
         await TestTimeout.Run(
@@ -229,12 +229,12 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 new Dictionary<TopicPartition, NewPartitionReassignment?>
                 {
                     [partition] = new NewPartitionReassignment(new[] { 0, 2 }),
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
             await TestTimeout.Run(
-                () => admin.ListPartitionReassignments(new[] { partition }).Reassignments(), s_deadline);
+                () => admin.ListPartitionReassignments(new[] { partition }).Reassignments().Get(), s_deadline);
 
         PartitionReassignment reassignment = Assert.Contains(partition, reassignments);
         Assert.NotEmpty(reassignment.Replicas);
@@ -257,9 +257,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_AQuietPartitionIsAbsentNotFaulted()
     {
-        await using MockAdminClient admin = new MockAdminClient(2);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4s2-quiet", 2, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4s2-quiet", 2, 1) }).All().Get(), s_deadline);
 
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
             await TestTimeout.Run(
@@ -268,7 +268,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                     {
                         new TopicPartition("p4s2-quiet", 0),
                         new TopicPartition("p4s2-quiet", 1),
-                    }).Reassignments(),
+                    }).Reassignments().Get(),
                 s_deadline);
 
         Assert.Empty(reassignments);
@@ -282,12 +282,12 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignments_AcceptsNullAndEmptySelections()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(partitions: null).Reassignments(), s_deadline));
+            () => admin.ListPartitionReassignments(partitions: null).Reassignments().Get(), s_deadline));
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>()).Reassignments(), s_deadline));
+            () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>()).Reassignments().Get(), s_deadline));
     }
 
     /// <summary>
@@ -297,29 +297,29 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task ListPartitionReassignmentsResult_ReturnsTheSameTaskInstance()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
-        ListPartitionReassignmentsResult result = admin.ListPartitionReassignments();
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncListPartitionReassignmentsResult result = admin.ListPartitionReassignments();
 
-        Assert.Same(result.Reassignments(), result.Reassignments());
-        await TestTimeout.Run(result.Reassignments, s_deadline);
+        Assert.Same(result.Reassignments().Get(), result.Reassignments().Get());
+        await TestTimeout.Run(() => result.Reassignments().Get(), s_deadline);
     }
 
     /// <summary>
     /// Both RPCs reject use after close, before any native call, and are reachable through
-    /// <see cref="IAdmin"/>.
+    /// <see cref="IAsyncAdmin"/>.
     /// </summary>
     [Fact]
     public async Task BothRpcs_ThrowObjectDisposedAfterClose_AndAreReachableThroughTheInterface()
     {
-        await using (MockAdminClient live = new MockAdminClient(1))
+        await using (AsyncMockAdminClient live = new AsyncMockAdminClient(1))
         {
-            IAdmin admin = live;
-            await TestTimeout.Run(() => admin.ListPartitionReassignments().Reassignments(), s_deadline);
+            IAsyncAdmin admin = live;
+            await TestTimeout.Run(() => admin.ListPartitionReassignments().Reassignments().Get(), s_deadline);
             await TestTimeout.Run(
-                () => admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()).All(), s_deadline);
+                () => admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()).All().Get(), s_deadline);
         }
 
-        MockAdminClient closed = new MockAdminClient(1);
+        AsyncMockAdminClient closed = new AsyncMockAdminClient(1);
         closed.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => closed.ListPartitionReassignments());
@@ -329,9 +329,9 @@ public sealed class PublicAdminReassignmentsOffsetsTests
             () => closed.ListOffsets(new Dictionary<TopicPartition, OffsetSpec>()));
 
         Assert.Contains(
-            typeof(KafkaAdminClient).GetMethods(),
-            method => method.Name == nameof(IAdmin.ListPartitionReassignments));
-        Assert.NotNull(typeof(KafkaAdminClient).GetMethod(nameof(IAdmin.ListOffsets)));
+            typeof(AsyncKafkaAdminClient).GetMethods(),
+            method => method.Name == nameof(IAsyncAdmin.ListPartitionReassignments));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.ListOffsets)));
     }
 
     /// <summary>
@@ -378,10 +378,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task G3_7_TheZeroArgAndOptionsOnlyForms_ListEveryReassignment()
     {
-        await using MockAdminClient mock = new MockAdminClient(3);
-        IAdmin admin = mock;
+        await using AsyncMockAdminClient mock = new AsyncMockAdminClient(3);
+        IAsyncAdmin admin = mock;
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p135-g37", 1, 2) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p135-g37", 1, 2) }).All().Get(), s_deadline);
 
         TopicPartition partition = new TopicPartition("p135-g37", 0);
         await TestTimeout.Run(
@@ -389,16 +389,16 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 new Dictionary<TopicPartition, NewPartitionReassignment?>
                 {
                     [partition] = new NewPartitionReassignment(new[] { 0, 2 }),
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions();
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> explicitNull = await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(null, options).Reassignments(), s_deadline);
+            () => admin.ListPartitionReassignments(null, options).Reassignments().Get(), s_deadline);
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> zeroArg = await TestTimeout.Run(
-            () => admin.ListPartitionReassignments().Reassignments(), s_deadline);
+            () => admin.ListPartitionReassignments().Reassignments().Get(), s_deadline);
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> optionsOnly = await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(options).Reassignments(), s_deadline);
+            () => admin.ListPartitionReassignments(options).Reassignments().Get(), s_deadline);
 
         Assert.Equal(new[] { partition }, explicitNull.Keys);
         Assert.Equal(new[] { partition }, zeroArg.Keys);
@@ -407,7 +407,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 
         // The control: an EMPTY selection is a different request, and lists nothing.
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>(), options).Reassignments(),
+            () => admin.ListPartitionReassignments(Array.Empty<TopicPartition>(), options).Reassignments().Get(),
             s_deadline));
     }
 
@@ -426,15 +426,15 @@ public sealed class PublicAdminReassignmentsOffsetsTests
     [Fact]
     public async Task G3_7_TheOptionsOnlyForm_ForwardsItsOptions()
     {
-        using KafkaAdminClient real = new KafkaAdminClient(
+        using AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
 
         KafkaException explicitNull = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(null, options).Reassignments()),
+            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),
             s_deadline);
         KafkaException optionsOnly = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(options).Reassignments()),
+            () => Assert.ThrowsAsync<KafkaException>(() => real.ListPartitionReassignments(options).Reassignments().Get()),
             s_deadline);
 
         // REQUEST_TIMED_OUT, the core's timeout error, and the same one on both forms.

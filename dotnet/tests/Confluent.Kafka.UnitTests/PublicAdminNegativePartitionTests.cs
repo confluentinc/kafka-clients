@@ -70,15 +70,15 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task Mock_AlterPartitionReassignments_ANegativeKey_FaultsOnlyItself_AndRoundTripsTheKey()
     {
-        await using MockAdminClient admin = new MockAdminClient(3);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("neg-apr", 2, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("neg-apr", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition negative = new TopicPartition("neg-apr", -1);
         TopicPartition zero = new TopicPartition("neg-apr", 0);
 
         // No synchronous throw: the binding sends the negative key to the core.
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [negative] = new NewPartitionReassignment(new[] { 0 }),
@@ -88,10 +88,10 @@ public sealed class PublicAdminNegativePartitionTests
         Assert.Equal(2, result.Values.Count);
         Assert.Contains(negative, result.Values.Keys);
 
-        await TestTimeout.Run(() => result.Values[zero], s_deadline);
+        await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
         Assert.Equal(UnknownTopicOrPartitionMessage, failure.Message);
     }
@@ -99,13 +99,13 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_ListPartitionReassignments_ANegativePartition_FailsTheWholeRequest()
     {
-        await using KafkaAdminClient admin = NewUnconnectedClient();
+        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
 
-        ListPartitionReassignmentsResult result =
+        AsyncListPartitionReassignmentsResult result =
             admin.ListPartitionReassignments(new[] { new TopicPartition("neg-lpr", -1) });
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.Reassignments), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Reassignments().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
     }
@@ -113,10 +113,10 @@ public sealed class PublicAdminNegativePartitionTests
     [Fact]
     public async Task RealClient_AlterPartitionReassignments_ANegativePartition_FaultsThatKey()
     {
-        await using KafkaAdminClient admin = NewUnconnectedClient();
+        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
         TopicPartition negative = new TopicPartition("neg-apr", -1);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [negative] = new NewPartitionReassignment(new[] { 0 }),
@@ -125,18 +125,18 @@ public sealed class PublicAdminNegativePartitionTests
         Assert.Contains(negative, result.Values.Keys);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[negative].Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
 
         // All() surfaces the same per-key failure; a bare ThrowsAsync<KafkaException> would also
         // accept the countdown's code-0 "result contained no entry" fault (see the remarks).
         KafkaException allFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, allFailure.Code);
         Assert.Equal(InvalidPartitionMessage, allFailure.Message);
     }
 
-    private static KafkaAdminClient NewUnconnectedClient() =>
-        new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+    private static AsyncKafkaAdminClient NewUnconnectedClient() =>
+        new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 }

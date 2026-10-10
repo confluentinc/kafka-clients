@@ -57,16 +57,16 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
 
         AclBinding lookup = Binding("keyed-by-value");
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[lookup], s_deadline));
+            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -78,7 +78,7 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task EachBinding_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBinding alpha = new AclBinding(
             new ResourcePattern(ResourceType.Topic, "rt-alpha", PatternType.Literal),
@@ -88,10 +88,10 @@ public sealed class PublicAdminCreateAclsTests
             new AccessControlEntry(
                 "User:bob", "10.0.0.7", AclOperation.DescribeConfigs, AclPermissionType.Deny));
 
-        CreateAclsResult result = admin.CreateAcls(new[] { alpha, beta });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { alpha, beta });
 
         Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha], result.Values[beta]);
+        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
 
         // Every column survived the round trip: a swapped pair in the projector or the reader
         // would produce a key that no longer equals the one submitted.
@@ -99,9 +99,9 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Contains(beta, result.Values.Keys);
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[alpha], s_deadline));
+            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[beta], s_deadline));
+            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
     /// <summary>
@@ -111,17 +111,17 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBinding first = Binding("solo-first");
-        CreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[first], s_deadline));
+            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -130,12 +130,12 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task All_FaultsWhenAnyBindingFails()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -146,12 +146,12 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
+        AsyncCreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
 
         Assert.Empty(result.Values);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -160,12 +160,12 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task DuplicateBindings_CollapseToOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
 
         Assert.Single(result.Values);
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -175,16 +175,16 @@ public sealed class PublicAdminCreateAclsTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBinding binding = Binding("tópico-café-日本");
-        CreateAclsResult result = admin.CreateAcls(new[] { binding });
+        AsyncCreateAclsResult result = admin.CreateAcls(new[] { binding });
 
         AclBinding key = Assert.Single(result.Values).Key;
         Assert.Equal("tópico-café-日本", key.Pattern.Name);
         Assert.Equal(binding, key);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>

@@ -65,20 +65,20 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task AnEmptyEntity_IsSent_AndAnsweredForItselfAlone()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ClientQuotaEntity empty = EmptyEntity();
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("valid", 1d), new ClientQuotaAlteration(empty, s_noOps) });
 
         Assert.Equal(2, result.Values.Count);
         Assert.True(result.Values.ContainsKey(Entity("valid")));
         Assert.True(result.Values.ContainsKey(EmptyEntity()));
 
-        foreach (Task perEntity in new[] { result.Values[Entity("valid")], result.Values[empty] })
+        foreach (AsyncKafkaFuture perEntity in new[] { result.Values[Entity("valid")], result.Values[empty] })
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => perEntity, s_deadline));
+                () => TestTimeout.Run(() => perEntity.Get(), s_deadline));
 
             // ⚠ The mock's own per-entity wording, typo included (mock_admin_client.rs:1766) —
             // NOT "quota alteration at index 1 has no entity types", the whole-call rejection.
@@ -98,9 +98,9 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task TwoEmptyEntities_AreOneEntity_SentAndAnsweredOnce()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[]
             {
                 new ClientQuotaAlteration(EmptyEntity(), s_noOps),
@@ -110,7 +110,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[EmptyEntity()], s_deadline));
+            () => TestTimeout.Run(() => result.Values[EmptyEntity()].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
         Assert.Equal(35, failure.Code);
     }
@@ -123,20 +123,20 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task ARepeatedEntity_IsAccepted_AndHasOneAwaitable()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("dup", 1d), Alteration("dup", 2d) });
 
         Assert.Equal(Entity("dup"), Assert.Single(result.Values).Key);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[Entity("dup")], s_deadline));
+            () => TestTimeout.Run(() => result.Values[Entity("dup")].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
         Assert.Equal(35, failure.Code);
 
         // All() is Java's allOf over the one per-entity future.
-        KafkaException all = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        KafkaException all = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, all.Message);
     }
 
@@ -147,9 +147,9 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("keyed-by-value", 1d) });
 
         ClientQuotaEntity lookup = Entity("keyed-by-value");
@@ -157,7 +157,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.True(result.Values.ContainsKey(lookup));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[lookup], s_deadline));
+            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -169,9 +169,9 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task TheEntityNameTernary_ProducesThreeDistinctKeys()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[]
             {
                 new ClientQuotaAlteration(Entity(null), s_noOps),
@@ -191,7 +191,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         // collapsed the null name into "", the three rows would become two duplicates and the
         // ABI would reject the whole request instead of reaching the mock.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -202,7 +202,7 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task EachEntity_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ClientQuotaEntity alpha = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -212,7 +212,7 @@ public sealed class PublicAdminAlterClientQuotasTests
             });
         ClientQuotaEntity beta = Entity("bob");
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[]
             {
                 new ClientQuotaAlteration(
@@ -227,14 +227,14 @@ public sealed class PublicAdminAlterClientQuotasTests
             });
 
         Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha], result.Values[beta]);
+        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[alpha], s_deadline));
+            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[beta], s_deadline));
+            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
     /// <summary>
@@ -244,31 +244,31 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ClientQuotaEntity first = Entity("solo-first");
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("solo-first", 1d), Alteration("solo-second", 2d) });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[first], s_deadline));
+            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary><c>All()</c> faults when any entity failed — Java's <c>KafkaFuture.allOf</c>.</summary>
     [Fact]
     public async Task All_FaultsWhenAnyEntityFails()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result = admin.AlterClientQuotas(
+        AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("all-a", 1d), Alteration("all-b", 2d) });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.All, s_deadline));
+            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -279,13 +279,13 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result =
+        AsyncAlterClientQuotasResult result =
             admin.AlterClientQuotas(Array.Empty<ClientQuotaAlteration>());
 
         Assert.Empty(result.Values);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -295,16 +295,16 @@ public sealed class PublicAdminAlterClientQuotasTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterClientQuotasResult result =
+        AsyncAlterClientQuotasResult result =
             admin.AlterClientQuotas(new[] { Alteration("用户-café", 1d) });
 
         ClientQuotaEntity key = Assert.Single(result.Values).Key;
         Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.User]);
         Assert.Equal(Entity("用户-café"), key);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>

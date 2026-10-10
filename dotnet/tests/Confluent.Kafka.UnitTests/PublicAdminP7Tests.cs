@@ -61,14 +61,14 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task CreateDelegationToken_ReturnsATokenWithItsMetadata()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         DelegationToken token = await admin.CreateDelegationToken(
             new CreateDelegationTokenOptions
             {
                 Renewers = new[] { new KafkaPrincipal("User", "alice") },
                 MaxLifetimeMs = 86_400_000L,
-            }).DelegationToken();
+            }).DelegationToken().Get();
 
         Assert.NotEmpty(token.Hmac);
         Assert.NotEmpty(token.TokenInfo.TokenId);
@@ -85,13 +85,13 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeDelegationToken_ReturnsEveryTokenWhenUnfiltered()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         DelegationToken first = await Create(admin, "alice");
         DelegationToken second = await Create(admin, "bob");
 
         IReadOnlyList<DelegationToken> described =
-            await admin.DescribeDelegationToken().DelegationTokens();
+            await admin.DescribeDelegationToken().DelegationTokens().Get();
 
         Assert.Equal(
             new[] { first.TokenInfo.TokenId, second.TokenInfo.TokenId }.OrderBy(id => id, StringComparer.Ordinal),
@@ -105,30 +105,30 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task RenewAndExpire_MatchTheTokenByItsMac()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         DelegationToken token = await Create(admin, "alice");
 
         long renewed = await admin.RenewDelegationToken(
-            token.Hmac, new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L }).ExpiryTimestamp();
+            token.Hmac, new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L }).ExpiryTimestamp().Get();
         Assert.Equal(3_600_000L, renewed);
 
         long expired = await admin.ExpireDelegationToken(
-            token.Hmac, new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp();
+            token.Hmac, new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp().Get();
         Assert.Equal(0L, expired);
 
         // Expired, so it is gone from the describe — the MAC matched both calls.
-        Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens());
+        Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens().Get());
     }
 
     /// <summary>An unknown MAC faults the returned task rather than throwing from the call.</summary>
     [Fact]
     public async Task RenewDelegationToken_UnknownMacFaultsTheTask()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp());
+            () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
     // ------------------------------------------------------------------------------------
@@ -142,9 +142,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeFeatures_ReturnsBothTablesAndTheEpoch()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata();
+        FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
         Assert.NotNull(metadata.FinalizedFeatures);
         Assert.NotNull(metadata.SupportedFeatures);
@@ -158,9 +158,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeFeatures_AcceptsANodeId() =>
         Assert.NotNull(
-            await new MockAdminClient()
+            await new AsyncMockAdminClient()
                 .DescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 })
-                .FeatureMetadata());
+                .FeatureMetadata().Get());
 
     /// <summary>
     /// <c>updateFeatures</c> rejects an update the mock has no bounds for, and the rejection
@@ -169,9 +169,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task UpdateFeatures_SurfacesTheRejectionOnEveryKey()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        UpdateFeaturesResult result = admin.UpdateFeatures(
+        AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
                 ["metadata.version"] = new FeatureUpdate(9, FeatureUpdate.UpgradeType.Upgrade),
@@ -182,10 +182,10 @@ public sealed class PublicAdminP7Tests
             new[] { "group.version", "metadata.version" },
             result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
-        foreach (Task value in result.Values.Values)
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        foreach (AsyncKafkaFuture value in result.Values.Values)
         {
-            await Assert.ThrowsAsync<KafkaException>(() => value);
+            await Assert.ThrowsAsync<KafkaException>(() => value.Get());
         }
     }
 
@@ -199,13 +199,13 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task G6_1_UpdateFeatures_MockAcceptsAnEmptyMap()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        UpdateFeaturesResult result =
+        AsyncUpdateFeaturesResult result =
             admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
 
         Assert.Empty(result.Values);
-        await TestTimeout.Run(() => result.All(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -292,9 +292,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void UpdateFeatures_AcceptsANameWithInteriorWhitespace()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        UpdateFeaturesResult result = admin.UpdateFeatures(
+        AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
                 ["a b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
@@ -319,16 +319,16 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public async Task G6_1_UpdateFeatures_MockAcceptsABlankFeatureName(string feature)
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        UpdateFeaturesResult result = admin.UpdateFeatures(
+        AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
                 [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
             });
 
         Assert.Equal(new[] { feature }, result.Values.Keys);
-        await TestTimeout.Run(() => result.All(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -348,9 +348,9 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task UpdateFeatures_WalksEveryKey_OnTheSuccessPath()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        UpdateFeaturesResult result = admin.UpdateFeatures(
+        AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
                 ["metadata.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
@@ -363,10 +363,10 @@ public sealed class PublicAdminP7Tests
 
         // A null per-key error IS the success value for a KafkaFuture<Void> result.
         // (Status, not IsCompletedSuccessfully — the latter post-dates the netstandard2.0 floor.)
-        await result.All();
-        foreach (Task value in result.Values.Values)
+        await result.All().Get();
+        foreach (AsyncKafkaFuture value in result.Values.Values)
         {
-            Assert.Equal(TaskStatus.RanToCompletion, value.Status);
+            Assert.Equal(TaskStatus.RanToCompletion, value.Get().Status);
         }
     }
 
@@ -382,10 +382,10 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
-            () => admin.DescribeUserScramCredentials(new[] { "alice" }).All());
+            () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
     }
@@ -398,12 +398,12 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_ARepeatedUser_IsSent_AndFaultsWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeUserScramCredentialsResult result =
+        AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
         Assert.Equal(35, error.Code);
     }
@@ -412,11 +412,11 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task AlterUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.AlterUserScramCredentials(
-                new[] { new UserScramCredentialDeletion("alice", ScramMechanism.ScramSha256) }).All());
+                new[] { new UserScramCredentialDeletion("alice", ScramMechanism.ScramSha256) }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
     }
@@ -428,13 +428,13 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_FailureReachesEveryAccessor()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
+        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
-        await Assert.ThrowsAsync<KafkaException>(() => result.Users());
-        await Assert.ThrowsAsync<KafkaException>(() => result.Description("alice"));
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        await Assert.ThrowsAsync<KafkaException>(() => result.Users().Get());
+        await Assert.ThrowsAsync<KafkaException>(() => result.Description("alice").Get());
     }
 
     // ------------------------------------------------------------------------------------
@@ -454,16 +454,16 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DescribeUserScramCredentials_AllFaulting_DoesNotFaultUsers()
     {
-        DescribeUserScramCredentialsResult result = ResultOver(
+        AsyncDescribeUserScramCredentialsResult result = ResultOver(
             allError: new KafkaException(29, "cluster authorization failed", isRetriable: false),
             all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
             users: new[] { "alice", "bob" });
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
         Assert.Equal(29, error.Code);
         Assert.Equal("cluster authorization failed", error.Message);
 
-        Assert.Equal(new[] { "alice", "bob" }, await result.Users());
+        Assert.Equal(new[] { "alice", "bob" }, await result.Users().Get());
     }
 
     /// <summary>
@@ -481,7 +481,7 @@ public sealed class PublicAdminP7Tests
         UserScramCredentialsDescription alice = new UserScramCredentialsDescription(
             "alice", new[] { new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096) });
 
-        DescribeUserScramCredentialsResult result = ResultOver(
+        AsyncDescribeUserScramCredentialsResult result = ResultOver(
             allError: null,
             all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal)
             {
@@ -490,11 +490,11 @@ public sealed class PublicAdminP7Tests
             },
             users: new[] { "alice" });
 
-        IReadOnlyDictionary<string, UserScramCredentialsDescription> all = await result.All();
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> all = await result.All().Get();
         Assert.Equal(new[] { "alice", "ghost" }, all.Keys.OrderBy(name => name, StringComparer.Ordinal));
         Assert.Empty(all["ghost"].CredentialInfos);
 
-        Assert.Equal(new[] { "alice" }, await result.Users());
+        Assert.Equal(new[] { "alice" }, await result.Users().Get());
     }
 
     /// <summary>
@@ -504,7 +504,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
     {
-        DescribeUserScramCredentialsResult result = ResultOver(
+        AsyncDescribeUserScramCredentialsResult result = ResultOver(
             allError: null,
             all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
             users: Array.Empty<string>());
@@ -523,11 +523,11 @@ public sealed class PublicAdminP7Tests
     /// the only member that touches the root. A populated root cannot be built in a unit
     /// test: the ABI exports no constructor for one and the Rust mock faults this RPC.
     /// </remarks>
-    private static DescribeUserScramCredentialsResult ResultOver(
+    private static AsyncDescribeUserScramCredentialsResult ResultOver(
         KafkaException? allError,
         IReadOnlyDictionary<string, UserScramCredentialsDescription> all,
         IReadOnlyList<string> users) =>
-        new DescribeUserScramCredentialsResult(
+        new AsyncDescribeUserScramCredentialsResult(
             Task.FromResult(new Internal.DescribeUserScramCredentialsViews(
                 allError,
                 all,
@@ -546,7 +546,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public async Task DelegationTokenToString_MasksTheMac()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         DelegationToken token = await Create(admin, "alice");
         string text = token.ToString();
@@ -732,12 +732,12 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(ScramMechanism.Unknown, ScramMechanisms.FromType(99));
     }
 
-    private static Task<DelegationToken> Create(MockAdminClient admin, string renewer) =>
+    private static Task<DelegationToken> Create(AsyncMockAdminClient admin, string renewer) =>
         admin.CreateDelegationToken(
             new CreateDelegationTokenOptions
             {
                 Renewers = new[] { new KafkaPrincipal("User", renewer) },
-            }).DelegationToken();
+            }).DelegationToken().Get();
 
     /// <summary>
     /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary

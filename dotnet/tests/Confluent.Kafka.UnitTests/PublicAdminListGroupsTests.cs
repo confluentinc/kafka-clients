@@ -61,16 +61,16 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_ReportsEverySeededGroup()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await SeedGroups(admin, "public-lg-a", "public-lg-b", "public-lg-c");
 
-        ListGroupsResult result = admin.ListGroups();
+        AsyncListGroupsResult result = admin.ListGroups();
 
         IReadOnlyCollection<GroupListing> valid =
-            await TestTimeout.Run(() => result.Valid(), s_deadline);
+            await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
         IReadOnlyCollection<KafkaException> errors =
-            await TestTimeout.Run(() => result.Errors(), s_deadline);
+            await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
 
         Assert.Equal(
             new[] { "public-lg-a", "public-lg-b", "public-lg-c" },
@@ -95,14 +95,14 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_AllAgreesWithValid_WhenNothingFailed()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await SeedGroups(admin, "public-lg-all-1", "public-lg-all-2");
 
-        ListGroupsResult result = admin.ListGroups();
+        AsyncListGroupsResult result = admin.ListGroups();
 
-        IReadOnlyCollection<GroupListing> all = await TestTimeout.Run(() => result.All(), s_deadline);
-        IReadOnlyCollection<GroupListing> valid = await TestTimeout.Run(() => result.Valid(), s_deadline);
+        IReadOnlyCollection<GroupListing> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
+        IReadOnlyCollection<GroupListing> valid = await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
 
         Assert.Equal(
             valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal),
@@ -117,29 +117,29 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_WithNoGroups_YieldsTwoEmptyCollections()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        ListGroupsResult result = admin.ListGroups();
+        AsyncListGroupsResult result = admin.ListGroups();
 
-        Assert.Empty(await TestTimeout.Run(() => result.Valid(), s_deadline));
-        Assert.Empty(await TestTimeout.Run(() => result.Errors(), s_deadline));
-        Assert.Empty(await TestTimeout.Run(() => result.All(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.Valid().Get(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.Errors().Get(), s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
-    /// The call is reachable through the <see cref="IAdmin"/> surface, which is what a user
+    /// The call is reachable through the <see cref="IAsyncAdmin"/> surface, which is what a user
     /// holding the interface — and every test double written against it — actually calls.
     /// </summary>
     [Fact]
     public async Task ListGroups_IsReachableThroughTheInterface()
     {
-        using MockAdminClient mock = new MockAdminClient();
-        IAdmin admin = mock;
+        using AsyncMockAdminClient mock = new AsyncMockAdminClient();
+        IAsyncAdmin admin = mock;
 
         await SeedGroups(mock, "public-lg-iface");
 
         IReadOnlyCollection<GroupListing> valid =
-            await TestTimeout.Run(() => admin.ListGroups().Valid(), s_deadline);
+            await TestTimeout.Run(() => admin.ListGroups().Valid().Get(), s_deadline);
 
         Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId);
     }
@@ -152,18 +152,18 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_NoFilter_IsTheSameCallHoweverItIsSpelled()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await SeedGroups(admin, "public-lg-nofilter");
 
-        foreach (ListGroupsResult result in new[]
+        foreach (AsyncListGroupsResult result in new[]
         {
             admin.ListGroups(),
             admin.ListGroups(null),
             admin.ListGroups(new ListGroupsOptions()),
         })
         {
-            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid(), s_deadline)).GroupId);
+            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
         }
     }
 
@@ -180,11 +180,11 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_AFullyFilteredCall_CompletesNormally()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await SeedGroups(admin, "public-lg-filtered");
 
-        ListGroupsResult result = admin.ListGroups(new ListGroupsOptions
+        AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
         {
             GroupStates = new[] { GroupState.Stable, GroupState.Empty },
             ProtocolTypes = new[] { ConsumerProtocol },
@@ -192,7 +192,7 @@ public sealed class PublicAdminListGroupsTests
             TimeoutMs = 30_000,
         });
 
-        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid(), s_deadline)).GroupId);
+        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
     }
 
     /// <summary>
@@ -202,7 +202,7 @@ public sealed class PublicAdminListGroupsTests
     [Fact]
     public async Task ListGroups_JavasFilterFactories_AreCallableEndToEnd()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await SeedGroups(admin, "public-lg-factory");
 
@@ -213,7 +213,7 @@ public sealed class PublicAdminListGroupsTests
             ListGroupsOptions.ForStreamsGroups(),
         })
         {
-            Assert.Empty(await TestTimeout.Run(() => admin.ListGroups(options).Errors(), s_deadline));
+            Assert.Empty(await TestTimeout.Run(() => admin.ListGroups(options).Errors().Get(), s_deadline));
         }
     }
 
@@ -267,7 +267,7 @@ public sealed class PublicAdminListGroupsTests
     /// <summary>
     /// Puts one group config per id into the mock, which is what makes the mock list them.
     /// </summary>
-    private static Task SeedGroups(MockAdminClient admin, params string[] groupIds) =>
+    private static Task SeedGroups(AsyncMockAdminClient admin, params string[] groupIds) =>
         TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
                 groupIds.ToDictionary(
@@ -277,6 +277,6 @@ public sealed class PublicAdminListGroupsTests
                         new AlterConfigOp(
                             new ConfigEntry("consumer.session.timeout.ms", "45000"),
                             AlterConfigOpType.Set),
-                    })).All(),
+                    })).All().Get(),
             s_deadline);
 }

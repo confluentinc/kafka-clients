@@ -78,9 +78,9 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_FansOutOneFuturePerGroupId()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClassicGroupsResult result =
+        AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(new[] { "p5-dclg-a", "p5-dclg-b", "p5-dclg-c" });
 
         Assert.Equal(
@@ -91,10 +91,10 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         // assertion while losing the per-group granularity the Java shape promises.
         Assert.Equal(3, result.DescribedGroups.Values.Distinct().Count());
 
-        foreach (KeyValuePair<string, Task<ClassicGroupDescription>> described in result.DescribedGroups)
+        foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> described in result.DescribedGroups)
         {
             KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => described.Value), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => described.Value.Get()), s_deadline);
 
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
@@ -109,12 +109,12 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_AllFaultsWhenAKeyFails()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
+        AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
@@ -125,7 +125,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     /// ids differing only in case stay two.
     /// </summary>
     /// <remarks>
-    /// The comparer is load-bearing all the way out — <see cref="DescribeClassicGroupsResult"/>
+    /// The comparer is load-bearing all the way out — <see cref="AsyncDescribeClassicGroupsResult"/>
     /// hardcodes <see cref="StringComparer.Ordinal"/> for its aggregate and has a public
     /// constructor with no factory to thread a different one through, so a case-insensitive
     /// bridge would silently disagree with the result it feeds.
@@ -133,9 +133,9 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_DeduplicatesIdsOrdinally()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClassicGroupsResult result =
+        AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(new[] { "p5-cdup", "p5-cdup", "P5-CDUP" });
 
         Assert.Equal(2, result.DescribedGroups.Count);
@@ -143,7 +143,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         Assert.Contains("P5-CDUP", result.DescribedGroups.Keys);
 
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>
@@ -153,15 +153,15 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_AnEmptyRequestCompletesEmpty()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClassicGroupsResult result =
+        AsyncDescribeClassicGroupsResult result =
             admin.DescribeClassicGroups(Array.Empty<string>());
 
         Assert.Empty(result.DescribedGroups);
 
         IReadOnlyDictionary<string, ClassicGroupDescription> all =
-            await TestTimeout.Run(result.All, s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         Assert.Empty(all);
     }
@@ -176,14 +176,14 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [InlineData(false)]
     public async Task DescribeClassicGroups_AcceptsBothAuthorizedOperationsSettings(bool include)
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClassicGroupsResult result = admin.DescribeClassicGroups(
+        AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(
             new[] { "p5-dclg-flag" },
             new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
 
         // The mock's refusal, not an ABI complaint about a malformed boolean.
         Assert.Equal(UnsupportedVersionCode, failure.Code);
@@ -191,19 +191,19 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     }
 
     /// <summary>
-    /// The RPC is reachable through <see cref="IAdmin"/>, not only through the concrete
+    /// The RPC is reachable through <see cref="IAsyncAdmin"/>, not only through the concrete
     /// mock — the interface is the shape Java's <c>Admin</c> declares.
     /// </summary>
     [Fact]
     public async Task DescribeClassicGroups_IsReachableThroughTheInterface()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
-        IAdmin api = admin;
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        IAsyncAdmin api = admin;
 
-        DescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
+        AsyncDescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
 
         Assert.Equal(new[] { "p5-dclg-iface" }, result.DescribedGroups.Keys);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>
@@ -214,7 +214,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_RejectsAMalformedIdList()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
             () => { admin.DescribeClassicGroups(null!); });
@@ -233,7 +233,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         Assert.Null(Record.Exception(
             () =>
@@ -251,7 +251,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
     [Fact]
     public async Task DescribeClassicGroups_AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(

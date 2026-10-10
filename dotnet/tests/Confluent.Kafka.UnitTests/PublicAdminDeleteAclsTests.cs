@@ -58,16 +58,16 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DeleteAclsResult result = admin.DeleteAcls(new[] { Filter("keyed-by-value") });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("keyed-by-value") });
 
         AclBindingFilter lookup = Filter("keyed-by-value");
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[lookup], s_deadline));
+            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -79,7 +79,7 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task NullAndEmpty_RoundTripAsDistinctKeys()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBindingFilter wildcard = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
@@ -89,7 +89,7 @@ public sealed class PublicAdminDeleteAclsTests
             new AccessControlEntryFilter(
                 string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any));
 
-        DeleteAclsResult result = admin.DeleteAcls(new[] { wildcard, literalEmpty });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { wildcard, literalEmpty });
 
         Assert.Equal(2, result.Values.Count);
         Assert.True(result.Values.ContainsKey(wildcard));
@@ -102,7 +102,7 @@ public sealed class PublicAdminDeleteAclsTests
             Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Host);
         }
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -112,7 +112,7 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task EachFilter_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBindingFilter alpha = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, "rt-alpha", PatternType.Literal),
@@ -123,17 +123,17 @@ public sealed class PublicAdminDeleteAclsTests
             new AccessControlEntryFilter(
                 "User:bob", "10.0.0.7", AclOperation.DescribeConfigs, AclPermissionType.Deny));
 
-        DeleteAclsResult result = admin.DeleteAcls(new[] { alpha, beta });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { alpha, beta });
 
         Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha], result.Values[beta]);
+        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[alpha], s_deadline));
+            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[beta], s_deadline));
+            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
     /// <summary>
@@ -143,17 +143,17 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBindingFilter first = Filter("solo-first");
-        DeleteAclsResult result = admin.DeleteAcls(new[] { first, Filter("solo-second") });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { first, Filter("solo-second") });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[first], s_deadline));
+            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -162,12 +162,12 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task All_OverAnEmptyRequest_IsAnEmptyCollection()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DeleteAclsResult result = admin.DeleteAcls(Array.Empty<AclBindingFilter>());
+        AsyncDeleteAclsResult result = admin.DeleteAcls(Array.Empty<AclBindingFilter>());
 
         Assert.Empty(result.Values);
-        Assert.Empty(await TestTimeout.Run(result.All, s_deadline));
+        Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -177,12 +177,12 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task DuplicateFilters_CollapseToOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
 
         Assert.Single(result.Values);
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -192,13 +192,13 @@ public sealed class PublicAdminDeleteAclsTests
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         AclBindingFilter filter = Filter("tópico-café-日本");
-        DeleteAclsResult result = admin.DeleteAcls(new[] { filter });
+        AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { filter });
 
         Assert.Equal("tópico-café-日本", Assert.Single(result.Values).Key.PatternFilter.Name);
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(result.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>

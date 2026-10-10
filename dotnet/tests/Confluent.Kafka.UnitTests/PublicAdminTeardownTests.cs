@@ -44,7 +44,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task DisposeAsync_IsIdempotent_AndMixesWithDispose()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
@@ -56,7 +56,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithATimeout_ThenDispose_IsSafe()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), s_deadline);
 
@@ -68,7 +68,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithZeroTimeout_IsValid()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
     }
@@ -76,7 +76,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithANegativeTimeout_ThrowsBeforeAnyNativeCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ArgumentOutOfRangeException failure = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => admin.Close(TimeSpan.FromMilliseconds(-1)));
@@ -118,7 +118,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task CloseAfterDispose_IsANoOp()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         // Java's close() is idempotent; a second close must not throw.
@@ -133,9 +133,9 @@ public sealed class PublicAdminTeardownTests
             {
                 for (int i = 0; i < 25; i++)
                 {
-                    using MockAdminClient admin = new MockAdminClient(1);
-                    CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic($"churn-{i}", 1, 1) });
-                    result.All().GetAwaiter().GetResult();
+                    using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+                    AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic($"churn-{i}", 1, 1) });
+                    result.All().Get().GetAwaiter().GetResult();
                 }
             },
             s_deadline);
@@ -148,7 +148,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);

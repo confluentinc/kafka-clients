@@ -39,10 +39,10 @@ public sealed class PublicAdminTfmSmokeTests
     [Fact]
     public async Task MockAdminClient_CreateTopicsClose_RoundTrips()
     {
-        IAdmin admin = new MockAdminClient(1);
+        IAsyncAdmin admin = new AsyncMockAdminClient(1);
         try
         {
-            CreateTopicsResult result = admin.CreateTopics(new[]
+            AsyncCreateTopicsResult result = admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
                 {
@@ -50,10 +50,10 @@ public sealed class PublicAdminTfmSmokeTests
                 },
             });
 
-            await TestTimeout.Run(result.All, s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
             int numPartitions = 0;
-            await TestTimeout.Run(async () => numPartitions = await result.NumPartitions(Topic), s_deadline);
+            await TestTimeout.Run(async () => numPartitions = await result.NumPartitions(Topic).Get(), s_deadline);
             Assert.Equal(1, numPartitions);
         }
         finally
@@ -74,7 +74,7 @@ public sealed class PublicAdminTfmSmokeTests
     [Fact]
     public async Task RealAdminClient_CreateDisposeAsync_RoundTrips()
     {
-        KafkaAdminClient admin = new KafkaAdminClient(
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
@@ -91,25 +91,25 @@ public sealed class PublicAdminTfmSmokeTests
         const string Named = "tfm-p2a-by-name";
         const string Identified = "tfm-p2a-by-id";
 
-        IAdmin admin = new MockAdminClient(1);
+        IAsyncAdmin admin = new AsyncMockAdminClient(1);
         try
         {
             await TestTimeout.Run(
-                () => admin.CreateTopics(new[] { new NewTopic(Named, 1, 1), new NewTopic(Identified, 1, 1) }).All(),
+                () => admin.CreateTopics(new[] { new NewTopic(Named, 1, 1), new NewTopic(Identified, 1, 1) }).All().Get(),
                 s_deadline);
 
-            DescribeTopicsResult described =
+            AsyncDescribeTopicsResult described =
                 admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Named, Identified }));
             IReadOnlyDictionary<string, TopicDescription> all =
-                await TestTimeout.Run(() => described.AllTopicNames()!, s_deadline);
+                await TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline);
             Assert.Equal(2, all.Count);
 
             Uuid topicId = all[Identified].TopicId;
 
             await TestTimeout.Run(
-                () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Named })).All(), s_deadline);
+                () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Named })).All().Get(), s_deadline);
             await TestTimeout.Run(
-                () => admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId })).All(), s_deadline);
+                () => admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId })).All().Get(), s_deadline);
         }
         finally
         {

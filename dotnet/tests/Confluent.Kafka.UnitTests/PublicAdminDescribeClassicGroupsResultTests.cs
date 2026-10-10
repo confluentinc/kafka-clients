@@ -53,8 +53,8 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         new ClassicGroupDescription(
             groupId, "consumer", "range", null, ClassicGroupState.Stable, null);
 
-    private static Task<ClassicGroupDescription> Completed(string groupId) =>
-        Task.FromResult(Description(groupId));
+    private static AsyncKafkaFuture<ClassicGroupDescription> Completed(string groupId) =>
+        new AsyncKafkaFuture<ClassicGroupDescription>(Task.FromResult(Description(groupId)));
 
     private static TaskCompletionSource<ClassicGroupDescription> Pending() =>
         new TaskCompletionSource<ClassicGroupDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -139,13 +139,13 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [Fact]
     public void DescribedGroups_IsTheStoredMapRatherThanJavasDefensiveCopy()
     {
-        Dictionary<string, Task<ClassicGroupDescription>> futures =
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> futures =
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
             };
 
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(futures);
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(futures);
 
         Assert.Same(futures, result.DescribedGroups);
         Assert.Same(result.DescribedGroups, result.DescribedGroups);
@@ -157,14 +157,14 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [Fact]
     public async Task All_YieldsEveryDescriptionKeyedByGroupId()
     {
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
                 ["g-2"] = Completed("g-2"),
             });
 
-        IReadOnlyDictionary<string, ClassicGroupDescription> all = await result.All();
+        IReadOnlyDictionary<string, ClassicGroupDescription> all = await result.All().Get();
 
         Assert.Equal(2, all.Count);
         Assert.Equal("g-1", all["g-1"].GroupId);
@@ -177,10 +177,10 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [Fact]
     public async Task All_OverAnEmptyMap_YieldsAnEmptyMap()
     {
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal));
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal));
 
-        Assert.Empty(await result.All());
+        Assert.Empty(await result.All().Get());
     }
 
     /// <summary>
@@ -191,13 +191,13 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [Fact]
     public void All_HandsBackAFreshTaskEachCall()
     {
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
             });
 
-        Assert.NotSame(result.All(), result.All());
+        Assert.NotSame(result.All().Get(), result.All().Get());
     }
 
     /// <summary>
@@ -210,18 +210,18 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         TaskCompletionSource<ClassicGroupDescription> broken = Pending();
         broken.SetException(new InvalidOperationException("group is broken"));
 
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
                 ["healthy"] = Completed("healthy"),
-                ["broken"] = broken.Task,
+                ["broken"] = new AsyncKafkaFuture<ClassicGroupDescription>(broken.Task),
             });
 
-        ClassicGroupDescription healthy = await result.DescribedGroups["healthy"];
+        ClassicGroupDescription healthy = await result.DescribedGroups["healthy"].Get();
         Assert.Equal("healthy", healthy.GroupId);
 
         InvalidOperationException error =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => result.All());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => result.All().Get());
         Assert.Equal("group is broken", error.Message);
     }
 
@@ -237,14 +237,14 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         broken.SetException(new InvalidOperationException("group is broken"));
         TaskCompletionSource<ClassicGroupDescription> stillRunning = Pending();
 
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
-                ["broken"] = broken.Task,
-                ["still-running"] = stillRunning.Task,
+                ["broken"] = new AsyncKafkaFuture<ClassicGroupDescription>(broken.Task),
+                ["still-running"] = new AsyncKafkaFuture<ClassicGroupDescription>(stillRunning.Task),
             });
 
-        Task<IReadOnlyDictionary<string, ClassicGroupDescription>> all = result.All();
+        Task<IReadOnlyDictionary<string, ClassicGroupDescription>> all = result.All().Get();
         Assert.False(all.IsCompleted);
 
         stillRunning.SetResult(Description("still-running"));
@@ -259,14 +259,14 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [Fact]
     public async Task All_KeysOrdinally()
     {
-        DescribeClassicGroupsResult result = new DescribeClassicGroupsResult(
-            new Dictionary<string, Task<ClassicGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeClassicGroupsResult result = new AsyncDescribeClassicGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>(StringComparer.Ordinal)
             {
                 ["group"] = Completed("group"),
                 ["GROUP"] = Completed("GROUP"),
             });
 
-        IReadOnlyDictionary<string, ClassicGroupDescription> all = await result.All();
+        IReadOnlyDictionary<string, ClassicGroupDescription> all = await result.All().Get();
 
         Assert.Equal(2, all.Count);
         Assert.Equal("group", all["group"].GroupId);

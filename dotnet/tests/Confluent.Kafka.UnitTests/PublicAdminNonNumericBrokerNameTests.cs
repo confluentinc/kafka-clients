@@ -70,15 +70,15 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BrokerLogger)]
     public async Task RealClient_DescribeConfigs_FailsEveryResource(ConfigResourceType brokerType)
     {
-        await using KafkaAdminClient admin = NewUnconnectedClient();
+        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
 
         Assert.Equal(2, result.Values.Count);
-        await AssertParseFailure(result.Values[broker]);
-        await AssertParseFailure(result.Values[topic]);
+        await AssertParseFailure(result.Values[broker].Get());
+        await AssertParseFailure(result.Values[topic].Get());
     }
 
     /// <summary>The <c>incrementalAlterConfigs</c> twin of the test above.</summary>
@@ -87,15 +87,15 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [InlineData(ConfigResourceType.BrokerLogger)]
     public async Task RealClient_IncrementalAlterConfigs_FailsEveryResource(ConfigResourceType brokerType)
     {
-        await using KafkaAdminClient admin = NewUnconnectedClient();
+        await using AsyncKafkaAdminClient admin = NewUnconnectedClient();
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
 
         Assert.Equal(2, result.Values.Count);
-        await AssertParseFailure(result.Values[broker]);
-        await AssertParseFailure(result.Values[topic]);
+        await AssertParseFailure(result.Values[broker].Get());
+        await AssertParseFailure(result.Values[topic].Get());
     }
 
     /// <summary>
@@ -105,14 +105,14 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_DescribeConfigs_Broker_FailsOnlyThatResource()
     {
-        using MockAdminClient admin = await NewMockWithTopic();
+        using AsyncMockAdminClient admin = await NewMockWithTopic();
         ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
 
-        await AssertParseFailure(result.Values[broker]);
-        await TestTimeout.Run(() => result.Values[topic], s_deadline);
+        await AssertParseFailure(result.Values[broker].Get());
+        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
     /// <summary>
@@ -123,42 +123,42 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     [Fact]
     public async Task Mock_DescribeConfigs_BrokerLogger_IsRefused_AndTheTopicIsDescribed()
     {
-        using MockAdminClient admin = await NewMockWithTopic();
+        using AsyncMockAdminClient admin = await NewMockWithTopic();
         ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { brokerLogger, topic });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { brokerLogger, topic });
 
-        await AssertNotImplemented(result.Values[brokerLogger]);
-        await TestTimeout.Run(() => result.Values[topic], s_deadline);
+        await AssertNotImplemented(result.Values[brokerLogger].Get());
+        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
     /// <summary>The mock's <c>incrementalAlterConfigs</c> for <c>BROKER</c>.</summary>
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_Broker_FailsOnlyThatResource()
     {
-        using MockAdminClient admin = await NewMockWithTopic();
+        using AsyncMockAdminClient admin = await NewMockWithTopic();
         ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
 
-        await AssertParseFailure(result.Values[broker]);
-        await TestTimeout.Run(() => result.Values[topic], s_deadline);
+        await AssertParseFailure(result.Values[broker].Get());
+        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
     /// <summary>The mock's <c>incrementalAlterConfigs</c> for <c>BROKER_LOGGER</c>.</summary>
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_BrokerLogger_IsRefused_AndTheTopicIsAltered()
     {
-        using MockAdminClient admin = await NewMockWithTopic();
+        using AsyncMockAdminClient admin = await NewMockWithTopic();
         ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(brokerLogger, topic));
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(brokerLogger, topic));
 
-        await AssertNotImplemented(result.Values[brokerLogger]);
-        await TestTimeout.Run(() => result.Values[topic], s_deadline);
+        await AssertNotImplemented(result.Values[brokerLogger].Get());
+        await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
     private static async Task AssertParseFailure(Task outcome)
@@ -191,14 +191,14 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         return alterations;
     }
 
-    private static async Task<MockAdminClient> NewMockWithTopic()
+    private static async Task<AsyncMockAdminClient> NewMockWithTopic()
     {
-        MockAdminClient admin = new MockAdminClient(1);
-        CreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
-        await TestTimeout.Run(created.All, s_deadline);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
+        await TestTimeout.Run(() => created.All().Get(), s_deadline);
         return admin;
     }
 
-    private static KafkaAdminClient NewUnconnectedClient() =>
-        new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+    private static AsyncKafkaAdminClient NewUnconnectedClient() =>
+        new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 }

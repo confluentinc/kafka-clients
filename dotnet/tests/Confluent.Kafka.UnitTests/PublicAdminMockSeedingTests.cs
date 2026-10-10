@@ -37,29 +37,29 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task TimeoutNextRequest_TimesOutExactlyThatManyOperations()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         // Baseline: the same call succeeds when nothing is seeded.
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-a", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-a", 1, 1) }).All().Get(), s_deadline);
 
         admin.TimeoutNextRequest(1);
 
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
-                () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-b", 1, 1) }).All()),
+                () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-b", 1, 1) }).All().Get()),
             s_deadline);
         Assert.Equal("The mock timed out the request.", failure.Message);
 
         // The counter is consumed, so the next call succeeds again.
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-c", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-c", 1, 1) }).All().Get(), s_deadline);
     }
 
     [Fact]
     public async Task UpdateBeginningOffsets_ChangesWhatListOffsetsEarliestReports()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
         TopicPartition seeded = new TopicPartition("seed-begin", 0);
         TopicPartition unseeded = new TopicPartition("seed-begin", 1);
 
@@ -79,7 +79,7 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateEndOffsets_ChangesWhatListOffsetsLatestReports()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
         TopicPartition partition = new TopicPartition("seed-end", 0);
 
         Assert.Equal(Unseeded, await LatestOffset(admin, partition));
@@ -95,17 +95,17 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateConsumerGroupOffsets_ChangesWhatListConsumerGroupOffsetsReports()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
         TopicPartition partition = new TopicPartition("seed-committed", 3);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> before = await TestTimeout.Run(
-            () => admin.ListConsumerGroupOffsets("g1").PartitionsToOffsetAndMetadata(), s_deadline);
+            () => admin.ListConsumerGroupOffsets("g1").PartitionsToOffsetAndMetadata().Get(), s_deadline);
         Assert.Empty(before);
 
         admin.UpdateConsumerGroupOffsets(new Dictionary<TopicPartition, long> { [partition] = 17 });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> after = await TestTimeout.Run(
-            () => admin.ListConsumerGroupOffsets("g1").PartitionsToOffsetAndMetadata(), s_deadline);
+            () => admin.ListConsumerGroupOffsets("g1").PartitionsToOffsetAndMetadata().Get(), s_deadline);
         OffsetAndMetadata? committed = Assert.Contains(partition, after);
         Assert.NotNull(committed);
         Assert.Equal(17, committed!.Offset);
@@ -114,10 +114,10 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task SetFeatureLevels_ChangesWhatDescribeFeaturesReports()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         FeatureMetadata before = await TestTimeout.Run(
-            () => admin.DescribeFeatures().FeatureMetadata(), s_deadline);
+            () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
         Assert.Empty(before.FinalizedFeatures);
         Assert.Empty(before.SupportedFeatures);
 
@@ -128,7 +128,7 @@ public class PublicAdminMockSeedingTests
             });
 
         FeatureMetadata after = await TestTimeout.Run(
-            () => admin.DescribeFeatures().FeatureMetadata(), s_deadline);
+            () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
 
         // All three levels reach the core — a single-level binding would lose min/max.
         FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures);
@@ -147,7 +147,7 @@ public class PublicAdminMockSeedingTests
             });
 
         FeatureMetadata replaced = await TestTimeout.Run(
-            () => admin.DescribeFeatures().FeatureMetadata(), s_deadline);
+            () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
         Assert.DoesNotContain("metadata.version", replaced.FinalizedFeatures);
         Assert.Contains("group.version", replaced.FinalizedFeatures);
     }
@@ -189,7 +189,7 @@ public class PublicAdminMockSeedingTests
     public async Task SeedingRejectsAConstructedNullTopic_AndSeedsNothing()
     {
         const string Message = "The offsets map must not contain a topic partition with a null topic.";
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
         TopicPartition valid = new TopicPartition("seed-null-topic", 0);
         Dictionary<TopicPartition, long> withNullTopic = new Dictionary<TopicPartition, long>
         {
@@ -231,18 +231,18 @@ public class PublicAdminMockSeedingTests
                 new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)));
     }
 
-    private static async Task<long> EarliestOffset(IAdmin admin, TopicPartition partition) =>
+    private static async Task<long> EarliestOffset(IAsyncAdmin admin, TopicPartition partition) =>
         await Offset(admin, partition, OffsetSpec.Earliest());
 
-    private static async Task<long> LatestOffset(IAdmin admin, TopicPartition partition) =>
+    private static async Task<long> LatestOffset(IAsyncAdmin admin, TopicPartition partition) =>
         await Offset(admin, partition, OffsetSpec.Latest());
 
-    private static async Task<long> Offset(IAdmin admin, TopicPartition partition, OffsetSpec spec)
+    private static async Task<long> Offset(IAsyncAdmin admin, TopicPartition partition, OffsetSpec spec)
     {
         ListOffsetsResult.ListOffsetsResultInfo info = await TestTimeout.Run(
             () => admin
                 .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec })
-                .PartitionResult(partition),
+                .PartitionResult(partition).Get(),
             s_deadline);
         return info.Offset;
     }

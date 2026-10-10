@@ -301,15 +301,15 @@ public sealed class PublicAdminShapeParityTests
     {
         const string Topic = "shape-parity-topic";
 
-        using MockAdminClient admin = new MockAdminClient(2);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
 
-        CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });
 
-        Task creation = result.Values[Topic];
+        Task creation = result.Values[Topic].Get();
         await TestTimeout.Run(() => creation, s_deadline);
 
         int replicationFactor = 0;
-        await TestTimeout.Run(async () => replicationFactor = await result.ReplicationFactor(Topic), s_deadline);
+        await TestTimeout.Run(async () => replicationFactor = await result.ReplicationFactor(Topic).Get(), s_deadline);
         Assert.Equal(2, replicationFactor);
     }
 }

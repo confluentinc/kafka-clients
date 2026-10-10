@@ -78,20 +78,20 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_SingleGroupCompletesWithItsOffsets()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets("p5-lcgo-one");
+        AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets("p5-lcgo-one");
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
-            await TestTimeout.Run(result.PartitionsToOffsetAndMetadata, s_deadline);
+            await TestTimeout.Run(() => result.PartitionsToOffsetAndMetadata().Get(), s_deadline);
 
         Assert.Empty(offsets);
 
         // The per-key accessor names the same future; the no-arg accessor above is only
         // legal because the request carried exactly one group.
         Assert.Same(
-            result.PartitionsToOffsetAndMetadata(),
-            result.PartitionsToOffsetAndMetadata("p5-lcgo-one"));
+            result.PartitionsToOffsetAndMetadata().Get(),
+            result.PartitionsToOffsetAndMetadata("p5-lcgo-one").Get());
 
         ArgumentException unknown = Assert.Throws<ArgumentException>(
             () => { _ = result.PartitionsToOffsetAndMetadata("p5-lcgo-absent"); });
@@ -106,9 +106,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_FansOutOneFuturePerGroupId()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["p5-lcgo-a"] = new ListConsumerGroupOffsetsSpec(),
@@ -118,7 +118,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>[] futures =
             new[] { "p5-lcgo-a", "p5-lcgo-b", "p5-lcgo-c" }
-                .Select(result.PartitionsToOffsetAndMetadata)
+                .Select(groupId => result.PartitionsToOffsetAndMetadata(groupId).Get())
                 .ToArray();
 
         // Distinct Task instances: a single shared future would satisfy a key-set
@@ -147,9 +147,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AllFaultsWhenAKeyFails()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["p5-lcgo-all-a"] = new ListConsumerGroupOffsetsSpec(),
@@ -157,7 +157,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             });
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
@@ -171,13 +171,13 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AnEmptyRequestCompletesEmpty()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal));
 
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> all =
-            await TestTimeout.Run(result.All, s_deadline);
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         Assert.Empty(all);
 
@@ -195,7 +195,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AcceptsNullAndEmptyPartitionSelections()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         // The convenience form's own spec: TopicPartitions left null.
         Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions);
@@ -203,7 +203,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         foreach (IReadOnlyCollection<TopicPartition>? selection in
             new IReadOnlyCollection<TopicPartition>?[] { null, Array.Empty<TopicPartition>() })
         {
-            ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+            AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
                     ["p5-lcgo-sel"] = new ListConsumerGroupOffsetsSpec
@@ -213,14 +213,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 });
 
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
-                await TestTimeout.Run(result.PartitionsToOffsetAndMetadata, s_deadline);
+                await TestTimeout.Run(() => result.PartitionsToOffsetAndMetadata().Get(), s_deadline);
 
             Assert.Empty(offsets);
         }
 
         // A selection naming real partitions is accepted too, and is not refused as a
         // malformed argument on the way down.
-        ListConsumerGroupOffsetsResult selected = admin.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult selected = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["p5-lcgo-sel-2"] = new ListConsumerGroupOffsetsSpec
@@ -234,30 +234,30 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             });
 
         Assert.Empty(
-            await TestTimeout.Run(selected.PartitionsToOffsetAndMetadata, s_deadline));
+            await TestTimeout.Run(() => selected.PartitionsToOffsetAndMetadata().Get(), s_deadline));
     }
 
     /// <summary>
-    /// Both forms are reachable through <see cref="IAdmin"/>, not only through the concrete
+    /// Both forms are reachable through <see cref="IAsyncAdmin"/>, not only through the concrete
     /// mock — the interface is the shape Java's <c>Admin</c> declares.
     /// </summary>
     [Fact]
     public async Task ListConsumerGroupOffsets_IsReachableThroughTheInterface()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
-        IAdmin api = admin;
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        IAsyncAdmin api = admin;
 
-        ListConsumerGroupOffsetsResult single = api.ListConsumerGroupOffsets("p5-lcgo-iface");
+        AsyncListConsumerGroupOffsetsResult single = api.ListConsumerGroupOffsets("p5-lcgo-iface");
         Assert.Empty(
-            await TestTimeout.Run(single.PartitionsToOffsetAndMetadata, s_deadline));
+            await TestTimeout.Run(() => single.PartitionsToOffsetAndMetadata().Get(), s_deadline));
 
-        ListConsumerGroupOffsetsResult batched = api.ListConsumerGroupOffsets(
+        AsyncListConsumerGroupOffsetsResult batched = api.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["p5-lcgo-iface-2"] = new ListConsumerGroupOffsetsSpec(),
             });
         Assert.Empty(
-            await TestTimeout.Run(batched.PartitionsToOffsetAndMetadata, s_deadline));
+            await TestTimeout.Run(() => batched.PartitionsToOffsetAndMetadata().Get(), s_deadline));
     }
 
     /// <summary>
@@ -267,7 +267,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_RejectsAMalformedRequest()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ArgumentNullException missingId = Assert.Throws<ArgumentNullException>(
             () => { admin.ListConsumerGroupOffsets((string)null!); });
@@ -325,7 +325,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         Assert.Null(Record.Exception(
             () =>
@@ -356,7 +356,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_TheSingleGroupForm_ForwardsItsOptions()
     {
-        using KafkaAdminClient real = new KafkaAdminClient(
+        using AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
 
@@ -367,11 +367,11 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     {
                         ["p5-lcgo-forward"] = new ListConsumerGroupOffsetsSpec(),
                     },
-                    options).All()),
+                    options).All().Get()),
             s_deadline);
         KafkaException single = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
-                () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All()),
+                () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All().Get()),
             s_deadline);
 
         // REQUEST_TIMED_OUT, the core's timeout error, and the same one on both forms.
@@ -387,7 +387,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
     [Fact]
     public async Task ListConsumerGroupOffsets_AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(

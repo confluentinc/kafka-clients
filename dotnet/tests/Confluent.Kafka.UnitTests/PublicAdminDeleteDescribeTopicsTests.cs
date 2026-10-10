@@ -48,29 +48,29 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task TopicId_RoundTripsThroughTheAbiAsBase64_AndComesBackAsTheSameUuid()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Topic = "p2a-roundtrip";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult byName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
-        TopicDescription described = await TestTimeout.Run(() => byName.TopicNameValues![Topic], s_deadline);
+        AsyncDescribeTopicsResult byName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
+        TopicDescription described = await TestTimeout.Run(() => byName.TopicNameValues![Topic].Get(), s_deadline);
 
         Uuid topicId = described.TopicId;
         Assert.NotEqual(Uuid.Zero, topicId);
 
         // Out as base64, back as the same Uuid — the result is keyed by the parsed id.
-        DescribeTopicsResult byId = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId }));
+        AsyncDescribeTopicsResult byId = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId }));
         Assert.True(byId.TopicIdValues!.ContainsKey(topicId));
 
-        TopicDescription again = await TestTimeout.Run(() => byId.TopicIdValues![topicId], s_deadline);
+        TopicDescription again = await TestTimeout.Run(() => byId.TopicIdValues![topicId].Get(), s_deadline);
         Assert.Equal(Topic, again.Name);
         Assert.Equal(topicId, again.TopicId);
 
         // …and the same for deleteTopics, whose key reader is a different delegate.
-        DeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId }));
+        AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId }));
         Assert.True(deleted.TopicIdValues!.ContainsKey(topicId));
-        await TestTimeout.Run(() => deleted.TopicIdValues![topicId], s_deadline);
+        await TestTimeout.Run(() => deleted.TopicIdValues![topicId].Get(), s_deadline);
     }
 
     /// <summary>
@@ -84,15 +84,15 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task WrongAccessor_ReturnsNull_BothDirections_BothResultTypes()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Alpha = "p2a-d8-alpha";
         const string Beta = "p2a-d8-beta";
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Alpha, 1, 1), new NewTopic(Beta, 1, 1) }).All(),
+            () => admin.CreateTopics(new[] { new NewTopic(Alpha, 1, 1), new NewTopic(Beta, 1, 1) }).All().Get(),
             s_deadline);
 
-        DescribeTopicsResult describedByName =
+        AsyncDescribeTopicsResult describedByName =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Alpha }));
         Assert.NotNull(describedByName.TopicNameValues);
         Assert.Null(describedByName.TopicIdValues);
@@ -100,26 +100,26 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Null(describedByName.AllTopicIds());
 
         Uuid alphaId = (await TestTimeout.Run(
-            () => describedByName.TopicNameValues![Alpha], s_deadline)).TopicId;
+            () => describedByName.TopicNameValues![Alpha].Get(), s_deadline)).TopicId;
 
-        DescribeTopicsResult describedById = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { alphaId }));
+        AsyncDescribeTopicsResult describedById = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { alphaId }));
         Assert.NotNull(describedById.TopicIdValues);
         Assert.Null(describedById.TopicNameValues);
         Assert.NotNull(describedById.AllTopicIds());
         Assert.Null(describedById.AllTopicNames());
 
-        DeleteTopicsResult deletedByName = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Alpha }));
+        AsyncDeleteTopicsResult deletedByName = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Alpha }));
         Assert.NotNull(deletedByName.TopicNameValues);
         Assert.Null(deletedByName.TopicIdValues);
-        await TestTimeout.Run(deletedByName.All, s_deadline);
+        await TestTimeout.Run(() => deletedByName.All().Get(), s_deadline);
 
-        DescribeTopicsResult betaByName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Beta }));
-        Uuid betaId = (await TestTimeout.Run(() => betaByName.TopicNameValues![Beta], s_deadline)).TopicId;
+        AsyncDescribeTopicsResult betaByName = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Beta }));
+        Uuid betaId = (await TestTimeout.Run(() => betaByName.TopicNameValues![Beta].Get(), s_deadline)).TopicId;
 
-        DeleteTopicsResult deletedById = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { betaId }));
+        AsyncDeleteTopicsResult deletedById = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { betaId }));
         Assert.NotNull(deletedById.TopicIdValues);
         Assert.Null(deletedById.TopicNameValues);
-        await TestTimeout.Run(deletedById.All, s_deadline);
+        await TestTimeout.Run(() => deletedById.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -130,7 +130,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task MixedOutcome_EachKeyCarriesItsOwnResult()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Present = "p2a-mixed-present";
         const string Absent = "p2a-mixed-absent";
 
@@ -138,33 +138,33 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         const string StillPresent = "p2a-mixed-still-present";
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Present, 1, 1), new NewTopic(StillPresent, 1, 1) }).All(),
+            () => admin.CreateTopics(new[] { new NewTopic(Present, 1, 1), new NewTopic(StillPresent, 1, 1) }).All().Get(),
             s_deadline);
 
-        DeleteTopicsResult deleted =
+        AsyncDeleteTopicsResult deleted =
             admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Present, Absent }));
 
-        await TestTimeout.Run(() => deleted.TopicNameValues![Present], s_deadline);
+        await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent], s_deadline));
+            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", failure.Message);
 
         // all() aggregates the failure rather than hanging or reporting success.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(deleted.All, s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
 
         // …and the same shape on describeTopics, where success also carries a value.
-        DescribeTopicsResult described =
+        AsyncDescribeTopicsResult described =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Absent, StillPresent }));
         Assert.Equal(StillPresent, (await TestTimeout.Run(
-            () => described.TopicNameValues![StillPresent], s_deadline)).Name);
+            () => described.TopicNameValues![StillPresent].Get(), s_deadline)).Name);
 
         KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => described.TopicNameValues![Absent], s_deadline));
+            () => TestTimeout.Run(() => described.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => described.AllTopicNames()!, s_deadline));
+            () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
     }
 
     /// <summary>
@@ -177,13 +177,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task DescriptionTree_IsCopiedOut_AndOutlivesTheResultRoot()
     {
-        using MockAdminClient admin = new MockAdminClient(3);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
         const string Topic = "p2a-tree";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 3) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 3) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult result = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
-        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic], s_deadline);
+        AsyncDescribeTopicsResult result = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
+        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic].Get(), s_deadline);
 
         Assert.Equal(Topic, description.Name);
         Assert.False(description.IsInternal);
@@ -224,16 +224,16 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task ReportedButEmptySets_AreEmptyCollections_NotNull()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Topic = "p2a-empty-sets";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult result = admin.DescribeTopics(
+        AsyncDescribeTopicsResult result = admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
             new DescribeTopicsOptions { IncludeAuthorizedOperations = true });
 
-        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic], s_deadline);
+        TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic].Get(), s_deadline);
 
         Assert.NotNull(description.AuthorizedOperations);
         Assert.Empty(description.AuthorizedOperations!);
@@ -253,18 +253,18 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task RepeatedKeys_YieldOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Topic = "p2a-dedup";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult byName =
+        AsyncDescribeTopicsResult byName =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic, Topic, Topic }));
         Assert.Single(byName.TopicNameValues!);
 
-        Uuid topicId = (await TestTimeout.Run(() => byName.TopicNameValues![Topic], s_deadline)).TopicId;
+        Uuid topicId = (await TestTimeout.Run(() => byName.TopicNameValues![Topic].Get(), s_deadline)).TopicId;
 
-        DescribeTopicsResult byId =
+        AsyncDescribeTopicsResult byId =
             admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId, topicId }));
         Assert.Single(byId.TopicIdValues!);
     }
@@ -341,18 +341,18 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task NonAsciiTopicName_RoundTripsThroughBothRpcs()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         const string Topic = "p2a-témas-日本語";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
+        AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Topic }));
         Assert.Equal(Topic, (await TestTimeout.Run(
-            () => described.TopicNameValues![Topic], s_deadline)).Name);
+            () => described.TopicNameValues![Topic].Get(), s_deadline)).Name);
 
-        DeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Topic }));
+        AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Topic }));
         Assert.True(deleted.TopicNameValues!.ContainsKey(Topic));
-        await TestTimeout.Run(deleted.All, s_deadline);
+        await TestTimeout.Run(() => deleted.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -429,47 +429,47 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     /// M15/P13.5 G1-10: the name-collection forms do exactly what the
     /// <see cref="TopicCollection"/> form does with <see cref="TopicCollection.OfTopicNames"/>
     /// — the same per-name keys, the same success values, the same failures — through the
-    /// <see cref="IAdmin"/> interface.
+    /// <see cref="IAsyncAdmin"/> interface.
     /// </summary>
     [Fact]
     public async Task G1_10_TheNameCollectionForms_BehaveAsTheTopicCollectionForm()
     {
-        using MockAdminClient mock = new MockAdminClient(1);
-        IAdmin admin = mock;
+        using AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        IAsyncAdmin admin = mock;
         const string Present = "p135-g110-present";
         const string Absent = "p135-g110-absent";
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Present, 2, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Present, 2, 1) }).All().Get(), s_deadline);
 
-        DescribeTopicsResult byName = admin.DescribeTopics(new[] { Present, Absent });
-        DescribeTopicsResult byCollection =
+        AsyncDescribeTopicsResult byName = admin.DescribeTopics(new[] { Present, Absent });
+        AsyncDescribeTopicsResult byCollection =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Present, Absent }));
         Assert.Null(byName.TopicIdValues);
         Assert.Equal(
             byCollection.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal),
             byName.TopicNameValues!.Keys.OrderBy(name => name, StringComparer.Ordinal));
 
-        TopicDescription named = await TestTimeout.Run(() => byName.TopicNameValues![Present], s_deadline);
-        TopicDescription collected = await TestTimeout.Run(() => byCollection.TopicNameValues![Present], s_deadline);
+        TopicDescription named = await TestTimeout.Run(() => byName.TopicNameValues![Present].Get(), s_deadline);
+        TopicDescription collected = await TestTimeout.Run(() => byCollection.TopicNameValues![Present].Get(), s_deadline);
         Assert.Equal(Present, named.Name);
         Assert.Equal(collected.Partitions.Count, named.Partitions.Count);
         Assert.Equal(collected.TopicId, named.TopicId);
 
         KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => byName.TopicNameValues![Absent], s_deadline));
+            () => TestTimeout.Run(() => byName.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
-        DeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
+        AsyncDeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
         Assert.Null(deleted.TopicIdValues);
-        await TestTimeout.Run(() => deleted.TopicNameValues![Present], s_deadline);
+        await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
         KafkaException deleteFailure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent], s_deadline));
+            () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
 
         // The delete took effect: describing the topic by name now fails.
-        DescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
+        AsyncDescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
         KafkaException gone = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present], s_deadline));
+            () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present].Get(), s_deadline));
         Assert.Equal($"Topic {Present} not found.", gone.Message);
     }
 
@@ -489,13 +489,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public async Task G1_10_TheNameCollectionForms_ForwardTheirOptions()
     {
-        IAdmin mock = new MockAdminClient(1);
-        IAdmin real = new KafkaAdminClient(
+        IAsyncAdmin mock = new AsyncMockAdminClient(1);
+        IAsyncAdmin real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             string[] names = { "alpha" };
-            foreach (IAdmin admin in new[] { mock, real })
+            foreach (IAsyncAdmin admin in new[] { mock, real })
             {
                 DescribeTopicsOptions badLimit = new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 };
                 string? described = Rejection(() => admin.DescribeTopics(names, badLimit));
@@ -506,13 +506,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
             DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
             AssertSameTimeout(
-                await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All()),
-                await Failure(() => real.DeleteTopics(names, deleteTimeout).All()));
+                await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All().Get()),
+                await Failure(() => real.DeleteTopics(names, deleteTimeout).All().Get()));
 
             DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
             AssertSameTimeout(
-                await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!),
-                await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!));
+                await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!.Value.Get()),
+                await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!.Value.Get()));
         }
         finally
         {

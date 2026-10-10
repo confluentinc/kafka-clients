@@ -73,7 +73,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         new TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private static ListConsumerGroupOffsetsResult Result(
+    private static AsyncListConsumerGroupOffsetsResult Result(
         params (string GroupId, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Future)[] entries)
     {
         Dictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
@@ -84,7 +84,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
             futures.Add(groupId, future);
         }
 
-        return new ListConsumerGroupOffsetsResult(futures);
+        return new AsyncListConsumerGroupOffsetsResult(futures);
     }
 
     /// <summary>
@@ -182,13 +182,13 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task PartitionsToOffsetAndMetadata_NoArgument_YieldsTheOnlyGroup()
     {
-        ListConsumerGroupOffsetsResult result = Result(("g", Completed(7)));
+        AsyncListConsumerGroupOffsetsResult result = Result(("g", Completed(7)));
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
-            await result.PartitionsToOffsetAndMetadata();
+            await result.PartitionsToOffsetAndMetadata().Get();
 
         Assert.Equal(7L, offsets[s_committed]!.Offset);
-        Assert.Same(result.PartitionsToOffsetAndMetadata("g"), result.PartitionsToOffsetAndMetadata());
+        Assert.Same(result.PartitionsToOffsetAndMetadata("g").Get(), result.PartitionsToOffsetAndMetadata().Get());
     }
 
     /// <summary>
@@ -202,7 +202,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [InlineData(3)]
     public void PartitionsToOffsetAndMetadata_NoArgument_RejectsAnyCountButOne(int groupCount)
     {
-        ListConsumerGroupOffsetsResult result = Result(
+        AsyncListConsumerGroupOffsetsResult result = Result(
             Enumerable
                 .Range(0, groupCount)
                 .Select(index => (GroupId: "g" + index, Future: Completed(index)))
@@ -226,10 +226,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task PartitionsToOffsetAndMetadata_ByGroupId_IsPerGroup()
     {
-        ListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("b", Completed(2)));
+        AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("b", Completed(2)));
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a"))[s_committed]!.Offset);
-        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b"))[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("a").Get())[s_committed]!.Offset);
+        Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset);
     }
 
     /// <summary>
@@ -240,7 +240,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public void PartitionsToOffsetAndMetadata_ByGroupId_RejectsAnUnrequestedGroupSynchronously()
     {
-        ListConsumerGroupOffsetsResult result = Result(("a", Completed(1)));
+        AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)));
 
         // Block-bodied lambdas bind xUnit's Action overload, so what is asserted is a
         // synchronous throw rather than a faulted task (see the no-argument test above).
@@ -264,10 +264,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task UncommittedPartition_IsPresentWithANullValueRatherThanAbsent()
     {
-        ListConsumerGroupOffsetsResult result = Result(("g", Completed(5)));
+        AsyncListConsumerGroupOffsetsResult result = Result(("g", Completed(5)));
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
-            await result.PartitionsToOffsetAndMetadata();
+            await result.PartitionsToOffsetAndMetadata().Get();
 
         Assert.True(offsets.ContainsKey(s_uncommitted));
         Assert.Null(offsets[s_uncommitted]);
@@ -284,11 +284,11 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task All_GathersEveryGroupOrdinallyAndIsFreshPerCall()
     {
-        ListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("A", Completed(2)));
+        AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)), ("A", Completed(2)));
 
         Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> first =
-            result.All();
-        Assert.NotSame(first, result.All());
+            result.All().Get();
+        Assert.NotSame(first, result.All().Get());
 
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> all = await first;
 
@@ -306,17 +306,17 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     public async Task PerGroupFailure_FaultsOnlyThatGroupAndTheAggregate()
     {
         TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
-        ListConsumerGroupOffsetsResult result = Result(("ok", Completed(1)), ("bad", broken.Task));
+        AsyncListConsumerGroupOffsetsResult result = Result(("ok", Completed(1)), ("bad", broken.Task));
 
         KafkaException failure = new KafkaException("nope");
         broken.SetException(failure);
 
-        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok"))[s_committed]!.Offset);
+        Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset);
 
         Assert.Same(
             failure,
-            await Assert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad")));
-        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => result.All()));
+            await Assert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad").Get()));
+        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     /// <summary>
@@ -330,9 +330,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     {
         TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
         TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> slow = Pending();
-        ListConsumerGroupOffsetsResult result = Result(("bad", broken.Task), ("slow", slow.Task));
+        AsyncListConsumerGroupOffsetsResult result = Result(("bad", broken.Task), ("slow", slow.Task));
 
-        Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> all = result.All();
+        Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> all = result.All().Get();
 
         broken.SetException(new KafkaException("gone"));
         Assert.False(all.IsCompleted);
@@ -349,9 +349,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task EmptyResult_AggregatesToAnEmptyMap()
     {
-        ListConsumerGroupOffsetsResult result = Result();
+        AsyncListConsumerGroupOffsetsResult result = Result();
 
-        Assert.Empty(await result.All());
+        Assert.Empty(await result.All().Get());
         Assert.Throws<InvalidOperationException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
         Assert.Throws<ArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("g"); });
     }

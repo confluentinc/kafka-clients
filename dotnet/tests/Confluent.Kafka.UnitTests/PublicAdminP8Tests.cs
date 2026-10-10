@@ -43,11 +43,11 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task AbortTransaction_FaultsWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
             () => admin.AbortTransaction(
-                new AbortTransactionSpec(new TopicPartition("txn-topic", 3), 91_234L, 7, 42)).All());
+                new AbortTransactionSpec(new TopicPartition("txn-topic", 3), 91_234L, 7, 42)).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
     }
@@ -108,10 +108,10 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ForceTerminateTransaction_FaultsWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
-            () => admin.ForceTerminateTransaction("txn-a").Result());
+            () => admin.ForceTerminateTransaction("txn-a").Result().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
     }
@@ -164,26 +164,26 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_FaultsEveryIdWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        FenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
+        AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
 
         Assert.Equal(2, result.FencedProducers.Count);
-        foreach (Task fenced in result.FencedProducers.Values)
+        foreach (AsyncKafkaFuture fenced in result.FencedProducers.Values)
         {
-            KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => fenced);
+            KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => fenced.Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All())).Message);
+            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.ProducerId("txn-x"))).Message);
+            (await Assert.ThrowsAsync<KafkaException>(() => result.ProducerId("txn-x").Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.EpochId("txn-y"))).Message);
+            (await Assert.ThrowsAsync<KafkaException>(() => result.EpochId("txn-y").Get())).Message);
     }
 
     /// <summary>
@@ -194,24 +194,24 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_EmptyBatch_IsAnEmptySuccess()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        FenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
+        AsyncFenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
 
         Assert.Empty(result.FencedProducers);
-        await result.All();
+        await result.All().Get();
     }
 
     /// <summary>A repeated id collapses to one awaiter, as Java's map-keyed result does.</summary>
     [Fact]
     public async Task FenceProducers_RepeatedId_CollapsesToOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        FenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
+        AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
         Assert.Equal(new[] { "txn-a" }, result.FencedProducers.Keys);
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
     }
 
     /// <summary>
@@ -221,9 +221,9 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task FenceProducers_UnrequestedId_ThrowsJavasMessageSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        FenceProducersResult result = admin.FenceProducers(new[] { "txn-a" });
+        AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a" });
 
         // A statement lambda, so xUnit binds the Action overload rather than the
         // Task-returning one these methods' return type would otherwise select.
@@ -246,7 +246,7 @@ public sealed class PublicAdminP8Tests
         Assert.Throws<ArgumentNullException>(() => { _ = result.EpochId(null!); });
 
         // Observe the requested id's own fault, so nothing is left unobserved.
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
     }
 
     [Fact]
@@ -294,29 +294,29 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeTransactions_FaultsEveryIdWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-b", "txn-a" });
+        AsyncDescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-b", "txn-a" });
 
         foreach (string id in new[] { "txn-a", "txn-b" })
         {
             KafkaException error = await Assert.ThrowsAsync<KafkaException>(
-                () => result.Description(id));
+                () => result.Description(id).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All())).Message);
+            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
     }
 
     /// <summary>An empty batch has nothing to join, so it is an empty success.</summary>
     [Fact]
     public async Task DescribeTransactions_EmptyBatch_IsAnEmptySuccess()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        Assert.Empty(await admin.DescribeTransactions(Array.Empty<string>()).All());
+        Assert.Empty(await admin.DescribeTransactions(Array.Empty<string>()).All().Get());
     }
 
     /// <summary>
@@ -326,9 +326,9 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeTransactions_UnrequestedId_ThrowsJavasMessageSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-a" });
+        AsyncDescribeTransactionsResult result = admin.DescribeTransactions(new[] { "txn-a" });
 
         // A statement lambda, so xUnit binds the Action overload rather than the
         // Task-returning one this method's return type would otherwise select.
@@ -344,7 +344,7 @@ public sealed class PublicAdminP8Tests
         Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
 
         // Observe the requested id's own fault, so nothing is left unobserved.
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
     }
 
     [Fact]
@@ -393,7 +393,7 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_FaultsEveryPartitionWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         TopicPartition[] requested =
         {
@@ -401,43 +401,43 @@ public sealed class PublicAdminP8Tests
             new TopicPartition("alpha", 4),
             new TopicPartition("beta", 2),
         };
-        DescribeProducersResult result = admin.DescribeProducers(requested);
+        AsyncDescribeProducersResult result = admin.DescribeProducers(requested);
 
         foreach (TopicPartition partition in requested)
         {
             KafkaException error = await Assert.ThrowsAsync<KafkaException>(
-                () => result.PartitionResult(partition));
+                () => result.PartitionResult(partition).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All())).Message);
+            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
     }
 
     [Fact]
     public async Task DescribeProducers_EmptyBatch_IsAnEmptySuccess()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        Assert.Empty(await admin.DescribeProducers(Array.Empty<TopicPartition>()).All());
+        Assert.Empty(await admin.DescribeProducers(Array.Empty<TopicPartition>()).All().Get());
     }
 
     /// <summary>A repeated partition collapses to one awaiter, as Java's map-keyed result does.</summary>
     [Fact]
     public async Task DescribeProducers_RepeatedPartition_CollapsesToOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeProducersResult result = admin.DescribeProducers(
+        AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0), new TopicPartition("alpha", 0) });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
 
         // The collapsed key is still addressable, and the partition that was never requested
         // is not — so the collapse did not widen the key set.
         await Assert.ThrowsAsync<KafkaException>(
-            () => result.PartitionResult(new TopicPartition("alpha", 0)));
+            () => result.PartitionResult(new TopicPartition("alpha", 0)).Get());
         Assert.Throws<ArgumentException>(
             () => { _ = result.PartitionResult(new TopicPartition("alpha", 1)); });
     }
@@ -449,9 +449,9 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_UnrequestedPartition_ThrowsJavasMessageSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeProducersResult result = admin.DescribeProducers(
+        AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) });
 
         ArgumentException missing = Assert.Throws<ArgumentException>(
@@ -467,7 +467,7 @@ public sealed class PublicAdminP8Tests
             StringComparison.Ordinal);
         Assert.Equal("partition", missing.ParamName);
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
     }
 
     [Fact]
@@ -505,13 +505,13 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task DescribeProducers_NegativeBrokerId_IsAccepted()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        DescribeProducersResult result = admin.DescribeProducers(
+        AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) },
             new DescribeProducersOptions { BrokerId = -1 });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
     }
 
     [Fact]
@@ -541,22 +541,22 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ListTransactions_FailsEveryViewWithJavasOwnMessage()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        ListTransactionsResult result = admin.ListTransactions();
+        AsyncListTransactionsResult result = admin.ListTransactions();
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.ByBrokerId()));
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.AllByBrokerId()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.ByBrokerId().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.AllByBrokerId().Get()));
     }
 
     /// <summary>Every filter set at once still reaches the same top-level failure.</summary>
     [Fact]
     public async Task ListTransactions_WithEveryFilter_FailsTheWholeCall()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        ListTransactionsResult result = admin.ListTransactions(
+        AsyncListTransactionsResult result = admin.ListTransactions(
             new ListTransactionsOptions
             {
                 FilteredStates = new[] { TransactionState.Ongoing, TransactionState.PrepareAbort },
@@ -565,7 +565,7 @@ public sealed class PublicAdminP8Tests
                 FilteredTransactionalIdPattern = "txn-.*",
             });
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     /// <summary>
@@ -589,12 +589,12 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ListTransactions_NegativeDuration_IsAccepted()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        ListTransactionsResult result =
+        AsyncListTransactionsResult result =
             admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All()));
+        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -613,11 +613,11 @@ public sealed class PublicAdminP8Tests
     [Fact]
     public async Task ResultHandleLessRpcs_SettleBeforeDispose()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         Task abort = admin.AbortTransaction(
-            new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)).All();
-        Task terminate = admin.ForceTerminateTransaction("txn-a").Result();
+            new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)).All().Get();
+        Task terminate = admin.ForceTerminateTransaction("txn-a").Result().Get();
 
         await Assert.ThrowsAsync<KafkaException>(() => abort);
         await Assert.ThrowsAsync<KafkaException>(() => terminate);

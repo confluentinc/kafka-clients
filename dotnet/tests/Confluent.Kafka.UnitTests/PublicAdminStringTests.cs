@@ -361,8 +361,8 @@ public sealed class PublicAdminStringTests
     [InlineData("lone-surrogate")]
     public void DescribeUserScramCredentials_ADescriptionLookupName_IsRejectedSynchronously(string kind)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
-        DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice" });
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice" });
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(
             () => { _ = result.Description(s_badStrings[kind]); });
@@ -382,8 +382,8 @@ public sealed class PublicAdminStringTests
     [InlineData("lone-surrogate")]
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
-        await using KafkaAdminClient admin =
-            new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        await using AsyncKafkaAdminClient admin =
+            new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
 
         ArgumentException rejected =
             Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(s_badStrings[kind]));
@@ -401,7 +401,7 @@ public sealed class PublicAdminStringTests
     [Fact]
     public async Task TwoKeysThatWouldCollapseAtTheAbi_AreRejected_AndTheClientStaysUsable()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(
             () => admin.CreateTopics(new[] { new NewTopic("a\0b", 1, 1), new NewTopic("a\0c", 1, 1) }));
@@ -409,13 +409,13 @@ public sealed class PublicAdminStringTests
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
         // Nothing named "a" was created by the rejected call.
-        DescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
+        AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
         KafkaException absent = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => described.TopicNameValues!["a"], s_deadline));
+            () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 
-        CreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic("after-rejection", 1, 1) });
-        await TestTimeout.Run(created.All, s_deadline);
+        AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic("after-rejection", 1, 1) });
+        await TestTimeout.Run(() => created.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -429,15 +429,15 @@ public sealed class PublicAdminStringTests
     [InlineData("日本語")]
     public async Task AKeyStringThatCrossesUnchanged_IsAccepted(string name)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
+        AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
         Assert.Equal(new[] { name }, created.Values.Keys);
-        await TestTimeout.Run(created.All, s_deadline);
+        await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
-        ListTopicsResult listed = admin.ListTopics();
+        AsyncListTopicsResult listed = admin.ListTopics();
         IReadOnlyCollection<string> names = Array.Empty<string>();
-        await TestTimeout.Run(async () => names = await listed.Names(), s_deadline);
+        await TestTimeout.Run(async () => names = await listed.Names().Get(), s_deadline);
         Assert.Contains(name, names);
     }
 

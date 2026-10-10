@@ -61,19 +61,19 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task ListTopics_ReturnsTheCreatedTopics_AndTheThreeProjectionsAgree()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(
             () => admin.CreateTopics(
-                new[] { new NewTopic("p2b-list-a", 1, 1), new NewTopic("p2b-list-b", 2, 1) }).All(),
+                new[] { new NewTopic("p2b-list-a", 1, 1), new NewTopic("p2b-list-b", 2, 1) }).All().Get(),
             s_deadline);
 
-        ListTopicsResult result = admin.ListTopics();
+        AsyncListTopicsResult result = admin.ListTopics();
 
         IReadOnlyDictionary<string, TopicListing> map =
-            await TestTimeout.Run(() => result.NamesToListings(), s_deadline);
-        IReadOnlyCollection<TopicListing> listings = await TestTimeout.Run(() => result.Listings(), s_deadline);
-        IReadOnlyCollection<string> names = await TestTimeout.Run(() => result.Names(), s_deadline);
+            await TestTimeout.Run(() => result.NamesToListings().Get(), s_deadline);
+        IReadOnlyCollection<TopicListing> listings = await TestTimeout.Run(() => result.Listings().Get(), s_deadline);
+        IReadOnlyCollection<string> names = await TestTimeout.Run(() => result.Names().Get(), s_deadline);
 
         Assert.Contains("p2b-list-a", map.Keys);
         Assert.Contains("p2b-list-b", map.Keys);
@@ -161,16 +161,16 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task CreatePartitions_AgainstTheMock_FailsPerTopicWithJavasExactMessage()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p2b-grow", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p2b-grow", 1, 1) }).All().Get(), s_deadline);
 
-        CreatePartitionsResult result = admin.CreatePartitions(
+        AsyncCreatePartitionsResult result = admin.CreatePartitions(
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
         // Per-KEY, not a call failure: the awaitable for that topic is what carries it.
-        Task perTopic = Assert.Single(result.Values).Value;
+        Task perTopic = Assert.Single(result.Values).Value.Get();
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
@@ -178,7 +178,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Equal(NotImplemented, failure.Message);
 
         // all() aggregates the same failure.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All(), s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     /// <summary>
@@ -189,16 +189,16 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task DeleteRecords_WithAnEmptyRequest_SucceedsWithAnEmptyResult()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DeleteRecordsResult result = admin.DeleteRecords(
+        AsyncDeleteRecordsResult result = admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete>());
 
         Assert.Empty(result.LowWatermarks);
 
         // Task.WhenAll over nothing completes, so the empty batch really does succeed.
-        await TestTimeout.Run(() => result.All(), s_deadline);
-        Assert.Equal(TaskStatus.RanToCompletion, result.All().Status);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
+        Assert.Equal(TaskStatus.RanToCompletion, result.All().Get().Status);
     }
 
     /// <summary>
@@ -208,16 +208,16 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task DeleteRecords_AgainstTheMock_FailsPerPartitionWithJavasExactMessage()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         TopicPartition partition = new TopicPartition("p2b-delete", 0);
-        DeleteRecordsResult result = admin.DeleteRecords(
+        AsyncDeleteRecordsResult result = admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete>
             {
                 [partition] = RecordsToDelete.BeforeOffset(10),
             });
 
-        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value;
+        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
@@ -364,13 +364,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
     {
         const string Topic = "témas-日本語-🎉";
 
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
         IReadOnlyDictionary<string, TopicListing> map =
-            await TestTimeout.Run(() => admin.ListTopics().NamesToListings(), s_deadline);
+            await TestTimeout.Run(() => admin.ListTopics().NamesToListings().Get(), s_deadline);
 
         Assert.True(map.ContainsKey(Topic));
         Assert.Equal(Topic, map[Topic].Name);
@@ -383,20 +383,20 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public async Task TfmSmoke_TheThreeNewRpcsWorkOnThisFramework()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p2b-smoke", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p2b-smoke", 1, 1) }).All().Get(), s_deadline);
 
-        Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names(), s_deadline));
+        Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline));
 
         await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(
                 () => admin.CreatePartitions(
-                    new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All(),
+                    new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All().Get(),
                 s_deadline));
 
         await TestTimeout.Run(
-            () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()).All(), s_deadline);
+            () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()).All().Get(), s_deadline);
     }
 }

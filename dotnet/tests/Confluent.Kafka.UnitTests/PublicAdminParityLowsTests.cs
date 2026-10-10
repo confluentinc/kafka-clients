@@ -49,13 +49,14 @@ public sealed class PublicAdminParityLowsTests
         Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities =
             Task.FromResult(quotas);
 
-        DescribeClientQuotasResult result = new DescribeClientQuotasResult(entities);
+        AsyncDescribeClientQuotasResult result = new AsyncDescribeClientQuotasResult(
+            new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities));
 
-        Assert.Same(entities, result.Entities());
-        Assert.Same(quotas, await TestTimeout.Run(() => result.Entities(), s_deadline));
+        Assert.Same(entities, result.Entities().Get());
+        Assert.Same(quotas, await TestTimeout.Run(() => result.Entities().Get(), s_deadline));
 
         ArgumentNullException thrown =
-            Assert.Throws<ArgumentNullException>(() => new DescribeClientQuotasResult(null!));
+            Assert.Throws<ArgumentNullException>(() => new AsyncDescribeClientQuotasResult(default));
         Assert.Equal("entities", thrown.ParamName);
     }
 
@@ -72,24 +73,24 @@ public sealed class PublicAdminParityLowsTests
         ClientQuotaEntity bob = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "bob" });
         KafkaException failure = new KafkaException("bob failed");
-        Dictionary<ClientQuotaEntity, Task> futures = new Dictionary<ClientQuotaEntity, Task>
+        Dictionary<ClientQuotaEntity, AsyncKafkaFuture> futures = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>
         {
-            [alice] = Task.CompletedTask,
+            [alice] = new AsyncKafkaFuture(Task.CompletedTask),
         };
 
-        AlterClientQuotasResult result = new AlterClientQuotasResult(futures);
+        AsyncAlterClientQuotasResult result = new AsyncAlterClientQuotasResult(futures);
 
         Assert.Same(futures, result.Values);
-        await TestTimeout.Run(() => result.All(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        futures[bob] = Task.FromException(failure);
+        futures[bob] = new AsyncKafkaFuture(Task.FromException(failure));
         KafkaException thrown =
-            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All(), s_deadline));
+            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);
 
         Assert.Equal(
             "futures",
-            Assert.Throws<ArgumentNullException>(() => new AlterClientQuotasResult(null!)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => new AsyncAlterClientQuotasResult(null!)).ParamName);
     }
 
     /// <summary>
@@ -100,22 +101,22 @@ public sealed class PublicAdminParityLowsTests
     public async Task G4_10_AlterUserScramCredentialsResult_IsPubliclyConstructible()
     {
         KafkaException failure = new KafkaException("bob failed");
-        Dictionary<string, Task> futures = new Dictionary<string, Task>(StringComparer.Ordinal)
+        Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["alice"] = Task.CompletedTask,
-            ["bob"] = Task.FromException(failure),
+            ["alice"] = new AsyncKafkaFuture(Task.CompletedTask),
+            ["bob"] = new AsyncKafkaFuture(Task.FromException(failure)),
         };
 
-        AlterUserScramCredentialsResult result = new AlterUserScramCredentialsResult(futures);
+        AsyncAlterUserScramCredentialsResult result = new AsyncAlterUserScramCredentialsResult(futures);
 
         Assert.Same(futures, result.Values);
         KafkaException thrown =
-            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All(), s_deadline));
+            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);
 
         Assert.Equal(
             "futures",
-            Assert.Throws<ArgumentNullException>(() => new AlterUserScramCredentialsResult(null!)).ParamName);
+            Assert.Throws<ArgumentNullException>(() => new AsyncAlterUserScramCredentialsResult(null!)).ParamName);
     }
 
     /// <summary>

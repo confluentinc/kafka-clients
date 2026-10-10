@@ -48,10 +48,10 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task MixedOutcome_EachTopicCarriesItsOwnResult()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         // Replication factor 5 against a 1-broker mock is rejected; the other is fine.
-        CreateTopicsResult result = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic("mixed-ok", 2, 1),
             new NewTopic("mixed-bad", 1, 5),
@@ -59,14 +59,14 @@ public sealed class PublicAdminCreateTopicsTests
 
         // `Values` is Java's `values()` — Map<String, KafkaFuture<Void>>: it says whether
         // the topic was created, and the metadata comes from the typed accessors.
-        await TestTimeout.Run(() => result.Values["mixed-ok"], s_deadline);
+        await TestTimeout.Run(() => result.Values["mixed-ok"].Get(), s_deadline);
 
         int numPartitions = 0;
-        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok"), s_deadline);
+        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok").Get(), s_deadline);
         Assert.Equal(2, numPartitions);
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values["mixed-bad"], s_deadline));
+            () => TestTimeout.Run(() => result.Values["mixed-bad"].Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
         Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
     }
@@ -79,15 +79,15 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task OneTopicCanBeAwaited_WithoutTouchingTheOthers()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic("solo-ok", 1, 1),
             new NewTopic("solo-bad", 1, 9),
         });
 
-        await TestTimeout.Run(() => result.Values["solo-ok"], s_deadline);
+        await TestTimeout.Run(() => result.Values["solo-ok"].Get(), s_deadline);
 
         // The failed sibling is deliberately left unawaited above; observe it now so the
         // test leaves no unobserved fault behind. AWAIT it rather than read `.Exception`:
@@ -95,7 +95,7 @@ public sealed class PublicAdminCreateTopicsTests
         // resumes asynchronously (RunContinuationsAsynchronously), so the sibling can
         // still be pending when it does — reading `.Exception` there raced (it failed
         // about 1 run in 8 on net8.0, at 61097faa too).
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Values["solo-bad"], s_deadline));
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
     }
 
     /// <summary>
@@ -105,27 +105,27 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task All_SucceedsWhenEveryTopicSucceeds_AndFaultsOtherwise()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult ok = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult ok = admin.CreateTopics(new[]
         {
             new NewTopic("all-a", 1, 1),
             new NewTopic("all-b", 1, 1),
         });
-        await TestTimeout.Run(ok.All, s_deadline);
+        await TestTimeout.Run(() => ok.All().Get(), s_deadline);
 
-        CreateTopicsResult mixed = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult mixed = admin.CreateTopics(new[]
         {
             new NewTopic("all-c", 1, 1),
             new NewTopic("all-d", 1, 4),
         });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(mixed.All, s_deadline));
+            () => TestTimeout.Run(() => mixed.All().Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
         // The successful sibling is still successful — All faulting does not fault it.
-        await TestTimeout.Run(() => mixed.Values["all-c"], s_deadline);
+        await TestTimeout.Run(() => mixed.Values["all-c"].Get(), s_deadline);
     }
 
     /// <summary>
@@ -140,9 +140,9 @@ public sealed class PublicAdminCreateTopicsTests
         const string Topic = "derived-topic";
         const string ConfigValue = "délété-🎈";
 
-        using MockAdminClient admin = new MockAdminClient(3);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
 
-        CreateTopicsResult result = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 4, 2)
             {
@@ -159,10 +159,10 @@ public sealed class PublicAdminCreateTopicsTests
         Uuid topicId = Uuid.Zero;
         Config config = default!;
 
-        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions(Topic), s_deadline);
-        await TestTimeout.Run(async () => replicationFactor = await result.ReplicationFactor(Topic), s_deadline);
-        await TestTimeout.Run(async () => topicId = await result.TopicId(Topic), s_deadline);
-        await TestTimeout.Run(async () => config = await result.Config(Topic), s_deadline);
+        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions(Topic).Get(), s_deadline);
+        await TestTimeout.Run(async () => replicationFactor = await result.ReplicationFactor(Topic).Get(), s_deadline);
+        await TestTimeout.Run(async () => topicId = await result.TopicId(Topic).Get(), s_deadline);
+        await TestTimeout.Run(async () => config = await result.Config(Topic).Get(), s_deadline);
 
         Assert.Equal(4, numPartitions);
         Assert.Equal(2, replicationFactor);
@@ -186,10 +186,10 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task DerivedAccessor_ForAnUnrequestedTopic_ThrowsArgumentExceptionSynchronously()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
-        await TestTimeout.Run(result.All, s_deadline);
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // Assert.Throws (not ThrowsAsync): the exception must escape the call itself,
         // before any Task is handed back.
@@ -213,23 +213,23 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ExistingTopic_FailsOnlyThatTopic()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult first = admin.CreateTopics(new[] { new NewTopic("dup", 1, 1) });
-        await TestTimeout.Run(first.All, s_deadline);
+        AsyncCreateTopicsResult first = admin.CreateTopics(new[] { new NewTopic("dup", 1, 1) });
+        await TestTimeout.Run(() => first.All().Get(), s_deadline);
 
-        CreateTopicsResult second = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult second = admin.CreateTopics(new[]
         {
             new NewTopic("dup", 1, 1),
             new NewTopic("fresh", 1, 1),
         });
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => second.Values["dup"], s_deadline));
+            () => TestTimeout.Run(() => second.Values["dup"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic dup exists already.", failure.Message);
 
-        await TestTimeout.Run(() => second.Values["fresh"], s_deadline);
+        await TestTimeout.Run(() => second.Values["fresh"].Get(), s_deadline);
     }
 
     /// <summary>
@@ -240,20 +240,20 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task RepeatedTopicName_YieldsOneEntry()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic("repeated", 1, 1),
             new NewTopic("repeated", 7, 1),
         });
 
         Assert.Single(result.Values);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // The FIRST occurrence is the one that was sent, as in Java.
         int numPartitions = 0;
-        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("repeated"), s_deadline);
+        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("repeated").Get(), s_deadline);
         Assert.Equal(1, numPartitions);
     }
 
@@ -263,12 +263,12 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task EmptyRequest_YieldsAnEmptyResultThatCompletes()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
+        AsyncCreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
 
         Assert.Empty(result.Values);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -281,7 +281,7 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ReplicaAssignmentForm_IsMutuallyExclusiveAndRoundTrips()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         NewTopic assigned = new NewTopic(
             "assigned-topic",
@@ -294,8 +294,8 @@ public sealed class PublicAdminCreateTopicsTests
         NewTopic counted = new NewTopic("counted-topic", 1, 1);
         Assert.Null(counted.ReplicasAssignments);
 
-        CreateTopicsResult result = admin.CreateTopics(new[] { assigned });
-        await TestTimeout.Run(result.All, s_deadline);
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[] { assigned });
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -329,9 +329,9 @@ public sealed class PublicAdminCreateTopicsTests
     [InlineData(true, true)]
     public async Task BothBoolOptions_CrossTheAbiForEveryCombination(bool validateOnly, bool retryOnQuotaViolation)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic($"bools-{validateOnly}-{retryOnQuotaViolation}", 1, 1) },
             new CreateTopicsOptions
             {
@@ -339,7 +339,7 @@ public sealed class PublicAdminCreateTopicsTests
                 RetryOnQuotaViolation = retryOnQuotaViolation,
             });
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -351,13 +351,13 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task ExplicitTimeout_CrossesTheAbi()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult result = admin.CreateTopics(
+        AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic("timeout-topic", 1, 1) },
             new CreateTopicsOptions { TimeoutMs = 5_000 });
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -382,9 +382,9 @@ public sealed class PublicAdminCreateTopicsTests
     {
         const string Topic = "d13-config-entries";
 
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult created = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 1, 1)
             {
@@ -393,7 +393,7 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         Config config = default!;
-        await TestTimeout.Run(async () => config = await created.Config(Topic), s_deadline);
+        await TestTimeout.Run(async () => config = await created.Config(Topic).Get(), s_deadline);
 
         ConfigEntry entry = Assert.Single(config.Entries);
         Assert.Equal(new ConfigEntry("cleanup.policy", "compact"), entry);
@@ -419,9 +419,9 @@ public sealed class PublicAdminCreateTopicsTests
         const string Topic = "d16-null-config";
         const string Name = "retention.ms";
 
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        CreateTopicsResult created = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 1, 1)
             {
@@ -429,19 +429,19 @@ public sealed class PublicAdminCreateTopicsTests
             },
         });
 
-        await TestTimeout.Run(created.All, s_deadline);
+        await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
         Config fromCreate = default!;
-        await TestTimeout.Run(async () => fromCreate = await created.Config(Topic), s_deadline);
+        await TestTimeout.Run(async () => fromCreate = await created.Config(Topic).Get(), s_deadline);
         ConfigEntry? createEntry = fromCreate.Get(Name);
         Assert.NotNull(createEntry);
         Assert.Null(createEntry!.Value);
         Assert.Equal("compact", fromCreate.Get("cleanup.policy")!.Value);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
-        DescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
+        AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
         Config fromDescribe = default!;
-        await TestTimeout.Run(async () => fromDescribe = await described.Values[resource], s_deadline);
+        await TestTimeout.Run(async () => fromDescribe = await described.Values[resource].Get(), s_deadline);
         ConfigEntry? describeEntry = fromDescribe.Get(Name);
         Assert.NotNull(describeEntry);
         Assert.Null(describeEntry!.Value);
@@ -578,9 +578,9 @@ public sealed class PublicAdminCreateTopicsTests
     [Fact]
     public async Task MinusOneCounts_CreateWithTheBrokerDefaults_LikeUnsetOnes()
     {
-        using MockAdminClient admin = new MockAdminClient(2);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
 
-        CreateTopicsResult result = admin.CreateTopics(new[]
+        AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic("minus-one", -1, (short)-1),
             new NewTopic("unset", (int?)null, (short?)null),
@@ -593,8 +593,8 @@ public sealed class PublicAdminCreateTopicsTests
         for (int i = 0; i < topics.Length; i++)
         {
             int index = i;
-            await TestTimeout.Run(async () => partitions[index] = await result.NumPartitions(topics[index]), s_deadline);
-            await TestTimeout.Run(async () => factors[index] = await result.ReplicationFactor(topics[index]), s_deadline);
+            await TestTimeout.Run(async () => partitions[index] = await result.NumPartitions(topics[index]).Get(), s_deadline);
+            await TestTimeout.Run(async () => factors[index] = await result.ReplicationFactor(topics[index]).Get(), s_deadline);
         }
 
         Assert.Equal(new[] { 1, 1, 3 }, partitions);

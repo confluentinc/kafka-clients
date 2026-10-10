@@ -72,12 +72,12 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
+        AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Entities, s_deadline));
+            () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
         Assert.NotEqual(0, failure.Code);
     }
@@ -89,13 +89,13 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [Fact]
     public async Task Entities_IsTheSameTaskEveryCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
-        Assert.Same(result.Entities(), result.Entities());
+        AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
+        Assert.Same(result.Entities().Get(), result.Entities().Get());
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Entities, s_deadline));
+            () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
     /// <summary>
@@ -108,7 +108,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
     [InlineData(ClientQuotaMatchType.Specified)]
     public async Task EveryMatchType_ReachesTheCore(ClientQuotaMatchType matchType)
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         ClientQuotaFilterComponent component = matchType switch
         {
@@ -119,12 +119,12 @@ public sealed class PublicAdminDescribeClientQuotasTests
             _ => ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User),
         };
 
-        DescribeClientQuotasResult result = admin.DescribeClientQuotas(
+        AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
         // It reached the core and came back as a call-level failure, not an argument error.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Entities, s_deadline));
+            () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 

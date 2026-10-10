@@ -68,7 +68,7 @@ public sealed class PublicAdminNegativeTimeoutTests
     [Fact]
     public async Task X2_RealClient_ANegativeTimeout_FailsExactlyAsAZeroTimeout()
     {
-        using KafkaAdminClient admin = new KafkaAdminClient(
+        using AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
 
         KafkaException zero = await Failure(admin, 0);
@@ -82,9 +82,9 @@ public sealed class PublicAdminNegativeTimeoutTests
         }
     }
 
-    private static Task<KafkaException> Failure(IAdmin admin, int timeoutMs)
+    private static Task<KafkaException> Failure(IAsyncAdmin admin, int timeoutMs)
     {
-        ListTopicsResult result = admin.ListTopics(new ListTopicsOptions { TimeoutMs = timeoutMs });
-        return TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.Names), s_deadline);
+        AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions { TimeoutMs = timeoutMs });
+        return TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Names().Get()), s_deadline);
     }
 }

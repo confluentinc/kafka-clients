@@ -66,20 +66,20 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
     [Fact]
     public async Task DeleteConsumerGroupOffsets_SurfacesTheMocksDocumentedRefusal()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         TopicPartition tp = new TopicPartition("p5-dcgo", 0);
-        DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+        AsyncDeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
             "p5-group",
             new[] { tp });
 
         KafkaException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromPartitionResult.Code);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
@@ -88,7 +88,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
     [Fact]
     public async Task DeleteConsumerGroupOffsets_ThrowsAfterDispose()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroupOffsets(
@@ -116,12 +116,12 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             [bad] = error,
         };
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(outcomes, all: null, good, bad);
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(outcomes, all: null, good, bad);
 
-        await TestTimeout.Run(() => result.PartitionResult(good), s_deadline);
+        await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
@@ -137,7 +137,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         TopicPartition known = new TopicPartition("p5-known", 0);
         TopicPartition unknown = new TopicPartition("p5-unknown", 7);
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?> { [known] = null }, all: null, known);
 
         ArgumentException? thrown = null;
@@ -173,13 +173,13 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             "Offset deletion result for partition \"" + requested + "\" was not included in the response",
             isRetriable: false);
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?> { [requested] = stored }, all: null, requested);
 
         // Captured BEFORE the assertion: a synchronous throw here would surface at this line,
         // outside Assert.ThrowsAsync's catch — which is what proves the fault is genuinely
         // asynchronous rather than merely tolerated by an assertion helper that accepts either.
-        Task task = result.PartitionResult(requested);
+        Task task = result.PartitionResult(requested).Get();
 
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => task), s_deadline);
@@ -196,10 +196,10 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
     {
         TopicPartition requested = new TopicPartition("p5-violation", 0);
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?>(), all: null, requested);
 
-        Task task = result.PartitionResult(requested);
+        Task task = result.PartitionResult(requested).Get();
 
         await TestTimeout.Run(
             () => Assert.ThrowsAsync<KeyNotFoundException>(() => task), s_deadline);
@@ -220,7 +220,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
 
         KafkaException first = new KafkaException(11, "first failure", isRetriable: true);
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?>
             {
                 [good] = null,
@@ -233,7 +233,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             good);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(first, thrown);
     }
 
@@ -248,13 +248,13 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         TopicPartition bad = new TopicPartition("p5-all-null", 0);
         KafkaException perPartition = new KafkaException(11, "partition failure", isRetriable: false);
 
-        DeleteConsumerGroupOffsetsResult result = Resolved(
+        AsyncDeleteConsumerGroupOffsetsResult result = Resolved(
             new Dictionary<TopicPartition, KafkaException?> { [bad] = perPartition }, all: null, bad);
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
         Assert.Same(perPartition, thrown);
     }
 
@@ -268,24 +268,24 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             new TaskCompletionSource<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>();
         source.SetException(callLevel);
 
-        DeleteConsumerGroupOffsetsResult result = new DeleteConsumerGroupOffsetsResult(source.Task, new[] { tp });
+        AsyncDeleteConsumerGroupOffsetsResult result = new AsyncDeleteConsumerGroupOffsetsResult(source.Task, new[] { tp });
 
         KafkaException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp)),
+            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp).Get()),
             s_deadline);
         Assert.Same(callLevel, fromPartitionResult);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(callLevel, fromAll);
     }
 
     /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>
-    private static DeleteConsumerGroupOffsetsResult Resolved(
+    private static AsyncDeleteConsumerGroupOffsetsResult Resolved(
         IReadOnlyDictionary<TopicPartition, KafkaException?> perKey,
         KafkaException? all,
         params TopicPartition[] requested) =>
-        new DeleteConsumerGroupOffsetsResult(
+        new AsyncDeleteConsumerGroupOffsetsResult(
             Task.FromResult<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)>(
                 (perKey, all)),
             requested);

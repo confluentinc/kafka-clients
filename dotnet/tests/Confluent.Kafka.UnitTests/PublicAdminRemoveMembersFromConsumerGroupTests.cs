@@ -64,19 +64,19 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_SurfacesTheMocksDocumentedRefusal()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         MemberToRemove member = new MemberToRemove("instance-1");
         RemoveMembersFromConsumerGroupOptions options =
             new RemoveMembersFromConsumerGroupOptions(new[] { member });
 
-        RemoveMembersFromConsumerGroupResult result =
+        AsyncRemoveMembersFromConsumerGroupResult result =
             admin.RemoveMembersFromConsumerGroup("p5-group", options);
 
         Assert.False(result.RemoveAll);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
 
@@ -85,7 +85,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         Assert.Null(fromAll.InnerException);
 
         KafkaException fromMember = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member).Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromMember.Code);
         Assert.Equal(NotImplemented, fromMember.Message);
         Assert.Null(fromMember.InnerException);
@@ -98,17 +98,17 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_RemoveAllMode_SurfacesTheMocksDocumentedRefusal()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
 
-        RemoveMembersFromConsumerGroupResult result =
+        AsyncRemoveMembersFromConsumerGroupResult result =
             admin.RemoveMembersFromConsumerGroup("p5-group-all", options);
 
         Assert.True(result.RemoveAll);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
@@ -117,7 +117,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_ThrowsAfterDispose()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
@@ -183,7 +183,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void MemberResult_NullMember_ThrowsArgumentNullException_Synchronously()
     {
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal),
             all: null,
             new MemberToRemove("instance-1"));
@@ -208,7 +208,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void MemberResult_RemoveAllMode_ThrowsArgumentException_Synchronously()
     {
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null);
 
         ArgumentException? thrown = null;
@@ -239,7 +239,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         MemberToRemove requested = new MemberToRemove("instance-1");
         MemberToRemove notRequested = new MemberToRemove("instance-2");
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = null },
             all: null,
             requested);
@@ -277,7 +277,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
                 + "was not included in the removal response",
             isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = stored },
             all: stored,
             member);
@@ -285,7 +285,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         // Captured BEFORE the assertion: a synchronous throw here would surface at this line,
         // outside Assert.ThrowsAsync's catch — which is what proves the fault is genuinely
         // asynchronous rather than merely tolerated by an assertion helper that accepts either.
-        Task task = result.MemberResult(member);
+        Task task = result.MemberResult(member).Get();
 
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => task), s_deadline);
@@ -302,10 +302,10 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     {
         MemberToRemove member = new MemberToRemove("instance-1");
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null, member);
 
-        Task task = result.MemberResult(member);
+        Task task = result.MemberResult(member).Get();
 
         await TestTimeout.Run(
             () => Assert.ThrowsAsync<KeyNotFoundException>(() => task), s_deadline);
@@ -317,12 +317,12 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     {
         MemberToRemove member = new MemberToRemove("instance-1");
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = null },
             all: null,
             member);
 
-        await TestTimeout.Run(() => result.MemberResult(member), s_deadline);
+        await TestTimeout.Run(() => result.MemberResult(member).Get(), s_deadline);
     }
 
     /// <summary>
@@ -335,13 +335,13 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         MemberToRemove member = new MemberToRemove("instance-1");
         KafkaException error = new KafkaException(11, "member failure", isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-1"] = error },
             all: error,
             member);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member).Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
@@ -361,7 +361,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
 
         KafkaException first = new KafkaException(25, "first failure", isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal)
             {
                 ["instance-a"] = null,
@@ -374,7 +374,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             good);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(first, thrown);
     }
 
@@ -389,15 +389,15 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         MemberToRemove bad = new MemberToRemove("instance-bad");
         KafkaException perMember = new KafkaException(25, "member failure", isRetriable: false);
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal) { ["instance-bad"] = perMember },
             all: null,
             bad);
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(bad)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(bad).Get()), s_deadline);
         Assert.Same(perMember, thrown);
     }
 
@@ -408,11 +408,11 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public async Task All_RemoveAllMode_CompletesOnANullStoredOutcome()
     {
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal), all: null);
 
         Assert.True(result.RemoveAll);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -446,13 +446,13 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             isRetriable: false,
             memberError);
 
-        RemoveMembersFromConsumerGroupResult result = Resolved(
+        AsyncRemoveMembersFromConsumerGroupResult result = Resolved(
             new Dictionary<string, KafkaException?>(StringComparer.Ordinal), stored);
 
         Assert.True(result.RemoveAll);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(stored, thrown);
         Assert.Equal(-1, thrown.Code);
         Assert.False(thrown.IsRetriable);
@@ -473,15 +473,15 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             new TaskCompletionSource<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>();
         source.SetException(callLevel);
 
-        RemoveMembersFromConsumerGroupResult result =
-            new RemoveMembersFromConsumerGroupResult(source.Task, new[] { member });
+        AsyncRemoveMembersFromConsumerGroupResult result =
+            new AsyncRemoveMembersFromConsumerGroupResult(source.Task, new[] { member });
 
         KafkaException fromMemberResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member)), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.MemberResult(member).Get()), s_deadline);
         Assert.Same(callLevel, fromMemberResult);
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Same(callLevel, fromAll);
     }
 
@@ -511,11 +511,11 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     }
 
     /// <summary>A result over an already-resolved outcome, the shape the trampoline builds.</summary>
-    private static RemoveMembersFromConsumerGroupResult Resolved(
+    private static AsyncRemoveMembersFromConsumerGroupResult Resolved(
         IReadOnlyDictionary<string, KafkaException?> perKey,
         KafkaException? all,
         params MemberToRemove[] requested) =>
-        new RemoveMembersFromConsumerGroupResult(
+        new AsyncRemoveMembersFromConsumerGroupResult(
             Task.FromResult<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
                 (perKey, all)),
             requested);

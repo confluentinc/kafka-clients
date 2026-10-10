@@ -53,8 +53,8 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         new ConsumerGroupDescription(
             groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
 
-    private static Task<ConsumerGroupDescription> Completed(string groupId) =>
-        Task.FromResult(Description(groupId));
+    private static AsyncKafkaFuture<ConsumerGroupDescription> Completed(string groupId) =>
+        new AsyncKafkaFuture<ConsumerGroupDescription>(Task.FromResult(Description(groupId)));
 
     private static TaskCompletionSource<ConsumerGroupDescription> Pending() =>
         new TaskCompletionSource<ConsumerGroupDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -118,13 +118,13 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [Fact]
     public void DescribedGroups_IsTheStoredMapRatherThanJavasDefensiveCopy()
     {
-        Dictionary<string, Task<ConsumerGroupDescription>> futures =
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>> futures =
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
             };
 
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(futures);
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(futures);
 
         Assert.Same(futures, result.DescribedGroups);
         Assert.Same(result.DescribedGroups, result.DescribedGroups);
@@ -136,14 +136,14 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [Fact]
     public async Task All_YieldsEveryDescriptionKeyedByGroupId()
     {
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
                 ["g-2"] = Completed("g-2"),
             });
 
-        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All();
+        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All().Get();
 
         Assert.Equal(2, all.Count);
         Assert.Equal("g-1", all["g-1"].GroupId);
@@ -156,10 +156,10 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [Fact]
     public async Task All_OverAnEmptyMap_YieldsAnEmptyMap()
     {
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal));
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal));
 
-        Assert.Empty(await result.All());
+        Assert.Empty(await result.All().Get());
     }
 
     /// <summary>
@@ -170,13 +170,13 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [Fact]
     public void All_HandsBackAFreshTaskEachCall()
     {
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
                 ["g-1"] = Completed("g-1"),
             });
 
-        Assert.NotSame(result.All(), result.All());
+        Assert.NotSame(result.All().Get(), result.All().Get());
     }
 
     /// <summary>
@@ -189,18 +189,18 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         TaskCompletionSource<ConsumerGroupDescription> broken = Pending();
         broken.SetException(new InvalidOperationException("group is broken"));
 
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
                 ["healthy"] = Completed("healthy"),
-                ["broken"] = broken.Task,
+                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken.Task),
             });
 
-        ConsumerGroupDescription healthy = await result.DescribedGroups["healthy"];
+        ConsumerGroupDescription healthy = await result.DescribedGroups["healthy"].Get();
         Assert.Equal("healthy", healthy.GroupId);
 
         InvalidOperationException error =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => result.All());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => result.All().Get());
         Assert.Equal("group is broken", error.Message);
     }
 
@@ -216,14 +216,14 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         broken.SetException(new InvalidOperationException("group is broken"));
         TaskCompletionSource<ConsumerGroupDescription> stillRunning = Pending();
 
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
-                ["broken"] = broken.Task,
-                ["still-running"] = stillRunning.Task,
+                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken.Task),
+                ["still-running"] = new AsyncKafkaFuture<ConsumerGroupDescription>(stillRunning.Task),
             });
 
-        Task<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All();
+        Task<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All().Get();
         Assert.False(all.IsCompleted);
 
         stillRunning.SetResult(Description("still-running"));
@@ -238,14 +238,14 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [Fact]
     public async Task All_KeysOrdinally()
     {
-        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
-            new Dictionary<string, Task<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
                 ["group"] = Completed("group"),
                 ["GROUP"] = Completed("GROUP"),
             });
 
-        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All();
+        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All().Get();
 
         Assert.Equal(2, all.Count);
         Assert.Equal("group", all["group"].GroupId);

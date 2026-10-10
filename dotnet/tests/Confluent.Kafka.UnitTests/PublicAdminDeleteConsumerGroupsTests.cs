@@ -57,22 +57,22 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     [Fact]
     public async Task DeleteConsumerGroups_SurfacesTheMocksDocumentedRefusal_PerGroup()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b" });
+        AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b" });
 
         Assert.Equal(2, result.DeletedGroups.Count);
 
-        foreach (KeyValuePair<string, Task> entry in result.DeletedGroups)
+        foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups)
         {
             KafkaException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => entry.Value), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => entry.Value.Get()), s_deadline);
             Assert.Equal(UnsupportedVersionCode, thrown.Code);
             Assert.Equal(NotImplemented, thrown.Message);
         }
 
         KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, fromAll.Code);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
@@ -81,7 +81,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     [Fact]
     public async Task DeleteConsumerGroups_ThrowsAfterDispose()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
         await admin.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroups(new[] { "p5-disposed" }));
@@ -99,7 +99,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     /// <summary>
     /// ⚠⚠ <b>A per-group failure faults ONLY that group's own <see cref="Task"/></b> — Java's
     /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>, exercised directly against
-    /// <see cref="DeleteConsumerGroupsResult"/>'s constructor rather than the mock.
+    /// <see cref="AsyncDeleteConsumerGroupsResult"/>'s constructor rather than the mock.
     /// </summary>
     [Fact]
     public async Task DeletedGroups_EachEntryIsIndependentlyFaultable()
@@ -112,12 +112,12 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
             ["bad"] = Task.FromException<bool>(error),
         };
 
-        DeleteConsumerGroupsResult result = new DeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
+        AsyncDeleteConsumerGroupsResult result = new AsyncDeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
 
-        await TestTimeout.Run(() => result.DeletedGroups["good"], s_deadline);
+        await TestTimeout.Run(() => result.DeletedGroups["good"].Get(), s_deadline);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.DeletedGroups["bad"]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
@@ -136,15 +136,15 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
             ["bad"] = Task.FromException<bool>(error),
         };
 
-        DeleteConsumerGroupsResult mixed = new DeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
+        AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
 
         KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(mixed.All), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(error, thrown);
 
-        DeleteConsumerGroupsResult clean = new DeleteConsumerGroupsResult(
+        AsyncDeleteConsumerGroupsResult clean = new AsyncDeleteConsumerGroupsResult(
             new Dictionary<string, Task<bool>>(StringComparer.Ordinal) { ["good"] = Task.FromResult(true) },
             StringComparer.Ordinal);
-        await TestTimeout.Run(clean.All, s_deadline);
+        await TestTimeout.Run(() => clean.All().Get(), s_deadline);
     }
 }

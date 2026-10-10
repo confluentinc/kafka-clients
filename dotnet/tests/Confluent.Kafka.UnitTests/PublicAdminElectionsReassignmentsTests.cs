@@ -81,7 +81,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task ElectLeaders_SurfacesTheMocksDocumentedRefusal_ForEverySelectionShape()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         IReadOnlyCollection<TopicPartition>?[] selections =
         {
@@ -92,17 +92,17 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         foreach (IReadOnlyCollection<TopicPartition>? selection in selections)
         {
-            ElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, selection);
+            AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, selection);
 
             KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(result.Partitions), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.Partitions().Get()), s_deadline);
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
 
             // all() forwards a call-level failure rather than swallowing it —
             // ElectLeadersResult.java:59-60.
             KafkaException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+                () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
             Assert.Equal(UnsupportedVersionCode, fromAll.Code);
             Assert.Equal(NotImplemented, fromAll.Message);
         }
@@ -117,11 +117,11 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [InlineData(ElectionType.Unclean)]
     public async Task ElectLeaders_AcceptsBothElectionTypes(ElectionType type)
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
-                admin.ElectLeaders(type, new[] { new TopicPartition("p4-type", 0) }).Partitions),
+                () => admin.ElectLeaders(type, new[] { new TopicPartition("p4-type", 0) }).Partitions().Get()),
             s_deadline);
 
         // The mock's refusal, not an IllegalArgument from the ABI's election-type check —
@@ -138,12 +138,12 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task ElectLeadersResult_PartitionsReturnsTheSameTaskInstance()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
-        ElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, null);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, null);
 
-        Assert.Same(result.Partitions(), result.Partitions());
+        Assert.Same(result.Partitions().Get(), result.Partitions().Get());
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.Partitions), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Partitions().Get()), s_deadline);
     }
 
     /// <summary>
@@ -174,12 +174,12 @@ public sealed class PublicAdminElectionsReassignmentsTests
             [worse] = second,
         };
 
-        ElectLeadersResult mixed = new ElectLeadersResult(
+        AsyncElectLeadersResult mixed = new AsyncElectLeadersResult(
             Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(outcomes));
 
         // partitions() SUCCEEDS: the failures are values, not faults.
         IReadOnlyDictionary<TopicPartition, KafkaException?> map =
-            await TestTimeout.Run(mixed.Partitions, s_deadline);
+            await TestTimeout.Run(() => mixed.Partitions().Get(), s_deadline);
         Assert.Null(map[good]);
         Assert.Same(first, map[bad]);
         Assert.Same(second, map[worse]);
@@ -187,14 +187,14 @@ public sealed class PublicAdminElectionsReassignmentsTests
         // all() completes exceptionally with the FIRST present Optional and does not
         // inspect the rest (ElectLeadersResult.java:62-67).
         KafkaException thrown =
-            await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(mixed.All), s_deadline);
+            await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(map.Values.First(value => value is not null), thrown);
 
         // …and with every election succeeded, all() completes.
-        ElectLeadersResult clean = new ElectLeadersResult(
+        AsyncElectLeadersResult clean = new AsyncElectLeadersResult(
             Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
                 new Dictionary<TopicPartition, KafkaException?> { [good] = null }));
-        await TestTimeout.Run(clean.All, s_deadline);
+        await TestTimeout.Run(() => clean.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -205,14 +205,14 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_FaultsOnlyTheFailingPartition()
     {
-        await using MockAdminClient admin = new MockAdminClient(3);
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic("p4-apr", 2, 1) }).All(), s_deadline);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic("p4-apr", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition zero = new TopicPartition("p4-apr", 0);
         TopicPartition one = new TopicPartition("p4-apr", 1);
         TopicPartition missing = new TopicPartition("p4-apr-missing", 0);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [zero] = new NewPartitionReassignment(new[] { 0, 1 }),
@@ -222,16 +222,16 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         Assert.Equal(3, result.Values.Count);
 
-        await TestTimeout.Run(() => result.Values[zero], s_deadline);
-        await TestTimeout.Run(() => result.Values[one], s_deadline);
+        await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values[one].Get(), s_deadline);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
 
         // all() is KafkaFuture.allOf, so one failure fails the batch — but only after the
         // successful partitions have completed on their own.
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
     }
 
     /// <summary>
@@ -249,21 +249,21 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_CancelSucceeds_AlongsideAReassignment()
     {
-        await using MockAdminClient admin = new MockAdminClient(3);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4-apr-cancel", 2, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4-apr-cancel", 2, 1) }).All().Get(), s_deadline);
 
         TopicPartition reassigned = new TopicPartition("p4-apr-cancel", 0);
         TopicPartition cancelled = new TopicPartition("p4-apr-cancel", 1);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [reassigned] = new NewPartitionReassignment(new[] { 0, 2 }),
                 [cancelled] = null,
             });
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal(2, result.Values.Count);
     }
 
@@ -281,18 +281,18 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [InlineData(false)]
     public async Task AlterPartitionReassignments_AcceptsBothReplicationFactorSettings(bool allow)
     {
-        await using MockAdminClient admin = new MockAdminClient(2);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("p4-apr-rf", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("p4-apr-rf", 1, 1) }).All().Get(), s_deadline);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [new TopicPartition("p4-apr-rf", 0)] = new NewPartitionReassignment(new[] { 0, 1 }),
             },
             new AlterPartitionReassignmentsOptions { AllowReplicationFactorChange = allow });
 
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -302,13 +302,13 @@ public sealed class PublicAdminElectionsReassignmentsTests
     [Fact]
     public async Task AlterPartitionReassignments_AnEmptyMapCompletes()
     {
-        await using MockAdminClient admin = new MockAdminClient(1);
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>());
 
         Assert.Empty(result.Values);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -327,31 +327,31 @@ public sealed class PublicAdminElectionsReassignmentsTests
     }
 
     /// <summary>
-    /// Both RPCs are reachable through <see cref="IAdmin"/> itself, on the real client type
+    /// Both RPCs are reachable through <see cref="IAsyncAdmin"/> itself, on the real client type
     /// as well as the mock — the interface is what a caller programs against.
     /// </summary>
     /// <remarks>
     /// Driven through the mock instance, because constructing a
-    /// <see cref="KafkaAdminClient"/> would need a broker; what is asserted is that the
+    /// <see cref="AsyncKafkaAdminClient"/> would need a broker; what is asserted is that the
     /// interface dispatch reaches the same implementation, and that
-    /// <see cref="KafkaAdminClient"/> implements both members at all.
+    /// <see cref="AsyncKafkaAdminClient"/> implements both members at all.
     /// </remarks>
     [Fact]
     public async Task BothRpcs_AreReachableThroughTheInterface()
     {
-        await using MockAdminClient mock = new MockAdminClient(1);
-        IAdmin admin = mock;
+        await using AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        IAsyncAdmin admin = mock;
 
         await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(
-                admin.ElectLeaders(ElectionType.Preferred, null).Partitions),
+                () => admin.ElectLeaders(ElectionType.Preferred, null).Partitions().Get()),
             s_deadline);
 
-        AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>());
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        Assert.NotNull(typeof(KafkaAdminClient).GetMethod(nameof(IAdmin.ElectLeaders)));
-        Assert.NotNull(typeof(KafkaAdminClient).GetMethod(nameof(IAdmin.AlterPartitionReassignments)));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.ElectLeaders)));
+        Assert.NotNull(typeof(AsyncKafkaAdminClient).GetMethod(nameof(IAsyncAdmin.AlterPartitionReassignments)));
     }
 }

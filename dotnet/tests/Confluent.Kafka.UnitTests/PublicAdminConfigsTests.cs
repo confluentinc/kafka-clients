@@ -44,7 +44,7 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task DescribeConfigs_ReportsATopicsConfiguration()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[]
@@ -53,19 +53,19 @@ public sealed class PublicAdminConfigsTests
                 {
                     Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
                 },
-            }).All(),
+            }).All().Get(),
             s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { resource });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { resource });
 
-        Config config = await TestTimeout.Run(() => result.Values[resource], s_deadline);
+        Config config = await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
         ConfigEntry entry = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
         Assert.Equal("compact", entry.Value);
 
         // …and All() gathers the same value under the same key, which only holds because the
         // aggregate is built with the bridge's own comparer.
-        IReadOnlyDictionary<ConfigResource, Config> all = await TestTimeout.Run(result.All, s_deadline);
+        IReadOnlyDictionary<ConfigResource, Config> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value);
     }
 
@@ -77,9 +77,9 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_SetIsVisibleToASubsequentDescribe()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -91,11 +91,11 @@ public sealed class PublicAdminConfigsTests
                     {
                         new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.Set),
                     },
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
-        DescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource], s_deadline);
+        AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
+        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
         Assert.Equal("1000", config.Get("retention.ms")!.Value);
     }
 
@@ -111,7 +111,7 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_DeleteWithANullValue_RemovesTheEntry()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await TestTimeout.Run(
             () => admin.CreateTopics(new[]
@@ -120,7 +120,7 @@ public sealed class PublicAdminConfigsTests
                 {
                     Configs = new Dictionary<string, string> { ["retention.ms"] = "1000" },
                 },
-            }).All(),
+            }).All().Get(),
             s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
@@ -133,11 +133,11 @@ public sealed class PublicAdminConfigsTests
                     {
                         new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.Delete),
                     },
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
-        DescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource], s_deadline);
+        AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
+        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
         Assert.Null(config.Get("retention.ms"));
     }
 
@@ -147,24 +147,24 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_AnUnknownTopic_FaultsOnlyItsOwnAwaitable()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
         ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);
         ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "public-cfg-absent");
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [present] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.Set) },
                 [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.Set) },
             });
 
-        await TestTimeout.Run(() => result.Values[present], s_deadline);
+        await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
@@ -180,13 +180,13 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task ListConfigResources_ReportsASeededClientMetricsResource()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         ConfigResource subscription = new ConfigResource(ConfigResourceType.ClientMetrics, "sub-1");
 
         // Empty before — the state Stage 1 was limited to asserting.
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All(), s_deadline));
+            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline));
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -197,17 +197,17 @@ public sealed class PublicAdminConfigsTests
                         new AlterConfigOp(
                             new ConfigEntry("interval.ms", "60000"), AlterConfigOpType.Set),
                     },
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
         // The listing now reports it…
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));
 
         // …and describing it returns the config the alter set.
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { subscription }).Values[subscription], s_deadline);
+            () => admin.DescribeConfigs(new[] { subscription }).Values[subscription].Get(), s_deadline);
         Assert.Equal("60000", config.Get("interval.ms")!.Value);
     }
 
@@ -233,17 +233,17 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await TestTimeout.Run(
             () => admin.CreateTopics(
-                new[] { new NewTopic(Topic, 1, 1), new NewTopic("public-cfg-sibling", 1, 1) }).All(),
+                new[] { new NewTopic(Topic, 1, 1), new NewTopic("public-cfg-sibling", 1, 1) }).All().Get(),
             s_deadline);
 
         ConfigResource noOps = new ConfigResource(ConfigResourceType.Topic, Topic);
         ConfigResource sibling = new ConfigResource(ConfigResourceType.Topic, "public-cfg-sibling");
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [noOps] = Array.Empty<AlterConfigOp>(),
@@ -251,18 +251,18 @@ public sealed class PublicAdminConfigsTests
             });
 
         // The zero-op resource completes — it does not fault.
-        await TestTimeout.Run(() => result.Values[noOps], s_deadline);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.Values[noOps].Get(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // …and the sibling's operation really was applied, so the success above is not a
         // blanket one that would also cover a broken row-flattening.
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { sibling }).Values[sibling], s_deadline);
+            () => admin.DescribeConfigs(new[] { sibling }).Values[sibling].Get(), s_deadline);
         Assert.Equal("v", config.Get("k")!.Value);
 
         // The zero-op resource was genuinely left untouched.
         Config untouched = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { noOps }).Values[noOps], s_deadline);
+            () => admin.DescribeConfigs(new[] { noOps }).Values[noOps].Get(), s_deadline);
         Assert.Empty(untouched.Entries);
     }
 
@@ -274,20 +274,20 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_OnlyZeroOpResources_CompletesSuccessfully()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AlterConfigsResult result = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [resource] = Array.Empty<AlterConfigOp>(),
             });
 
-        await TestTimeout.Run(() => result.Values[resource], s_deadline);
-        await TestTimeout.Run(result.All, s_deadline);
+        await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
+        await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
     /// <summary>
@@ -308,28 +308,28 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "public-cfg-never-created");
 
         // (A) zero ops — sent as the sentinel row, so the core answers and rejects it.
-        AlterConfigsResult zeroOps = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult zeroOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
         KafkaException zeroOpsFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // (B) the SAME absent resource with one op — sent, so the core rejects it.
-        AlterConfigsResult withOps = admin.IncrementalAlterConfigs(
+        AsyncAlterConfigsResult withOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             });
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
@@ -351,17 +351,17 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task DescribeConfigs_OfAnUndefinedType_IsAnsweredAsUnknown()
     {
-        using MockAdminClient admin = new MockAdminClient();
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
-        DescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
 
         ConfigResource key = Assert.Single(result.Values.Keys);
         Assert.Equal(ConfigResourceType.Unknown, key.Type);
         Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.Unknown, "x")));
 
         KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[undefined]), s_deadline);
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[undefined].Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal("Not implemented yet", failure.Message);
     }
@@ -440,10 +440,10 @@ public sealed class PublicAdminConfigsTests
     [Fact]
     public async Task TfmSmoke_TheTwoNewRpcsWorkOnThisFramework()
     {
-        await using MockAdminClient admin = new MockAdminClient();
+        await using AsyncMockAdminClient admin = new AsyncMockAdminClient();
 
         await TestTimeout.Run(
-            () => admin.CreateTopics(new[] { new NewTopic("cfg-smoke", 1, 1) }).All(), s_deadline);
+            () => admin.CreateTopics(new[] { new NewTopic("cfg-smoke", 1, 1) }).All().Get(), s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "cfg-smoke");
 
@@ -452,24 +452,24 @@ public sealed class PublicAdminConfigsTests
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
                     [resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { resource }).Values[resource], s_deadline);
+            () => admin.DescribeConfigs(new[] { resource }).Values[resource].Get(), s_deadline);
         Assert.Equal("v", config.Get("k")!.Value);
     }
 
     /// <summary>
-    /// Both RPCs work through the <see cref="IAdmin"/> interface, not only the concrete
+    /// Both RPCs work through the <see cref="IAsyncAdmin"/> interface, not only the concrete
     /// mock.
     /// </summary>
     [Fact]
     public async Task TheTwoRpcs_AreReachableThroughIAdmin()
     {
-        using IAdmin admin = new MockAdminClient();
+        using IAsyncAdmin admin = new AsyncMockAdminClient();
 
-        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -478,11 +478,11 @@ public sealed class PublicAdminConfigsTests
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
                     [resource] = new[] { new AlterConfigOp(new ConfigEntry("x", "y"), AlterConfigOpType.Set) },
-                }).All(),
+                }).All().Get(),
             s_deadline);
 
         IReadOnlyDictionary<ConfigResource, Config> all =
-            await TestTimeout.Run(() => admin.DescribeConfigs(new[] { resource }).All(), s_deadline);
+            await TestTimeout.Run(() => admin.DescribeConfigs(new[] { resource }).All().Get(), s_deadline);
         Assert.Equal("y", all[resource].Get("x")!.Value);
     }
 }

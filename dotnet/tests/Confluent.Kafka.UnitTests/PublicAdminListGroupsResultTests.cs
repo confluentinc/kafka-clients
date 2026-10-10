@@ -57,9 +57,9 @@ public sealed class PublicAdminListGroupsResultTests
         GroupListing first = Listing("g1");
         GroupListing second = Listing("g2");
 
-        ListGroupsResult result = ResultOf(new[] { first, second }, Array.Empty<KafkaException>());
+        AsyncListGroupsResult result = ResultOf(new[] { first, second }, Array.Empty<KafkaException>());
 
-        Assert.Equal(new[] { first, second }, await result.All());
+        Assert.Equal(new[] { first, second }, await result.All().Get());
     }
 
     /// <summary>
@@ -74,15 +74,15 @@ public sealed class PublicAdminListGroupsResultTests
         KafkaException first = Error("first");
         KafkaException second = Error("second");
 
-        ListGroupsResult result = ResultOf(new[] { Listing("g1") }, new[] { first, second });
+        AsyncListGroupsResult result = ResultOf(new[] { Listing("g1") }, new[] { first, second });
 
-        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
 
         Assert.Same(first, thrown);
 
         // ⚠ The successfully fetched listing is NOT yielded as a consolation: `all()` is
         // all-or-nothing, which is the whole reason `valid()` exists beside it.
-        Assert.Single(await result.Valid());
+        Assert.Single(await result.Valid().Get());
     }
 
     /// <summary>
@@ -95,9 +95,9 @@ public sealed class PublicAdminListGroupsResultTests
     {
         GroupListing listing = Listing("g1");
 
-        ListGroupsResult result = ResultOf(new[] { listing }, new[] { Error("boom") });
+        AsyncListGroupsResult result = ResultOf(new[] { listing }, new[] { Error("boom") });
 
-        IReadOnlyCollection<GroupListing> valid = await result.Valid();
+        IReadOnlyCollection<GroupListing> valid = await result.Valid().Get();
 
         Assert.Equal(new[] { listing }, valid);
     }
@@ -112,12 +112,12 @@ public sealed class PublicAdminListGroupsResultTests
         KafkaException first = Error("first");
         KafkaException second = Error("second");
 
-        ListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), new[] { first, second });
+        AsyncListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), new[] { first, second });
 
-        Assert.Equal(new[] { first, second }, await result.Errors());
+        Assert.Equal(new[] { first, second }, await result.Errors().Get());
 
         // Java's "if nothing can be fetched, an empty collection is yielded" (:77).
-        Assert.Empty(await result.Valid());
+        Assert.Empty(await result.Valid().Get());
     }
 
     /// <summary>
@@ -130,18 +130,18 @@ public sealed class PublicAdminListGroupsResultTests
         GroupListing listing = Listing("g1");
         KafkaException[] errors = { Error("a"), Error("b"), Error("c") };
 
-        ListGroupsResult result = ResultOf(new[] { listing }, errors);
+        AsyncListGroupsResult result = ResultOf(new[] { listing }, errors);
 
-        Assert.Equal(new[] { listing }, await result.Valid());
-        Assert.Equal(errors, await result.Errors());
+        Assert.Equal(new[] { listing }, await result.Valid().Get());
+        Assert.Equal(errors, await result.Errors().Get());
 
         // The reverse shape: more listings than errors, and the single error still governs all().
         GroupListing[] listings = { Listing("g1"), Listing("g2"), Listing("g3") };
-        ListGroupsResult reversed = ResultOf(listings, new[] { Error("only") });
+        AsyncListGroupsResult reversed = ResultOf(listings, new[] { Error("only") });
 
-        Assert.Equal(listings, await reversed.Valid());
-        Assert.Single(await reversed.Errors());
-        await Assert.ThrowsAsync<KafkaException>(() => reversed.All());
+        Assert.Equal(listings, await reversed.Valid().Get());
+        Assert.Single(await reversed.Errors().Get());
+        await Assert.ThrowsAsync<KafkaException>(() => reversed.All().Get());
     }
 
     /// <summary>
@@ -152,11 +152,11 @@ public sealed class PublicAdminListGroupsResultTests
     [Fact]
     public async Task Empty_SucceedsOnAllThreeAccessors()
     {
-        ListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), Array.Empty<KafkaException>());
+        AsyncListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), Array.Empty<KafkaException>());
 
-        Assert.Empty(await result.All());
-        Assert.Empty(await result.Valid());
-        Assert.Empty(await result.Errors());
+        Assert.Empty(await result.All().Get());
+        Assert.Empty(await result.Valid().Get());
+        Assert.Empty(await result.Errors().Get());
     }
 
     /// <summary>
@@ -170,12 +170,12 @@ public sealed class PublicAdminListGroupsResultTests
         GroupListing listing = Listing("g1");
         KafkaException error = Error("boom");
 
-        ListGroupsResult result = ResultOf(new[] { listing }, new[] { error });
+        AsyncListGroupsResult result = ResultOf(new[] { listing }, new[] { error });
 
-        Assert.Same(await result.Valid(), await result.Valid());
-        Assert.Same(await result.Errors(), await result.Errors());
-        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All()));
-        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All()));
+        Assert.Same(await result.Valid().Get(), await result.Valid().Get());
+        Assert.Same(await result.Errors().Get(), await result.Errors().Get());
+        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     /// <summary>
@@ -224,10 +224,10 @@ public sealed class PublicAdminListGroupsResultTests
 
     private static KafkaException Error(string message) => new KafkaException(message);
 
-    private static ListGroupsResult ResultOf(
+    private static AsyncListGroupsResult ResultOf(
         IReadOnlyCollection<GroupListing> valid,
         IReadOnlyCollection<KafkaException> errors) =>
-        new ListGroupsResult(Task.FromResult((valid, errors)));
+        new AsyncListGroupsResult(Task.FromResult((valid, errors)));
 
     private static byte NullableFlag(ParameterInfo parameter) => NullableAnnotation.Flag(parameter);
 }

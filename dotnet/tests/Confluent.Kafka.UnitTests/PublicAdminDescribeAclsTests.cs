@@ -72,12 +72,12 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
+        AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Values, s_deadline));
+            () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
         Assert.NotEqual(0, failure.Code);
     }
@@ -89,13 +89,13 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task Values_IsTheSameTaskEveryCall()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
-        Assert.Same(result.Values(), result.Values());
+        AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
+        Assert.Same(result.Values().Get(), result.Values().Get());
 
         await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Values, s_deadline));
+            () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
     /// <summary>
@@ -106,16 +106,16 @@ public sealed class PublicAdminDescribeAclsTests
     [Fact]
     public async Task WildcardFilter_IsAccepted_NotRejected()
     {
-        using MockAdminClient admin = new MockAdminClient(1);
+        using AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
 
-        DescribeAclsResult result = admin.DescribeAcls(
+        AsyncDescribeAclsResult result = admin.DescribeAcls(
             new AclBindingFilter(
                 new ResourcePatternFilter(ResourceType.Any, null, PatternType.Any),
                 new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any)));
 
         // It reached the core and came back as a call-level failure, not an argument error.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(result.Values, s_deadline));
+            () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
