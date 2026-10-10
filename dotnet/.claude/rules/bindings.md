@@ -57,7 +57,9 @@ per language:
 
 - the **FFI mechanism** — .NET: P/Invoke; Python: CPython extension
 - the **host idioms** used to rebuild — e.g. Java `Future` → .NET `Task`,
-  Python `concurrent.futures.Future`.
+  Python `concurrent.futures.Future`. A binding may offer both a blocking and an
+  awaitable type for Java's `Future`; .NET does (`KafkaFuture` / `AsyncKafkaFuture`,
+  M11/P4.2, M15/P14).
 
 Target the **Java shape**, *not* the language's existing ecosystem client
 (e.g. **not** `confluent-kafka-python`'s `produce()/poll()`) — that's what keeps

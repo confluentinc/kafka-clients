@@ -2021,7 +2021,11 @@ everything after that differs.
     root to borrow from, so both go through `FromHandle` / their own `_destroy`, never
     `FromBorrowedHandle`. Sub-shapes follow **Java's return type**, not the accessor
     set: **4a** value-carrying → one `Task` per key; **4b** void → one `Task` per key,
-    where a null error *is* the success value. Hookless, so the callback family still
+    where a null error *is* the success value. (M15/P14: read 'one `Task` per key' as
+    'one completion per key': a `TaskCompletionSource` with
+    `RunContinuationsAsynchronously` on the async flavour, or a `SyncCompletion` latch on
+    the sync flavour, chosen by the operation's `AdminFlavour`. `AdminCallbacks` and the
+    countdown do not depend on the flavour.) Hookless, so the callback family still
     owns the `GCHandle` free — but as a **countdown released by the last of N**, armed
     at `n + 1` with a submit-owned token (which is what makes `n == 0` releasable at
     all), where `n` is read from that RPC's own ABI doc comment and is **not**
@@ -2397,6 +2401,12 @@ window).
     `AddRef` **outside** the `try` that routes a failure through
     `AbandonBeforeSubmit` — an `AddRef` throw would then skip the abandon path and
     permanently root the per-op `GCHandle` (M9/P4 M3).
+  - A sync admin Result composed over Tasks (`Task.WhenAll`, an `async` projection,
+    `ContinueWith`) and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`,
+    `.Result`). This is sync-over-async: with `RunContinuationsAsynchronously` the
+    composite needs a thread-pool thread to complete, so a saturated pool starves it.
+    Compose over `SyncFutureSource` instead (`ProjectedSyncFuture`, `AllOfSyncFuture`,
+    `GatheringAllOfSyncFuture`), which runs on the thread that calls `Get()` (M15/P14).
 
 **Tests required:**
 
