@@ -49,14 +49,19 @@ public sealed class PublicAdminShapeParityTests
     /// <c>thenApply(v -&gt; null)</c> and the private
     /// <c>Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt;</c> is never
     /// published. Publishing it would widen Java's surface, which is the opposite of
-    /// restoring it.
+    /// restoring it. On the sync flavour (M15/P14 S4) the erased value is the void
+    /// <see cref="KafkaFuture"/>; the async twin's is pinned beside it.
     /// </summary>
     [Fact]
     public void CreateTopicsResult_Values_ErasesTheMetadataLikeJava()
     {
         PropertyInfo values = typeof(CreateTopicsResult).GetProperty(nameof(CreateTopicsResult.Values))!;
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, Task>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.PropertyType);
+
+        PropertyInfo asyncValues = typeof(AsyncCreateTopicsResult).GetProperty(nameof(AsyncCreateTopicsResult.Values))!;
+
+        Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.PropertyType);
     }
 
     /// <summary>
@@ -73,9 +78,14 @@ public sealed class PublicAdminShapeParityTests
     public void ReplicationFactor_IsIntOnTheResultSide_AndShortOnTheRequestSide()
     {
         Assert.Equal(
-            typeof(Task<int>),
+            typeof(KafkaFuture<int>),
             typeof(CreateTopicsResult)
                 .GetMethod(nameof(CreateTopicsResult.ReplicationFactor), new[] { typeof(string) })!
+                .ReturnType);
+        Assert.Equal(
+            typeof(AsyncKafkaFuture<int>),
+            typeof(AsyncCreateTopicsResult)
+                .GetMethod(nameof(AsyncCreateTopicsResult.ReplicationFactor), new[] { typeof(string) })!
                 .ReturnType);
 
         Assert.Equal(

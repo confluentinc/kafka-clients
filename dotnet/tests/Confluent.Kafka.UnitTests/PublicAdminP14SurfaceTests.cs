@@ -52,6 +52,36 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAsyncDisposable.DisposeAsync),
     };
 
+    /// <summary>The future types the async flavour must never expose: a <see cref="Task"/> or a sync future.</summary>
+    private static readonly Type[] s_forbiddenOnAsync =
+    {
+        typeof(Task), typeof(Task<>), typeof(ValueTask), typeof(ValueTask<>), typeof(KafkaFuture), typeof(KafkaFuture<>),
+    };
+
+    /// <summary>The future types the sync flavour must never expose: a <see cref="Task"/> or an async future.</summary>
+    private static readonly Type[] s_forbiddenOnSync =
+    {
+        typeof(Task), typeof(Task<>), typeof(ValueTask), typeof(ValueTask<>), typeof(AsyncKafkaFuture), typeof(AsyncKafkaFuture<>),
+    };
+
+    /// <summary>
+    /// The sync Results converted to <see cref="KafkaFuture"/>s so far. Each M15/P14 S5a-f session adds its
+    /// family's names; S5g replaces this set with every sync <c>*Result</c>.
+    /// </summary>
+    private static readonly string[] s_syncConvertedResults =
+    {
+        nameof(CreateTopicsResult),
+    };
+
+    /// <summary>
+    /// The <see cref="IAdmin"/> RPCs converted to the sync Results so far, by name (every overload of a name is
+    /// covered). Each M15/P14 S5a-f session adds its family's names; S5g replaces this set with every RPC.
+    /// </summary>
+    private static readonly string[] s_syncConvertedRpcs =
+    {
+        nameof(IAdmin.CreateTopics),
+    };
+
     private static readonly string[] s_mockOnly =
     {
         nameof(AsyncMockAdminClient.TimeoutNextRequest),
@@ -134,7 +164,7 @@ public sealed class PublicAdminP14SurfaceTests
 
         foreach (MethodInfo method in Rpcs(typeof(IAsyncAdmin)))
         {
-            CheckSignature(method, offenders);
+            CheckSignature(method, s_forbiddenOnAsync, offenders);
         }
 
         foreach (Type client in new[] { typeof(AsyncKafkaAdminClient), typeof(AsyncMockAdminClient) })
@@ -143,24 +173,51 @@ public sealed class PublicAdminP14SurfaceTests
             {
                 if (!s_taskExempt.Contains(method.Name))
                 {
-                    CheckSignature(method, offenders);
+                    CheckSignature(method, s_forbiddenOnAsync, offenders);
                 }
             }
         }
 
         foreach (Type result in AsyncResults())
         {
-            foreach (MethodInfo method in result.GetMethods(PublicDeclared))
-            {
-                CheckSignature(method, offenders);
-            }
+            CheckResult(result, s_forbiddenOnAsync, offenders);
+        }
 
-            foreach (FieldInfo field in result.GetFields(PublicDeclared))
-            {
-                Check(field.FieldType, result.Name + "." + field.Name, offenders);
-            }
+        Assert.Empty(offenders);
+    }
 
-            Assert.Empty(result.GetNestedTypes(BindingFlags.Public));
+    /// <summary>
+    /// The sync flavour's converted members expose no <see cref="Task"/>, no <see cref="ValueTask"/> and no
+    /// <see cref="AsyncKafkaFuture"/> at any generic depth: each converted Result's public members, and each
+    /// converted RPC on <see cref="IAdmin"/> and on both sync clients, hand out <see cref="KafkaFuture"/>s only.
+    /// The set is explicit (<see cref="s_syncConvertedResults"/>, <see cref="s_syncConvertedRpcs"/>) because the
+    /// sync flavour is converted one family per session (M15/P14 S4-S5g); every name must resolve, so a misspelt
+    /// or renamed entry cannot pass vacuously.
+    /// </summary>
+    [Fact]
+    public void SyncFlavour_ConvertedMembers_ExposeNoTaskNorAsyncFuture_AtAnyDepth()
+    {
+        List<string> offenders = new List<string>();
+
+        foreach (string name in s_syncConvertedResults)
+        {
+            Type? result = s_assembly.GetType(AdminNamespace + "." + name);
+            Assert.True(result is not null && result.IsPublic, $"{name} is not a public admin type");
+            CheckResult(result!, s_forbiddenOnSync, offenders);
+        }
+
+        foreach (Type admin in new[] { typeof(IAdmin), typeof(KafkaAdminClient), typeof(MockAdminClient) })
+        {
+            foreach (string name in s_syncConvertedRpcs)
+            {
+                MethodInfo[] overloads = admin.GetMethods(PublicDeclared).Where(m => m.Name == name).ToArray();
+                Assert.True(overloads.Length > 0, $"{admin.Name}.{name} does not exist");
+
+                foreach (MethodInfo method in overloads)
+                {
+                    CheckSignature(method, s_forbiddenOnSync, offenders);
+                }
+            }
         }
 
         Assert.Empty(offenders);
@@ -301,21 +358,44 @@ public sealed class PublicAdminP14SurfaceTests
         return type.FullName!;
     }
 
-    private static void CheckSignature(MethodInfo method, List<string> offenders)
+    private static void CheckResult(Type result, Type[] forbidden, List<string> offenders)
+    {
+        foreach (MethodInfo method in result.GetMethods(PublicDeclared))
+        {
+            CheckSignature(method, forbidden, offenders);
+        }
+
+        foreach (ConstructorInfo constructor in result.GetConstructors(BindingFlags.Public | BindingFlags.Instance))
+        {
+            foreach (ParameterInfo parameter in constructor.GetParameters())
+            {
+                Check(parameter.ParameterType, result.Name + ".ctor(" + parameter.Name + ")", forbidden, offenders);
+            }
+        }
+
+        foreach (FieldInfo field in result.GetFields(PublicDeclared))
+        {
+            Check(field.FieldType, result.Name + "." + field.Name, forbidden, offenders);
+        }
+
+        Assert.Empty(result.GetNestedTypes(BindingFlags.Public));
+    }
+
+    private static void CheckSignature(MethodInfo method, Type[] forbidden, List<string> offenders)
     {
         string where = method.DeclaringType!.Name + "." + method.Name;
-        Check(method.ReturnType, where + " returns", offenders);
+        Check(method.ReturnType, where + " returns", forbidden, offenders);
         foreach (ParameterInfo parameter in method.GetParameters())
         {
-            Check(parameter.ParameterType, where + "(" + parameter.Name + ")", offenders);
+            Check(parameter.ParameterType, where + "(" + parameter.Name + ")", forbidden, offenders);
         }
     }
 
-    private static void Check(Type type, string where, List<string> offenders)
+    private static void Check(Type type, string where, Type[] forbidden, List<string> offenders)
     {
         if (type.IsByRef || type.IsArray)
         {
-            Check(type.GetElementType()!, where, offenders);
+            Check(type.GetElementType()!, where, forbidden, offenders);
             return;
         }
 
@@ -325,9 +405,7 @@ public sealed class PublicAdminP14SurfaceTests
         }
 
         Type definition = type.IsGenericType ? type.GetGenericTypeDefinition() : type;
-        if (definition == typeof(Task) || definition == typeof(Task<>)
-            || definition == typeof(ValueTask) || definition == typeof(ValueTask<>)
-            || definition == typeof(KafkaFuture) || definition == typeof(KafkaFuture<>))
+        if (Array.IndexOf(forbidden, definition) >= 0)
         {
             offenders.Add(string.Format(CultureInfo.InvariantCulture, "{0}: {1}", where, type));
             return;
@@ -335,7 +413,7 @@ public sealed class PublicAdminP14SurfaceTests
 
         foreach (Type argument in type.GetGenericArguments())
         {
-            Check(argument, where, offenders);
+            Check(argument, where, forbidden, offenders);
         }
     }
 }

@@ -50,7 +50,7 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null) =>
-        CreateTopicsResult.From(_native.CreateTopics(newTopics, options, AdminFlavour.Async));
+        CreateTopicsResult.From(_native.CreateTopics(newTopics, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>

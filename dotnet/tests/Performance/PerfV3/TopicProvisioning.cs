@@ -83,7 +83,7 @@ internal static class TopicProvisioning
             new CreateTopicsOptions { TimeoutMs = OperationTimeoutMs });
         try
         {
-            createResult.Values[topic].GetAwaiter().GetResult();
+            createResult.Values[topic].Get();
             Console.WriteLine($">>> created '{topic}'");
         }
         catch (KafkaException e) when (e.Code == TopicAlreadyExistsCode)

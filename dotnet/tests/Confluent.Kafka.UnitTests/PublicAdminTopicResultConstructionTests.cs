@@ -26,11 +26,14 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The three topic results are user-constructible (M15/P13.2 G1-6) — Java's
-/// <c>protected</c> constructors (<c>CreateTopicsResult.java:35</c>,
-/// <c>DeleteTopicsResult.java:34</c>, <c>DescribeTopicsResult.java:37</c>), published
-/// <c>public</c> on the still-<see langword="sealed"/> types (D5), so a test or a mock can
-/// fabricate a result. Pure managed; nothing native.
+/// The construction of the three topic results — Java's <c>protected</c> constructors
+/// (<c>CreateTopicsResult.java:35</c>, <c>DeleteTopicsResult.java:34</c>,
+/// <c>DescribeTopicsResult.java:37</c>). <see cref="DeleteTopicsResult"/> and
+/// <see cref="DescribeTopicsResult"/> publish theirs <c>public</c> on the
+/// still-<see langword="sealed"/> types (M15/P13.2 G1-6, D5), so a test or a mock can
+/// fabricate a result. <see cref="CreateTopicsResult"/>'s became <c>internal</c> when it
+/// moved to the sync flavour (M15/P14 S4, Q3 (b)): a recorded Java-parity deviation,
+/// follow-up FU-5. Pure managed; nothing native.
 /// </summary>
 public sealed class PublicAdminTopicResultConstructionTests
 {
@@ -41,17 +44,20 @@ public sealed class PublicAdminTopicResultConstructionTests
     private const string BothNull = "topicIdFutures and nameFutures cannot both be null.";
 
     /// <summary>
-    /// Each type stays sealed and has exactly one public constructor, whose parameters are
-    /// Java's names with the types the public accessors read (the accessor is the
-    /// contract): <see cref="CreateTopicsResult"/>'s map is non-nullable, the other two
-    /// take two nullable maps of which exactly one must be non-null.
+    /// Each type stays sealed and has exactly one constructor, whose parameters are Java's
+    /// names with the types the accessors read (the accessor is the contract):
+    /// <see cref="CreateTopicsResult"/>'s map is non-nullable, the other two take two
+    /// nullable maps of which exactly one must be non-null. <see cref="CreateTopicsResult"/>'s
+    /// constructor is <c>internal</c> and takes <see cref="KafkaFuture{T}"/> values
+    /// (M15/P14 S4, Q3 (b), follow-up FU-5) — asserted as internal, so a regression that
+    /// re-publishes it turns this red.
     /// </summary>
     [Fact]
-    public void Shape_OnePublicConstructorPerType_MirroringJava()
+    public void Shape_OneConstructorPerType_MirroringJava()
     {
-        AssertOnlyConstructor(
+        AssertOnlyInternalConstructor(
             typeof(CreateTopicsResult),
-            (typeof(IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>>), "futures", NullableAnnotation.NotAnnotated));
+            (typeof(IReadOnlyDictionary<string, KafkaFuture<TopicMetadataAndConfig>>), "futures", NullableAnnotation.NotAnnotated));
 
         AssertOnlyConstructor(
             typeof(DeleteTopicsResult),
@@ -126,9 +132,9 @@ public sealed class PublicAdminTopicResultConstructionTests
 
     /// <summary>
     /// A fabricated <see cref="AsyncCreateTopicsResult"/> behaves like a client-built one: the
-    /// typed accessors project the supplied metadata, <see cref="CreateTopicsResult.Values"/>
+    /// typed accessors project the supplied metadata, <see cref="AsyncCreateTopicsResult.Values"/>
     /// hands back the <b>same</b> task instances (erased to <see cref="Task"/>), and
-    /// <see cref="CreateTopicsResult.All"/> completes when every one does and faults with a
+    /// <see cref="AsyncCreateTopicsResult.All"/> completes when every one does and faults with a
     /// supplied failure.
     /// </summary>
     [Fact]
@@ -183,8 +189,8 @@ public sealed class PublicAdminTopicResultConstructionTests
     /// <c>all()</c> and the four accessors all read the stored <c>futures</c> map when they
     /// are called (<c>CreateTopicsResult.java:43-46</c>, <c>:51-53</c>, <c>:66</c>), so an
     /// entry the caller adds or replaces after construction shows up in all of them at
-    /// once. <see cref="CreateTopicsResult.Values"/>, <see cref="CreateTopicsResult.All"/>
-    /// and <see cref="CreateTopicsResult.NumPartitions"/> must agree after each mutation.
+    /// once. <see cref="AsyncCreateTopicsResult.Values"/>, <see cref="AsyncCreateTopicsResult.All"/>
+    /// and <see cref="AsyncCreateTopicsResult.NumPartitions"/> must agree after each mutation.
     /// </summary>
     [Fact]
     public async Task CreateTopicsResult_CallerMapMutatedAfterConstruction_AllViewsAgree()
@@ -235,7 +241,7 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     /// <summary>
-    /// Each access of <see cref="CreateTopicsResult.Values"/> is a fresh snapshot of the
+    /// Each access of <see cref="AsyncCreateTopicsResult.Values"/> is a fresh snapshot of the
     /// caller's map as it is at that moment — Java's <c>values()</c> collects a new map on
     /// every call (<c>CreateTopicsResult.java:43-46</c>). So an earlier snapshot keeps the
     /// membership it was taken with, and a later one picks up both additions and removals.
@@ -271,9 +277,9 @@ public sealed class PublicAdminTopicResultConstructionTests
     /// <c>values()</c> collects into a new map with <c>Collectors.toMap</c> (a
     /// <c>HashMap</c>, so lookup is by <c>String.equals</c>), while each typed accessor
     /// calls <c>futures.get(topic)</c> on the caller's map (<c>CreateTopicsResult.java:92</c>).
-    /// So with a case-insensitive map, <see cref="CreateTopicsResult.Values"/> misses
+    /// So with a case-insensitive map, <see cref="AsyncCreateTopicsResult.Values"/> misses
     /// <c>"T"</c> for a topic stored as <c>"t"</c>, while
-    /// <see cref="CreateTopicsResult.NumPartitions"/> finds it.
+    /// <see cref="AsyncCreateTopicsResult.NumPartitions"/> finds it.
     /// </summary>
     [Fact]
     public async Task CreateTopicsResult_CaseInsensitiveCallerMap_SplitsAsJavaDoes()
@@ -471,7 +477,27 @@ public sealed class PublicAdminTopicResultConstructionTests
     {
         Assert.True(type.IsSealed, type.Name);
 
-        ConstructorInfo constructor = Assert.Single(type.GetConstructors());
+        AssertParameters(Assert.Single(type.GetConstructors()), expected);
+    }
+
+    /// <summary>
+    /// The sync-flavour twin of <see cref="AssertOnlyConstructor"/>: no public constructor at
+    /// all, and exactly one <c>internal</c> one (<see cref="MethodBase.IsAssembly"/>) with the
+    /// expected parameters.
+    /// </summary>
+    private static void AssertOnlyInternalConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
+    {
+        Assert.True(type.IsSealed, type.Name);
+        Assert.Empty(type.GetConstructors());
+
+        ConstructorInfo constructor = Assert.Single(type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
+        Assert.True(constructor.IsAssembly, type.Name);
+
+        AssertParameters(constructor, expected);
+    }
+
+    private static void AssertParameters(ConstructorInfo constructor, (Type Type, string Name, byte Flag)[] expected)
+    {
         ParameterInfo[] parameters = constructor.GetParameters();
 
         Assert.Equal(expected.Select(parameter => parameter.Type), parameters.Select(parameter => parameter.ParameterType));

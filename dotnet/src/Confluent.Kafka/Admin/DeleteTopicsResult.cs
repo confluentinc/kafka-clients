@@ -58,7 +58,8 @@ public sealed class DeleteTopicsResult
     /// </para>
     /// <para>
     /// <b>Public rather than <c>protected</c>, on a <see langword="sealed"/> type</b>
-    /// (M15/P13.2, D5) — see <see cref="CreateTopicsResult(IReadOnlyDictionary{string, Task{TopicMetadataAndConfig}})"/>.
+    /// (M15/P13.2, D5): every admin result is sealed and none of its accessors is virtual,
+    /// so fabricating a result — the Java use case — needs only the constructor.
     /// The parameter types are the ones <see cref="TopicIdValues"/> and
     /// <see cref="TopicNameValues"/> publish, and the dictionaries are held by reference, as
     /// Java holds its maps.

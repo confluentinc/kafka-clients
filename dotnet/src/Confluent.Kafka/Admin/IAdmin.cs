@@ -91,7 +91,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Creates topics — Java's <c>createTopics(Collection&lt;NewTopic&gt;,
     /// CreateTopicsOptions)</c>. Returns <b>immediately</b>, without waiting for the
-    /// broker; the result carries one awaitable per topic.
+    /// broker; the result carries one <see cref="KafkaFuture{T}"/> per topic, whose
+    /// <c>Get()</c> blocks the calling thread until that topic completes.
     /// </summary>
     /// <param name="newTopics">
     /// The topics to create. A repeated topic name yields one entry, as Java's
@@ -101,8 +102,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic. A topic that fails faults only <em>its own</em>
-    /// awaitable; a partially failed batch is not a failed call.
+    /// One future per topic. A topic that fails fails only <em>its own</em>
+    /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newTopics"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -117,6 +118,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// null keys (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.CreateTopics"/>
     CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null);
 
     /// <summary>

@@ -110,7 +110,12 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// </summary>
     internal KafkaFuture Erase() => _source is null ? default : new KafkaFuture(_source);
 
-    private SyncFutureSource<T> Source => _source ?? throw new InvalidOperationException(KafkaFuture.DefaultValueMessage);
+    /// <summary>
+    /// What this future waits on, for a composite built over it — a sync admin result's projection or all-of (M15/P14
+    /// S4, <see cref="SyncAdminFutures"/>). Never blocks.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A default value.</exception>
+    internal SyncFutureSource<T> Source => _source ?? throw new InvalidOperationException(KafkaFuture.DefaultValueMessage);
 }
 
 /// <summary>
@@ -184,5 +189,6 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// <inheritdoc/>
     public override int GetHashCode() => _source?.GetHashCode() ?? 0;
 
-    private SyncFutureSource Source => _source ?? throw new InvalidOperationException(DefaultValueMessage);
+    /// <inheritdoc cref="KafkaFuture{T}.Source"/>
+    internal SyncFutureSource Source => _source ?? throw new InvalidOperationException(DefaultValueMessage);
 }
