@@ -413,26 +413,6 @@ public sealed class AdminP14SyncCompositionTests
                     break;
                 }
 
-            case "memoization":
-                {
-                    ValuedHarness<string, TopicDescription> harness =
-                        ValuedHarness<string, TopicDescription>.DescribeTopicsByName(flavour, s_topics);
-                    foreach (string topic in s_topics)
-                    {
-                        harness.Succeed(topic);
-                    }
-
-                    // One aggregate gathers once, so every Get() of it hands out the same map ...
-                    FutureProbe aggregate = harness.All();
-                    object? gathered = await aggregate.Outcome();
-                    harness.AssertAllSucceeded(gathered);
-                    Assert.Same(gathered, await aggregate.Outcome());
-
-                    // ... and a new call is a new aggregate, as on both flavours before S4: it gathers afresh.
-                    Assert.NotSame(gathered, await harness.All().Outcome());
-                    break;
-                }
-
             default:
                 await RunKeyedRow(row, ValuedHarness<string, TopicDescription>.DescribeTopicsByName(flavour, s_topics), "delta");
                 break;
@@ -550,6 +530,308 @@ public sealed class AdminP14SyncCompositionTests
             ValuedHarness<TopicPartition, DeletedRecords>.DeleteRecords(flavour, partitions),
             new TopicPartition("gamma", 0));
     }
+
+    /// <summary>
+    /// <see cref="DescribeClusterResult"/> / <see cref="AsyncDescribeClusterResult"/> (M15/P14 S5a): one completion
+    /// and four projections over it, no keys. Omitted: one-fails / two-fail / all-fail (one completion, so they collapse
+    /// into the fails row); unknown-key, null-key and per-key independence (no keys); erasure identity (no void view).
+    /// The memoization row carries the identity half: each accessor is built once, so it is equal on every call.
+    /// </summary>
+    public static TheoryData<string, string> DescribeClusterRows => Rows(
+        "all-succeed",
+        "all-succeed-absent",
+        "fails",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="ListConfigResourcesResult"/> / <see cref="AsyncListConfigResourcesResult"/> (M15/P14 S5a): one
+    /// future, no projection, no keys. Omitted: one-fails / two-fail / all-fail (one future, so they collapse into the
+    /// fails row); unknown-key, null-key and per-key independence (no keys); memoization (no projection or aggregate);
+    /// erasure identity (no void view; the identity row pins <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> ListConfigResourcesRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="DescribeConfigsResult"/> / <see cref="AsyncDescribeConfigsResult"/> (M15/P14 S5a). Omitted: erasure
+    /// identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeConfigsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="AlterConfigsResult"/> / <see cref="AsyncAlterConfigsResult"/> (M15/P14 S5a). Omitted: memoization (no
+    /// projection — its only composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> AlterConfigsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="DescribeLogDirsResult"/> / <see cref="AsyncDescribeLogDirsResult"/> (M15/P14 S5a). Omitted: null-key
+    /// (a broker id is an <see cref="int"/>, so a null key cannot be expressed); erasure identity (no void view; its
+    /// equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeLogDirsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="AlterReplicaLogDirsResult"/> / <see cref="AsyncAlterReplicaLogDirsResult"/> (M15/P14 S5a). Omitted:
+    /// memoization (no projection — its only composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> AlterReplicaLogDirsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="DescribeReplicaLogDirsResult"/> / <see cref="AsyncDescribeReplicaLogDirsResult"/> (M15/P14 S5a).
+    /// Omitted: erasure identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeReplicaLogDirsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="DescribeClusterResult"/> and <see cref="AsyncDescribeClusterResult"/>: the four projections over the
+    /// one completion compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeClusterRows))]
+    public async Task DescribeCluster_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        DescribeClusterHarness harness = DescribeClusterHarness.For(flavour);
+        Node broker = new Node(1, "broker-1", 9092, "rack-a");
+        Node controller = new Node(2, "broker-2", 9093, null);
+        IReadOnlyCollection<Node> nodes = new[] { broker, controller };
+        IReadOnlyCollection<AclOperation> operations = new[] { AclOperation.Read, AclOperation.Write };
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe[] probes = harness.Accessors();
+                    foreach (FutureProbe probe in probes)
+                    {
+                        probe.AssertPending();
+                    }
+
+                    harness.Operation.SetResult(new DescribeClusterSnapshot(nodes, controller, "cluster-1", operations));
+
+                    Assert.Same(nodes, await probes[0].Outcome());
+                    Assert.Same(controller, await probes[1].Outcome());
+                    Assert.Equal("cluster-1", await probes[2].Outcome());
+                    Assert.Same(operations, await probes[3].Outcome());
+                    break;
+                }
+
+            case "all-succeed-absent":
+                {
+                    // No controller, no cluster id (the old-broker Metadata fallback), no authorized operations reported:
+                    // each projection yields null rather than failing.
+                    harness.Operation.SetResult(new DescribeClusterSnapshot(nodes, null, null, null));
+
+                    FutureProbe[] probes = harness.Accessors();
+                    Assert.Same(nodes, await probes[0].Outcome());
+                    Assert.Null(await probes[1].Outcome());
+                    Assert.Null(await probes[2].Outcome());
+                    Assert.Null(await probes[3].Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    // Every projection rethrows the completion's own exception instance, wrapped in nothing.
+                    KafkaException failure = new KafkaException(7, "describeCluster failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    foreach (FutureProbe probe in harness.Accessors())
+                    {
+                        Assert.Same(failure, await probe.Outcome());
+                    }
+
+                    break;
+                }
+
+            case "memoization":
+                {
+                    // Each projection is built once, with the result: equal on every call, before and after completion ...
+                    Assert.True(harness.AccessorsEqualAcrossCalls());
+                    FutureProbe[] first = harness.Accessors();
+
+                    harness.Operation.SetResult(new DescribeClusterSnapshot(nodes, controller, "cluster-1", operations));
+
+                    Assert.True(harness.AccessorsEqualAcrossCalls());
+                    FutureProbe[] second = harness.Accessors();
+                    for (int index = 0; index < first.Length; index++)
+                    {
+                        // ... so a value read through an earlier call is the very instance a later call yields.
+                        object? value = await first[index].Outcome();
+                        Assert.Same(value, await first[index].Outcome());
+                        Assert.Same(value, await second[index].Outcome());
+                    }
+
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ListConfigResourcesResult"/> and <see cref="AsyncListConfigResourcesResult"/>: <c>All()</c> composes
+    /// alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListConfigResourcesRows))]
+    public async Task ListConfigResources_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListConfigResourcesHarness harness = ListConfigResourcesHarness.For(flavour);
+        IReadOnlyCollection<ConfigResource> resources = new[]
+        {
+            new ConfigResource(ConfigResourceType.Topic, "alpha"),
+            new ConfigResource(ConfigResourceType.Broker, "1"),
+        };
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe all = harness.All();
+                    all.AssertPending();
+
+                    harness.Operation.SetResult(resources);
+
+                    Assert.Same(resources, await all.Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    KafkaException failure = new KafkaException(7, "listConfigResources failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "identity":
+                {
+                    // All() is the operation's own future: equal on every call, done the moment it is.
+                    Assert.True(harness.AllEqualAcrossCalls());
+                    FutureProbe all = harness.All();
+                    Assert.False(all.IsDone);
+
+                    harness.Operation.SetResult(resources);
+
+                    Assert.True(all.IsDone);
+                    Assert.True(harness.All().IsDone);
+                    Assert.True(harness.AllEqualAcrossCalls());
+                    Assert.Same(resources, await all.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeConfigsResult"/> and <see cref="AsyncDescribeConfigsResult"/>: the per-resource futures and
+    /// the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeConfigsRows))]
+    public Task DescribeConfigs_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            ValuedHarness<ConfigResource, Config>.DescribeConfigs(flavour, Resources()),
+            new ConfigResource(ConfigResourceType.Topic, "delta"));
+
+    /// <summary>
+    /// <see cref="AlterConfigsResult"/> and <see cref="AsyncAlterConfigsResult"/>: the per-resource void futures and
+    /// <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterConfigsRows))]
+    public Task AlterConfigs_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            VoidHarness<ConfigResource>.IncrementalAlterConfigs(flavour, Resources()),
+            new ConfigResource(ConfigResourceType.Topic, "delta"));
+
+    /// <summary>
+    /// <see cref="DescribeLogDirsResult"/> and <see cref="AsyncDescribeLogDirsResult"/>: the per-broker futures and
+    /// the gathered <c>AllDescriptions()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeLogDirsRows))]
+    public Task DescribeLogDirs_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            ValuedHarness<int, IReadOnlyDictionary<string, LogDirDescription>>.DescribeLogDirs(flavour, new[] { 1, 2, 3 }),
+            9);
+
+    /// <summary>
+    /// <see cref="AlterReplicaLogDirsResult"/> and <see cref="AsyncAlterReplicaLogDirsResult"/>: the per-replica void
+    /// futures and <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterReplicaLogDirsRows))]
+    public Task AlterReplicaLogDirs_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            VoidHarness<TopicPartitionReplica>.AlterReplicaLogDirs(flavour, Replicas()),
+            new TopicPartitionReplica("gamma", 0, 1));
+
+    /// <summary>
+    /// <see cref="DescribeReplicaLogDirsResult"/> and <see cref="AsyncDescribeReplicaLogDirsResult"/>: the per-replica
+    /// futures and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeReplicaLogDirsRows))]
+    public Task DescribeReplicaLogDirs_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            ValuedHarness<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>.DescribeReplicaLogDirs(
+                flavour, Replicas()),
+            new TopicPartitionReplica("gamma", 0, 1));
 
     /// <summary>
     /// The rows every keyed Result shares, over <paramref name="harness"/>'s three keys in their key order.
@@ -677,6 +959,25 @@ public sealed class AdminP14SyncCompositionTests
                     break;
                 }
 
+            case "memoization":
+                {
+                    // A gathering aggregate (the rows list it only for a Result whose All() gathers a map).
+                    foreach (TKey key in keys)
+                    {
+                        harness.Succeed(key);
+                    }
+
+                    // One aggregate gathers once, so every Get() of it hands out the same map ...
+                    FutureProbe aggregate = harness.All();
+                    object? gathered = await aggregate.Outcome();
+                    harness.AssertAllSucceeded(gathered);
+                    Assert.Same(gathered, await aggregate.Outcome());
+
+                    // ... and a new call is a new aggregate, as on both flavours before S4: it gathers afresh.
+                    Assert.NotSame(gathered, await harness.All().Outcome());
+                    break;
+                }
+
             case "erasure-identity":
             case "key-identity":
                 {
@@ -726,6 +1027,20 @@ public sealed class AdminP14SyncCompositionTests
     };
 
     private static Config Empty() => new Config(Array.Empty<ConfigEntry>());
+
+    private static ConfigResource[] Resources() => new[]
+    {
+        new ConfigResource(ConfigResourceType.Topic, "alpha"),
+        new ConfigResource(ConfigResourceType.Broker, "1"),
+        new ConfigResource(ConfigResourceType.Topic, "gamma"),
+    };
+
+    private static TopicPartitionReplica[] Replicas() => new[]
+    {
+        new TopicPartitionReplica("alpha", 0, 1),
+        new TopicPartitionReplica("alpha", 1, 2),
+        new TopicPartitionReplica("beta", 0, 1),
+    };
 
     private static TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
         new TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
@@ -955,6 +1270,41 @@ public sealed class AdminP14SyncCompositionTests
             return new VoidHarness<string>(operation, topics, true, null, null, () => asyncResult.Values, asyncResult.All);
         }
 
+        internal static VoidHarness<ConfigResource> IncrementalAlterConfigs(
+            string flavour, IReadOnlyList<ConfigResource> resources)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<ConfigResource> operation = new VoidKeyedAdminOperation<ConfigResource>(
+                "incrementalAlterConfigs", resources, EqualityComparer<ConfigResource>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterConfigsResult result = AlterConfigsResult.From(operation);
+                return new VoidHarness<ConfigResource>(operation, resources, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncAlterConfigsResult asyncResult = AsyncAlterConfigsResult.From(operation);
+            return new VoidHarness<ConfigResource>(
+                operation, resources, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        internal static VoidHarness<TopicPartitionReplica> AlterReplicaLogDirs(
+            string flavour, IReadOnlyList<TopicPartitionReplica> replicas)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<TopicPartitionReplica> operation = new VoidKeyedAdminOperation<TopicPartitionReplica>(
+                "alterReplicaLogDirs", replicas, EqualityComparer<TopicPartitionReplica>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.From(operation);
+                return new VoidHarness<TopicPartitionReplica>(
+                    operation, replicas, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncAlterReplicaLogDirsResult asyncResult = AsyncAlterReplicaLogDirsResult.From(operation);
+            return new VoidHarness<TopicPartitionReplica>(
+                operation, replicas, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
         internal override void Succeed(TKey key) => _operation.SetResult(key, true);
 
         internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
@@ -1108,6 +1458,97 @@ public sealed class AdminP14SyncCompositionTests
                 allGathers: false);
         }
 
+        internal static ValuedHarness<ConfigResource, Config> DescribeConfigs(
+            string flavour, IReadOnlyList<ConfigResource> resources)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<ConfigResource, Config> operation = new KeyedAdminOperation<ConfigResource, Config>(
+                "describeConfigs", resources, EqualityComparer<ConfigResource>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeConfigsResult result = DescribeConfigsResult.From(operation);
+                return new ValuedHarness<ConfigResource, Config>(
+                    operation, resources, _ => Empty(), true, () => result.Values, null, () => FutureProbe.Of(result.All()), allGathers: true);
+            }
+
+            AsyncDescribeConfigsResult asyncResult = AsyncDescribeConfigsResult.From(operation);
+            return new ValuedHarness<ConfigResource, Config>(
+                operation,
+                resources,
+                _ => Empty(),
+                true,
+                null,
+                () => asyncResult.Values,
+                () => FutureProbe.Of(asyncResult.All()),
+                allGathers: true);
+        }
+
+        internal static ValuedHarness<int, IReadOnlyDictionary<string, LogDirDescription>> DescribeLogDirs(
+            string flavour, IReadOnlyList<int> brokers)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> operation =
+                new KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>>(
+                    "describeLogDirs", brokers, EqualityComparer<int>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeLogDirsResult result = DescribeLogDirsResult.From(operation);
+                return new ValuedHarness<int, IReadOnlyDictionary<string, LogDirDescription>>(
+                    operation,
+                    brokers,
+                    LogDirs,
+                    true,
+                    () => result.Descriptions,
+                    null,
+                    () => FutureProbe.Of(result.AllDescriptions()),
+                    allGathers: true);
+            }
+
+            AsyncDescribeLogDirsResult asyncResult = AsyncDescribeLogDirsResult.From(operation);
+            return new ValuedHarness<int, IReadOnlyDictionary<string, LogDirDescription>>(
+                operation,
+                brokers,
+                LogDirs,
+                true,
+                null,
+                () => asyncResult.Descriptions,
+                () => FutureProbe.Of(asyncResult.AllDescriptions()),
+                allGathers: true);
+        }
+
+        internal static ValuedHarness<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> DescribeReplicaLogDirs(
+            string flavour, IReadOnlyList<TopicPartitionReplica> replicas)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> operation =
+                new KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(
+                    "describeReplicaLogDirs", replicas, EqualityComparer<TopicPartitionReplica>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeReplicaLogDirsResult result = DescribeReplicaLogDirsResult.From(operation);
+                return new ValuedHarness<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(
+                    operation,
+                    replicas,
+                    ReplicaLogDir,
+                    true,
+                    () => result.Values,
+                    null,
+                    () => FutureProbe.Of(result.All()),
+                    allGathers: true);
+            }
+
+            AsyncDescribeReplicaLogDirsResult asyncResult = AsyncDescribeReplicaLogDirsResult.From(operation);
+            return new ValuedHarness<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(
+                operation,
+                replicas,
+                ReplicaLogDir,
+                true,
+                null,
+                () => asyncResult.Values,
+                () => FutureProbe.Of(asyncResult.All()),
+                allGathers: true);
+        }
+
         internal override void Succeed(TKey key) => _operation.SetResult(key, _values[key]);
 
         internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
@@ -1150,6 +1591,15 @@ public sealed class AdminP14SyncCompositionTests
 
         private static TopicDescription Description(string name) =>
             new TopicDescription(name, false, Array.Empty<TopicPartitionInfo>());
+
+        private static IReadOnlyDictionary<string, LogDirDescription> LogDirs(int broker) =>
+            new Dictionary<string, LogDirDescription>(StringComparer.Ordinal)
+            {
+                ["/data/broker-" + broker] = new LogDirDescription(null, new Dictionary<TopicPartition, ReplicaInfo>()),
+            };
+
+        private static DescribeReplicaLogDirsResult.ReplicaLogDirInfo ReplicaLogDir(TopicPartitionReplica replica) =>
+            new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId, 0L, null, -1L);
     }
 
     /// <summary>
@@ -1194,5 +1644,101 @@ public sealed class AdminP14SyncCompositionTests
             _sync is not null
                 ? _sync.NamesToListings() == _sync.NamesToListings()
                 : _async!.NamesToListings() == _async.NamesToListings();
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.DescribeCluster_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
+    /// </summary>
+    private sealed class DescribeClusterHarness
+    {
+        private readonly DescribeClusterResult? _sync;
+        private readonly AsyncDescribeClusterResult? _async;
+
+        private DescribeClusterHarness(
+            SingleAdminOperation<DescribeClusterSnapshot> operation,
+            DescribeClusterResult? sync,
+            AsyncDescribeClusterResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<DescribeClusterSnapshot> Operation { get; }
+
+        internal static DescribeClusterHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<DescribeClusterSnapshot> operation =
+                new SingleAdminOperation<DescribeClusterSnapshot>("describeCluster", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new DescribeClusterHarness(operation, DescribeClusterResult.From(operation), null)
+                : new DescribeClusterHarness(operation, null, AsyncDescribeClusterResult.From(operation));
+        }
+
+        /// <summary><c>Nodes()</c>, <c>Controller()</c>, <c>ClusterId()</c> and <c>AuthorizedOperations()</c>, in that order.</summary>
+        internal FutureProbe[] Accessors() =>
+            _sync is not null
+                ? new[]
+                {
+                    FutureProbe.Of(_sync.Nodes()),
+                    FutureProbe.Of(_sync.Controller()),
+                    FutureProbe.Of(_sync.ClusterId()),
+                    FutureProbe.Of(_sync.AuthorizedOperations()),
+                }
+                : new[]
+                {
+                    FutureProbe.Of(_async!.Nodes()),
+                    FutureProbe.Of(_async.Controller()),
+                    FutureProbe.Of(_async.ClusterId()),
+                    FutureProbe.Of(_async.AuthorizedOperations()),
+                };
+
+        internal bool AccessorsEqualAcrossCalls() =>
+            _sync is not null
+                ? _sync.Nodes() == _sync.Nodes()
+                    && _sync.Controller() == _sync.Controller()
+                    && _sync.ClusterId() == _sync.ClusterId()
+                    && _sync.AuthorizedOperations() == _sync.AuthorizedOperations()
+                : _async!.Nodes() == _async.Nodes()
+                    && _async.Controller() == _async.Controller()
+                    && _async.ClusterId() == _async.ClusterId()
+                    && _async.AuthorizedOperations() == _async.AuthorizedOperations();
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListConfigResources_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
+    /// </summary>
+    private sealed class ListConfigResourcesHarness
+    {
+        private readonly ListConfigResourcesResult? _sync;
+        private readonly AsyncListConfigResourcesResult? _async;
+
+        private ListConfigResourcesHarness(
+            SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation,
+            ListConfigResourcesResult? sync,
+            AsyncListConfigResourcesResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<IReadOnlyCollection<ConfigResource>> Operation { get; }
+
+        internal static ListConfigResourcesHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation =
+                new SingleAdminOperation<IReadOnlyCollection<ConfigResource>>("listConfigResources", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListConfigResourcesHarness(operation, ListConfigResourcesResult.From(operation), null)
+                : new ListConfigResourcesHarness(operation, null, AsyncListConfigResourcesResult.From(operation));
+        }
+
+        internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal bool AllEqualAcrossCalls() =>
+            _sync is not null ? _sync.All() == _sync.All() : _async!.All() == _async.All();
     }
 }

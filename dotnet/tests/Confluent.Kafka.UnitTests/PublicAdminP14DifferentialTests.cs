@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4: each converted RPC, called with the same arguments on a
+/// The differential rows of M15/P14 S4 and S5a: each converted RPC, called with the same arguments on a
 /// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
 /// same outcome through every member of its Result — equal values, or an exception of the same type with the same
 /// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
@@ -45,6 +45,14 @@ public sealed class PublicAdminP14DifferentialTests
     private const int UnknownTopicOrPartitionCode = 3;
     private const int UnknownTopicIdCode = 100;
     private const int UnsupportedVersionCode = 35;
+
+    // Errors.REPLICA_NOT_AVAILABLE, Errors.INVALID_REQUEST and Errors.KAFKA_STORAGE_ERROR (M15/P14 S5a).
+    private const int ReplicaNotAvailableCode = 9;
+    private const int InvalidRequestCode = 42;
+    private const int KafkaStorageErrorCode = 56;
+
+    // The core's LOCAL_ILLEGAL_STATE, which carries its absent-key error.
+    private const int LocalIllegalStateCode = -4;
 
     private const string NotImplementedYet = "Not implemented yet";
 
@@ -413,6 +421,348 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>DescribeCluster</c> (M15/P14 S5a): the four projections agree on both three-broker mocks — the nodes, the
+    /// controller, the mock's cluster id and, when asked for, the empty-but-present authorized-operation set.
+    /// </summary>
+    [Fact]
+    public async Task DescribeCluster_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(3);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        DescribeClusterOptions options = new DescribeClusterOptions { IncludeAuthorizedOperations = true };
+
+        DescribeClusterResult syncResult = sync.DescribeCluster(options);
+        AsyncDescribeClusterResult asyncResult = async.DescribeCluster(options);
+
+        IReadOnlyCollection<Node> nodes = Assert.IsAssignableFrom<IReadOnlyCollection<Node>>(
+            await Agree(
+                FutureProbe.Of(syncResult.Nodes()),
+                FutureProbe.Of(asyncResult.Nodes()),
+                static outcome => string.Join(",", Sorted(((IReadOnlyCollection<Node>)outcome).Select(static node => node.ToString())))));
+        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(static node => node.Id).OrderBy(static id => id));
+
+        Node controller = Assert.IsType<Node>(
+            await Agree(
+                FutureProbe.Of(syncResult.Controller()),
+                FutureProbe.Of(asyncResult.Controller()),
+                static outcome => outcome.ToString()!));
+        Assert.Equal(0, controller.Id);
+
+        Assert.Equal(
+            (object)"4A5xz_QZTB2CtL4wc0X0Jw",
+            await Agree(FutureProbe.Of(syncResult.ClusterId()), FutureProbe.Of(asyncResult.ClusterId())));
+
+        IReadOnlyCollection<AclOperation> operations = Assert.IsAssignableFrom<IReadOnlyCollection<AclOperation>>(
+            await Agree(
+                FutureProbe.Of(syncResult.AuthorizedOperations()),
+                FutureProbe.Of(asyncResult.AuthorizedOperations()),
+                static outcome => string.Join(",", ((IReadOnlyCollection<AclOperation>)outcome).OrderBy(static op => op))));
+        Assert.Empty(operations);
+    }
+
+    /// <summary>
+    /// <c>ListConfigResources</c> (M15/P14 S5a): with the same topic seeded, the topic filter yields exactly that
+    /// topic's resource on both mocks, and the unfiltered call lists the same resources on both.
+    /// </summary>
+    [Fact]
+    public async Task ListConfigResources_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await Seed(sync, async, new NewTopic("diff-j", 1, 1));
+
+        IReadOnlyCollection<ConfigResource> topics = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
+            await Agree(
+                FutureProbe.Of(sync.ListConfigResources(new[] { ConfigResourceType.Topic }).All()),
+                FutureProbe.Of(async.ListConfigResources(new[] { ConfigResourceType.Topic }).All()),
+                static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
+        Assert.Equal(new ConfigResource(ConfigResourceType.Topic, "diff-j"), Assert.Single(topics));
+
+        IReadOnlyCollection<ConfigResource> every = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
+            await Agree(
+                FutureProbe.Of(sync.ListConfigResources().All()),
+                FutureProbe.Of(async.ListConfigResources().All()),
+                static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
+        Assert.Contains(new ConfigResource(ConfigResourceType.Topic, "diff-j"), every);
+        Assert.Contains(every, static resource => resource.Type == ConfigResourceType.Broker);
+    }
+
+    /// <summary>
+    /// <c>DescribeConfigs</c> (M15/P14 S5a): a seeded topic, a missing topic, an existing broker and a missing one.
+    /// The per-resource futures and the gathered <c>All()</c> agree on both mocks; <c>All()</c> fails with the first
+    /// failure in key order.
+    /// </summary>
+    [Fact]
+    public async Task DescribeConfigs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        NewTopic topic = new NewTopic("diff-k", 1, 1)
+        {
+            Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
+        };
+        await Seed(sync, async, topic);
+
+        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, "diff-k");
+        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "diff-k-missing");
+        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "0");
+        ConfigResource absentBroker = new ConfigResource(ConfigResourceType.Broker, "7");
+        ConfigResource[] request = { present, missing, broker, absentBroker };
+
+        DescribeConfigsResult syncResult = sync.DescribeConfigs(request);
+        AsyncDescribeConfigsResult asyncResult = async.DescribeConfigs(request);
+        Assert.Equal(request, syncResult.Values.Keys);
+        Assert.Equal(request, asyncResult.Values.Keys);
+
+        Config config = Assert.IsType<Config>(
+            await Agree(
+                FutureProbe.Of(syncResult.Values[present]),
+                FutureProbe.Of(asyncResult.Values[present]),
+                static outcome => string.Join(",", Entries((Config)outcome))));
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
+
+        Assert.IsType<Config>(
+            await Agree(
+                FutureProbe.Of(syncResult.Values[broker]),
+                FutureProbe.Of(asyncResult.Values[broker]),
+                static outcome => string.Join(",", Entries((Config)outcome))));
+
+        const string MissingTopic = "Resource ConfigResource(type=Topic, name='diff-k-missing') not found.";
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            MissingTopic,
+            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+        AssertKafka(
+            InvalidRequestCode,
+            "Broker 7 not found.",
+            await Agree(FutureProbe.Of(syncResult.Values[absentBroker]), FutureProbe.Of(asyncResult.Values[absentBroker])));
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            MissingTopic,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>IncrementalAlterConfigs</c> (M15/P14 S5a): a <see cref="AlterConfigOpType.Set"/> against a seeded topic and
+    /// one against a missing topic. The per-resource void futures and <c>All()</c> agree on both mocks, and the change
+    /// is visible to a later describe on both.
+    /// </summary>
+    [Fact]
+    public async Task IncrementalAlterConfigs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await Seed(sync, async, new NewTopic("diff-l", 1, 1));
+
+        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, "diff-l");
+        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "diff-l-absent");
+        AlterConfigOp[] set = { new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.Set) };
+        Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request =
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [present] = set, [missing] = set };
+
+        AlterConfigsResult syncResult = sync.IncrementalAlterConfigs(request);
+        AsyncAlterConfigsResult asyncResult = async.IncrementalAlterConfigs(request);
+        Assert.Equal(new[] { present, missing }, syncResult.Values.Keys);
+        Assert.Equal(new[] { present, missing }, asyncResult.Values.Keys);
+
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(FutureProbe.Of(syncResult.Values[present]), FutureProbe.Of(asyncResult.Values[present])));
+        const string NoSuchTopic = "No such topic as diff-l-absent";
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            NoSuchTopic,
+            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            NoSuchTopic,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        Config described = Assert.IsType<Config>(
+            await Agree(
+                FutureProbe.Of(sync.DescribeConfigs(new[] { present }).Values[present]),
+                FutureProbe.Of(async.DescribeConfigs(new[] { present }).Values[present]),
+                static outcome => string.Join(",", Entries((Config)outcome))));
+        Assert.Equal("1000", described.Get("retention.ms")!.Value);
+    }
+
+    /// <summary>
+    /// <c>DescribeLogDirs</c> (M15/P14 S5a): a broker hosting a seeded two-partition topic and a broker the mock does
+    /// not have. The per-broker futures and the gathered <c>AllDescriptions()</c> agree on both mocks; the unknown
+    /// broker succeeds with an empty map on both.
+    /// </summary>
+    [Fact]
+    public async Task DescribeLogDirs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await Seed(sync, async, new NewTopic("diff-m", 2, 1));
+        int[] request = { 0, 5 };
+
+        DescribeLogDirsResult syncResult = sync.DescribeLogDirs(request);
+        AsyncDescribeLogDirsResult asyncResult = async.DescribeLogDirs(request);
+        Assert.Equal(request, syncResult.Descriptions.Keys);
+        Assert.Equal(request, asyncResult.Descriptions.Keys);
+
+        IReadOnlyDictionary<string, LogDirDescription> hosting =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<string, LogDirDescription>>(
+                await Agree(
+                    FutureProbe.Of(syncResult.Descriptions[0]),
+                    FutureProbe.Of(asyncResult.Descriptions[0]),
+                    static outcome => LogDirs((IReadOnlyDictionary<string, LogDirDescription>)outcome)));
+        Assert.Equal("/tmp/kafka-logs:diff-m-0;diff-m-1", LogDirs(hosting));
+
+        IReadOnlyDictionary<string, LogDirDescription> unknown =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<string, LogDirDescription>>(
+                await Agree(
+                    FutureProbe.Of(syncResult.Descriptions[5]),
+                    FutureProbe.Of(asyncResult.Descriptions[5]),
+                    static outcome => LogDirs((IReadOnlyDictionary<string, LogDirDescription>)outcome)));
+        Assert.Empty(unknown);
+
+        IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>> all =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>(
+                await Agree(
+                    FutureProbe.Of(syncResult.AllDescriptions()),
+                    FutureProbe.Of(asyncResult.AllDescriptions()),
+                    static outcome => string.Join(
+                        "|",
+                        ((IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>)outcome)
+                            .OrderBy(static entry => entry.Key)
+                            .Select(static entry => entry.Key + "=" + LogDirs(entry.Value)))));
+        Assert.Equal(request, all.Keys.OrderBy(static broker => broker));
+    }
+
+    /// <summary>
+    /// <c>AlterReplicaLogDirs</c> (M15/P14 S5a): a move to the broker's own directory, one to a directory it does not
+    /// have, and one naming a broker that does not exist. The per-replica void futures and <c>All()</c> agree on both
+    /// mocks, and the accepted move is then described as in progress on both.
+    /// </summary>
+    [Fact]
+    public async Task AlterReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await Seed(sync, async, new NewTopic("diff-n", 2, 1));
+
+        TopicPartitionReplica moved = new TopicPartitionReplica("diff-n", 0, 0);
+        TopicPartitionReplica offline = new TopicPartitionReplica("diff-n", 1, 0);
+        TopicPartitionReplica nowhere = new TopicPartitionReplica("diff-n", 0, 7);
+        Dictionary<TopicPartitionReplica, string> request = new Dictionary<TopicPartitionReplica, string>
+        {
+            [moved] = "/tmp/kafka-logs",
+            [offline] = "/mnt/absent",
+            [nowhere] = "/tmp/kafka-logs",
+        };
+
+        AlterReplicaLogDirsResult syncResult = sync.AlterReplicaLogDirs(request);
+        AsyncAlterReplicaLogDirsResult asyncResult = async.AlterReplicaLogDirs(request);
+        Assert.Equal(new[] { moved, offline, nowhere }, syncResult.Values.Keys);
+        Assert.Equal(new[] { moved, offline, nowhere }, asyncResult.Values.Keys);
+
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(FutureProbe.Of(syncResult.Values[moved]), FutureProbe.Of(asyncResult.Values[moved])));
+        const string Offline = "Log directory /mnt/absent is offline";
+        AssertKafka(
+            KafkaStorageErrorCode,
+            Offline,
+            await Agree(FutureProbe.Of(syncResult.Values[offline]), FutureProbe.Of(asyncResult.Values[offline])));
+        AssertKafka(
+            ReplicaNotAvailableCode,
+            "Can't find diff-n-0-7",
+            await Agree(FutureProbe.Of(syncResult.Values[nowhere]), FutureProbe.Of(asyncResult.Values[nowhere])));
+        AssertKafka(
+            KafkaStorageErrorCode,
+            Offline,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        object? info = await Agree(
+            FutureProbe.Of(sync.DescribeReplicaLogDirs(new[] { moved }).Values[moved]),
+            FutureProbe.Of(async.DescribeReplicaLogDirs(new[] { moved }).Values[moved]),
+            static outcome => outcome.ToString()!);
+        Assert.Equal(
+            "(currentReplicaLogDir=/tmp/kafka-logs, futureReplicaLogDir=/tmp/kafka-logs, futureReplicaOffsetLag=0)",
+            Assert.IsType<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(info).ToString());
+    }
+
+    /// <summary>
+    /// <c>DescribeReplicaLogDirs</c> (M15/P14 S5a): a replica at rest and a replica of a topic the mock does not have,
+    /// which the mock omits from its answer. The per-replica futures and the gathered <c>All()</c> agree on both mocks;
+    /// the omitted replica fails on both with the core's absent-key error, and so does <c>All()</c>.
+    /// </summary>
+    [Fact]
+    public async Task DescribeReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        await Seed(sync, async, new NewTopic("diff-o", 1, 1));
+
+        TopicPartitionReplica atRest = new TopicPartitionReplica("diff-o", 0, 0);
+        TopicPartitionReplica omitted = new TopicPartitionReplica("diff-o-missing", 0, 0);
+        TopicPartitionReplica[] request = { atRest, omitted };
+
+        DescribeReplicaLogDirsResult syncResult = sync.DescribeReplicaLogDirs(request);
+        AsyncDescribeReplicaLogDirsResult asyncResult = async.DescribeReplicaLogDirs(request);
+        Assert.Equal(request, syncResult.Values.Keys);
+        Assert.Equal(request, asyncResult.Values.Keys);
+
+        object? info = await Agree(
+            FutureProbe.Of(syncResult.Values[atRest]),
+            FutureProbe.Of(asyncResult.Values[atRest]),
+            static outcome => outcome.ToString()!);
+        Assert.Equal(
+            "ReplicaLogDirInfo(currentReplicaLogDir=/tmp/kafka-logs)",
+            Assert.IsType<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(info).ToString());
+
+        // The core's absent-key error (LOCAL_ILLEGAL_STATE, -4), delivered per key on both flavours.
+        const string Absent = "the requested key was not present in the admin RPC's response";
+        AssertKafka(
+            LocalIllegalStateCode,
+            Absent,
+            await Agree(FutureProbe.Of(syncResult.Values[omitted]), FutureProbe.Of(asyncResult.Values[omitted])));
+        AssertKafka(
+            LocalIllegalStateCode,
+            Absent,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the cluster, configs and log-dir members (M15/P14 S5a) throw alike on both
+    /// mocks — the same type, parameter name and message — before any future exists: a null argument, and a null
+    /// element where the member takes a collection of references.
+    /// </summary>
+    [Fact]
+    public void ClusterConfigsLogDirsGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "diff-p");
+        TopicPartitionReplica replica = new TopicPartitionReplica("diff-p", 0, 0);
+
+        AssertThrowAlike(() => sync.DescribeConfigs(null!), () => async.DescribeConfigs(null!));
+        AssertThrowAlike(() => sync.IncrementalAlterConfigs(null!), () => async.IncrementalAlterConfigs(null!));
+        AssertThrowAlike(() => sync.DescribeLogDirs(null!), () => async.DescribeLogDirs(null!));
+        AssertThrowAlike(() => sync.AlterReplicaLogDirs(null!), () => async.AlterReplicaLogDirs(null!));
+        AssertThrowAlike(() => sync.DescribeReplicaLogDirs(null!), () => async.DescribeReplicaLogDirs(null!));
+
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeConfigs(new ConfigResource[] { null! }),
+            () => async.DescribeConfigs(new ConfigResource[] { null! }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.IncrementalAlterConfigs(
+                new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }),
+            () => async.IncrementalAlterConfigs(
+                new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = null! }),
+            () => async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = null! }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeReplicaLogDirs(new TopicPartitionReplica[] { null! }),
+            () => async.DescribeReplicaLogDirs(new TopicPartitionReplica[] { null! }));
+    }
+
+    /// <summary>
     /// The synchronous argument guards of the topic-family members throw alike on both mocks — the same type,
     /// parameter name and message — before any future exists.
     /// </summary>
@@ -507,6 +857,22 @@ public sealed class PublicAdminP14DifferentialTests
     private static string Listed(IEnumerable<TopicListing> listings) =>
         string.Join(",", Sorted(listings.Select(static listing => listing.Name + "/" + (listing.IsInternal ? "internal" : "user"))));
 
+    private static string Resources(IEnumerable<ConfigResource> resources) =>
+        string.Join(",", Sorted(resources.Select(static resource => resource.ToString())));
+
+    /// <summary>
+    /// One broker's log directories, comparable across mocks: each path, sorted, with its error (if any) and its
+    /// replicas' partitions, sorted.
+    /// </summary>
+    private static string LogDirs(IReadOnlyDictionary<string, LogDirDescription> directories) =>
+        string.Join(
+            "|",
+            directories.OrderBy(static entry => entry.Key, StringComparer.Ordinal).Select(static entry =>
+                entry.Key
+                + (entry.Value.Error is null ? string.Empty : "!" + entry.Value.Error.Message)
+                + ":"
+                + string.Join(";", Sorted(entry.Value.ReplicaInfos.Keys.Select(static partition => partition.ToString())))));
+
     /// <summary>
     /// Creates <paramref name="topics"/> on both mocks, asserting they agree, and returns each mock's own id for the
     /// first topic.
@@ -537,13 +903,20 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
-    /// Both calls throw synchronously, alike: the same type, message and parameter name — an
-    /// <see cref="ArgumentNullException"/> for every guard in this file.
+    /// Both calls throw synchronously, alike: an <see cref="ArgumentNullException"/> with the same message and
+    /// parameter name.
     /// </summary>
-    private static void AssertThrowAlike(Action sync, Action async)
+    private static void AssertThrowAlike(Action sync, Action async) => AssertThrowAlike<ArgumentNullException>(sync, async);
+
+    /// <summary>
+    /// Both calls throw synchronously, alike: exactly <typeparamref name="TException"/>, with the same message and
+    /// parameter name.
+    /// </summary>
+    private static void AssertThrowAlike<TException>(Action sync, Action async)
+        where TException : ArgumentException
     {
-        ArgumentNullException syncFailure = Assert.Throws<ArgumentNullException>(sync);
-        ArgumentNullException asyncFailure = Assert.Throws<ArgumentNullException>(async);
+        TException syncFailure = Assert.Throws<TException>(sync);
+        TException asyncFailure = Assert.Throws<TException>(async);
         Assert.Equal(syncFailure.ParamName, asyncFailure.ParamName);
         Assert.Equal(syncFailure.Message, asyncFailure.Message);
     }
