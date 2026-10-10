@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -22,14 +21,14 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>describeConsumerGroups</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.DescribeConsumerGroupsResult</c>
-/// (<c>DescribeConsumerGroupsResult.java:30</c>): one awaitable <b>per group id</b>, handed
+/// (<c>DescribeConsumerGroupsResult.java:30</c>): one future <b>per group id</b>, handed
 /// back the moment the request is submitted.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A group that fails faults only <em>its own</em> <see cref="Task"/>; a per-group failure
-/// is not a call failure. <see cref="All"/> is the aggregate over those per-group tasks and
-/// succeeds only if every one of them did.
+/// A group that fails fails only <em>its own</em> <see cref="KafkaFuture{T}"/>; a per-group
+/// failure is not a call failure. <see cref="All"/> is the aggregate over those per-group futures
+/// and succeeds only if every one of them did.
 /// </para>
 /// <para>
 /// ⚠ <b>Unlike <see cref="DescribeTopicsResult"/>, this one <em>does</em> have an
@@ -47,80 +46,77 @@ namespace Confluent.Kafka.Admin;
 /// copy exists to prevent, so copying per call would buy nothing and allocate on every
 /// read. This is the call <see cref="DescribeConfigsResult.Values"/> already makes.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its group (or, for
+/// <see cref="All"/>, every group) has completed, and needs no thread-pool thread: the futures here are composed on
+/// the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncDescribeConsumerGroupsResult"/>
 public sealed class DescribeConsumerGroupsResult
 {
-    private readonly IReadOnlyDictionary<string, Task<ConsumerGroupDescription>> _futures;
+    private readonly IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per group id — Java's <b>public</b>
+    /// Wraps one future per group id — Java's <b>public</b>
     /// <c>DescribeConsumerGroupsResult(Map&lt;String, KafkaFuture&lt;ConsumerGroupDescription&gt;&gt;)</c>
     /// (<c>:34</c>).
     /// </summary>
     /// <remarks>
-    /// ⚠ Java declares this constructor <b>public</b>, unlike most <c>*Result</c>
-    /// constructors, which are package-private — so it is mirrored as public rather than
-    /// narrowed, the same call <see cref="ListOffsetsResult"/> and
-    /// <see cref="DeleteRecordsResult"/> already make. It follows that no key comparer is
-    /// threaded in from the bridge the way
+    /// <para>
+    /// ⚠ Java declares this constructor <b>public</b>, unlike most <c>*Result</c> constructors, which are
+    /// package-private. <b>It is internal here on purpose</b>: a recorded Java-parity deviation, follow-up FU-5 in
+    /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map.
+    /// </para>
+    /// <para>
+    /// No key comparer is threaded in from the bridge the way
     /// <see cref="DescribeConfigsResult(IReadOnlyDictionary{ConfigResource, KafkaFuture{Config}}, IEqualityComparer{ConfigResource})"/>
-    /// does: the map here can come from a caller, so there is no bridge comparer to
-    /// thread. See <see cref="All"/> for what that means for the aggregate.
+    /// does: Java's constructor takes the map alone, so this one does too. See <see cref="All"/> for what that means
+    /// for the aggregate.
+    /// </para>
     /// </remarks>
-    /// <param name="futures">One awaitable per requested group id.</param>
+    /// <param name="futures">One future per requested group id.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
-    public DescribeConsumerGroupsResult(IReadOnlyDictionary<string, Task<ConsumerGroupDescription>> futures)
+    internal DescribeConsumerGroupsResult(IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> futures)
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
-    internal static DescribeConsumerGroupsResult From(
-        KeyedAdminOperation<string, ConsumerGroupDescription> operation) =>
-        new DescribeConsumerGroupsResult(operation.Tasks);
+    internal static DescribeConsumerGroupsResult From(KeyedAdminOperation<string, ConsumerGroupDescription> operation) =>
+        new DescribeConsumerGroupsResult(SyncAdminFutures.Wrap(operation.SyncSources));
 
     /// <summary>
-    /// One awaitable per requested group id — Java's <c>describedGroups()</c>
+    /// One future per requested group id — Java's <c>describedGroups()</c>
     /// (<c>:41</c>).
     /// </summary>
     /// <remarks>
     /// Returns the stored instance rather than Java's defensive copy; see the note on the
     /// class for why.
     /// </remarks>
-    public IReadOnlyDictionary<string, Task<ConsumerGroupDescription>> DescribedGroups => _futures;
+    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups => _futures;
 
     /// <summary>
     /// Every group's description in one map, succeeding only if every group succeeded —
     /// Java's <c>all()</c> (<c>:48</c>).
     /// </summary>
-    /// <returns>A task yielding the whole map, or faulting with the first failure.</returns>
+    /// <returns>
+    /// A future yielding the whole map, or failing with the first failure in key order. Its <c>Get()</c> waits for
+    /// every group.
+    /// </returns>
     /// <remarks>
     /// The aggregate is built with <see cref="StringComparer.Ordinal"/> — what the bridge
     /// keys group ids by, and how Kafka compares them. Ordinal is the <em>strictest</em>
     /// choice, so keys already distinct in <see cref="DescribedGroups"/> stay distinct here
     /// and the gather can never collide; a caller who built the map with a looser comparer
-    /// keeps every entry but should look it up the same way it was keyed.
+    /// keeps every entry but should look it up the same way it was keyed. Every group is waited for first, so a
+    /// failure fails this future with the first failure in key order, exactly as Java's
+    /// <c>allOf(...).thenApply(...)</c> chain does; the map is built once per call to this method, on the first
+    /// <c>Get()</c>'s thread.
     /// </remarks>
-    public Task<IReadOnlyDictionary<string, ConsumerGroupDescription>> All() => Gather(_futures);
-
-    private static async Task<IReadOnlyDictionary<string, ConsumerGroupDescription>> Gather(
-        IReadOnlyDictionary<string, Task<ConsumerGroupDescription>> futures)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever
-        // key happens to be enumerated first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<string, ConsumerGroupDescription> descriptions =
-            new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Task<ConsumerGroupDescription>> entry in futures)
-        {
-            descriptions.Add(entry.Key, entry.Value.Result);
-        }
-
-        return descriptions;
-    }
+    public KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> All() =>
+        SyncAdminFutures.GatherAll(_futures, StringComparer.Ordinal);
 }

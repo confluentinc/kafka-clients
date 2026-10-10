@@ -152,7 +152,7 @@ public sealed class KafkaAdminClient : IAdmin
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         AlterConsumerGroupOffsetsOptions? options = null) =>
         AlterConsumerGroupOffsetsResult.From(
-            _native.AlterConsumerGroupOffsets(groupId, offsets, options, AdminFlavour.Async));
+            _native.AlterConsumerGroupOffsets(groupId, offsets, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -160,7 +160,7 @@ public sealed class KafkaAdminClient : IAdmin
         IReadOnlyCollection<TopicPartition> partitions,
         DeleteConsumerGroupOffsetsOptions? options = null) =>
         DeleteConsumerGroupOffsetsResult.From(
-            _native.DeleteConsumerGroupOffsets(groupId, partitions, options, AdminFlavour.Async));
+            _native.DeleteConsumerGroupOffsets(groupId, partitions, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
@@ -183,17 +183,17 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
-        ListGroupsResult.From(_native.ListGroups(options, AdminFlavour.Async));
+        ListGroupsResult.From(_native.ListGroups(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null) =>
-        DescribeConsumerGroupsResult.From(_native.DescribeConsumerGroups(groupIds, options, AdminFlavour.Async));
+        DescribeConsumerGroupsResult.From(_native.DescribeConsumerGroups(groupIds, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null) =>
-        DescribeClassicGroupsResult.From(_native.DescribeClassicGroups(groupIds, options, AdminFlavour.Async));
+        DescribeClassicGroupsResult.From(_native.DescribeClassicGroups(groupIds, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
@@ -224,18 +224,18 @@ public sealed class KafkaAdminClient : IAdmin
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options = null) =>
         ListConsumerGroupOffsetsResult.From(
-            _native.ListConsumerGroupOffsets(groupSpecs, options, AdminFlavour.Async));
+            _native.ListConsumerGroupOffsets(groupSpecs, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
-        DeleteConsumerGroupsResult.From(_native.DeleteConsumerGroups(groupIds, options, AdminFlavour.Async));
+        DeleteConsumerGroupsResult.From(_native.DeleteConsumerGroups(groupIds, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroupResult.From(
-            _native.RemoveMembersFromConsumerGroup(groupId, options, AdminFlavour.Async));
+            _native.RemoveMembersFromConsumerGroup(groupId, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

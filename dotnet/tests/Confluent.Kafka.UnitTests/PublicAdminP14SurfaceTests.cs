@@ -87,6 +87,14 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(AlterPartitionReassignmentsResult),
         nameof(ListPartitionReassignmentsResult),
         nameof(ListOffsetsResult),
+        nameof(ListGroupsResult),
+        nameof(DescribeConsumerGroupsResult),
+        nameof(DescribeClassicGroupsResult),
+        nameof(ListConsumerGroupOffsetsResult),
+        nameof(DeleteConsumerGroupsResult),
+        nameof(RemoveMembersFromConsumerGroupResult),
+        nameof(AlterConsumerGroupOffsetsResult),
+        nameof(DeleteConsumerGroupOffsetsResult),
     };
 
     /// <summary>
@@ -112,6 +120,14 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.AlterPartitionReassignments),
         nameof(IAdmin.ListPartitionReassignments),
         nameof(IAdmin.ListOffsets),
+        nameof(IAdmin.ListGroups),
+        nameof(IAdmin.DescribeConsumerGroups),
+        nameof(IAdmin.DescribeClassicGroups),
+        nameof(IAdmin.ListConsumerGroupOffsets),
+        nameof(IAdmin.DeleteConsumerGroups),
+        nameof(IAdmin.RemoveMembersFromConsumerGroup),
+        nameof(IAdmin.AlterConsumerGroupOffsets),
+        nameof(IAdmin.DeleteConsumerGroupOffsets),
     };
 
     private static readonly string[] s_mockOnly =

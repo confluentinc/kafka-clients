@@ -15,7 +15,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.ExceptionServices;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -23,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>listGroups</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListGroupsResult</c> (<c>ListGroupsResult.java:31</c>):
-/// <b>three</b> awaitable views of <b>one</b> listing, handed back the moment the request is
+/// <b>three</b> future views of <b>one</b> listing, handed back the moment the request is
 /// submitted.
 /// </summary>
 /// <remarks>
@@ -59,28 +58,33 @@ namespace Confluent.Kafka.Admin;
 /// one source future's value rather than a failure of it. It says nothing about the enclosing
 /// call failing: Java completes those two futures only from inside <c>thenApply</c>
 /// (<c>:40</c>), which does not run when the source future fails — so a failed call would leave
-/// all three permanently incomplete. A task that never completes is a hang, not a contract, so
-/// when the call itself fails this binding faults all three instead. For per-group errors the
+/// all three permanently incomplete. A future that never completes is a hang, not a contract, so
+/// when the call itself fails this binding fails all three instead. For per-group errors the
 /// behaviour is exactly as Java documents it.
 /// </para>
 /// <para>
 /// <b>Every accessor is a method although each yields a value</b>, matching
 /// <see cref="ListTopicsResult.NamesToListings"/> and <see cref="ListConfigResourcesResult.All"/>
-/// — each starts work (an <c>await</c> of the shared source) and returns a fresh
-/// <see cref="Task{TResult}"/> rather than reading a field, which is not what a property
-/// promises.
+/// — each builds a fresh <see cref="KafkaFuture{T}"/> over the shared source rather than reading a
+/// field, which is not what a property promises.
+/// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
+/// no thread-pool thread: the futures here are projections of the one latch, composed on the waiting thread, never
+/// over a <c>Task</c>.
 /// </para>
 /// </remarks>
+/// <seealso cref="AsyncListGroupsResult"/>
 public sealed class ListGroupsResult
 {
-    private readonly Task<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> _future;
+    private readonly KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> _future;
 
     /// <summary>
-    /// Wraps the one awaitable the call completes — Java's package-private
+    /// Wraps the one future the call completes — Java's package-private
     /// <c>ListGroupsResult(KafkaFuture&lt;Collection&lt;Object&gt;&gt;)</c> (<c>:36</c>).
     /// </summary>
     /// <param name="future">
-    /// The task the call completes with the two lists: the groups that were listed, and the
+    /// The future the call completes with the two lists: the groups that were listed, and the
     /// errors that occurred.
     /// </param>
     /// <remarks>
@@ -93,24 +97,26 @@ public sealed class ListGroupsResult
     /// selecting.
     /// </remarks>
     internal ListGroupsResult(
-        Task<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> future)
+        KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> future)
     {
         _future = future;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ListGroupsResult From(
         SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation) =>
-        new ListGroupsResult(operation.Task);
+        new ListGroupsResult(
+            new KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
+                operation.SyncSource));
 
     /// <summary>
     /// Every group listing, or the first error that occurred — Java's <c>all()</c> (<c>:69</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding all of the listings, or faulting with the <b>first</b> error when any
+    /// A future yielding all of the listings, or failing with the <b>first</b> error when any
     /// occurred (<c>:52-53</c>).
     /// </returns>
     /// <remarks>
@@ -118,28 +124,31 @@ public sealed class ListGroupsResult
     /// that were fetched successfully, and the later errors are not reported either. Use
     /// <see cref="Valid"/> for the partial results and <see cref="Errors"/> for everything that
     /// went wrong.
+    /// <para>
+    /// A fresh future per call. Within one such future the check runs once, on the first <c>Get()</c>'s thread, and
+    /// every later <c>Get()</c> rethrows the same <see cref="KafkaException"/> instance. A call-level failure fails it
+    /// with the call's own error, as it fails <see cref="Valid"/> and <see cref="Errors"/>.
+    /// </para>
     /// </remarks>
-    public async Task<IReadOnlyCollection<GroupListing>> All()
-    {
-        (IReadOnlyCollection<GroupListing> valid, IReadOnlyCollection<KafkaException> errors) =
-            await _future.ConfigureAwait(false);
-
-        if (errors.Count > 0)
+    public KafkaFuture<IReadOnlyCollection<GroupListing>> All() =>
+        SyncAdminFutures.Project(_future, static listing =>
         {
-            // Java hands the exception object itself to completeExceptionally (:53). Capturing
-            // and rethrowing preserves that object rather than re-originating it here, so a
-            // second All() cannot rewrite the stack trace the first one already reported.
-            ExceptionDispatchInfo.Capture(errors.First()).Throw();
-        }
+            if (listing.Errors.Count > 0)
+            {
+                // Java hands the exception object itself to completeExceptionally (:53). Capturing
+                // and rethrowing preserves that object rather than re-originating it here, so a
+                // second All() cannot rewrite the stack trace the first one already reported.
+                ExceptionDispatchInfo.Capture(listing.Errors.First()).Throw();
+            }
 
-        return valid;
-    }
+            return listing.Valid;
+        });
 
     /// <summary>
     /// Just the listings that were fetched, errors ignored — Java's <c>valid()</c> (<c>:82</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the listings that succeeded, empty when none did. It does not fault for a
+    /// A future yielding the listings that succeeded, empty when none did. It does not fail for a
     /// per-group error.
     /// </returns>
     /// <remarks>
@@ -147,14 +156,14 @@ public sealed class ListGroupsResult
     /// with <see cref="Errors"/> to find out what is missing — nothing about this collection
     /// alone distinguishes "there are only two groups" from "eight more could not be fetched".
     /// </remarks>
-    public async Task<IReadOnlyCollection<GroupListing>> Valid() =>
-        (await _future.ConfigureAwait(false)).Valid;
+    public KafkaFuture<IReadOnlyCollection<GroupListing>> Valid() =>
+        SyncAdminFutures.Project(_future, static listing => listing.Valid);
 
     /// <summary>
     /// Just the errors that occurred — Java's <c>errors()</c> (<c>:95</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the errors, empty when none occurred. It does not fault for a per-group
+    /// A future yielding the errors, empty when none occurred. It does not fail for a per-group
     /// error — an error is an element here, not a failure.
     /// </returns>
     /// <remarks>
@@ -162,6 +171,6 @@ public sealed class ListGroupsResult
     /// (<c>:89-90</c>). Only the first of these is ever thrown by <see cref="All"/>, so this is
     /// the only view that reports all of them.
     /// </remarks>
-    public async Task<IReadOnlyCollection<KafkaException>> Errors() =>
-        (await _future.ConfigureAwait(false)).Errors;
+    public KafkaFuture<IReadOnlyCollection<KafkaException>> Errors() =>
+        SyncAdminFutures.Project(_future, static listing => listing.Errors);
 }

@@ -16,7 +16,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -24,14 +23,14 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of a <c>listConsumerGroupOffsets</c> call — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>
-/// (<c>ListConsumerGroupOffsetsResult.java:36</c>): one awaitable <b>per group id</b>,
+/// (<c>ListConsumerGroupOffsetsResult.java:36</c>): one future <b>per group id</b>,
 /// each yielding that group's committed offsets keyed by partition.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A group that fails faults only <em>its own</em> <see cref="Task"/>; a per-group failure
-/// is not a call failure. <see cref="All"/> is the aggregate over those per-group tasks and
-/// succeeds only if every one of them did.
+/// A group that fails fails only <em>its own</em> <see cref="KafkaFuture{T}"/>; a per-group
+/// failure is not a call failure. <see cref="All"/> is the aggregate over those per-group futures
+/// and succeeds only if every one of them did.
 /// </para>
 /// <para>
 /// ⚠ <b>This result publishes no per-key map</b>, unlike
@@ -58,13 +57,19 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> and
 /// <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> follow.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its group (or, for
+/// <see cref="All"/>, every group) has completed, and needs no thread-pool thread: the futures here are composed on
+/// the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListConsumerGroupOffsetsResult"/>
 public sealed class ListConsumerGroupOffsetsResult
 {
-    private readonly IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
+    private readonly IReadOnlyDictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per group id — Java's <b>package-private</b>
+    /// Wraps one future per group id — Java's <b>package-private</b>
     /// <c>ListConsumerGroupOffsetsResult(Map&lt;CoordinatorKey, KafkaFuture&lt;...&gt;&gt;)</c>
     /// (<c>:40</c>).
     /// </summary>
@@ -72,7 +77,7 @@ public sealed class ListConsumerGroupOffsetsResult
     /// <para>
     /// ⚠ Java's constructor is package-private and is mirrored as <see langword="internal"/>
     /// rather than widened — unlike <see cref="DescribeClassicGroupsResult"/>, whose Java
-    /// constructor really is public. So the bridge is the only thing that can build one, and
+    /// constructor really is public (and is internal here only as a recorded deviation, FU-5). So the bridge is the only thing that can build one, and
     /// the map is a bridge invariant rather than caller input: no null guard is written, the
     /// same call <see cref="CreateTopicsResult"/> and <see cref="DescribeConfigsResult"/>
     /// already make for their own internal constructors.
@@ -83,26 +88,30 @@ public sealed class ListConsumerGroupOffsetsResult
     /// already keyed by group id.
     /// </para>
     /// </remarks>
-    /// <param name="futures">One awaitable per requested group id.</param>
+    /// <param name="futures">One future per requested group id.</param>
     internal ListConsumerGroupOffsetsResult(
-        IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
+        IReadOnlyDictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
     {
         _futures = futures;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
+    /// <remarks>
+    /// A view over the operation's own latches, keyed with its own (ordinal) comparer, so a group's future is equal
+    /// on every read.
+    /// </remarks>
     internal static ListConsumerGroupOffsetsResult From(
         KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation) =>
-        new ListConsumerGroupOffsetsResult(operation.Tasks);
+        new ListConsumerGroupOffsetsResult(SyncAdminFutures.Wrap(operation.SyncSources));
 
     /// <summary>
     /// The single requested group's committed offsets keyed by partition — Java's no-argument
     /// <c>partitionsToOffsetAndMetadata()</c> (<c>:49</c>).
     /// </summary>
-    /// <returns>A task yielding that group's committed offsets.</returns>
+    /// <returns>A future yielding that group's committed offsets.</returns>
     /// <exception cref="InvalidOperationException">
     /// Offsets for more than one group — or for no group at all — were requested, so there is
     /// no single group for this form to mean. Java throws <c>IllegalStateException</c> on the
@@ -112,7 +121,7 @@ public sealed class ListConsumerGroupOffsetsResult
     /// A partition the group has no committed offset for is present with a
     /// <see langword="null"/> value rather than absent; see the note on the class.
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata()
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata()
     {
         // Java's guard is `futures.size() != 1`, so an EMPTY result throws here too — the
         // message names only the multiple-group case, and the text is Java's verbatim.
@@ -132,20 +141,18 @@ public sealed class ListConsumerGroupOffsetsResult
     /// <c>partitionsToOffsetAndMetadata(String)</c> (<c>:62</c>).
     /// </summary>
     /// <param name="groupId">A group id from the request this result came from.</param>
-    /// <returns>A task yielding that group's committed offsets.</returns>
+    /// <returns>A future yielding that group's committed offsets.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupId"/> was not part of this request. Java throws
     /// <c>IllegalArgumentException</c> on the same condition (<c>:63-64</c>).
     /// </exception>
     /// <remarks>
-    /// Argument validation is synchronous — this method is deliberately not <c>async</c>, so
-    /// a caller mistake surfaces at the call site rather than only when the returned
-    /// <see cref="Task"/> is awaited. That matches Java, which throws out of the method, and
-    /// is the .NET guidance for a <see cref="Task"/>-returning method: a usage error is not
-    /// an operation outcome.
+    /// Argument validation is synchronous, so a caller mistake surfaces at the call site rather than only when the
+    /// returned future's <c>Get()</c> is called. That matches Java, which throws out of the method: a usage error is
+    /// not an operation outcome.
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata(string groupId)
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata(string groupId)
     {
         if (groupId is null)
         {
@@ -153,7 +160,7 @@ public sealed class ListConsumerGroupOffsetsResult
         }
 
         if (!_futures.TryGetValue(
-                groupId, out Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>? future))
+                groupId, out KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future))
         {
             throw new ArgumentException(
                 string.Format(
@@ -170,31 +177,17 @@ public sealed class ListConsumerGroupOffsetsResult
     /// Every group's committed offsets in one map, succeeding only if every group succeeded —
     /// Java's <c>all()</c> (<c>:72</c>).
     /// </summary>
-    /// <returns>A task yielding the whole map, or faulting with the first failure.</returns>
+    /// <returns>
+    /// A future yielding the whole map, or failing with the first failure in key order. Its <c>Get()</c> waits for
+    /// every group.
+    /// </returns>
     /// <remarks>
     /// The aggregate is built with <see cref="StringComparer.Ordinal"/> — what the bridge keys
-    /// group ids by, and how Kafka compares them. Each call starts a fresh gather and hands
-    /// back a new <see cref="Task"/>, which is why this is a method and not a property.
+    /// group ids by, and how Kafka compares them. Every group is waited for first, so a failure fails this future with
+    /// the first failure in key order, exactly as Java's <c>allOf(...).thenApply(...)</c> chain does. Each call starts
+    /// a fresh gather and hands back a new future, which is why this is a method and not a property; within one such
+    /// future the map is built once, on the first <c>Get()</c>'s thread.
     /// </remarks>
-    public Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> All() =>
-        Gather(_futures);
-
-    private static async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>
-        Gather(IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever key
-        // happens to be enumerated first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets =
-            new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
-                futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
-        {
-            offsets.Add(entry.Key, entry.Value.Result);
-        }
-
-        return offsets;
-    }
+    public KafkaFuture<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> All() =>
+        SyncAdminFutures.GatherAll(_futures, StringComparer.Ordinal);
 }

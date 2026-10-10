@@ -89,8 +89,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
 
     /// <summary>
     /// Java's constructor is <b>package-private</b> (<c>:40</c>), so it is mirrored as
-    /// internal rather than widened to public the way
-    /// <see cref="DescribeClassicGroupsResult"/>'s genuinely-public one is.
+    /// internal. (<see cref="DescribeClassicGroupsResult"/>'s is public in Java and internal
+    /// here only as a recorded deviation, FU-5 — this one needs none.) M15/P14 S5c: it takes the
+    /// sync flavour's <see cref="KafkaFuture{T}"/>s.
     /// </summary>
     [Fact]
     public void Constructor_IsInternalMirroringJavasPackagePrivateOne()
@@ -102,7 +103,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
                 BindingFlags.NonPublic | BindingFlags.Instance));
         Assert.True(constructor.IsAssembly);
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>),
+            typeof(IReadOnlyDictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>),
             Assert.Single(constructor.GetParameters()).ParameterType);
     }
 
@@ -156,20 +157,21 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         foreach (MethodInfo overload in overloads)
         {
             Assert.Equal(
-                typeof(Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>),
+                typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>),
                 overload.ReturnType);
         }
     }
 
     /// <summary>
     /// The aggregate's value type is the per-group map of per-partition offsets — Java's
-    /// <c>Map&lt;String, Map&lt;TopicPartition, OffsetAndMetadata&gt;&gt;</c> (<c>:72</c>).
+    /// <c>Map&lt;String, Map&lt;TopicPartition, OffsetAndMetadata&gt;&gt;</c> (<c>:72</c>), as a
+    /// <see cref="KafkaFuture{T}"/> on the sync flavour (M15/P14 S5c).
     /// </summary>
     [Fact]
     public void All_YieldsAMapOfGroupIdToPartitionOffsets()
     {
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>),
             typeof(ListConsumerGroupOffsetsResult)
                 .GetMethod(nameof(ListConsumerGroupOffsetsResult.All))!
                 .ReturnType);

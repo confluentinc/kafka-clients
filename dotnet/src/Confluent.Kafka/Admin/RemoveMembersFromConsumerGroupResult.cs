@@ -15,7 +15,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -23,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAdmin.RemoveMembersFromConsumerGroup"/> — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult</c>
-/// (<c>RemoveMembersFromConsumerGroupResult.java:33-42</c>): one awaitable over a map whose
+/// (<c>RemoveMembersFromConsumerGroupResult.java:33-42</c>): one completion over a map whose
 /// values are the per-member outcomes (Java's <c>Map&lt;MemberIdentity, Errors&gt;</c>, keyed
 /// here by <c>group.instance.id</c>), **plus** the original request's member collection — the
 /// second stored field Java carries (<c>memberInfos</c>, <c>:36</c>), the same two-field
@@ -31,9 +30,9 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠⚠ <b>A per-member failure is a map VALUE here, not a faulted awaitable</b> — the same
+/// ⚠⚠ <b>A per-member failure is a map VALUE here, not a failed completion</b> — the same
 /// shape as <see cref="DeleteConsumerGroupOffsetsResult"/> / <see cref="AlterConsumerGroupOffsetsResult"/>.
-/// A whole-request failure faults the awaitable itself, and both accessors rethrow it
+/// A whole-request failure fails the completion itself, and both accessors rethrow it
 /// unchanged, as Java's continuations test the <c>throwable</c> first.
 /// </para>
 /// <para>
@@ -58,27 +57,33 @@ namespace Confluent.Kafka.Admin;
 /// was not observable before. There is no per-member outcome in this mode at all, as in
 /// Java.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the request has completed, and needs
+/// no thread-pool thread: the futures here are projections of the one latch, composed on the waiting thread, never
+/// over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncRemoveMembersFromConsumerGroupResult"/>
 public sealed class RemoveMembersFromConsumerGroupResult
 {
-    private readonly Task<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> _future;
+    private readonly KafkaFuture<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> _future;
     private readonly IReadOnlyCollection<MemberToRemove> _memberInfos;
 
     /// <summary>
-    /// Wraps the single awaitable and the original request's member collection — Java's
+    /// Wraps the single completion and the original request's member collection — Java's
     /// package-private
     /// <c>RemoveMembersFromConsumerGroupResult(KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;,
     /// Set&lt;MemberToRemove&gt;)</c> (<c>:38-42</c>).
     /// </summary>
     /// <param name="future">
-    /// The single awaitable: <c>PerKey</c> is the per-member map keyed by
+    /// The single completion: <c>PerKey</c> is the per-member map keyed by
     /// <c>group.instance.id</c> (a <see langword="null"/> value is Java's <c>Errors.NONE</c>;
     /// empty in removeAll mode), <c>All</c> the fault Java's <c>all()</c> reports, or
     /// <see langword="null"/> when it succeeds.
     /// </param>
     /// <param name="memberInfos">The original request's members; empty in removeAll mode.</param>
     internal RemoveMembersFromConsumerGroupResult(
-        Task<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> future,
+        KafkaFuture<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> future,
         IReadOnlyCollection<MemberToRemove> memberInfos)
     {
         _future = future;
@@ -86,14 +91,17 @@ public sealed class RemoveMembersFromConsumerGroupResult
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static RemoveMembersFromConsumerGroupResult From(
         (
             SingleAdminOperation<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)> Operation,
             IReadOnlyCollection<MemberToRemove> Members) submitted) =>
-        new RemoveMembersFromConsumerGroupResult(submitted.Operation.Task, submitted.Members);
+        new RemoveMembersFromConsumerGroupResult(
+            new KafkaFuture<(IReadOnlyDictionary<string, KafkaException?> PerKey, KafkaException? All)>(
+                submitted.Operation.SyncSource),
+            submitted.Members);
 
     /// <summary>
     /// <see langword="true"/> when this result came from a removeAll request — Java's private
@@ -109,37 +117,38 @@ public sealed class RemoveMembersFromConsumerGroupResult
     internal bool RemoveAll => _memberInfos.Count == 0;
 
     /// <summary>
-    /// Returns a task which indicates whether the request was 100% success, i.e. no either
+    /// Returns a future which indicates whether the request was 100% success, i.e. no either
     /// top level or member level error — Java's <c>all()</c> (<c>:49-76</c>). If not, the
     /// first member error is thrown.
     /// </summary>
-    /// <returns>A task representing the whole request.</returns>
+    /// <returns>A future representing the whole request. Its <c>Get()</c> waits for the request.</returns>
     /// <remarks>
     /// The fault is the core's <c>kafka_admin_RemoveMembersFromConsumerGroupResult_all</c>,
     /// rethrown unchanged — see the type remarks for what it carries in
     /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> mode. A whole-request
-    /// failure faults the awaitable instead and propagates unchanged through the
-    /// <see langword="await"/> (<c>:52-53</c>). A fresh task per call, as Java allocates a
+    /// failure fails the completion instead and propagates unchanged through the
+    /// projection (<c>:52-53</c>). A fresh future per call, as Java allocates a
     /// fresh <c>KafkaFutureImpl</c> per <c>all()</c> call (<c>:50</c>).
     /// </remarks>
-    public async Task All()
-    {
-        // A call-level failure propagates by the await itself.
-        KafkaException? all = (await _future.ConfigureAwait(false)).All;
-
-        if (all is not null)
+    public KafkaFuture All() =>
+        SyncAdminFutures.Project(_future, static outcome =>
         {
-            throw all;
-        }
-    }
+            // A call-level failure propagates through the projection's source.
+            if (outcome.All is not null)
+            {
+                throw outcome.All;
+            }
+
+            return true;
+        }).Erase();
 
     /// <summary>
-    /// Returns the selected member's task — Java's <c>memberResult(MemberToRemove)</c>
+    /// Returns the selected member's future — Java's <c>memberResult(MemberToRemove)</c>
     /// (<c>:81-98</c>).
     /// </summary>
     /// <param name="member">A member from the request this result came from.</param>
     /// <returns>
-    /// A task that completes when that member was removed successfully, and faults otherwise.
+    /// A future that completes when that member was removed successfully, and fails otherwise.
     /// </returns>
     /// <exception cref="ArgumentException">
     /// This result came from a removeAll request, or <paramref name="member"/> was not part of
@@ -148,13 +157,11 @@ public sealed class RemoveMembersFromConsumerGroupResult
     /// consulted.
     /// </exception>
     /// <remarks>
-    /// This method itself is deliberately <b>not</b> <see langword="async"/>, for the same
-    /// reason as <see cref="DeleteConsumerGroupOffsetsResult.PartitionResult"/>: an
-    /// <see langword="async"/> method would defer even a pre-<see langword="await"/> throw into
-    /// the returned <see cref="Task"/>, turning Java's synchronous precondition checks into an
-    /// asynchronous fault.
+    /// The checks run in this method, before the future is built, as in
+    /// <see cref="DeleteConsumerGroupOffsetsResult.PartitionResult"/>: Java's synchronous precondition checks stay
+    /// synchronous, and only the rest is the future's projection. A fresh future per call.
     /// </remarks>
-    public Task MemberResult(MemberToRemove member)
+    public KafkaFuture MemberResult(MemberToRemove member)
     {
         if (member is null)
         {
@@ -178,25 +185,25 @@ public sealed class RemoveMembersFromConsumerGroupResult
                     member.GroupInstanceId));
         }
 
-        return MemberResultAsync(member);
-    }
-
-    private async Task MemberResultAsync(MemberToRemove member)
-    {
-        // A call-level failure propagates by the await itself — Java's `throwable != null`
-        // branch (:91-92).
-        IReadOnlyDictionary<string, KafkaException?> perKey = (await _future.ConfigureAwait(false)).PerKey;
-
-        // The indexer, not TryGetValue: `member` passed the request-set check above, and the
-        // core reports one row per requested member, so a miss is a core contract violation —
-        // faulting loudly beats reporting a success nobody observed. A value is that member's
-        // own outcome, including the core's "not included in the removal response" error for a
-        // requested member the broker did not answer (Java's `getSubLevelError`, :100-111).
-        KafkaException? error = perKey[member.GroupInstanceId];
-        if (error is not null)
+        string groupInstanceId = member.GroupInstanceId;
+        return SyncAdminFutures.Project(_future, outcome =>
         {
-            throw error;
-        }
+            // A call-level failure propagates through the projection's source — Java's `throwable != null`
+            // branch (:91-92).
+            //
+            // The indexer, not TryGetValue: `member` passed the request-set check above, and the
+            // core reports one row per requested member, so a miss is a core contract violation —
+            // failing loudly beats reporting a success nobody observed. A value is that member's
+            // own outcome, including the core's "not included in the removal response" error for a
+            // requested member the broker did not answer (Java's `getSubLevelError`, :100-111).
+            KafkaException? error = outcome.PerKey[groupInstanceId];
+            if (error is not null)
+            {
+                throw error;
+            }
+
+            return true;
+        }).Erase();
     }
 
     private static bool Contains(IReadOnlyCollection<MemberToRemove> members, MemberToRemove member)

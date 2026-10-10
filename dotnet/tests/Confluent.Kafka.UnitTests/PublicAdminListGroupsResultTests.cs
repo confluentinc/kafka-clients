@@ -179,9 +179,10 @@ public sealed class PublicAdminListGroupsResultTests
     }
 
     /// <summary>
-    /// The public shape is Java's three <b>methods</b>, each yielding a task — not properties,
-    /// because each starts an <c>await</c> of the shared source rather than reading a field. The
-    /// shipped <see cref="ListTopicsResult.NamesToListings"/> and
+    /// The public shape is Java's three <b>methods</b>, each yielding a <see cref="KafkaFuture{T}"/>
+    /// (M15/P14 S5c: the sync flavour; its async twin <see cref="AsyncListGroupsResult"/> keeps the
+    /// awaitables) — not properties, because each composes a fresh future over the shared source
+    /// rather than reading a field. The shipped <see cref="ListTopicsResult.NamesToListings"/> and
     /// <see cref="ListConfigResourcesResult.All"/> make the same call.
     /// </summary>
     [Fact]
@@ -194,17 +195,23 @@ public sealed class PublicAdminListGroupsResultTests
         MethodInfo errors = typeof(ListGroupsResult).GetMethod(
             nameof(ListGroupsResult.Errors), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(Task<IReadOnlyCollection<GroupListing>>), all.ReturnType);
-        Assert.Equal(typeof(Task<IReadOnlyCollection<GroupListing>>), valid.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), all.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), valid.ReturnType);
 
         // ⚠ Java's Collection<Throwable> narrows to this binding's one flat KafkaException —
         // every per-group error crossing the ABI is a native error handle.
-        Assert.Equal(typeof(Task<IReadOnlyCollection<KafkaException>>), errors.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<KafkaException>>), errors.ReturnType);
 
-        // Non-null: each is completed from the source's value (:55-58), never with null.
-        Assert.Equal(1, NullableFlag(all.ReturnParameter));
-        Assert.Equal(1, NullableFlag(valid.ReturnParameter));
-        Assert.Equal(1, NullableFlag(errors.ReturnParameter));
+        // Flattened positions of KafkaFuture<IReadOnlyCollection<X>>: 0 = the KafkaFuture (a
+        // generic struct, so oblivious — its own shape is the CLR type asserted above),
+        // 1 = the collection, 2 = its element. Non-null at 1 and 2: each is completed from the
+        // source's value (:55-58), never with null, and holds no null entry.
+        foreach (MethodInfo accessor in new[] { all, valid, errors })
+        {
+            Assert.Equal(NullableAnnotation.Oblivious, NullableFlag(accessor.ReturnParameter, 0));
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 1));
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 2));
+        }
 
         // No accessor is a property, and none was invented beyond Java's three.
         Assert.Empty(typeof(ListGroupsResult).GetProperties());
@@ -229,5 +236,5 @@ public sealed class PublicAdminListGroupsResultTests
         IReadOnlyCollection<KafkaException> errors) =>
         new AsyncListGroupsResult(Task.FromResult((valid, errors)));
 
-    private static byte NullableFlag(ParameterInfo parameter) => NullableAnnotation.Flag(parameter);
+    private static byte NullableFlag(ParameterInfo parameter, int index) => NullableAnnotation.Flag(parameter, index);
 }

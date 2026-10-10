@@ -60,16 +60,19 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         new TaskCompletionSource<ClassicGroupDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>
-    /// Java's constructor is <b>public</b> (<c>:34</c>) and is mirrored as public rather
-    /// than narrowed; it rejects a null map before anything can dereference it.
+    /// Java's constructor is <b>public</b> (<c>:34</c>); here it is <b>internal</b> — a recorded Java-parity
+    /// deviation, follow-up FU-5 (M15/P14 Q3) — over one <see cref="KafkaFuture{T}"/> per group, and it still
+    /// rejects a null map before anything can dereference it (reached through <c>InternalsVisibleTo</c>).
     /// </summary>
     [Fact]
-    public void Constructor_IsPublicAndRejectsNull()
+    public void Constructor_IsInternalAndRejectsNull()
     {
-        ConstructorInfo constructor = Assert.Single(typeof(DescribeClassicGroupsResult).GetConstructors());
-        Assert.True(constructor.IsPublic);
+        Assert.Empty(typeof(DescribeClassicGroupsResult).GetConstructors());
+        ConstructorInfo constructor = Assert.Single(
+            typeof(DescribeClassicGroupsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task<ClassicGroupDescription>>),
+            typeof(IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>>),
             Assert.Single(constructor.GetParameters()).ParameterType);
 
         ArgumentNullException error =
@@ -118,13 +121,13 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     public void ValueType_IsTheClassicDescription()
     {
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task<ClassicGroupDescription>>),
+            typeof(IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>>),
             typeof(DescribeClassicGroupsResult)
                 .GetProperty(nameof(DescribeClassicGroupsResult.DescribedGroups))!
                 .PropertyType);
 
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<string, ClassicGroupDescription>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>>),
             typeof(DescribeClassicGroupsResult)
                 .GetMethod(nameof(DescribeClassicGroupsResult.All))!
                 .ReturnType);

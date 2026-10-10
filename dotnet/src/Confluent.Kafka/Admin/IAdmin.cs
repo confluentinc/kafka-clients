@@ -652,7 +652,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Alters the committed offsets for a consumer group — Java's
     /// <c>alterConsumerGroupOffsets(String, Map&lt;TopicPartition, OffsetAndMetadata&gt;,
     /// AlterConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
-    /// for the broker.
+    /// for the broker; the result's futures share one native completion, and each
+    /// <c>Get()</c> blocks the calling thread until the request completes.
     /// </summary>
     /// <param name="groupId">The consumer group id.</param>
     /// <param name="offsets">Topic partition → the offset (and metadata) to commit it to.</param>
@@ -660,10 +661,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
-    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// ⚠ <b>One</b> completion over the whole request, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a failed completion — Java's
     /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="AlterConsumerGroupOffsetsResult"/>.
-    /// The task itself faults only when the whole request failed or could not be submitted
+    /// The completion itself fails only when the whole request failed or could not be submitted
     /// at all — never for one partition's own outcome — and it resolves only when the core
     /// reports, an empty <paramref name="offsets"/> included.
     /// </returns>
@@ -677,6 +678,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks). A null metadata is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AlterConsumerGroupOffsets"/>
     AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
@@ -686,7 +688,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Deletes the committed offsets for a set of partitions in a consumer group — Java's
     /// <c>deleteConsumerGroupOffsets(String, Set&lt;TopicPartition&gt;,
     /// DeleteConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
-    /// for the broker.
+    /// for the broker; the result's futures share one native completion, and each
+    /// <c>Get()</c> blocks the calling thread until the request completes.
     /// </summary>
     /// <param name="groupId">The consumer group id.</param>
     /// <param name="partitions">The partitions whose committed offsets should be deleted.</param>
@@ -694,10 +697,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
-    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// ⚠ <b>One</b> completion over the whole request, and a per-partition failure is a
+    /// <b>value in its map</b> rather than a failed completion — Java's
     /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="DeleteConsumerGroupOffsetsResult"/>.
-    /// The task itself faults only when the whole request failed or could not be submitted
+    /// The completion itself fails only when the whole request failed or could not be submitted
     /// at all — never for one partition's own outcome — and it resolves only when the core
     /// reports, an empty <paramref name="partitions"/> included.
     /// </returns>
@@ -710,6 +713,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteConsumerGroupOffsets"/>
     DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
@@ -835,7 +839,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Lists the groups available in the cluster — Java's
     /// <c>listGroups(ListGroupsOptions)</c>. Returns <b>immediately</b>, without waiting for
-    /// the broker.
+    /// the broker; the result's three futures share one native completion, and each
+    /// <c>Get()</c> blocks the calling thread until the listing completes.
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. ⚠ Its three filters
@@ -844,12 +849,12 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// every state, protocol type and type.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable carrying <em>two independent</em> collections: the listings
+    /// ⚠ <b>One</b> completion carrying <em>two independent</em> collections: the listings
     /// that were returned, and the failures of the brokers that could not be queried. They
     /// are not parallel — one listing beside three errors is a legitimate outcome — so
     /// <see cref="ListGroupsResult.Valid"/> and <see cref="ListGroupsResult.Errors"/> each
     /// have their own length, and only <see cref="ListGroupsResult.All"/> turns the first
-    /// error into a fault.
+    /// error into a failure.
     /// </returns>
     /// <remarks>
     /// Java also declares a no-argument <c>listGroups()</c> convenience overload, collapsed
@@ -866,13 +871,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListGroups"/>
     ListGroupsResult ListGroups(ListGroupsOptions? options = null);
 
     /// <summary>
     /// Describes some consumer groups in the cluster — Java's
     /// <c>describeConsumerGroups(Collection&lt;String&gt;, DescribeConsumerGroupsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries
-    /// one awaitable per group id.
+    /// one <see cref="KafkaFuture{T}"/> per group id, whose <c>Get()</c> blocks the calling
+    /// thread until that group completes.
     /// </summary>
     /// <remarks>
     /// Java also declares a <c>describeConsumerGroups(Collection&lt;String&gt;)</c>
@@ -883,7 +890,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
-    /// result holds one awaitable per distinct id.
+    /// result holds one future per distinct id.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
@@ -892,7 +899,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// One awaitable per group id, each carrying that group's own
+    /// One future per group id, each carrying that group's own
     /// <see cref="ConsumerGroupDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
@@ -901,6 +908,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeConsumerGroups"/>
     DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null);
 
@@ -908,7 +916,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Describes some classic (non-KIP-848) groups in the cluster — Java's
     /// <c>describeClassicGroups(Collection&lt;String&gt;, DescribeClassicGroupsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries
-    /// one awaitable per group id.
+    /// one <see cref="KafkaFuture{T}"/> per group id, whose <c>Get()</c> blocks the calling
+    /// thread until that group completes.
     /// </summary>
     /// <remarks>
     /// Java also declares a <c>describeClassicGroups(Collection&lt;String&gt;)</c>
@@ -919,7 +928,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
-    /// result holds one awaitable per distinct id.
+    /// result holds one future per distinct id.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
@@ -928,7 +937,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="ClassicGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// One awaitable per group id, each carrying that group's own
+    /// One future per group id, each carrying that group's own
     /// <see cref="ClassicGroupDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
@@ -937,6 +946,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeClassicGroups"/>
     DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null);
 
@@ -944,7 +954,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Lists the committed offsets of a single consumer group — Java's
     /// <c>listConsumerGroupOffsets(String, ListConsumerGroupOffsetsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries
-    /// one awaitable, keyed by <paramref name="groupId"/>.
+    /// one <see cref="KafkaFuture{T}"/>, keyed by <paramref name="groupId"/>, whose
+    /// <c>Get()</c> blocks the calling thread until the group completes.
     /// </summary>
     /// <remarks>
     /// Java also declares a <c>listConsumerGroupOffsets(String)</c> convenience overload
@@ -960,7 +971,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable, keyed by <paramref name="groupId"/>, carrying that group's
+    /// One future, keyed by <paramref name="groupId"/>, carrying that group's
     /// committed offsets or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
@@ -969,6 +980,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions?)"/>
     ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         string groupId, ListConsumerGroupOffsetsOptions? options = null);
 
@@ -976,7 +988,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Lists the committed offsets of several consumer groups — Java's
     /// <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;,
     /// ListConsumerGroupOffsetsOptions)</c>. Returns <b>immediately</b>, without waiting
-    /// for the broker; the result carries one awaitable per group id.
+    /// for the broker; the result carries one <see cref="KafkaFuture{T}"/> per group id, whose
+    /// <c>Get()</c> blocks the calling thread until that group completes.
     /// </summary>
     /// <remarks>
     /// Java also declares a
@@ -994,7 +1007,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per group id, each carrying that group's committed offsets or its
+    /// One future per group id, each carrying that group's committed offsets or its
     /// own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException">
@@ -1006,6 +1019,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions?)"/>
     ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options = null);
@@ -1013,14 +1027,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Deletes consumer groups from the cluster — Java's
     /// <c>deleteConsumerGroups(Collection&lt;String&gt;, DeleteConsumerGroupsOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/> per group id, whose <c>Get()</c> blocks the calling thread
+    /// until that group completes.
     /// </summary>
     /// <param name="groupIds">The consumer group ids to delete. Duplicates collapse.</param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
+    /// One future per group id — Java's <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>.
     /// See <see cref="DeleteConsumerGroupsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
@@ -1029,13 +1045,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteConsumerGroups"/>
     DeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null);
 
     /// <summary>
     /// Removes members from a consumer group by their static member identity — Java's
     /// <c>removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)</c>.
-    /// Returns <b>immediately</b>, without waiting for the broker.
+    /// Returns <b>immediately</b>, without waiting for the broker; the result's futures share
+    /// one native completion, and each <c>Get()</c> blocks the calling thread until the request
+    /// completes.
     /// </summary>
     /// <param name="groupId">The id of the group to remove members from.</param>
     /// <param name="options">
@@ -1046,10 +1065,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// therefore required here too, not optional.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole request, and a per-member failure is a
-    /// <b>value in its map</b> rather than a faulted awaitable — Java's
+    /// ⚠ <b>One</b> completion over the whole request, and a per-member failure is a
+    /// <b>value in its map</b> rather than a failed completion — Java's
     /// <c>Map&lt;MemberIdentity, Errors&gt;</c>. See
-    /// <see cref="RemoveMembersFromConsumerGroupResult"/>. The task itself faults only when
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/>. The completion itself fails only when
     /// the whole request failed or could not be submitted at all — never for one member's
     /// own outcome, which in <c>removeAll</c> mode only
     /// <see cref="RemoveMembersFromConsumerGroupResult.All"/> reports.
@@ -1063,6 +1082,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// remarks). A null reason is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.RemoveMembersFromConsumerGroup"/>
     RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options);
 
