@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4, S5a, S5b, S5c and S5d: each converted RPC, called with the same arguments on a
+/// The differential rows of M15/P14 S4, S5a, S5b, S5c, S5d and S5e: each converted RPC, called with the same arguments on a
 /// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
 /// same outcome through every member of its Result — equal values, or an exception of the same type with the same
 /// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
@@ -69,6 +69,16 @@ public sealed class PublicAdminP14DifferentialTests
     // The core's default message for UNKNOWN_TOPIC_OR_PARTITION, which the core mock's reassignment of an unknown
     // partition carries (Java's mock throws a message-less UnknownTopicOrPartitionException).
     private const string UnknownTopicOrPartitionMessage = "This server does not host this topic-partition.";
+
+    // The core's LOCAL_ILLEGAL_ARGUMENT, and the core mock's refusal of a token request without a renewer (Java's mock
+    // throws IndexOutOfBoundsException from options.renewers().get(0), MockAdminClient.java:652) (M15/P14 S5e).
+    private const int LocalIllegalArgumentCode = -3;
+    private const string NoRenewer =
+        "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner";
+
+    // Errors.DELEGATION_TOKEN_NOT_FOUND, which the core mock raises with an empty message (M15/P14 S5e).
+    private const int DelegationTokenNotFoundCode = 62;
+    private const string DelegationTokenNotFoundMessage = "";
 
     private static readonly Uuid s_missingId = new Uuid(0x7A7A7A7A7A7A7A7AL, 0x5B5B5B5B5B5B5B5BL);
 
@@ -1726,6 +1736,337 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>DescribeUserScramCredentials</c> (M15/P14 S5e), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1254-1255</c> throws from the call; the core mock fails the one completion instead):
+    /// <c>All()</c>, <c>Users()</c> and a <c>Description</c> fail alike, as Java derives all three from the one
+    /// future.
+    /// </summary>
+    [Fact]
+    public async Task DescribeUserScramCredentials_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] users = { "diff-al-alice", "diff-al-bob" };
+
+        DescribeUserScramCredentialsResult syncResult = sync.DescribeUserScramCredentials(users);
+        AsyncDescribeUserScramCredentialsResult asyncResult = async.DescribeUserScramCredentials(users);
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.Users()), FutureProbe.Of(asyncResult.Users())));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(
+                FutureProbe.Of(syncResult.Description(users[0])), FutureProbe.Of(asyncResult.Description(users[0]))));
+    }
+
+    /// <summary>
+    /// <c>AlterUserScramCredentials</c> (M15/P14 S5e), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1259-1260</c> throws from the call; the core mock fails every user instead): both mocks key
+    /// the result by the altered users, in request order and once per distinct user, and each user's future and
+    /// <c>All()</c> fail alike.
+    /// </summary>
+    [Fact]
+    public async Task AlterUserScramCredentials_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] users = { "diff-am-bob", "diff-am-alice" };
+        UserScramCredentialAlteration[] alterations =
+        {
+            new UserScramCredentialDeletion(users[0], ScramMechanism.ScramSha256),
+            new UserScramCredentialDeletion(users[1], ScramMechanism.ScramSha512),
+            new UserScramCredentialDeletion(users[0], ScramMechanism.ScramSha512),
+        };
+
+        AlterUserScramCredentialsResult syncResult = sync.AlterUserScramCredentials(alterations);
+        AsyncAlterUserScramCredentialsResult asyncResult = async.AlterUserScramCredentials(alterations);
+        Assert.Equal(users, syncResult.Values.Keys);
+        Assert.Equal(users, asyncResult.Values.Keys);
+
+        foreach (string user in users)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.Values[user]), FutureProbe.Of(asyncResult.Values[user])));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+    }
+
+    /// <summary>
+    /// <c>CreateDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:641</c>):
+    /// both mocks mint a token owned by the first renewer, with the requested maximum lifetime and the ABI's <c>-1</c>
+    /// expiry (token ids, MACs and issue times are each mock's own, so the token is compared through
+    /// <see cref="TokenOf"/>); and both fail a request without a renewer alike, with the core mock's message.
+    /// </summary>
+    [Fact]
+    public async Task CreateDelegationToken_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+
+        object? created = await Agree(
+            FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-an-alice", "diff-an-bob")).DelegationToken()),
+            FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-an-alice", "diff-an-bob")).DelegationToken()),
+            token => TokenOf((DelegationToken)token));
+        Assert.Equal(
+            "owner=User:diff-an-alice;renewers=User:diff-an-alice,User:diff-an-bob;max=86400000;expiry=-1",
+            TokenOf(Assert.IsType<DelegationToken>(created)));
+
+        AssertKafka(
+            LocalIllegalArgumentCode,
+            NoRenewer,
+            await Agree(
+                FutureProbe.Of(sync.CreateDelegationToken().DelegationToken()),
+                FutureProbe.Of(async.CreateDelegationToken().DelegationToken())));
+    }
+
+    /// <summary>
+    /// <c>RenewDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:661</c>):
+    /// renewing each mock's own token by its MAC gives the renew period as the new expiry on both, and an unknown MAC
+    /// fails alike with <c>DELEGATION_TOKEN_NOT_FOUND</c>.
+    /// </summary>
+    [Fact]
+    public async Task RenewDelegationToken_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
+        byte[] asyncMac =
+            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
+        RenewDelegationTokenOptions options = new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L };
+
+        object? renewed = await Agree(
+            FutureProbe.Of(sync.RenewDelegationToken(syncMac, options).ExpiryTimestamp()),
+            FutureProbe.Of(async.RenewDelegationToken(asyncMac, options).ExpiryTimestamp()));
+        Assert.Equal(3_600_000L, Assert.IsType<long>(renewed));
+
+        byte[] unknown = { 0xDE, 0x00, 0xAD };
+        AssertKafka(
+            DelegationTokenNotFoundCode,
+            DelegationTokenNotFoundMessage,
+            await Agree(
+                FutureProbe.Of(sync.RenewDelegationToken(unknown).ExpiryTimestamp()),
+                FutureProbe.Of(async.RenewDelegationToken(unknown).ExpiryTimestamp())));
+    }
+
+    /// <summary>
+    /// <c>ExpireDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:683</c>):
+    /// expiring each mock's own token now gives the expiry period on both and removes the token from both; an unknown
+    /// MAC fails alike with <c>DELEGATION_TOKEN_NOT_FOUND</c>.
+    /// </summary>
+    [Fact]
+    public async Task ExpireDelegationToken_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
+        byte[] asyncMac =
+            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
+        ExpireDelegationTokenOptions options = new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L };
+
+        object? expired = await Agree(
+            FutureProbe.Of(sync.ExpireDelegationToken(syncMac, options).ExpiryTimestamp()),
+            FutureProbe.Of(async.ExpireDelegationToken(asyncMac, options).ExpiryTimestamp()));
+        Assert.Equal(0L, Assert.IsType<long>(expired));
+        object? remaining = await Agree(
+            FutureProbe.Of(sync.DescribeDelegationToken().DelegationTokens()),
+            FutureProbe.Of(async.DescribeDelegationToken().DelegationTokens()),
+            tokens => TokensOf((IReadOnlyList<DelegationToken>)tokens));
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<DelegationToken>>(remaining));
+
+        byte[] unknown = { 0xDE, 0x00, 0xAD };
+        AssertKafka(
+            DelegationTokenNotFoundCode,
+            DelegationTokenNotFoundMessage,
+            await Agree(
+                FutureProbe.Of(sync.ExpireDelegationToken(unknown).ExpiryTimestamp()),
+                FutureProbe.Of(async.ExpireDelegationToken(unknown).ExpiryTimestamp())));
+    }
+
+    /// <summary>
+    /// <c>DescribeDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:709</c>):
+    /// with no owners filter both mocks describe every token they minted, compared through <see cref="TokensOf"/>.
+    /// </summary>
+    [Fact]
+    public async Task DescribeDelegationToken_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        foreach (string renewer in new[] { "diff-aq-alice", "diff-aq-bob" })
+        {
+            _ = await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers(renewer)).DelegationToken()));
+            _ = await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers(renewer)).DelegationToken()));
+        }
+
+        object? described = await Agree(
+            FutureProbe.Of(sync.DescribeDelegationToken().DelegationTokens()),
+            FutureProbe.Of(async.DescribeDelegationToken().DelegationTokens()),
+            tokens => TokensOf((IReadOnlyList<DelegationToken>)tokens));
+        Assert.Equal(
+            "owner=User:diff-aq-alice;renewers=User:diff-aq-alice;max=86400000;expiry=-1|" +
+            "owner=User:diff-aq-bob;renewers=User:diff-aq-bob;max=86400000;expiry=-1",
+            TokensOf(Assert.IsAssignableFrom<IReadOnlyList<DelegationToken>>(described)));
+    }
+
+    /// <summary>
+    /// <c>DescribeFeatures</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:1269</c>):
+    /// both mocks describe the same seeded feature levels, compared through <see cref="FeaturesOf"/>.
+    /// </summary>
+    [Fact]
+    public async Task DescribeFeatures_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        Dictionary<string, (short Level, short MinSupported, short MaxSupported)> levels =
+            new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)
+            {
+                ["metadata.version"] = (7, 1, 20),
+                ["group.version"] = (1, 0, 1),
+            };
+        sync.SetFeatureLevels(levels);
+        async.SetFeatureLevels(levels);
+
+        object? described = await Agree(
+            FutureProbe.Of(sync.DescribeFeatures().FeatureMetadata()),
+            FutureProbe.Of(async.DescribeFeatures().FeatureMetadata()),
+            metadata => FeaturesOf((FeatureMetadata)metadata));
+        Assert.Equal(
+            "finalized=group.version:1-1,metadata.version:7-7;epoch=123;" +
+            "supported=group.version:0-1,metadata.version:1-20",
+            FeaturesOf(Assert.IsType<FeatureMetadata>(described)));
+    }
+
+    /// <summary>
+    /// <c>UpdateFeatures</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:1286</c>): an
+    /// update past the seeded bounds fails alike on both mocks, with the core mock's message; an update to level 0
+    /// succeeds alike on every key; and an empty map gives an empty result whose <c>All()</c> succeeds, on both.
+    /// </summary>
+    [Fact]
+    public async Task UpdateFeatures_OnBothMocks_Agree()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+
+        // One key, so the core mock's first-failure-aborts-the-batch is not ordered by its map.
+        Dictionary<string, FeatureUpdate> rejected = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
+        {
+            ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
+        };
+        UpdateFeaturesResult syncRejected = sync.UpdateFeatures(rejected);
+        AsyncUpdateFeaturesResult asyncRejected = async.UpdateFeatures(rejected);
+        AssertKafka(
+            InvalidRequestCode,
+            "Invalid update version 1 for feature metadata.version. Can't upgrade above 0",
+            await Agree(
+                FutureProbe.Of(syncRejected.Values["metadata.version"]),
+                FutureProbe.Of(asyncRejected.Values["metadata.version"])));
+        AssertKafka(
+            InvalidRequestCode,
+            "Invalid update version 1 for feature metadata.version. Can't upgrade above 0",
+            await Agree(FutureProbe.Of(syncRejected.All()), FutureProbe.Of(asyncRejected.All())));
+
+        string[] features = { "metadata.version", "group.version" };
+        Dictionary<string, FeatureUpdate> accepted = features.ToDictionary(
+            feature => feature, _ => new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade), StringComparer.Ordinal);
+        UpdateFeaturesResult syncAccepted = sync.UpdateFeatures(accepted);
+        AsyncUpdateFeaturesResult asyncAccepted = async.UpdateFeatures(accepted);
+        Assert.Equal(features, syncAccepted.Values.Keys);
+        Assert.Equal(features, asyncAccepted.Values.Keys);
+        foreach (string feature in features)
+        {
+            Assert.Same(
+                BlockingCall.Returned,
+                await Agree(FutureProbe.Of(syncAccepted.Values[feature]), FutureProbe.Of(asyncAccepted.Values[feature])));
+        }
+
+        Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncAccepted.All()), FutureProbe.Of(asyncAccepted.All())));
+
+        Dictionary<string, FeatureUpdate> empty = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal);
+        UpdateFeaturesResult syncEmpty = sync.UpdateFeatures(empty);
+        AsyncUpdateFeaturesResult asyncEmpty = async.UpdateFeatures(empty);
+        Assert.Empty(syncEmpty.Values);
+        Assert.Empty(asyncEmpty.Values);
+        Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the SCRAM, delegation-token and feature members (M15/P14 S5e) throw alike on
+    /// both mocks — the same type, parameter name and message — before any future exists: a null argument where a
+    /// member takes a required reference, a null element where it takes a collection, and a request string the native
+    /// client cannot take unchanged (an embedded NUL). <c>Description</c>'s guards are the Result's own, at the call
+    /// on both flavours.
+    /// </summary>
+    [Fact]
+    public void ScramTokensAndFeaturesGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] nulUser = { "diff\0ar" };
+        UserScramCredentialAlteration?[] nullAlteration =
+            { new UserScramCredentialDeletion("diff-ar", ScramMechanism.ScramSha256), null };
+        UserScramCredentialAlteration[] nulAlteration =
+            { new UserScramCredentialDeletion("diff\0ar", ScramMechanism.ScramSha256) };
+        Dictionary<string, FeatureUpdate> nullUpdate =
+            new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal) { ["metadata.version"] = null! };
+        Dictionary<string, FeatureUpdate> nulFeature = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
+        {
+            ["metadata\0version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+        };
+
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeUserScramCredentials(nulUser), () => async.DescribeUserScramCredentials(nulUser));
+
+        AssertThrowAlike(() => sync.AlterUserScramCredentials(null!), () => async.AlterUserScramCredentials(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterUserScramCredentials(nullAlteration!), () => async.AlterUserScramCredentials(nullAlteration!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterUserScramCredentials(nulAlteration), () => async.AlterUserScramCredentials(nulAlteration));
+
+        AssertThrowAlike(() => sync.RenewDelegationToken(null!), () => async.RenewDelegationToken(null!));
+        AssertThrowAlike(() => sync.ExpireDelegationToken(null!), () => async.ExpireDelegationToken(null!));
+
+        AssertThrowAlike(() => sync.UpdateFeatures(null!), () => async.UpdateFeatures(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.UpdateFeatures(nullUpdate), () => async.UpdateFeatures(nullUpdate));
+        AssertThrowAlike<ArgumentException>(() => sync.UpdateFeatures(nulFeature), () => async.UpdateFeatures(nulFeature));
+
+        DescribeUserScramCredentialsResult syncResult = sync.DescribeUserScramCredentials();
+        AsyncDescribeUserScramCredentialsResult asyncResult = async.DescribeUserScramCredentials();
+        AssertThrowAlike(() => syncResult.Description(null!), () => asyncResult.Description(null!));
+        AssertThrowAlike<ArgumentException>(() => syncResult.Description("diff\0ar"), () => asyncResult.Description("diff\0ar"));
+
+        // The rows' own pins: the null-element guards are the binding's, with its messages, and the request-string
+        // guard names the member's own parameter.
+        Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.RenewDelegationToken(null!)).ParamName);
+        Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.ExpireDelegationToken(null!)).ParamName);
+        Assert.Equal("alterations", Assert.Throws<ArgumentNullException>(() => sync.AlterUserScramCredentials(null!)).ParamName);
+        Assert.Equal("featureUpdates", Assert.Throws<ArgumentNullException>(() => sync.UpdateFeatures(null!)).ParamName);
+        Assert.Equal("userName", Assert.Throws<ArgumentNullException>(() => syncResult.Description(null!)).ParamName);
+        AssertArgument(
+            "The SCRAM credential alterations must not contain a null element.",
+            "alterations",
+            () => sync.AlterUserScramCredentials(nullAlteration!));
+        AssertArgument(
+            "The feature updates must not contain a null update.", "featureUpdates", () => sync.UpdateFeatures(nullUpdate));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "users", () => sync.DescribeUserScramCredentials(nulUser));
+        AssertArgument(
+            Internal.AdminStrings.InvalidStringMessage, "alterations", () => sync.AlterUserScramCredentials(nulAlteration));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "featureUpdates", () => sync.UpdateFeatures(nulFeature));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "userName", () => syncResult.Description("diff\0ar"));
+    }
+
+    /// <summary>
     /// <paramref name="call"/> throws exactly <see cref="ArgumentException"/>, naming <paramref name="parameterName"/>
     /// with <paramref name="message"/>.
     /// </summary>
@@ -1956,6 +2297,43 @@ public sealed class PublicAdminP14DifferentialTests
     /// <summary>A user entity; a <see langword="null"/> name is the default user.</summary>
     private static ClientQuotaEntity QuotaEntity(string? user) =>
         new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = user });
+
+    /// <summary>A token request whose renewers are the users <paramref name="names"/>, for a day.</summary>
+    private static CreateDelegationTokenOptions Renewers(params string[] names) =>
+        new CreateDelegationTokenOptions
+        {
+            Renewers = names.Select(name => new KafkaPrincipal("User", name)).ToArray(),
+            MaxLifetimeMs = 86_400_000L,
+        };
+
+    /// <summary>
+    /// The token a mock minted, read through <paramref name="minted"/> within its deadline; a mint that failed fails the
+    /// test here rather than in a later step.
+    /// </summary>
+    private static async Task<DelegationToken> Minted(FutureProbe minted) =>
+        Assert.IsType<DelegationToken>(await minted.Outcome());
+
+    /// <summary>A token's mock-independent fields: its owner, renewers, maximum lifetime and expiry.</summary>
+    private static string TokenOf(DelegationToken token) =>
+        $"owner={token.TokenInfo.OwnerAsString};renewers={string.Join(",", token.TokenInfo.RenewersAsString)};" +
+        $"max={token.TokenInfo.MaxTimestamp};expiry={token.TokenInfo.ExpiryTimestamp}";
+
+    /// <summary>Every token's <see cref="TokenOf"/>, in ordinal order.</summary>
+    private static string TokensOf(IReadOnlyList<DelegationToken> tokens) =>
+        string.Join("|", tokens.Select(TokenOf).OrderBy(token => token, StringComparer.Ordinal));
+
+    /// <summary>A feature description's two tables, each in ordinal key order, and its epoch.</summary>
+    private static string FeaturesOf(FeatureMetadata metadata) =>
+        "finalized=" + string.Join(
+            ",",
+            metadata.FinalizedFeatures
+                .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .Select(entry => $"{entry.Key}:{entry.Value.MinVersionLevel}-{entry.Value.MaxVersionLevel}")) +
+        $";epoch={metadata.FinalizedFeaturesEpoch};supported=" + string.Join(
+            ",",
+            metadata.SupportedFeatures
+                .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .Select(entry => $"{entry.Key}:{entry.Value.MinVersion}-{entry.Value.MaxVersion}"));
 
     /// <summary>One quota of <paramref name="entity"/> set to <paramref name="value"/>, or removed when it is null.</summary>
     private static ClientQuotaAlteration QuotaAlteration(ClientQuotaEntity entity, string quota, double? value) =>

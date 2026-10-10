@@ -67,6 +67,18 @@ public sealed class AdminP14SyncCompositionTests
     /// <summary>A group id none of <see cref="s_groups"/> equals ordinally.</summary>
     private const string UnknownGroup = "gRoUp";
 
+    /// <summary>
+    /// The user names of the S5e SCRAM Results: distinct under the ordinal comparer the bridge keys them by, and equal
+    /// under a case-insensitive one (see <see cref="s_groups"/>).
+    /// </summary>
+    private static readonly string[] s_users = { "alice", "Alice", "ALICE" };
+
+    /// <summary>A user name none of <see cref="s_users"/> equals ordinally.</summary>
+    private const string UnknownUser = "aLiCe";
+
+    /// <summary>The feature names of the S5e <c>UpdateFeatures</c> Result.</summary>
+    private static readonly string[] s_features = { "metadata.version", "group.version", "transaction.version" };
+
     public static TheoryData<string, string> CreateTopicsRows => Rows(
         "all-succeed",
         "one-fails",
@@ -1913,9 +1925,409 @@ public sealed class AdminP14SyncCompositionTests
         Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
     }
 
+    /// <summary>
+    /// <see cref="DescribeUserScramCredentialsResult"/> / <see cref="AsyncDescribeUserScramCredentialsResult"/> (M15/P14
+    /// S5e): three accessors over one completion, as Java derives all three from its one <c>dataFuture</c>
+    /// (<c>DescribeUserScramCredentialsResult.java:44-45</c>). "all-error" pins that a per-user failure fails
+    /// <c>All()</c> but not <c>Users()</c> (<c>:68-69</c>, <c>:89-90</c>). Three rows pin the timing of
+    /// <c>Description</c>'s guards: "description-null-user" and "description-invalid-user", that both throw at the call,
+    /// alike on both flavours; and "description-before-completion", that a description asked for before the call
+    /// completed is a future and fails at <c>Get()</c>, never at the call — Java's lookup runs inside
+    /// <c>dataFuture.whenComplete</c> (<c>:114-131</c>), so its unknown-user failure (<c>:124-125</c>) is the future's
+    /// too. Omitted: one-fails / two-fail / all-fail (one completion: a per-user failure is the views' own, the
+    /// all-error row); unknown-key, null-key and per-key independence (no per-key futures — every accessor projects the
+    /// one completion; the description guards are the null-key rows); a description over a succeeded call, and with it
+    /// the unknown-user lookup itself (no populated result root can be built in a unit test: the ABI exports no
+    /// constructor for one and the mock fails this RPC, see <see cref="AdminP7ResultMarshalTests"/>); memoization
+    /// (<c>All()</c> and <c>Users()</c> hand back the views' own instances, so a recomputed projection is not
+    /// observable); identity and erasure identity (each accessor call is a fresh projection on both flavours; no void
+    /// view).
+    /// </summary>
+    public static TheoryData<string, string> DescribeUserScramCredentialsRows => Rows(
+        "all-succeed",
+        "fails",
+        "all-error",
+        "description-null-user",
+        "description-invalid-user",
+        "description-before-completion");
+
+    /// <summary>
+    /// <see cref="AlterUserScramCredentialsResult"/> / <see cref="AsyncAlterUserScramCredentialsResult"/> (M15/P14 S5e),
+    /// keyed by user under the ordinal comparer the bridge keys by (<see cref="s_users"/>). Two rows pin the internal
+    /// constructor (Q3, FU-5): "constructor-null-guard", its guard at construction, alike on both flavours; and
+    /// "constructor-by-reference", that it reads the map it is given rather than a copy, as Java's unmodifiable view over
+    /// it does (<c>AlterUserScramCredentialsResult.java:38-39</c>). Omitted: memoization (no projection — its only
+    /// composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> AlterUserScramCredentialsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity",
+        "constructor-null-guard",
+        "constructor-by-reference");
+
+    /// <summary>
+    /// <see cref="CreateDelegationTokenResult"/> / <see cref="AsyncCreateDelegationTokenResult"/> (M15/P14 S5e): one
+    /// future, <c>DelegationToken()</c>, and no keys. Omitted: one-fails / two-fail / all-fail (one future, so they
+    /// collapse into the fails row); unknown-key, null-key and per-key independence (no keys); memoization (no projection
+    /// or aggregate: <c>DelegationToken()</c> is the operation's own future); erasure identity (no void view; the identity
+    /// row pins <c>DelegationToken()</c>).
+    /// </summary>
+    public static TheoryData<string, string> CreateDelegationTokenRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="RenewDelegationTokenResult"/> / <see cref="AsyncRenewDelegationTokenResult"/> (M15/P14 S5e): the rows
+    /// and omissions of <see cref="CreateDelegationTokenRows"/>, over <c>ExpiryTimestamp()</c>.
+    /// </summary>
+    public static TheoryData<string, string> RenewDelegationTokenRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="ExpireDelegationTokenResult"/> / <see cref="AsyncExpireDelegationTokenResult"/> (M15/P14 S5e): the
+    /// rows and omissions of <see cref="CreateDelegationTokenRows"/>, over <c>ExpiryTimestamp()</c>.
+    /// </summary>
+    public static TheoryData<string, string> ExpireDelegationTokenRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="DescribeDelegationTokenResult"/> / <see cref="AsyncDescribeDelegationTokenResult"/> (M15/P14 S5e): one
+    /// future, <c>DelegationTokens()</c>, a projection of the operation's collection to Java's list type
+    /// (<c>DescribeDelegationTokenResult.java:38</c>). "identity" pins that every call returns an equal future over the
+    /// one projection; it does not pin that the future is done the moment the operation is, which the async twin's
+    /// projection, a continuation, is not. "memoization" completes with a collection that is not a list, so the
+    /// projection builds one, and pins that it is built once: the same list on every <c>Get()</c>. Omitted: the rows
+    /// <see cref="CreateDelegationTokenRows"/> omits, but memoization, for the same reasons.
+    /// </summary>
+    public static TheoryData<string, string> DescribeDelegationTokenRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="DescribeFeaturesResult"/> / <see cref="AsyncDescribeFeaturesResult"/> (M15/P14 S5e): the rows and
+    /// omissions of <see cref="CreateDelegationTokenRows"/>, over <c>FeatureMetadata()</c>.
+    /// </summary>
+    public static TheoryData<string, string> DescribeFeaturesRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="UpdateFeaturesResult"/> / <see cref="AsyncUpdateFeaturesResult"/> (M15/P14 S5e), keyed by feature
+    /// under the ordinal comparer the bridge keys by. Omitted: memoization (no projection — its only composite is
+    /// <c>All()</c>); the constructor rows (its constructor is Java's package-private one, <c>UpdateFeaturesResult.java:35</c>,
+    /// with no guard on either flavour, and it is not a Q3 constructor).
+    /// </summary>
+    public static TheoryData<string, string> UpdateFeaturesRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="DescribeUserScramCredentialsResult"/> and <see cref="AsyncDescribeUserScramCredentialsResult"/>:
+    /// <c>All()</c>, <c>Users()</c> and <c>Description</c> compose alike over the one completion.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The views' retained root is the invalid (zero) handle, so <c>Description</c>'s lookup — the only member that
+    /// passes the root to native — must never run here: no row asks for a description over a succeeded call, and on the
+    /// async flavour no row completes the views successfully after asking for one.
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(DescribeUserScramCredentialsRows))]
+    public async Task DescribeUserScramCredentials_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        DescribeUserScramCredentialsHarness harness = DescribeUserScramCredentialsHarness.Create(flavour);
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> all =
+            new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal)
+            {
+                ["alice"] = new UserScramCredentialsDescription("alice", Array.Empty<ScramCredentialInfo>()),
+            };
+        IReadOnlyList<string> users = new[] { "alice", "bob" };
+        KafkaException failure = new KafkaException(7, "the request failed", isRetriable: true);
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe allFuture = harness.All();
+                    FutureProbe usersFuture = harness.Users();
+                    allFuture.AssertPending();
+                    usersFuture.AssertPending();
+
+                    harness.Operation.SetResult(Views(null, all, users));
+
+                    Assert.Same(all, await allFuture.Outcome());
+                    Assert.Same(users, await usersFuture.Outcome());
+                    Assert.Same(all, await harness.All().Outcome());
+                    Assert.Same(users, await harness.Users().Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    // The call's own failure fails every accessor, with the same instance. (A description asked for
+                    // before it is "description-before-completion", on a bounded thread.)
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.All().Outcome());
+                    Assert.Same(failure, await harness.Users().Outcome());
+                    Assert.Same(failure, await harness.Description("alice").Outcome());
+                    Assert.Same(failure, await harness.Description("bob").Outcome());
+                    break;
+                }
+
+            case "all-error":
+                {
+                    // A per-user failure fails all() with the first one, and users() still lists every user,
+                    // the one that failed included (Java :68-69, :89-90).
+                    KafkaException perUser = new KafkaException(58, "bob could not be described", isRetriable: false);
+                    harness.Operation.SetResult(Views(perUser, new Dictionary<string, UserScramCredentialsDescription>(), users));
+
+                    Assert.Same(perUser, await harness.All().Outcome());
+                    Assert.Same(perUser, await harness.All().Outcome());
+                    Assert.Same(users, await harness.Users().Outcome());
+                    break;
+                }
+
+            case "description-null-user":
+                {
+                    // At the call, before and after the call completed, alike on both flavours.
+                    AssertNullArgument(Thrown(() => harness.Description(null!)), "userName");
+                    harness.Operation.SetException(failure);
+                    AssertNullArgument(Thrown(() => harness.Description(null!)), "userName");
+                    break;
+                }
+
+            case "description-invalid-user":
+                {
+                    string expected = new ArgumentException(AdminStrings.InvalidStringMessage, "userName").Message;
+                    AssertArgument(Thrown(() => harness.Description("al\0ice")), "userName", expected);
+                    harness.Operation.SetException(failure);
+                    AssertArgument(Thrown(() => harness.Description("al\0ice")), "userName", expected);
+                    break;
+                }
+
+            case "description-before-completion":
+                {
+                    // The description is asked for, and returns, on a bounded dedicated thread while the call is still
+                    // pending; only then does the call fail. A description that waited for the call at the call would
+                    // never return here (the Join's deadline fails the row); it must instead return a future that is
+                    // pending until the call completes and then fails at Get().
+                    FutureProbe description =
+                        Assert.IsAssignableFrom<FutureProbe>(BlockingCall.RunGet(() => harness.Description("alice")));
+                    description.AssertPending();
+
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await description.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AlterUserScramCredentialsResult"/> and <see cref="AsyncAlterUserScramCredentialsResult"/>: the per-user
+    /// void futures, <c>All()</c> and the internal constructor compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterUserScramCredentialsRows))]
+    public async Task AlterUserScramCredentials_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        switch (row)
+        {
+            case "constructor-null-guard":
+                {
+                    // Rejected at construction, as Java's Objects.requireNonNull rejects it (:39): the same type,
+                    // parameter name and message on both flavours.
+                    AssertNullArgument(
+                        FlavourOf(flavour) == AdminFlavour.Sync
+                            ? Thrown(() => _ = new AlterUserScramCredentialsResult(null!))
+                            : Thrown(() => _ = new AsyncAlterUserScramCredentialsResult(null!)),
+                        "futures");
+                    break;
+                }
+
+            case "constructor-by-reference":
+                await AlterUserScramCredentialsByReference(flavour);
+                break;
+
+            default:
+                await RunKeyedRow(row, VoidHarness<string>.AlterUserScramCredentials(flavour, s_users), UnknownUser);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AlterUserScramCredentials_SyncAndAsyncResults_ComposeAlike"/>'s "constructor-by-reference" row: the
+    /// constructor reads the map it is given, not a copy (<c>AlterUserScramCredentialsResult.java:39</c>, an unmodifiable
+    /// view over it), so <c>Values</c> and <c>All()</c> read whatever it holds when called. One user's future is the map's
+    /// only entry at first; a second, failed one is added after construction.
+    /// </summary>
+    private static async Task AlterUserScramCredentialsByReference(string flavour)
+    {
+        AdminFlavour adminFlavour = FlavourOf(flavour);
+        VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+            "alterUserScramCredentials", s_users, StringComparer.Ordinal, adminFlavour);
+        KafkaException failure = new KafkaException(58, "the second user failed", isRetriable: false);
+        if (adminFlavour == AdminFlavour.Sync)
+        {
+            IReadOnlyDictionary<string, KafkaFuture> erased = SyncAdminFutures.Erase(operation.SyncSources, operation.KeyComparer);
+            Dictionary<string, KafkaFuture> map =
+                new Dictionary<string, KafkaFuture>(StringComparer.Ordinal) { [s_users[0]] = erased[s_users[0]] };
+            AlterUserScramCredentialsResult result = new AlterUserScramCredentialsResult(map);
+            Assert.Same(map, result.Values);
+
+            operation.SetResult(s_users[0], true);
+            AssertReturned(await FutureProbe.Of(result.All()).Outcome());
+
+            map.Add(s_users[1], erased[s_users[1]]);
+            operation.SetException(s_users[1], failure);
+            Assert.Equal(2, result.Values.Count);
+            Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
+            return;
+        }
+
+        Dictionary<string, AsyncKafkaFuture> asyncMap = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
+        {
+            [s_users[0]] = new AsyncKafkaFuture(operation.Tasks[s_users[0]]),
+        };
+        AsyncAlterUserScramCredentialsResult asyncResult = new AsyncAlterUserScramCredentialsResult(asyncMap);
+        Assert.Same(asyncMap, asyncResult.Values);
+
+        operation.SetResult(s_users[0], true);
+        AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
+
+        asyncMap.Add(s_users[1], new AsyncKafkaFuture(operation.Tasks[s_users[1]]));
+        operation.SetException(s_users[1], failure);
+        Assert.Equal(2, asyncResult.Values.Count);
+        Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
+    }
+
+    /// <summary>
+    /// <see cref="CreateDelegationTokenResult"/> and <see cref="AsyncCreateDelegationTokenResult"/>:
+    /// <c>DelegationToken()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(CreateDelegationTokenRows))]
+    public Task CreateDelegationToken_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunSingleRow(row, SingleHarness<DelegationToken>.CreateDelegationToken(flavour), Token("token-1"));
+
+    /// <summary>
+    /// <see cref="RenewDelegationTokenResult"/> and <see cref="AsyncRenewDelegationTokenResult"/>:
+    /// <c>ExpiryTimestamp()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RenewDelegationTokenRows))]
+    public Task RenewDelegationToken_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunSingleRow(row, SingleHarness<long>.RenewDelegationToken(flavour), 1_700_000_000_123L);
+
+    /// <summary>
+    /// <see cref="ExpireDelegationTokenResult"/> and <see cref="AsyncExpireDelegationTokenResult"/>:
+    /// <c>ExpiryTimestamp()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ExpireDelegationTokenRows))]
+    public Task ExpireDelegationToken_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunSingleRow(row, SingleHarness<long>.ExpireDelegationToken(flavour), 1_700_000_000_456L);
+
+    /// <summary>
+    /// <see cref="DescribeDelegationTokenResult"/> and <see cref="AsyncDescribeDelegationTokenResult"/>:
+    /// <c>DelegationTokens()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeDelegationTokenRows))]
+    public async Task DescribeDelegationToken_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        SingleHarness<IReadOnlyCollection<DelegationToken>> harness =
+            SingleHarness<IReadOnlyCollection<DelegationToken>>.DescribeDelegationToken(flavour);
+        List<DelegationToken> tokens = new List<DelegationToken> { Token("token-1"), Token("token-2") };
+        switch (row)
+        {
+            case "identity":
+                {
+                    // Every call returns an equal future over the one projection, before and after it completed.
+                    Assert.True(harness.EqualAcrossCalls());
+                    FutureProbe future = harness.Future();
+                    future.AssertPending();
+
+                    harness.Operation.SetResult(tokens);
+
+                    Assert.Same(tokens, await future.Outcome());
+                    Assert.True(harness.EqualAcrossCalls());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    // A collection that is not a list: the projection builds one, once.
+                    harness.Operation.SetResult(new Queue<DelegationToken>(tokens));
+
+                    object? first = await harness.Future().Outcome();
+                    object? second = await harness.Future().Outcome();
+                    IReadOnlyList<DelegationToken> list = Assert.IsAssignableFrom<IReadOnlyList<DelegationToken>>(first);
+                    Assert.Same(first, second);
+                    Assert.Equal(tokens, list);
+                    break;
+                }
+
+            default:
+                await RunSingleRow(row, harness, tokens);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeFeaturesResult"/> and <see cref="AsyncDescribeFeaturesResult"/>: <c>FeatureMetadata()</c>
+    /// composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeFeaturesRows))]
+    public Task DescribeFeatures_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        FeatureMetadata metadata = new FeatureMetadata(
+            new Dictionary<string, FinalizedVersionRange>(StringComparer.Ordinal)
+            {
+                ["metadata.version"] = new FinalizedVersionRange(1, 20),
+            },
+            7L,
+            new Dictionary<string, SupportedVersionRange>(StringComparer.Ordinal)
+            {
+                ["metadata.version"] = new SupportedVersionRange(1, 21),
+            });
+        return RunSingleRow(row, SingleHarness<FeatureMetadata>.DescribeFeatures(flavour), metadata);
+    }
+
+    /// <summary>
+    /// <see cref="UpdateFeaturesResult"/> and <see cref="AsyncUpdateFeaturesResult"/>: the per-feature void futures and
+    /// <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(UpdateFeaturesRows))]
+    public Task UpdateFeatures_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(row, VoidHarness<string>.UpdateFeatures(flavour, s_features), "kraft.version");
+
     /// <summary>The rows every Result over one future and no keys shares.</summary>
     private static async Task RunSingleRow<T>(string row, SingleHarness<T> harness, T value)
-        where T : class
     {
         switch (row)
         {
@@ -1926,7 +2338,7 @@ public sealed class AdminP14SyncCompositionTests
 
                     harness.Operation.SetResult(value);
 
-                    Assert.Same(value, await future.Outcome());
+                    AssertValue(value, await future.Outcome());
                     break;
                 }
 
@@ -1954,7 +2366,7 @@ public sealed class AdminP14SyncCompositionTests
                     Assert.True(future.IsDone);
                     Assert.True(harness.Future().IsDone);
                     Assert.True(harness.EqualAcrossCalls());
-                    Assert.Same(value, await future.Outcome());
+                    AssertValue(value, await future.Outcome());
                     break;
                 }
 
@@ -2380,6 +2792,45 @@ public sealed class AdminP14SyncCompositionTests
     private static TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
         new TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
 
+    /// <summary>
+    /// The copied-out views a <c>DescribeUserScramCredentials</c> completion carries, over the invalid (zero) root:
+    /// sound only while nothing reaches <c>Description</c>'s lookup, the one member that passes the root to native.
+    /// </summary>
+    private static DescribeUserScramCredentialsViews Views(
+        KafkaException? allError,
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> all,
+        IReadOnlyList<string> users) =>
+        new DescribeUserScramCredentialsViews(
+            allError, all, users, Internal.Interop.SafeDescribeUserScramCredentialsResultHandle.Adopt(IntPtr.Zero));
+
+    private static DelegationToken Token(string tokenId) =>
+        new DelegationToken(
+            new TokenInformation(
+                tokenId,
+                new KafkaPrincipal("User", "alice"),
+                new[] { new KafkaPrincipal("User", "bob") },
+                1_000L,
+                3_000L,
+                2_000L),
+            new byte[] { 1, 2, 3 });
+
+    /// <summary>
+    /// Asserts <paramref name="outcome"/> is <paramref name="value"/>: the same instance for a reference, an equal value
+    /// for a value type (which the probe boxes).
+    /// </summary>
+    private static void AssertValue<T>(T value, object? outcome)
+    {
+        object? expected = value;
+        if (typeof(T).IsValueType)
+        {
+            Assert.Equal(expected, outcome);
+        }
+        else
+        {
+            Assert.Same(expected, outcome);
+        }
+    }
+
     private static void AssertReturned(object? outcome) => Assert.Same(BlockingCall.Returned, outcome);
 
     /// <summary>Runs a call-site action and returns what it threw, or <see langword="null"/>.</summary>
@@ -2714,6 +3165,38 @@ public sealed class AdminP14SyncCompositionTests
             AsyncAlterClientQuotasResult asyncResult = AsyncAlterClientQuotasResult.From(operation);
             return new VoidHarness<ClientQuotaEntity>(
                 operation, keys, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        /// <summary>An <c>AlterUserScramCredentials</c> Result of either flavour (M15/P14 S5e), over the bridge's ordinal comparer.</summary>
+        internal static VoidHarness<string> AlterUserScramCredentials(string flavour, IReadOnlyList<string> users)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+                "alterUserScramCredentials", users, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterUserScramCredentialsResult result = AlterUserScramCredentialsResult.From(operation);
+                return new VoidHarness<string>(operation, users, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncAlterUserScramCredentialsResult asyncResult = AsyncAlterUserScramCredentialsResult.From(operation);
+            return new VoidHarness<string>(operation, users, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        /// <summary>An <c>UpdateFeatures</c> Result of either flavour (M15/P14 S5e), over the bridge's ordinal comparer.</summary>
+        internal static VoidHarness<string> UpdateFeatures(string flavour, IReadOnlyList<string> features)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
+                "updateFeatures", features, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                UpdateFeaturesResult result = UpdateFeaturesResult.From(operation);
+                return new VoidHarness<string>(operation, features, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncUpdateFeaturesResult asyncResult = AsyncUpdateFeaturesResult.From(operation);
+            return new VoidHarness<string>(operation, features, true, null, null, () => asyncResult.Values, asyncResult.All);
         }
 
         internal override void Succeed(TKey key) => _operation.SetResult(key, true);
@@ -3655,12 +4138,12 @@ public sealed class AdminP14SyncCompositionTests
     }
 
     /// <summary>
-    /// A Result over one future and no keys, of either flavour (M15/P14 S5d) — <see cref="DescribeAclsResult"/>'s
-    /// <c>Values()</c> or <see cref="DescribeClientQuotasResult"/>'s <c>Entities()</c> — driven through its operation's
-    /// own <c>SetResult</c> / <c>SetException</c>.
+    /// A Result over one future and no keys, of either flavour (M15/P14 S5d and S5e) — <see cref="DescribeAclsResult"/>'s
+    /// <c>Values()</c>, <see cref="DescribeClientQuotasResult"/>'s <c>Entities()</c>, or the single accessor of a
+    /// delegation-token or <c>DescribeFeatures</c> Result — driven through its operation's own <c>SetResult</c> /
+    /// <c>SetException</c>. <typeparamref name="T"/> may be a value type (the expiry timestamps).
     /// </summary>
     private sealed class SingleHarness<T>
-        where T : class
     {
         private readonly Func<FutureProbe> _future;
         private readonly Func<bool> _equalAcrossCalls;
@@ -3712,9 +4195,158 @@ public sealed class AdminP14SyncCompositionTests
                 () => asyncResult.Entities() == asyncResult.Entities());
         }
 
+        internal static SingleHarness<DelegationToken> CreateDelegationToken(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<DelegationToken> operation =
+                new SingleAdminOperation<DelegationToken>("createDelegationToken", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                CreateDelegationTokenResult result = CreateDelegationTokenResult.From(operation);
+                return new SingleHarness<DelegationToken>(
+                    operation, () => FutureProbe.Of(result.DelegationToken()), () => result.DelegationToken() == result.DelegationToken());
+            }
+
+            AsyncCreateDelegationTokenResult asyncResult = AsyncCreateDelegationTokenResult.From(operation);
+            return new SingleHarness<DelegationToken>(
+                operation,
+                () => FutureProbe.Of(asyncResult.DelegationToken()),
+                () => asyncResult.DelegationToken() == asyncResult.DelegationToken());
+        }
+
+        internal static SingleHarness<long> RenewDelegationToken(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<long> operation = new SingleAdminOperation<long>("renewDelegationToken", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                RenewDelegationTokenResult result = RenewDelegationTokenResult.From(operation);
+                return new SingleHarness<long>(
+                    operation, () => FutureProbe.Of(result.ExpiryTimestamp()), () => result.ExpiryTimestamp() == result.ExpiryTimestamp());
+            }
+
+            AsyncRenewDelegationTokenResult asyncResult = AsyncRenewDelegationTokenResult.From(operation);
+            return new SingleHarness<long>(
+                operation,
+                () => FutureProbe.Of(asyncResult.ExpiryTimestamp()),
+                () => asyncResult.ExpiryTimestamp() == asyncResult.ExpiryTimestamp());
+        }
+
+        internal static SingleHarness<long> ExpireDelegationToken(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<long> operation = new SingleAdminOperation<long>("expireDelegationToken", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                ExpireDelegationTokenResult result = ExpireDelegationTokenResult.From(operation);
+                return new SingleHarness<long>(
+                    operation, () => FutureProbe.Of(result.ExpiryTimestamp()), () => result.ExpiryTimestamp() == result.ExpiryTimestamp());
+            }
+
+            AsyncExpireDelegationTokenResult asyncResult = AsyncExpireDelegationTokenResult.From(operation);
+            return new SingleHarness<long>(
+                operation,
+                () => FutureProbe.Of(asyncResult.ExpiryTimestamp()),
+                () => asyncResult.ExpiryTimestamp() == asyncResult.ExpiryTimestamp());
+        }
+
+        internal static SingleHarness<IReadOnlyCollection<DelegationToken>> DescribeDelegationToken(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation =
+                new SingleAdminOperation<IReadOnlyCollection<DelegationToken>>("describeDelegationToken", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeDelegationTokenResult result = DescribeDelegationTokenResult.From(operation);
+                return new SingleHarness<IReadOnlyCollection<DelegationToken>>(
+                    operation,
+                    () => FutureProbe.Of(result.DelegationTokens()),
+                    () => result.DelegationTokens() == result.DelegationTokens());
+            }
+
+            AsyncDescribeDelegationTokenResult asyncResult = AsyncDescribeDelegationTokenResult.From(operation);
+            return new SingleHarness<IReadOnlyCollection<DelegationToken>>(
+                operation,
+                () => FutureProbe.Of(asyncResult.DelegationTokens()),
+                () => asyncResult.DelegationTokens() == asyncResult.DelegationTokens());
+        }
+
+        internal static SingleHarness<FeatureMetadata> DescribeFeatures(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<FeatureMetadata> operation = new SingleAdminOperation<FeatureMetadata>("describeFeatures", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeFeaturesResult result = DescribeFeaturesResult.From(operation);
+                return new SingleHarness<FeatureMetadata>(
+                    operation, () => FutureProbe.Of(result.FeatureMetadata()), () => result.FeatureMetadata() == result.FeatureMetadata());
+            }
+
+            AsyncDescribeFeaturesResult asyncResult = AsyncDescribeFeaturesResult.From(operation);
+            return new SingleHarness<FeatureMetadata>(
+                operation,
+                () => FutureProbe.Of(asyncResult.FeatureMetadata()),
+                () => asyncResult.FeatureMetadata() == asyncResult.FeatureMetadata());
+        }
+
         internal FutureProbe Future() => _future();
 
         internal bool EqualAcrossCalls() => _equalAcrossCalls();
+    }
+
+    /// <summary>
+    /// A <c>DescribeUserScramCredentials</c> Result of either flavour (M15/P14 S5e) — <c>All()</c>, <c>Users()</c> and
+    /// <c>Description</c> over one completion — driven through its operation's own <c>SetResult</c> /
+    /// <c>SetException</c>.
+    /// </summary>
+    private sealed class DescribeUserScramCredentialsHarness
+    {
+        private readonly Func<FutureProbe> _all;
+        private readonly Func<FutureProbe> _users;
+        private readonly Func<string, FutureProbe> _description;
+
+        private DescribeUserScramCredentialsHarness(
+            SingleAdminOperation<DescribeUserScramCredentialsViews> operation,
+            Func<FutureProbe> all,
+            Func<FutureProbe> users,
+            Func<string, FutureProbe> description)
+        {
+            Operation = operation;
+            _all = all;
+            _users = users;
+            _description = description;
+        }
+
+        internal SingleAdminOperation<DescribeUserScramCredentialsViews> Operation { get; }
+
+        internal static DescribeUserScramCredentialsHarness Create(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<DescribeUserScramCredentialsViews> operation =
+                new SingleAdminOperation<DescribeUserScramCredentialsViews>("describeUserScramCredentials", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeUserScramCredentialsResult result = DescribeUserScramCredentialsResult.From(operation);
+                return new DescribeUserScramCredentialsHarness(
+                    operation,
+                    () => FutureProbe.Of(result.All()),
+                    () => FutureProbe.Of(result.Users()),
+                    user => FutureProbe.Of(result.Description(user)));
+            }
+
+            AsyncDescribeUserScramCredentialsResult asyncResult = AsyncDescribeUserScramCredentialsResult.From(operation);
+            return new DescribeUserScramCredentialsHarness(
+                operation,
+                () => FutureProbe.Of(asyncResult.All()),
+                () => FutureProbe.Of(asyncResult.Users()),
+                user => FutureProbe.Of(asyncResult.Description(user)));
+        }
+
+        internal FutureProbe All() => _all();
+
+        internal FutureProbe Users() => _users();
+
+        internal FutureProbe Description(string userName) => _description(userName);
     }
 
     /// <summary>
