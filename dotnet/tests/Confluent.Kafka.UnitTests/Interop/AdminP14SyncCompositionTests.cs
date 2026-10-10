@@ -834,6 +834,289 @@ public sealed class AdminP14SyncCompositionTests
             new TopicPartitionReplica("gamma", 0, 1));
 
     /// <summary>
+    /// <see cref="ElectLeadersResult"/> / <see cref="AsyncElectLeadersResult"/> (M15/P14 S5b): one future over a map
+    /// whose values are the per-partition outcomes, and <c>All()</c>'s walk over those values. The one-fails /
+    /// two-fail / all-fail rows put the failures in the map, where Java's <c>Optional&lt;Throwable&gt;</c> carries them
+    /// (the map's own future succeeds); the fails row is the call-level failure. Omitted: unknown-key, null-key and
+    /// per-key independence (one future and no per-key member); erasure identity (no void view; the identity row pins
+    /// <c>Partitions()</c>).
+    /// </summary>
+    public static TheoryData<string, string> ElectLeadersRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "fails",
+        "memoization",
+        "identity");
+
+    /// <summary>
+    /// <see cref="AlterPartitionReassignmentsResult"/> / <see cref="AsyncAlterPartitionReassignmentsResult"/> (M15/P14
+    /// S5b). Omitted: null-key (<see cref="TopicPartition"/> is a value type, so a null key cannot be expressed);
+    /// memoization (no projection — its only composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> AlterPartitionReassignmentsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="ListPartitionReassignmentsResult"/> / <see cref="AsyncListPartitionReassignmentsResult"/> (M15/P14
+    /// S5b): one future, no projection, no keys. Omitted: one-fails / two-fail / all-fail (one future, and the ABI
+    /// declares no per-partition error, so they collapse into the fails row); unknown-key, null-key and per-key
+    /// independence (no keys); memoization (no projection or aggregate); erasure identity (no void view; the identity row
+    /// pins <c>Reassignments()</c>).
+    /// </summary>
+    public static TheoryData<string, string> ListPartitionReassignmentsRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="ListOffsetsResult"/> / <see cref="AsyncListOffsetsResult"/> (M15/P14 S5b). The per-key member is
+    /// <c>PartitionResult</c>, so the unknown-key row asserts its own guard rather than a dictionary's. Omitted: null-key
+    /// (<see cref="TopicPartition"/> is a value type, so a null key cannot be expressed); erasure identity (no void view;
+    /// its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> ListOffsetsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="ElectLeadersResult"/> and <see cref="AsyncElectLeadersResult"/>: <c>Partitions()</c> and the walk
+    /// <c>All()</c> makes over its values compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ElectLeadersRows))]
+    public async Task ElectLeaders_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ElectLeadersHarness harness = ElectLeadersHarness.For(flavour);
+        TopicPartition[] partitions = TopicPartitions();
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe map = harness.Partitions();
+                    FutureProbe all = harness.All();
+                    map.AssertPending();
+                    all.AssertPending();
+
+                    Dictionary<TopicPartition, KafkaException?> outcomes = Outcomes(partitions, null, null, null);
+                    harness.Operation.SetResult(outcomes);
+
+                    Assert.Same(outcomes, await map.Outcome());
+                    AssertReturned(await all.Outcome());
+                    break;
+                }
+
+            case "one-fails":
+                {
+                    // A partition's failure is a VALUE: the map's own future succeeds, and only All() walks it into one.
+                    KafkaException failure = new KafkaException(84, "the second election failed", isRetriable: false);
+                    Dictionary<TopicPartition, KafkaException?> outcomes = Outcomes(partitions, null, failure, null);
+                    harness.Operation.SetResult(outcomes);
+
+                    Assert.Same(outcomes, await harness.Partitions().Outcome());
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "two-fail-first-in-key-order":
+                {
+                    // The walk reports the first failure in the map's order (the ABI's sorted order), not the last.
+                    KafkaException first = new KafkaException(84, "the second election failed", isRetriable: false);
+                    KafkaException last = new KafkaException(85, "the third election failed", isRetriable: true);
+                    Dictionary<TopicPartition, KafkaException?> outcomes = Outcomes(partitions, null, first, last);
+                    harness.Operation.SetResult(outcomes);
+
+                    Assert.Same(first, await harness.All().Outcome());
+                    Assert.Same(outcomes, await harness.Partitions().Outcome());
+                    break;
+                }
+
+            case "all-fail":
+                {
+                    KafkaException[] failures =
+                    {
+                        new KafkaException(84, "the first election failed", isRetriable: false),
+                        new KafkaException(85, "the second election failed", isRetriable: true),
+                        new KafkaException(86, "the third election failed", isRetriable: false),
+                    };
+                    Dictionary<TopicPartition, KafkaException?> outcomes = Outcomes(partitions, failures);
+                    harness.Operation.SetResult(outcomes);
+
+                    Assert.Same(failures[0], await harness.All().Outcome());
+                    IReadOnlyDictionary<TopicPartition, KafkaException?> map =
+                        Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
+                            await harness.Partitions().Outcome());
+                    for (int index = 0; index < partitions.Length; index++)
+                    {
+                        Assert.Same(failures[index], map[partitions[index]]);
+                    }
+
+                    break;
+                }
+
+            case "fails":
+                {
+                    // The call-level failure fails the map's future, and All() forwards it (Java's `throwable != null`).
+                    KafkaException failure = new KafkaException(7, "electLeaders failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.Partitions().Outcome());
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    KafkaException failure = new KafkaException(84, "the second election failed", isRetriable: false);
+                    harness.Operation.SetResult(Outcomes(partitions, null, failure, null));
+
+                    // One All() future walks once, so every Get() of it rethrows the same instance ...
+                    FutureProbe all = harness.All();
+                    Assert.Same(failure, await all.Outcome());
+                    Assert.Same(failure, await all.Outcome());
+
+                    // ... and a new call is a new future, as Java allocates a fresh KafkaFutureImpl per all() call.
+                    (bool fresh, FutureProbe first, FutureProbe second) = harness.TwoAlls();
+                    Assert.True(fresh, "two All() calls returned an equal future");
+                    Assert.Same(failure, await first.Outcome());
+                    Assert.Same(failure, await second.Outcome());
+                    break;
+                }
+
+            case "identity":
+                {
+                    // Partitions() is the operation's own future: equal on every call, done the moment it is.
+                    Assert.True(harness.PartitionsEqualAcrossCalls());
+                    FutureProbe map = harness.Partitions();
+                    Assert.False(map.IsDone);
+
+                    Dictionary<TopicPartition, KafkaException?> outcomes = Outcomes(partitions, null, null, null);
+                    harness.Operation.SetResult(outcomes);
+
+                    Assert.True(map.IsDone);
+                    Assert.True(harness.Partitions().IsDone);
+                    Assert.True(harness.PartitionsEqualAcrossCalls());
+                    Assert.Same(outcomes, await map.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AlterPartitionReassignmentsResult"/> and <see cref="AsyncAlterPartitionReassignmentsResult"/>: the
+    /// per-partition void futures and <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AlterPartitionReassignmentsRows))]
+    public Task AlterPartitionReassignments_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(
+            row,
+            VoidHarness<TopicPartition>.AlterPartitionReassignments(flavour, TopicPartitions()),
+            new TopicPartition("gamma", 0));
+
+    /// <summary>
+    /// <see cref="ListPartitionReassignmentsResult"/> and <see cref="AsyncListPartitionReassignmentsResult"/>:
+    /// <c>Reassignments()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListPartitionReassignmentsRows))]
+    public async Task ListPartitionReassignments_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListPartitionReassignmentsHarness harness = ListPartitionReassignmentsHarness.For(flavour);
+        Dictionary<TopicPartition, PartitionReassignment> reassignments = new Dictionary<TopicPartition, PartitionReassignment>
+        {
+            [new TopicPartition("alpha", 0)] = new PartitionReassignment(new[] { 1, 2, 3 }, new[] { 3 }, Array.Empty<int>()),
+            [new TopicPartition("beta", 0)] = new PartitionReassignment(new[] { 2, 3 }, Array.Empty<int>(), new[] { 1 }),
+        };
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe map = harness.Reassignments();
+                    map.AssertPending();
+
+                    harness.Operation.SetResult(reassignments);
+
+                    Assert.Same(reassignments, await map.Outcome());
+                    break;
+                }
+
+            case "fails":
+                {
+                    KafkaException failure = new KafkaException(7, "listPartitionReassignments failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.Reassignments().Outcome());
+                    break;
+                }
+
+            case "identity":
+                {
+                    // Reassignments() is the operation's own future: equal on every call, done the moment it is.
+                    Assert.True(harness.ReassignmentsEqualAcrossCalls());
+                    FutureProbe map = harness.Reassignments();
+                    Assert.False(map.IsDone);
+
+                    harness.Operation.SetResult(reassignments);
+
+                    Assert.True(map.IsDone);
+                    Assert.True(harness.Reassignments().IsDone);
+                    Assert.True(harness.ReassignmentsEqualAcrossCalls());
+                    Assert.Same(reassignments, await map.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ListOffsetsResult"/> and <see cref="AsyncListOffsetsResult"/>: the per-partition futures
+    /// <c>PartitionResult</c> hands out and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListOffsetsRows))]
+    public async Task ListOffsets_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        TopicPartition[] partitions = TopicPartitions();
+        ListOffsetsHarness harness = ListOffsetsHarness.For(flavour, partitions);
+        TopicPartition unknown = new TopicPartition("gamma", 0);
+        if (row != "unknown-key")
+        {
+            await RunKeyedRow(row, harness, unknown);
+            return;
+        }
+
+        // PartitionResult is the only per-key member, and its guard is Java's (ListOffsetsResult.java:43-46):
+        // synchronous, at the call, an ArgumentException with the exact message — not a dictionary's KeyNotFoundException.
+        string expected = new ArgumentException("List Offsets for partition \"gamma-0\" was not attempted", "partition").Message;
+        ArgumentException failure = Assert.IsType<ArgumentException>(harness.CallIndexer(unknown));
+        Assert.Equal("partition", failure.ParamName);
+        Assert.Equal(expected, failure.Message);
+        Assert.False(harness.ContainsKey(unknown));
+        Assert.True(harness.ContainsKey(partitions[0]));
+    }
+
+    /// <summary>
     /// The rows every keyed Result shares, over <paramref name="harness"/>'s three keys in their key order.
     /// </summary>
     private static async Task RunKeyedRow<TKey>(string row, KeyedHarness<TKey> harness, TKey unknown)
@@ -1041,6 +1324,26 @@ public sealed class AdminP14SyncCompositionTests
         new TopicPartitionReplica("alpha", 1, 2),
         new TopicPartitionReplica("beta", 0, 1),
     };
+
+    private static TopicPartition[] TopicPartitions() => new[]
+    {
+        new TopicPartition("alpha", 0),
+        new TopicPartition("alpha", 1),
+        new TopicPartition("beta", 0),
+    };
+
+    /// <summary>An election map in <paramref name="partitions"/>' order, each partition mapped to its outcome.</summary>
+    private static Dictionary<TopicPartition, KafkaException?> Outcomes(
+        IReadOnlyList<TopicPartition> partitions, params KafkaException?[] outcomes)
+    {
+        Dictionary<TopicPartition, KafkaException?> map = new Dictionary<TopicPartition, KafkaException?>();
+        for (int index = 0; index < partitions.Count; index++)
+        {
+            map.Add(partitions[index], outcomes[index]);
+        }
+
+        return map;
+    }
 
     private static TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
         new TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
@@ -1303,6 +1606,24 @@ public sealed class AdminP14SyncCompositionTests
             AsyncAlterReplicaLogDirsResult asyncResult = AsyncAlterReplicaLogDirsResult.From(operation);
             return new VoidHarness<TopicPartitionReplica>(
                 operation, replicas, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        internal static VoidHarness<TopicPartition> AlterPartitionReassignments(
+            string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<TopicPartition> operation = new VoidKeyedAdminOperation<TopicPartition>(
+                "alterPartitionReassignments", partitions, EqualityComparer<TopicPartition>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AlterPartitionReassignmentsResult result = AlterPartitionReassignmentsResult.From(operation);
+                return new VoidHarness<TopicPartition>(
+                    operation, partitions, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncAlterPartitionReassignmentsResult asyncResult = AsyncAlterPartitionReassignmentsResult.From(operation);
+            return new VoidHarness<TopicPartition>(
+                operation, partitions, true, null, null, () => asyncResult.Values, asyncResult.All);
         }
 
         internal override void Succeed(TKey key) => _operation.SetResult(key, true);
@@ -1740,5 +2061,178 @@ public sealed class AdminP14SyncCompositionTests
 
         internal bool AllEqualAcrossCalls() =>
             _sync is not null ? _sync.All() == _sync.All() : _async!.All() == _async.All();
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ElectLeaders_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
+    /// </summary>
+    private sealed class ElectLeadersHarness
+    {
+        private readonly ElectLeadersResult? _sync;
+        private readonly AsyncElectLeadersResult? _async;
+
+        private ElectLeadersHarness(
+            SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation,
+            ElectLeadersResult? sync,
+            AsyncElectLeadersResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> Operation { get; }
+
+        internal static ElectLeadersHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
+                new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>("electLeaders", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ElectLeadersHarness(operation, ElectLeadersResult.From(operation), null)
+                : new ElectLeadersHarness(operation, null, AsyncElectLeadersResult.From(operation));
+        }
+
+        internal FutureProbe Partitions() =>
+            _sync is not null ? FutureProbe.Of(_sync.Partitions()) : FutureProbe.Of(_async!.Partitions());
+
+        internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal bool PartitionsEqualAcrossCalls() =>
+            _sync is not null ? _sync.Partitions() == _sync.Partitions() : _async!.Partitions() == _async.Partitions();
+
+        /// <summary>
+        /// Two <c>All()</c> calls: whether they are different futures, and both, so the caller observes each outcome
+        /// (an async one left unobserved would fault on the finalizer).
+        /// </summary>
+        internal (bool Fresh, FutureProbe First, FutureProbe Second) TwoAlls()
+        {
+            if (_sync is not null)
+            {
+                KafkaFuture first = _sync.All();
+                KafkaFuture second = _sync.All();
+                return (first != second, FutureProbe.Of(first), FutureProbe.Of(second));
+            }
+
+            AsyncKafkaFuture asyncFirst = _async!.All();
+            AsyncKafkaFuture asyncSecond = _async.All();
+            return (asyncFirst != asyncSecond, FutureProbe.Of(asyncFirst), FutureProbe.Of(asyncSecond));
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListPartitionReassignments_SyncAndAsyncResults_ComposeAlike"/>'s flavour
+    /// adapter.
+    /// </summary>
+    private sealed class ListPartitionReassignmentsHarness
+    {
+        private readonly ListPartitionReassignmentsResult? _sync;
+        private readonly AsyncListPartitionReassignmentsResult? _async;
+
+        private ListPartitionReassignmentsHarness(
+            SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation,
+            ListPartitionReassignmentsResult? sync,
+            AsyncListPartitionReassignmentsResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Operation { get; }
+
+        internal static ListPartitionReassignmentsHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> operation =
+                new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                    "listPartitionReassignments", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListPartitionReassignmentsHarness(operation, ListPartitionReassignmentsResult.From(operation), null)
+                : new ListPartitionReassignmentsHarness(operation, null, AsyncListPartitionReassignmentsResult.From(operation));
+        }
+
+        internal FutureProbe Reassignments() =>
+            _sync is not null ? FutureProbe.Of(_sync.Reassignments()) : FutureProbe.Of(_async!.Reassignments());
+
+        internal bool ReassignmentsEqualAcrossCalls() =>
+            _sync is not null
+                ? _sync.Reassignments() == _sync.Reassignments()
+                : _async!.Reassignments() == _async.Reassignments();
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListOffsets_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter: a
+    /// keyed Result with no per-key dictionary, so its per-key member is <c>PartitionResult</c>, and the keys it answers
+    /// for are those <c>PartitionResult</c> does not reject.
+    /// </summary>
+    private sealed class ListOffsetsHarness : KeyedHarness<TopicPartition>
+    {
+        private readonly KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> _operation;
+        private readonly Dictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> _values;
+        private readonly ListOffsetsResult? _sync;
+        private readonly AsyncListOffsetsResult? _async;
+
+        private ListOffsetsHarness(
+            KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation,
+            IReadOnlyList<TopicPartition> partitions,
+            ListOffsetsResult? sync,
+            AsyncListOffsetsResult? async)
+            : base(partitions, true)
+        {
+            _operation = operation;
+            _values = partitions.ToDictionary(
+                partition => partition,
+                partition => new ListOffsetsResult.ListOffsetsResultInfo(100L + partition.Partition, -1L, null));
+            _sync = sync;
+            _async = async;
+        }
+
+        internal static ListOffsetsHarness For(string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation =
+                new KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(
+                    "listOffsets", partitions, EqualityComparer<TopicPartition>.Default, adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListOffsetsHarness(operation, partitions, ListOffsetsResult.From(operation), null)
+                : new ListOffsetsHarness(operation, partitions, null, AsyncListOffsetsResult.From(operation));
+        }
+
+        internal override void Succeed(TopicPartition key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(TopicPartition key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(TopicPartition key) => _values[key];
+
+        internal override IEnumerable<TopicPartition> ValuesKeys() => Keys.Where(Answers).ToList();
+
+        internal override FutureProbe Value(TopicPartition key) =>
+            _sync is not null ? FutureProbe.Of(_sync.PartitionResult(key)) : FutureProbe.Of(_async!.PartitionResult(key));
+
+        internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal override void AssertAllSucceeded(object? outcome)
+        {
+            // The gathered map: every key, in key order, each value the very instance its key completed with.
+            IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> gathered =
+                Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>(outcome);
+            Assert.Equal(Keys, gathered.Keys);
+            foreach (TopicPartition key in Keys)
+            {
+                Assert.Same(_values[key], gathered[key]);
+            }
+        }
+
+        internal override bool ValueEqualAcrossReads(TopicPartition key) =>
+            _sync is not null
+                ? _sync.PartitionResult(key) == _sync.PartitionResult(key)
+                : _async!.PartitionResult(key) == _async.PartitionResult(key);
+
+        internal override bool TryGetValue(TopicPartition key) => Answers(key);
+
+        internal override bool ContainsKey(TopicPartition key) => Answers(key);
+
+        private bool Answers(TopicPartition key) => CallIndexer(key) is null;
     }
 }

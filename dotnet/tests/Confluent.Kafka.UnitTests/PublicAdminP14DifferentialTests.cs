@@ -24,7 +24,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4 and S5a: each converted RPC, called with the same arguments on a
+/// The differential rows of M15/P14 S4, S5a and S5b: each converted RPC, called with the same arguments on a
 /// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
 /// same outcome through every member of its Result — equal values, or an exception of the same type with the same
 /// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
@@ -55,6 +55,10 @@ public sealed class PublicAdminP14DifferentialTests
     private const int LocalIllegalStateCode = -4;
 
     private const string NotImplementedYet = "Not implemented yet";
+
+    // The core's default message for UNKNOWN_TOPIC_OR_PARTITION, which the core mock's reassignment of an unknown
+    // partition carries (Java's mock throws a message-less UnknownTopicOrPartitionException).
+    private const string UnknownTopicOrPartitionMessage = "This server does not host this topic-partition.";
 
     private static readonly Uuid s_missingId = new Uuid(0x7A7A7A7A7A7A7A7AL, 0x5B5B5B5B5B5B5B5BL);
 
@@ -785,6 +789,266 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>ElectLeaders</c> (M15/P14 S5b): Java's <c>MockAdminClient.electLeaders</c> throws
+    /// <c>UnsupportedOperationException("Not implemented yet")</c> (<c>MockAdminClient.java:793-797</c>), which the
+    /// core mock delivers as the call's own failure. For an explicit selection, an empty one and the null "every
+    /// partition" one, <c>Partitions()</c> and <c>All()</c> fail alike on both mocks.
+    /// </summary>
+    [Fact]
+    public async Task ElectLeaders_OnBothMocks_FailsAlike_NotImplementedYet()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        IReadOnlyCollection<TopicPartition>?[] selections =
+        {
+            new[] { new TopicPartition("diff-q", 0) },
+            Array.Empty<TopicPartition>(),
+            null,
+        };
+
+        foreach (IReadOnlyCollection<TopicPartition>? selection in selections)
+        {
+            ElectLeadersResult syncResult = sync.ElectLeaders(ElectionType.Preferred, selection);
+            AsyncElectLeadersResult asyncResult = async.ElectLeaders(ElectionType.Preferred, selection);
+
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.Partitions()), FutureProbe.Of(asyncResult.Partitions())));
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        }
+    }
+
+    /// <summary>
+    /// <c>AlterPartitionReassignments</c> (M15/P14 S5b): a reassignment, a cancellation (a null entry, Java's
+    /// <c>Optional.empty()</c>) and a reassignment of a partition the mock does not have. The per-partition void
+    /// futures and <c>All()</c> agree on both mocks, and a later list shows the same reassignment on both — the
+    /// cancelled partition absent.
+    /// </summary>
+    [Fact]
+    public async Task AlterPartitionReassignments_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(3);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        await Seed(sync, async, new NewTopic("diff-r", 2, 1));
+
+        TopicPartition reassigned = new TopicPartition("diff-r", 0);
+        TopicPartition cancelled = new TopicPartition("diff-r", 1);
+        TopicPartition missing = new TopicPartition("diff-r-missing", 0);
+        Dictionary<TopicPartition, NewPartitionReassignment?> request = new Dictionary<TopicPartition, NewPartitionReassignment?>
+        {
+            [reassigned] = new NewPartitionReassignment(new[] { 0, 2 }),
+            [cancelled] = null,
+            [missing] = new NewPartitionReassignment(new[] { 0 }),
+        };
+
+        AlterPartitionReassignmentsResult syncResult = sync.AlterPartitionReassignments(request);
+        AsyncAlterPartitionReassignmentsResult asyncResult = async.AlterPartitionReassignments(request);
+        Assert.Equal(new[] { reassigned, cancelled, missing }, syncResult.Values.Keys);
+        Assert.Equal(new[] { reassigned, cancelled, missing }, asyncResult.Values.Keys);
+
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(FutureProbe.Of(syncResult.Values[reassigned]), FutureProbe.Of(asyncResult.Values[reassigned])));
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(FutureProbe.Of(syncResult.Values[cancelled]), FutureProbe.Of(asyncResult.Values[cancelled])));
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            UnknownTopicOrPartitionMessage,
+            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+        AssertKafka(
+            UnknownTopicOrPartitionCode,
+            UnknownTopicOrPartitionMessage,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> listed =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                await Agree(
+                    FutureProbe.Of(sync.ListPartitionReassignments(new[] { reassigned, cancelled }).Reassignments()),
+                    FutureProbe.Of(async.ListPartitionReassignments(new[] { reassigned, cancelled }).Reassignments()),
+                    static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome)));
+        Assert.Equal(new[] { reassigned }, listed.Keys);
+        Assert.Equal(new[] { 0, 2 }, Target(listed[reassigned]));
+    }
+
+    /// <summary>
+    /// <c>ListPartitionReassignments(partitions, options)</c> (M15/P14 S5b): with the same reassignment made on both
+    /// mocks, an explicit selection lists it and omits the quiet partition, an empty selection lists nothing, and the
+    /// zero-argument form (a null selection) lists every reassignment — alike on both mocks.
+    /// </summary>
+    [Fact]
+    public async Task ListPartitionReassignments_WithASelection_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(3);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        TopicPartition reassigned = new TopicPartition("diff-s", 0);
+        TopicPartition quiet = new TopicPartition("diff-s", 1);
+        await Reassign(sync, async, new NewTopic("diff-s", 2, 2), reassigned, 0, 2);
+
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> selected =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                await Agree(
+                    FutureProbe.Of(sync.ListPartitionReassignments(new[] { reassigned, quiet }).Reassignments()),
+                    FutureProbe.Of(async.ListPartitionReassignments(new[] { reassigned, quiet }).Reassignments()),
+                    static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome)));
+        Assert.Equal(new[] { reassigned }, selected.Keys);
+        Assert.Equal(new[] { 0, 2 }, Target(selected[reassigned]));
+
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> none =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                await Agree(
+                    FutureProbe.Of(sync.ListPartitionReassignments(Array.Empty<TopicPartition>()).Reassignments()),
+                    FutureProbe.Of(async.ListPartitionReassignments(Array.Empty<TopicPartition>()).Reassignments()),
+                    static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome)));
+        Assert.Empty(none);
+
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> every =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                await Agree(
+                    FutureProbe.Of(sync.ListPartitionReassignments().Reassignments()),
+                    FutureProbe.Of(async.ListPartitionReassignments().Reassignments()),
+                    static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome)));
+        Assert.Equal(new[] { reassigned }, every.Keys);
+    }
+
+    /// <summary>
+    /// <c>ListPartitionReassignments(options)</c> (M15/P14 S5b), the options-only overload, which routes on its own
+    /// (a null selection, not an empty one): it lists every reassignment on both mocks, the same as
+    /// <c>(null, options)</c> does.
+    /// </summary>
+    [Fact]
+    public async Task ListPartitionReassignments_OptionsOnly_OnBothMocks_ListsEveryReassignment()
+    {
+        using MockAdminClient sync = new MockAdminClient(3);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        TopicPartition reassigned = new TopicPartition("diff-t", 0);
+        await Reassign(sync, async, new NewTopic("diff-t", 1, 2), reassigned, 1, 2);
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions();
+
+        IReadOnlyDictionary<TopicPartition, PartitionReassignment> optionsOnly =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(
+                await Agree(
+                    FutureProbe.Of(sync.ListPartitionReassignments(options).Reassignments()),
+                    FutureProbe.Of(async.ListPartitionReassignments(options).Reassignments()),
+                    static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome)));
+        Assert.Equal(new[] { reassigned }, optionsOnly.Keys);
+        Assert.Equal(new[] { 1, 2 }, Target(optionsOnly[reassigned]));
+
+        object? explicitNull = await Agree(
+            FutureProbe.Of(sync.ListPartitionReassignments(null, options).Reassignments()),
+            FutureProbe.Of(async.ListPartitionReassignments(null, options).Reassignments()),
+            static outcome => ReassignmentsOf((IReadOnlyDictionary<TopicPartition, PartitionReassignment>)outcome));
+        Assert.Equal(
+            ReassignmentsOf(optionsOnly),
+            ReassignmentsOf(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(explicitNull)));
+    }
+
+    /// <summary>
+    /// <c>ListOffsets</c> (M15/P14 S5b): with the same offsets seeded on both mocks, an earliest query, a latest query
+    /// and a timestamp query — which Java's mock does not implement (<c>MockAdminClient.java:1230-1231</c> throws from
+    /// the call; the core mock fails that partition instead). The per-partition futures and the gathered <c>All()</c>
+    /// agree on both mocks, and
+    /// <c>PartitionResult</c> rejects an unrequested partition alike, at the call.
+    /// </summary>
+    [Fact]
+    public async Task ListOffsets_OnBothMocks_GivesEqualOutcomes()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition earliest = new TopicPartition("diff-u", 0);
+        TopicPartition latest = new TopicPartition("diff-u", 1);
+        TopicPartition byTime = new TopicPartition("diff-u", 2);
+        Dictionary<TopicPartition, long> beginning = new Dictionary<TopicPartition, long> { [earliest] = 5L };
+        Dictionary<TopicPartition, long> end = new Dictionary<TopicPartition, long> { [latest] = 42L };
+        sync.UpdateBeginningOffsets(beginning);
+        async.UpdateBeginningOffsets(beginning);
+        sync.UpdateEndOffsets(end);
+        async.UpdateEndOffsets(end);
+
+        Dictionary<TopicPartition, OffsetSpec> request = new Dictionary<TopicPartition, OffsetSpec>
+        {
+            [earliest] = OffsetSpec.Earliest(),
+            [latest] = OffsetSpec.Latest(),
+            [byTime] = OffsetSpec.ForTimestamp(1000L),
+        };
+
+        ListOffsetsResult syncResult = sync.ListOffsets(request);
+        AsyncListOffsetsResult asyncResult = async.ListOffsets(request);
+
+        ListOffsetsResult.ListOffsetsResultInfo fromEarliest = Assert.IsType<ListOffsetsResult.ListOffsetsResultInfo>(
+            await Agree(
+                FutureProbe.Of(syncResult.PartitionResult(earliest)),
+                FutureProbe.Of(asyncResult.PartitionResult(earliest)),
+                static outcome => Offsets((ListOffsetsResult.ListOffsetsResultInfo)outcome)));
+        Assert.Equal("5/-1/none", Offsets(fromEarliest));
+        ListOffsetsResult.ListOffsetsResultInfo fromLatest = Assert.IsType<ListOffsetsResult.ListOffsetsResultInfo>(
+            await Agree(
+                FutureProbe.Of(syncResult.PartitionResult(latest)),
+                FutureProbe.Of(asyncResult.PartitionResult(latest)),
+                static outcome => Offsets((ListOffsetsResult.ListOffsetsResultInfo)outcome)));
+        Assert.Equal("42/-1/none", Offsets(fromLatest));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.PartitionResult(byTime)), FutureProbe.Of(asyncResult.PartitionResult(byTime))));
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        TopicPartition unrequested = new TopicPartition("diff-u", 7);
+        AssertThrowAlike<ArgumentException>(
+            () => { _ = syncResult.PartitionResult(unrequested); },
+            () => { _ = asyncResult.PartitionResult(unrequested); });
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); });
+        Assert.Equal("partition", rejected.ParamName);
+        Assert.Equal(
+            new ArgumentException("List Offsets for partition \"diff-u-7\" was not attempted", "partition").Message,
+            rejected.Message);
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the election, reassignment and offset members (M15/P14 S5b) throw alike on
+    /// both mocks — the same type, parameter name and message — before any future exists: a null argument where the
+    /// member takes a required reference, and a null element (a null topic, a null offset spec) where it takes a
+    /// collection. <c>ElectLeaders</c> and <c>ListPartitionReassignments</c> take a null selection as "every
+    /// partition", so only their null-element guard applies.
+    /// </summary>
+    [Fact]
+    public void ElectionsReassignmentsOffsetsGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition nullTopic = default;
+        TopicPartition partition = new TopicPartition("diff-v", 0);
+
+        AssertThrowAlike(() => sync.AlterPartitionReassignments(null!), () => async.AlterPartitionReassignments(null!));
+        AssertThrowAlike(() => sync.ListOffsets(null!), () => async.ListOffsets(null!));
+
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ElectLeaders(ElectionType.Preferred, new[] { nullTopic }),
+            () => async.ElectLeaders(ElectionType.Preferred, new[] { nullTopic }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AlterPartitionReassignments(
+                new Dictionary<TopicPartition, NewPartitionReassignment?> { [nullTopic] = new NewPartitionReassignment(new[] { 0 }) }),
+            () => async.AlterPartitionReassignments(
+                new Dictionary<TopicPartition, NewPartitionReassignment?> { [nullTopic] = new NewPartitionReassignment(new[] { 0 }) }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ListPartitionReassignments(new[] { nullTopic }),
+            () => async.ListPartitionReassignments(new[] { nullTopic }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }),
+            () => async.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = null! }),
+            () => async.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = null! }));
+    }
+
+    /// <summary>
     /// Runs both probes to their outcomes and asserts they agree: equal values, or exceptions of the same type with
     /// the same message (and code). Returns the sync outcome for the row's own pin.
     /// </summary>
@@ -859,6 +1123,48 @@ public sealed class PublicAdminP14DifferentialTests
 
     private static string Resources(IEnumerable<ConfigResource> resources) =>
         string.Join(",", Sorted(resources.Select(static resource => resource.ToString())));
+
+    /// <summary>A reassignment map, comparable across mocks: each partition, sorted, with its reassignment.</summary>
+    private static string ReassignmentsOf(IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments) =>
+        string.Join("|", Sorted(reassignments.Select(static entry => entry.Key + "=" + entry.Value)));
+
+    /// <summary>
+    /// The target replicas a reassignment moves to: its current replicas plus those being added, less those being
+    /// removed, sorted.
+    /// </summary>
+    private static List<int> Target(PartitionReassignment reassignment) =>
+        reassignment.Replicas
+            .Concat(reassignment.AddingReplicas)
+            .Except(reassignment.RemovingReplicas)
+            .Distinct()
+            .OrderBy(static broker => broker)
+            .ToList();
+
+    private static string Offsets(ListOffsetsResult.ListOffsetsResultInfo info) =>
+        info.Offset + "/" + info.Timestamp + "/" + (info.LeaderEpoch?.ToString() ?? "none");
+
+    /// <summary>
+    /// Creates <paramref name="topic"/> on both mocks and reassigns <paramref name="partition"/> to
+    /// <paramref name="targetReplicas"/> on both, asserting both agree.
+    /// </summary>
+    private static async Task Reassign(
+        MockAdminClient sync,
+        AsyncMockAdminClient async,
+        NewTopic topic,
+        TopicPartition partition,
+        params int[] targetReplicas)
+    {
+        await Seed(sync, async, topic);
+        Dictionary<TopicPartition, NewPartitionReassignment?> request = new Dictionary<TopicPartition, NewPartitionReassignment?>
+        {
+            [partition] = new NewPartitionReassignment(targetReplicas),
+        };
+        Assert.Same(
+            BlockingCall.Returned,
+            await Agree(
+                FutureProbe.Of(sync.AlterPartitionReassignments(request).All()),
+                FutureProbe.Of(async.AlterPartitionReassignments(request).All())));
+    }
 
     /// <summary>
     /// One broker's log directories, comparable across mocks: each path, sorted, with its error (if any) and its
