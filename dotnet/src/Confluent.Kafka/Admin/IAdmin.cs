@@ -1447,14 +1447,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Fences out every active producer using the given transactional ids — Java's
     /// <c>fenceProducers(Collection, FenceProducersOptions)</c>. Returns <b>immediately</b>,
-    /// without waiting for the broker.
+    /// without waiting for the broker; the result carries one <see cref="KafkaFuture"/> per id,
+    /// whose <c>Get()</c> blocks the calling thread until that id completes.
     /// </summary>
     /// <param name="transactionalIds">
     /// The transactional ids to fence. De-duplicated, because Java keys its result on a map.
     /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
-    /// <returns>One awaitable per id, plus the three derived views. See <see cref="FenceProducersResult"/>.</returns>
+    /// <returns>One future per id, plus the three derived views. See <see cref="FenceProducersResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
@@ -1462,20 +1463,23 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.FenceProducers"/>
     FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null);
 
     /// <summary>
     /// Describes the ongoing transactions of the given transactional ids — Java's
     /// <c>describeTransactions(Collection, DescribeTransactionsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/> per id, whose <c>Get()</c> blocks the calling thread until
+    /// that id completes.
     /// </summary>
     /// <param name="transactionalIds">
     /// The transactional ids to describe. De-duplicated, because Java keys its result on a map.
     /// An empty collection is a valid request that succeeds with an empty result, as Java's is.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
-    /// <returns>One awaitable per id. See <see cref="DescribeTransactionsResult"/>.</returns>
+    /// <returns>One future per id. See <see cref="DescribeTransactionsResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
@@ -1483,13 +1487,16 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeTransactions"/>
     DescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null);
 
     /// <summary>
     /// Describes the active producers of the given partitions — Java's
     /// <c>describeProducers(Collection, DescribeProducersOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/> per partition, whose <c>Get()</c> blocks the calling thread
+    /// until that partition completes.
     /// </summary>
     /// <param name="partitions">
     /// The partitions to describe. De-duplicated, because Java keys its result on a map. An
@@ -1499,7 +1506,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults. <c>BrokerId</c> is
     /// Java's <c>OptionalInt</c>: unset sends the request to each partition's leader.
     /// </param>
-    /// <returns>One awaitable per partition. See <see cref="DescribeProducersResult"/>.</returns>
+    /// <returns>One future per partition. See <see cref="DescribeProducersResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, which the
@@ -1507,13 +1514,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeProducers"/>
     DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null);
 
     /// <summary>
     /// Lists the cluster's transactions, fanning out to every broker — Java's
     /// <c>listTransactions(ListTransactionsOptions)</c>. Returns <b>immediately</b>, without
-    /// waiting for the brokers.
+    /// waiting for the brokers; the result's views are <see cref="KafkaFuture{T}"/>s, whose
+    /// <c>Get()</c> blocks the calling thread until that view completes.
     /// </summary>
     /// <param name="options">
     /// Request filters, or <see langword="null"/> for Java's defaults (every state, every
@@ -1530,16 +1539,19 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// surrogate (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListTransactions"/>
     ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null);
 
     /// <summary>
     /// Aborts one hanging transaction on a partition — Java's
     /// <c>abortTransaction(AbortTransactionSpec, AbortTransactionOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/>, whose <c>Get()</c> blocks the calling thread until the abort
+    /// completes.
     /// </summary>
     /// <param name="spec">Which transaction to abort.</param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
-    /// <returns>The single awaitable Java publishes. See <see cref="AbortTransactionResult"/>.</returns>
+    /// <returns>The single future Java publishes. See <see cref="AbortTransactionResult"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="spec"/> carries a topic partition whose topic is null (constructible, as
@@ -1548,18 +1560,21 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.AbortTransaction"/>
     AbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options = null);
 
     /// <summary>
     /// Forcefully terminates the ongoing transaction of one transactional id — Java's
     /// <c>forceTerminateTransaction(String, TerminateTransactionOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// termination completes.
     /// </summary>
     /// <param name="transactionalId">Whose transaction to terminate.</param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
-    /// The single awaitable Java publishes — ⚠ as <c>Result()</c>, not <c>All()</c>. See
+    /// The single future Java publishes — ⚠ as <c>Result()</c>, not <c>All()</c>. See
     /// <see cref="TerminateTransactionResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
@@ -1568,6 +1583,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ForceTerminateTransaction"/>
     TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options = null);
 

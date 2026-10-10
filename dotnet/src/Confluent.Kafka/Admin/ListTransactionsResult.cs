@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -28,15 +27,15 @@ namespace Confluent.Kafka.Admin;
 /// ⚠⚠ <b>The three views differ in what they do with a <em>per-broker</em> failure.</b> Java
 /// holds one future over a map of per-broker futures (<c>:35</c>), so a broker that fails is
 /// not a call failure: <see cref="ByBrokerId"/> <b>keeps</b> that failure as one entry's own
-/// task, which is the whole point of the view ("if a partial listing is sufficient",
+/// future, which is the whole point of the view ("if a partial listing is sufficient",
 /// <c>:57-59</c>), while <see cref="AllByBrokerId"/> and <see cref="All"/> fail with the first
 /// error they encounter. The call itself fails only when the broker list could not be
 /// discovered — and then all three views fail with that error.
 /// </para>
 /// <para>
 /// ⚠ <b>The two stages resolve independently, as in Java.</b> <see cref="ByBrokerId"/>
-/// resolves as soon as the brokers are known, while their own tasks may still be running,
-/// and each broker's task resolves when <em>that</em> broker finishes — a fast broker is
+/// resolves as soon as the brokers are known, while their own futures may still be running,
+/// and each broker's future resolves when <em>that</em> broker finishes — a fast broker is
 /// not held up by a slow or failing one.
 /// </para>
 /// <para>
@@ -44,54 +43,74 @@ namespace Confluent.Kafka.Admin;
 /// <c>TransactionState.toString()</c> spelling, the same table
 /// <see cref="ListTransactionsOptions.FilteredStates"/> writes.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on managed latches until its view has completed, and needs no
+/// thread-pool thread: the futures here are composed on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListTransactionsResult"/>
 public sealed class ListTransactionsResult
 {
-    private readonly Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>
+    private readonly ListTransactionsAdminOperation _operation;
+
+    private readonly KafkaFuture<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>
         _byBrokerId;
 
-    /// <summary>Wraps the outer, broker-keyed future — Java's <c>byBrokerId()</c>.</summary>
-    /// <param name="byBrokerId">
-    /// The future of the broker map; each value is that broker's own task, which may still be
-    /// pending when the map resolves.
+    /// <summary>Wraps a sync operation's two stages — Java's <c>byBrokerId()</c> and its per-broker futures.</summary>
+    /// <param name="operation">
+    /// An <see cref="AdminFlavour.Sync"/> <c>listTransactions</c> operation: its outer latch resolves with the broker
+    /// map, each value that broker's own latch, which may still be pending when the map resolves.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="byBrokerId"/> is null.</exception>
-    internal ListTransactionsResult(
-        Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>> byBrokerId)
+    /// <exception cref="ArgumentNullException"><paramref name="operation"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Async"/>.</exception>
+    internal ListTransactionsResult(ListTransactionsAdminOperation operation)
     {
-        _byBrokerId = byBrokerId ?? throw new ArgumentNullException(nameof(byBrokerId));
+        _operation = operation ?? throw new ArgumentNullException(nameof(operation));
+
+        // Built once, so ByBrokerId() hands back an equal future on every call, as the async
+        // twin's eager projection does; the projection is memoized, so every Get() returns the
+        // same map, whose per-broker futures are the brokers' own latches.
+        _byBrokerId = SyncAdminFutures.Project(
+            new KafkaFuture<IReadOnlyDictionary<int, SyncFutureSource<IReadOnlyCollection<TransactionListing>>>>(
+                operation.SyncByBrokerId),
+            static brokers => SyncAdminFutures.Wrap(brokers));
     }
 
     /// <summary>
-    /// Builds this result over a <c>listTransactions</c> operation's outer stage: the one place it is built from an
-    /// admin operation (M15/P14).
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> <c>listTransactions</c> operation: the one place it
+    /// is built from an admin operation (M15/P14).
     /// </summary>
     internal static ListTransactionsResult From(ListTransactionsAdminOperation operation) =>
-        new ListTransactionsResult(operation.ByBrokerId);
+        new ListTransactionsResult(operation);
 
     /// <summary>
     /// Every listing in the cluster, failing with the first error — Java's <c>all()</c>
     /// (<c>:48</c>).
     /// </summary>
-    /// <returns>A task yielding every broker's listings, flattened.</returns>
-    public Task<IReadOnlyCollection<TransactionListing>> All() => Flatten(AllByBrokerId());
+    /// <returns>A future yielding every broker's listings, flattened.</returns>
+    /// <remarks>
+    /// Java's <c>allByBrokerId().thenApply(...)</c>, so it fails exactly when, and with what,
+    /// <see cref="AllByBrokerId"/> does. Each call builds a new future.
+    /// </remarks>
+    public KafkaFuture<IReadOnlyCollection<TransactionListing>> All() =>
+        SyncAdminFutures.Project(AllByBrokerId(), Flatten);
 
     /// <summary>
-    /// One task per broker, <b>keeping</b> each broker's own outcome — Java's
+    /// One future per broker, <b>keeping</b> each broker's own outcome — Java's
     /// <c>byBrokerId()</c> (<c>:68</c>).
     /// </summary>
     /// <returns>
-    /// A task yielding the per-broker map. It fails only if the broker list could not be
-    /// discovered; a broker whose listing failed appears as a faulted entry.
+    /// A future yielding the per-broker map. It fails only if the broker list could not be
+    /// discovered; a broker whose listing failed appears as a failed entry.
     /// </returns>
-    public Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>> ByBrokerId() =>
+    public KafkaFuture<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>> ByBrokerId() =>
         _byBrokerId;
 
     /// <summary>
     /// Every listing keyed by the broker hosting it, failing with the first error — Java's
     /// <c>allByBrokerId()</c> (<c>:92</c>).
     /// </summary>
-    /// <returns>A task yielding the broker-keyed map of listings.</returns>
+    /// <returns>A future yielding the broker-keyed map of listings.</returns>
     /// <remarks>
     /// <para>
     /// ⚠ <b>Fail-fast, as in Java</b> (<c>:92-118</c>): it completes with the full map once
@@ -105,50 +124,19 @@ public sealed class ListTransactionsResult
     /// per-broker callback, and there are none — which is a quirk, not a contract; the core's
     /// own synchronous listing returns an empty result there too.
     /// </para>
+    /// <para>
+    /// Each call builds a new future, as Java allocates a new <c>allFuture</c> per call. One
+    /// future gathers its map once, so every <c>Get()</c> of it returns the same map, or
+    /// rethrows the same broker's exception instance.
+    /// </para>
     /// </remarks>
-    public Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBrokerId() =>
-        Gather(_byBrokerId);
+    public KafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBrokerId() =>
+        new KafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(
+            new FailFastGroupSyncFuture(_operation));
 
-    private static async Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> Gather(
-        Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>> byBrokerId)
+    private static IReadOnlyCollection<TransactionListing> Flatten(
+        IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> brokers)
     {
-        IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers =
-            await byBrokerId.ConfigureAwait(false);
-
-        // In completion order, so the first broker to FAIL fails the view without waiting for
-        // the ones still running — Java's allByBrokerId(). Task.WhenAll would wait for all.
-        List<Task<IReadOnlyCollection<TransactionListing>>> pending =
-            new List<Task<IReadOnlyCollection<TransactionListing>>>(brokers.Values);
-        while (pending.Count > 0)
-        {
-            Task<IReadOnlyCollection<TransactionListing>> finished =
-                await Task.WhenAny(pending).ConfigureAwait(false);
-            if (finished.IsFaulted || finished.IsCanceled)
-            {
-                // Rethrows that broker's own exception (not an AggregateException).
-                await finished.ConfigureAwait(false);
-            }
-
-            pending.Remove(finished);
-        }
-
-        Dictionary<int, IReadOnlyCollection<TransactionListing>> listings =
-            new Dictionary<int, IReadOnlyCollection<TransactionListing>>(
-                brokers.Count, EqualityComparer<int>.Default);
-        foreach (KeyValuePair<int, Task<IReadOnlyCollection<TransactionListing>>> broker in brokers)
-        {
-            listings.Add(broker.Key, broker.Value.Result);
-        }
-
-        return listings;
-    }
-
-    private static async Task<IReadOnlyCollection<TransactionListing>> Flatten(
-        Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> allByBrokerId)
-    {
-        IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> brokers =
-            await allByBrokerId.ConfigureAwait(false);
-
         List<TransactionListing> listings = new List<TransactionListing>();
         foreach (IReadOnlyCollection<TransactionListing> broker in brokers.Values)
         {

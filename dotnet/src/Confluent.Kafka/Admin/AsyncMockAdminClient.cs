@@ -397,7 +397,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
-        AsyncListTransactionsResult.From(_native.ListTransactionsOperation(options));
+        AsyncListTransactionsResult.From(_native.ListTransactionsOperation(options, AdminFlavour.Async));
 
     /// <inheritdoc/>
     public AsyncAbortTransactionResult AbortTransaction(

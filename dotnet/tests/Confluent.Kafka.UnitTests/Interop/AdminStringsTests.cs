@@ -232,6 +232,7 @@ public sealed class AdminStringsTests
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\uD800" },
+            AdminFlavour.Async,
             (nativeHandle, states, stateCount, producerIds, producerIdCount, durationMs, pattern, timeoutMs,
                 byBrokerIdCallback, callback, userData) => submitted = true)));
 
@@ -240,7 +241,7 @@ public sealed class AdminStringsTests
         Assert.False(submitted);
 
         AsyncListTransactionsResult result =
-            AsyncListTransactionsResult.From(admin.ListTransactionsOperation(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
+            AsyncListTransactionsResult.From(admin.ListTransactionsOperation(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }, AdminFlavour.Async));
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(35, failure.Code);
         Assert.Equal("Not implemented yet", failure.Message);

@@ -491,6 +491,7 @@ public sealed class AdminP8SubmitArgumentTests
         CapturedListTransactions captured = new CapturedListTransactions();
         AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             options,
+            AdminFlavour.Async,
             (handle, states, stateCount, producerIds, producerIdCount, durationMs, pattern,
              timeoutMs, byBrokerIdCallback, callback, data) =>
             {

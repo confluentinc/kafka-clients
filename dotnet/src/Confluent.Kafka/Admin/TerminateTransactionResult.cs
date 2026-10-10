@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -22,30 +21,45 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.TerminateTransactionResult</c> (<c>:25</c>).
 /// </summary>
 /// <remarks>
+/// <para>
 /// ⚠ The sole member is <see cref="Result"/>, <b>not</b> <c>All()</c>: Java names it
 /// <c>result()</c> (<c>:36</c>), and it wraps a scalar <c>KafkaFuture&lt;Void&gt;</c> rather
 /// than a per-key map. The five sibling P8 results do answer <c>All()</c>; that asymmetry is
 /// Java's and is deliberately kept.
+/// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the termination has completed, and
+/// needs no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncTerminateTransactionResult"/>
 public sealed class TerminateTransactionResult
 {
-    private readonly Task _result;
+    private readonly KafkaFuture _result;
 
-    internal TerminateTransactionResult(Task result)
+    internal TerminateTransactionResult(KafkaFuture result)
     {
         _result = result;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
+    /// <remarks>
+    /// The <c>bool</c> is the void bridge's internal success token: the future waits on the same latch and does not
+    /// carry it.
+    /// </remarks>
     internal static TerminateTransactionResult From(SingleAdminOperation<bool> operation) =>
-        new TerminateTransactionResult(operation.Task);
+        new TerminateTransactionResult(new KafkaFuture(operation.SyncSource));
 
     /// <summary>
     /// Whether the transaction was terminated — Java's <c>result()</c> (<c>:36</c>).
     /// </summary>
-    /// <returns>An awaitable that completes when the termination has.</returns>
-    public Task Result() => _result;
+    /// <returns>A future that completes when the termination has.</returns>
+    /// <remarks>
+    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
+    /// completion.
+    /// </remarks>
+    public KafkaFuture Result() => _result;
 }

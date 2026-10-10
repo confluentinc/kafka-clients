@@ -381,33 +381,33 @@ public sealed class MockAdminClient : IAdmin
     /// <inheritdoc/>
     public FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null) =>
-        FenceProducersResult.From(_native.FenceProducers(transactionalIds, options, AdminFlavour.Async));
+        FenceProducersResult.From(_native.FenceProducers(transactionalIds, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null) =>
         DescribeTransactionsResult.From(
-            _native.DescribeTransactions(transactionalIds, options, AdminFlavour.Async));
+            _native.DescribeTransactions(transactionalIds, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null) =>
-        DescribeProducersResult.From(_native.DescribeProducers(partitions, options, AdminFlavour.Async));
+        DescribeProducersResult.From(_native.DescribeProducers(partitions, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
-        ListTransactionsResult.From(_native.ListTransactionsOperation(options));
+        ListTransactionsResult.From(_native.ListTransactionsOperation(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public AbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options = null) =>
-        AbortTransactionResult.From(_native.AbortTransaction(spec, options, AdminFlavour.Async));
+        AbortTransactionResult.From(_native.AbortTransaction(spec, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options = null) =>
         TerminateTransactionResult.From(
-            _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Async));
+            _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public Task Close(TimeSpan timeout) => _native.Close(timeout);

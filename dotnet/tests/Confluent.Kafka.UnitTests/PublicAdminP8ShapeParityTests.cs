@@ -17,7 +17,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
@@ -93,19 +92,26 @@ public sealed class PublicAdminP8ShapeParityTests
     /// <summary>
     /// ⚠ <see cref="DescribeProducersResult"/> publishes <b>no per-partition map</b> either:
     /// Java declares only <c>partitionResult(TopicPartition)</c> and <c>all()</c>
-    /// (<c>DescribeProducersResult.java:36, :44</c>).
+    /// (<c>DescribeProducersResult.java:36, :44</c>) — a <see cref="KafkaFuture{T}"/> on the sync flavour and an
+    /// <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5f).
     /// </summary>
-    [Fact]
-    public void DescribeProducersResult_PublishesExactlyJavasTwoMembers()
+    /// <param name="result">The Result type of one flavour.</param>
+    /// <param name="future">That flavour's open generic future type.</param>
+    [Theory]
+    [InlineData(typeof(DescribeProducersResult), typeof(KafkaFuture<>))]
+    [InlineData(typeof(AsyncDescribeProducersResult), typeof(AsyncKafkaFuture<>))]
+    public void DescribeProducersResult_PublishesExactlyJavasTwoMembers(Type result, Type future)
     {
-        Assert.Equal(
-            new[] { "All", "PartitionResult" },
-            DeclaredPublicMethodNames(typeof(DescribeProducersResult)));
-        Assert.Empty(DeclaredPublicPropertyNames(typeof(DescribeProducersResult)));
+        Assert.Equal(new[] { "All", "PartitionResult" }, DeclaredPublicMethodNames(result));
+        Assert.Empty(DeclaredPublicPropertyNames(result));
 
         Assert.Equal(
-            typeof(Task<DescribeProducersResult.PartitionProducerState>),
-            typeof(DescribeProducersResult).GetMethod("PartitionResult")!.ReturnType);
+            future.MakeGenericType(typeof(DescribeProducersResult.PartitionProducerState)),
+            result.GetMethod("PartitionResult")!.ReturnType);
+        Assert.Equal(
+            future.MakeGenericType(
+                typeof(IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>)),
+            result.GetMethod("All")!.ReturnType);
     }
 
     /// <summary>
@@ -128,78 +134,90 @@ public sealed class PublicAdminP8ShapeParityTests
     /// <summary>
     /// ⚠ <see cref="DescribeTransactionsResult"/> publishes <b>no per-id map</b>: Java declares
     /// only <c>description(String)</c> and <c>all()</c>
-    /// (<c>DescribeTransactionsResult.java:43, :62</c>), unlike every sibling describe result.
+    /// (<c>DescribeTransactionsResult.java:43, :62</c>), unlike every sibling describe result — a
+    /// <see cref="KafkaFuture{T}"/> on the sync flavour and an <see cref="AsyncKafkaFuture{T}"/> on the async one
+    /// (M15/P14 S5f).
     /// </summary>
-    [Fact]
-    public void DescribeTransactionsResult_PublishesExactlyJavasTwoMembers()
+    /// <param name="result">The Result type of one flavour.</param>
+    /// <param name="future">That flavour's open generic future type.</param>
+    [Theory]
+    [InlineData(typeof(DescribeTransactionsResult), typeof(KafkaFuture<>))]
+    [InlineData(typeof(AsyncDescribeTransactionsResult), typeof(AsyncKafkaFuture<>))]
+    public void DescribeTransactionsResult_PublishesExactlyJavasTwoMembers(Type result, Type future)
     {
-        Assert.Equal(
-            new[] { "All", "Description" },
-            DeclaredPublicMethodNames(typeof(DescribeTransactionsResult)));
-        Assert.Empty(DeclaredPublicPropertyNames(typeof(DescribeTransactionsResult)));
+        Assert.Equal(new[] { "All", "Description" }, DeclaredPublicMethodNames(result));
+        Assert.Empty(DeclaredPublicPropertyNames(result));
 
         Assert.Equal(
-            typeof(Task<TransactionDescription>),
-            typeof(DescribeTransactionsResult).GetMethod("Description")!.ReturnType);
+            future.MakeGenericType(typeof(TransactionDescription)),
+            result.GetMethod("Description")!.ReturnType);
+        Assert.Equal(
+            future.MakeGenericType(typeof(IReadOnlyDictionary<string, TransactionDescription>)),
+            result.GetMethod("All")!.ReturnType);
     }
 
     /// <summary>
     /// ⚠ <c>listTransactions</c> is the one P8 RPC taking <b>only</b> options — Java has no
     /// required parameter for it — and its result publishes exactly Java's three views
-    /// (<c>ListTransactionsResult.java:48, :68, :92</c>).
+    /// (<c>ListTransactionsResult.java:48, :68, :92</c>), each a <see cref="KafkaFuture{T}"/> on the sync flavour
+    /// and an <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5f).
     /// </summary>
-    [Fact]
-    public void ListTransactions_TakesOnlyOptions_AndPublishesJavasThreeViews()
+    /// <param name="client">The client interface of one flavour.</param>
+    /// <param name="result">That flavour's Result type.</param>
+    /// <param name="future">That flavour's open generic future type.</param>
+    [Theory]
+    [InlineData(typeof(IAdmin), typeof(ListTransactionsResult), typeof(KafkaFuture<>))]
+    [InlineData(typeof(IAsyncAdmin), typeof(AsyncListTransactionsResult), typeof(AsyncKafkaFuture<>))]
+    public void ListTransactions_TakesOnlyOptions_AndPublishesJavasThreeViews(Type client, Type result, Type future)
     {
-        Assert.Single(typeof(IAdmin).GetMethod(nameof(IAdmin.ListTransactions))!.GetParameters());
+        MethodInfo rpc = client.GetMethod(nameof(IAdmin.ListTransactions))!;
+        Assert.Single(rpc.GetParameters());
+        Assert.Equal(result, rpc.ReturnType);
 
-        Assert.Equal(
-            new[] { "All", "AllByBrokerId", "ByBrokerId" },
-            DeclaredPublicMethodNames(typeof(ListTransactionsResult)));
-        Assert.Empty(DeclaredPublicPropertyNames(typeof(ListTransactionsResult)));
+        Assert.Equal(new[] { "All", "AllByBrokerId", "ByBrokerId" }, DeclaredPublicMethodNames(result));
+        Assert.Empty(DeclaredPublicPropertyNames(result));
 
-        // ⚠ byBrokerId() is a future OF a map OF futures: the nesting is what keeps a
-        // per-broker failure addressable, and flattening it would silently drop that view's
-        // whole purpose.
+        // ⚠ byBrokerId() is a future OF a map OF futures — of the same flavour at both levels:
+        // the nesting is what keeps a per-broker failure addressable, and flattening it would
+        // silently drop that view's whole purpose.
+        Type listings = typeof(IReadOnlyCollection<TransactionListing>);
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>>>),
-            typeof(ListTransactionsResult).GetMethod("ByBrokerId")!.ReturnType);
+            future.MakeGenericType(
+                typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(int), future.MakeGenericType(listings))),
+            result.GetMethod("ByBrokerId")!.ReturnType);
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>),
-            typeof(ListTransactionsResult).GetMethod("AllByBrokerId")!.ReturnType);
-        Assert.Equal(
-            typeof(Task<IReadOnlyCollection<TransactionListing>>),
-            typeof(ListTransactionsResult).GetMethod("All")!.ReturnType);
+            future.MakeGenericType(typeof(IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>)),
+            result.GetMethod("AllByBrokerId")!.ReturnType);
+        Assert.Equal(future.MakeGenericType(listings), result.GetMethod("All")!.ReturnType);
     }
 
     /// <summary>
     /// <see cref="FenceProducersResult"/> publishes Java's erased map plus the two projections
     /// (<c>FenceProducersResult.java:44, :53, :60, :67</c>) — and no <c>ProducerIdAndEpoch</c>
-    /// (M15/P8 D50).
+    /// (M15/P8 D50). The futures are <see cref="KafkaFuture"/> / <see cref="KafkaFuture{T}"/> on the sync flavour
+    /// and <see cref="AsyncKafkaFuture"/> / <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5f).
     /// </summary>
-    [Fact]
-    public void FenceProducersResult_PublishesExactlyJavasFourMembers()
+    /// <param name="result">The Result type of one flavour.</param>
+    /// <param name="voidFuture">That flavour's payload-free future type.</param>
+    /// <param name="future">That flavour's open generic future type.</param>
+    [Theory]
+    [InlineData(typeof(FenceProducersResult), typeof(KafkaFuture), typeof(KafkaFuture<>))]
+    [InlineData(typeof(AsyncFenceProducersResult), typeof(AsyncKafkaFuture), typeof(AsyncKafkaFuture<>))]
+    public void FenceProducersResult_PublishesExactlyJavasFourMembers(Type result, Type voidFuture, Type future)
     {
-        Assert.Equal(
-            new[] { "All", "EpochId", "ProducerId" },
-            DeclaredPublicMethodNames(typeof(FenceProducersResult)));
-        Assert.Equal(
-            new[] { "FencedProducers" },
-            DeclaredPublicPropertyNames(typeof(FenceProducersResult)));
+        Assert.Equal(new[] { "All", "EpochId", "ProducerId" }, DeclaredPublicMethodNames(result));
+        Assert.Equal(new[] { "FencedProducers" }, DeclaredPublicPropertyNames(result));
 
         // ⚠ The two projections keep Java's own widths: an epoch is a short here although
         // ProducerState.ProducerEpoch beside it is an int. A C# widening would be silent.
-        Assert.Equal(
-            typeof(Task<long>),
-            typeof(FenceProducersResult).GetMethod("ProducerId")!.ReturnType);
-        Assert.Equal(
-            typeof(Task<short>),
-            typeof(FenceProducersResult).GetMethod("EpochId")!.ReturnType);
+        Assert.Equal(future.MakeGenericType(typeof(long)), result.GetMethod("ProducerId")!.ReturnType);
+        Assert.Equal(future.MakeGenericType(typeof(short)), result.GetMethod("EpochId")!.ReturnType);
+        Assert.Equal(voidFuture, result.GetMethod("All")!.ReturnType);
 
         // The erased view is payload-free, mirroring Java's thenApply(p -> null).
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task>),
-            typeof(FenceProducersResult).GetProperty("FencedProducers")!.PropertyType);
+            typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(string), voidFuture),
+            result.GetProperty("FencedProducers")!.PropertyType);
     }
 
     /// <summary>
@@ -218,15 +236,21 @@ public sealed class PublicAdminP8ShapeParityTests
     }
 
     /// <summary>
-    /// Both members return the non-generic <see cref="Task"/> — Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c> carries no payload, so a <c>Task&lt;T&gt;</c> here would
-    /// be inventing one.
+    /// Both members return a payload-free future — <see cref="KafkaFuture"/> on the sync flavour and
+    /// <see cref="AsyncKafkaFuture"/> on the async one (M15/P14 S5f). Java's <c>KafkaFuture&lt;Void&gt;</c> carries
+    /// no payload, so a valued future here would be inventing one.
     /// </summary>
-    [Fact]
-    public void ResultHandleLessResults_ReturnAPayloadFreeTask()
+    /// <param name="result">The Result type.</param>
+    /// <param name="member">Its sole member, by Java's name.</param>
+    /// <param name="future">The payload-free future type of its flavour.</param>
+    [Theory]
+    [InlineData(typeof(AbortTransactionResult), "All", typeof(KafkaFuture))]
+    [InlineData(typeof(TerminateTransactionResult), "Result", typeof(KafkaFuture))]
+    [InlineData(typeof(AsyncAbortTransactionResult), "All", typeof(AsyncKafkaFuture))]
+    [InlineData(typeof(AsyncTerminateTransactionResult), "Result", typeof(AsyncKafkaFuture))]
+    public void ResultHandleLessResults_ReturnAPayloadFreeFuture(Type result, string member, Type future)
     {
-        Assert.Equal(typeof(Task), typeof(AbortTransactionResult).GetMethod("All")!.ReturnType);
-        Assert.Equal(typeof(Task), typeof(TerminateTransactionResult).GetMethod("Result")!.ReturnType);
+        Assert.Equal(future, result.GetMethod(member)!.ReturnType);
     }
 
     /// <summary>

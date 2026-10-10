@@ -405,7 +405,7 @@ public sealed class AdminListTransactionsTwoStageTests
     [Fact]
     public async Task ABrokersListings_ReachItsOwnEntry_AndEveryView()
     {
-        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(AdminFlavour.Async);
         AsyncListTransactionsResult result = new AsyncListTransactionsResult(operation.ByBrokerId);
 
         TransactionListing first = new TransactionListing("txn-a", 11L, TransactionState.Ongoing);
@@ -448,7 +448,7 @@ public sealed class AdminListTransactionsTwoStageTests
     [Fact]
     public async Task TheFailFastViews_FailWithTheFirstBrokerToFail_NotTheLowestId()
     {
-        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(AdminFlavour.Async);
         AsyncListTransactionsResult result = new AsyncListTransactionsResult(operation.ByBrokerId);
         operation.PublishBrokers(new[] { 1, 2, 3 });
 
@@ -472,7 +472,7 @@ public sealed class AdminListTransactionsTwoStageTests
     [Fact]
     public async Task CountdownZero_FaultsEverythingNothingCompleted()
     {
-        ListTransactionsAdminOperation undiscovered = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation undiscovered = new ListTransactionsAdminOperation(AdminFlavour.Async);
         undiscovered.SetPendingCallbacks(0);
         undiscovered.ReleaseSubmitToken();
 
@@ -481,7 +481,7 @@ public sealed class AdminListTransactionsTwoStageTests
         Assert.Equal(0, noResult.Code);
         Assert.Equal("The listTransactions call completed without delivering a result.", noResult.Message);
 
-        ListTransactionsAdminOperation discovered = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation discovered = new ListTransactionsAdminOperation(AdminFlavour.Async);
         discovered.SetPendingCallbacks(0);
         discovered.PublishBrokers(new[] { 4, 6 });
         discovered.SetBrokerResult(6, Array.Empty<TransactionListing>());
@@ -503,7 +503,7 @@ public sealed class AdminListTransactionsTwoStageTests
     [Fact]
     public void AddPendingCallbacks_ExtendsARunningCountdown_AndRefusesAReleasedOne()
     {
-        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(AdminFlavour.Async);
         operation.SetPendingCallbacks(1);
         operation.AddPendingCallbacks(2);
         operation.AddPendingCallbacks(0);
@@ -581,6 +581,7 @@ public sealed class AdminListTransactionsTwoStageTests
         Submission submission = new Submission();
         submission.Result = AsyncListTransactionsResult.From(admin.ListTransactionsOperation(
             options: null,
+            AdminFlavour.Async,
             (handle, states, stateCount, producerIds, producerIdCount, durationMs, pattern,
              timeoutMs, byBrokerIdCallback, callback, data) =>
             {

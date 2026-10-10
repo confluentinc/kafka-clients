@@ -108,6 +108,12 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(DescribeDelegationTokenResult),
         nameof(DescribeFeaturesResult),
         nameof(UpdateFeaturesResult),
+        nameof(FenceProducersResult),
+        nameof(DescribeTransactionsResult),
+        nameof(DescribeProducersResult),
+        nameof(ListTransactionsResult),
+        nameof(AbortTransactionResult),
+        nameof(TerminateTransactionResult),
     };
 
     /// <summary>
@@ -154,6 +160,12 @@ public sealed class PublicAdminP14SurfaceTests
         nameof(IAdmin.DescribeDelegationToken),
         nameof(IAdmin.DescribeFeatures),
         nameof(IAdmin.UpdateFeatures),
+        nameof(IAdmin.FenceProducers),
+        nameof(IAdmin.DescribeTransactions),
+        nameof(IAdmin.DescribeProducers),
+        nameof(IAdmin.ListTransactions),
+        nameof(IAdmin.AbortTransaction),
+        nameof(IAdmin.ForceTerminateTransaction),
     };
 
     private static readonly string[] s_mockOnly =

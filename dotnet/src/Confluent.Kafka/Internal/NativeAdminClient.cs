@@ -5311,20 +5311,23 @@ internal sealed class NativeAdminClient : IDisposable
     }
 
     /// <summary>
-    /// The production submit of <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>,
-    /// for the async flavour's clients (M15/P14), which wrap the operation in their Result's <c>From</c>.
+    /// The production submit of
+    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, AdminFlavour, NativeListTransactionsSubmit)"/>,
+    /// for a client of the given flavour (M15/P14): each client passes its own flavour, then wraps the operation in its
+    /// Result's <c>From</c>.
     /// </summary>
     /// <remarks>
-    /// Unlike the other RPCs it takes no <see cref="AdminFlavour"/>: the operation has a single, task-backed shape,
-    /// which is the async flavour's.
+    /// Like every other RPC since M15/P14 S5f it takes the <see cref="AdminFlavour"/>, so both of the operation's
+    /// stages are of that flavour's kind (see <see cref="ListTransactionsAdminOperation"/>).
     /// </remarks>
-    internal ListTransactionsAdminOperation ListTransactionsOperation(ListTransactionsOptions? options) =>
-        ListTransactionsOperation(options, NativeMethods.AdminClientListTransactionsAsync);
+    internal ListTransactionsAdminOperation ListTransactionsOperation(
+        ListTransactionsOptions? options, AdminFlavour flavour) =>
+        ListTransactionsOperation(options, flavour, NativeMethods.AdminClientListTransactionsAsync);
 
     /// <summary>
     /// Submits <c>listTransactions</c> and returns immediately with Java's
-    /// <c>byBrokerId()</c> shape: one awaitable over the broker map, whose per-broker
-    /// awaitables each resolve on their own.
+    /// <c>byBrokerId()</c> shape: one future over the broker map, whose per-broker
+    /// futures each resolve on their own.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -5352,7 +5355,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// </para>
     /// </remarks>
     internal ListTransactionsAdminOperation ListTransactionsOperation(
-        ListTransactionsOptions? options, NativeListTransactionsSubmit submit)
+        ListTransactionsOptions? options, AdminFlavour flavour, NativeListTransactionsSubmit submit)
     {
         ThrowIfClosed();
 
@@ -5370,7 +5373,7 @@ internal sealed class NativeAdminClient : IDisposable
         // passes, as "no pattern filter".
         AdminStrings.Validate(options?.FilteredTransactionalIdPattern, nameof(options));
 
-        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation();
+        ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(flavour);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -5434,7 +5437,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// The state filter and its count, produced together — see the transposition note on
-    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, AdminFlavour, NativeListTransactionsSubmit)"/>.
     /// </summary>
     /// <param name="options">The request options, or null.</param>
     /// <param name="pinned">Receives the call-scoped pins the returned pointers borrow from.</param>
@@ -5461,7 +5464,7 @@ internal sealed class NativeAdminClient : IDisposable
 
     /// <summary>
     /// The producer-id filter and its count, produced together — see the transposition note on
-    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, NativeListTransactionsSubmit)"/>.
+    /// <see cref="ListTransactionsOperation(ListTransactionsOptions, AdminFlavour, NativeListTransactionsSubmit)"/>.
     /// </summary>
     /// <param name="options">The request options, or null.</param>
     /// <returns>The producer ids and their count.</returns>

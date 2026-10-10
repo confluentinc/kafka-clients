@@ -15,50 +15,57 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of a <c>describeProducers</c> call — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one awaitable
+/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one future
 /// per topic partition.
 /// </summary>
 /// <remarks>
+/// <para>
 /// ⚠ Java publishes <b>no</b> per-partition map, only the <see cref="PartitionResult"/> lookup
 /// and <see cref="All"/> (<c>:36</c>, <c>:44</c>).
+/// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its partition (or, for
+/// <see cref="All"/>, every partition) has completed, and needs no thread-pool thread: the futures here are composed
+/// on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncDescribeProducersResult"/>
 public sealed class DescribeProducersResult
 {
-    private readonly IReadOnlyDictionary<TopicPartition, Task<PartitionProducerState>> _futures;
+    private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> _futures;
 
-    /// <summary>Wraps one awaitable per topic partition.</summary>
-    /// <param name="futures">One awaitable per requested partition.</param>
+    /// <summary>Wraps one future per topic partition.</summary>
+    /// <param name="futures">One future per requested partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
     internal DescribeProducersResult(
-        IReadOnlyDictionary<TopicPartition, Task<PartitionProducerState>> futures)
+        IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures)
     {
         _futures = futures ?? throw new ArgumentNullException(nameof(futures));
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static DescribeProducersResult From(
         KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation) =>
-        new DescribeProducersResult(operation.Tasks);
+        new DescribeProducersResult(SyncAdminFutures.Wrap(operation.SyncSources));
 
     /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c> (<c>:36</c>).</summary>
     /// <param name="partition">A topic partition from the request.</param>
-    /// <returns>That partition's awaitable.</returns>
+    /// <returns>That partition's future, over its own latch: an equal future on every call.</returns>
     /// <exception cref="ArgumentException">
     /// The partition was not in the request — Java's <c>IllegalArgumentException</c>
     /// (<c>:39-40</c>), thrown <b>synchronously</b> because it is a usage error.
     /// </exception>
-    public Task<PartitionProducerState> PartitionResult(TopicPartition partition) =>
-        _futures.TryGetValue(partition, out Task<PartitionProducerState>? future)
+    public KafkaFuture<PartitionProducerState> PartitionResult(TopicPartition partition) =>
+        _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState> future)
             ? future
             : throw new ArgumentException(
                 string.Format(
@@ -71,32 +78,22 @@ public sealed class DescribeProducersResult
     /// Every partition's producers in one map, succeeding only if every partition did —
     /// Java's <c>all()</c> (<c>:44</c>).
     /// </summary>
-    /// <returns>A task yielding the whole map, or faulting with the first failure.</returns>
+    /// <returns>A future yielding the whole map, or failing with the first failure in key order.</returns>
     /// <remarks>
+    /// <para>
+    /// Every partition is waited for first, so a failure fails the aggregate with the first failure in key order
+    /// exactly as Java's <c>allOf(...).thenApply(...)</c> chain does, rather than whichever partition a reader happens
+    /// to reach first. Each call builds a new aggregate.
+    /// </para>
+    /// <para>
     /// ⚠ <b>Recorded divergence</b> — see <see cref="DescribeTransactionsResult.All"/>, which
     /// states it once for both siblings: Java wraps this one's unreachable gather failure in a
     /// <c>KafkaException</c> (<c>:54</c>) and that one's in a plain <c>RuntimeException</c>,
     /// and neither wrap is expressible here.
+    /// </para>
     /// </remarks>
-    public Task<IReadOnlyDictionary<TopicPartition, PartitionProducerState>> All() => Gather(_futures);
-
-    private static async Task<IReadOnlyDictionary<TopicPartition, PartitionProducerState>> Gather(
-        IReadOnlyDictionary<TopicPartition, Task<PartitionProducerState>> futures)
-    {
-        // WhenAll first, so the aggregate faults with the first failure exactly as Java's
-        // allOf(...).thenApply(...) does rather than with whichever key enumerates first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<TopicPartition, PartitionProducerState> states =
-            new Dictionary<TopicPartition, PartitionProducerState>(
-                futures.Count, EqualityComparer<TopicPartition>.Default);
-        foreach (KeyValuePair<TopicPartition, Task<PartitionProducerState>> entry in futures)
-        {
-            states.Add(entry.Key, entry.Value.Result);
-        }
-
-        return states;
-    }
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionProducerState>> All() =>
+        SyncAdminFutures.GatherAll(_futures, EqualityComparer<TopicPartition>.Default);
 
     /// <summary>
     /// The active producers of one partition — Java's nested
