@@ -32,9 +32,10 @@ namespace Confluent.Kafka.Admin;
 /// while the broker's query itself succeeded — Java documents
 /// <c>KafkaStorageException</c> ("the log directory is offline") and
 /// <c>UnknownServerException</c> as its two values (<c>:54-59</c>). The per-broker
-/// task in <see cref="DescribeLogDirsResult.Descriptions"/> therefore
-/// <b>succeeds</b>, carrying a description whose <see cref="Error"/> is non-null. Faulting
-/// the task here would be a behavioural divergence — the broker answered.
+/// future in <see cref="DescribeLogDirsResult.Descriptions"/> /
+/// <see cref="AsyncDescribeLogDirsResult.Descriptions"/> therefore
+/// <b>succeeds</b>, carrying a description whose <see cref="Error"/> is non-null. Failing
+/// that future here would be a behavioural divergence — the broker answered.
 /// </para>
 /// <para>
 /// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read.

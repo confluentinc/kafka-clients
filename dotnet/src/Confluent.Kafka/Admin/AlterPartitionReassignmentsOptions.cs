@@ -40,7 +40,7 @@ public sealed class AlterPartitionReassignmentsOptions
     /// and that a broker too old to understand the option fails with
     /// <c>UnsupportedVersionException</c> (<c>Admin.java</c>'s
     /// <c>alterPartitionReassignments</c> javadoc). Both arrive here as an ordinary
-    /// per-partition <see cref="KafkaException"/> on that partition's awaitable.
+    /// per-partition <see cref="KafkaException"/> on that partition's future.
     /// </remarks>
     public bool AllowReplicationFactorChange { get; set; } = true;
 }

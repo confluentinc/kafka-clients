@@ -11,8 +11,9 @@
 # multilanguage integration test harness (the dotnet_async backend, M8/P2). It is
 # the async twin of Dockerfile.grpc: identical builder + runtime stages, differing
 # only by ENV CONSUMER_FLAVOR=async (Program.cs then hosts AsyncProducerServiceImpl
-# + AsyncConsumerServiceImpl, driving the binding's asynchronous
-# AsyncKafkaProducer<byte[],byte[]> / AsyncKafkaConsumer<byte[],byte[]>).
+# + AsyncConsumerServiceImpl + AsyncAdminServiceImpl, driving the binding's
+# asynchronous AsyncKafkaProducer<byte[],byte[]> / AsyncKafkaConsumer<byte[],byte[]>
+# / AsyncKafkaAdminClient).
 #
 # Kept STANDALONE (its own FROM, NOT `FROM confluent-kafka-rust/dotnet-grpc-server:dev`)
 # so it has no build-ordering dependency on the sync image and can be rebuilt
@@ -24,10 +25,11 @@
 #
 # Tags the result as confluent-kafka-rust/dotnet-async-grpc-server:dev.
 #
-# The image serves ProducerService + ConsumerService (no AdminService: that is
-# hosted by the sync image only, M15/P12 D1 — see Program.cs); it drives the
+# The image serves ProducerService + ConsumerService + AdminService (admin on both
+# images since M15/P14, over IAsyncAdmin here — see Program.cs); it drives the
 # binding's asynchronous AsyncKafkaProducer<byte[],byte[]> /
-# AsyncKafkaConsumer<byte[],byte[]> over the C ABI. Requires
+# AsyncKafkaConsumer<byte[],byte[]> and AsyncKafkaAdminClient over the C ABI.
+# Requires
 # `cargo build --features ffi --release` to have produced the LINUX
 # libconfluent_kafka.so under rust/target/release/ first (build-grpc-images: build).
 
@@ -95,8 +97,8 @@ ENV LD_LIBRARY_PATH=/app
 # Pin the servicer flavor for this image (M8/P2) — the ONLY behavioral difference
 # from Dockerfile.grpc. Despite its name, Program.cs's CONSUMER_FLAVOR selector
 # picks the whole servicer set: here AsyncProducerServiceImpl +
-# AsyncConsumerServiceImpl (AsyncKafkaProducer / AsyncKafkaConsumer). Mirrors
-# python_async.
+# AsyncConsumerServiceImpl + AsyncAdminServiceImpl (AsyncKafkaProducer /
+# AsyncKafkaConsumer / AsyncKafkaAdminClient). Mirrors python_async.
 ENV CONSUMER_FLAVOR=async
 
 # The server defaults to 127.0.0.1; bind all interfaces so it is reachable

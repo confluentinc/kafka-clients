@@ -19,15 +19,15 @@ Newest first.
     - The sync composites run over latches, not Tasks: `SyncFutureSource`, `ProjectedSyncFuture`, `AllOfSyncFuture`, `GatheringAllOfSyncFuture`, `FailFastGroupSyncFuture`. A sync `Get()` needs no thread-pool thread.
     - A sync `Close(TimeSpan)` over the existing sync `kafka_admin_AdminClient_close`. `IAdmin : IDisposable` only; `IAsyncAdmin : IAsyncDisposable, IDisposable`.
     - The grpc-server serves admin on both flavours (the sync `AdminServiceImpl` plus `AsyncAdminServiceImpl`), and the Rust harness has a `dotnet_async` admin arm.
-  - **Rulings.** PLAN §0: D1–D19, Q1–Q8, the a/b rule, the Q5 checkpoint rulings, and the rule-file texts S7 applied in `6243491a`. Text 1 (`dotnet/CLAUDE.md:59-61`) was applied at close with its final period dropped: it is spliced mid-sentence, before the existing "; producer transactions are **not** exposed yet.", and the words are unchanged.
+  - **Rulings.** PLAN §0: D1–D19, Q1–Q8, the a/b rule, the Q5 checkpoint rulings, and the rule-file texts S7 applied in `6243491a`. Text 1 (`dotnet/CLAUDE.md:60-62`) was applied at close with its final period dropped: it is spliced mid-sentence, before the existing "; producer transactions are **not** exposed yet.", and the words are unchanged.
   - **⚠ Breaking (R8, pre-publish).** Every existing .NET admin user breaks: `KafkaAdminClient` / `MockAdminClient` / `IAdmin` are now sync, and `await` on a `KafkaFuture` does not compile. Async users move to `AsyncKafkaAdminClient` / `IAsyncAdmin`. This is allowed before 1.0.
   - **Q3 parity deviation.** The 10 Result constructors that Java makes public (7) or protected (3) are internal on both flavours, so all 88 Result constructors are internal. Each one's xmldoc says so and points at FU-5.
   - **ListTransactions fail-fast rule.** `AllByBrokerId()` / `All()` compose per call, as Java and the async flavour do. Brokers already complete when the view is requested are examined in discovery order, and the first faulted one wins. Otherwise the first broker to fail in time wins. Zero brokers complete with an empty map.
   - **Supersessions** (the records themselves are left as written):
-    - M15 D2 ("ONE `IAdmin`, no `IAsyncAdmin`"): the M15/P1 entry at line 702 and its "Public surface" bullet at line 708.
-    - M15/P12 D1 ("the admin harness has a sync arm only"): the M15/P12 entry's residual (a) at line 478.
+    - M15 D2 ("ONE `IAdmin`, no `IAsyncAdmin`"): the M15/P1 entry at line 701 and its "Public surface" bullet at line 707.
+    - M15/P12 D1 ("the admin harness has a sync arm only"): the M15/P12 entry's residual (a) at line 477.
     - The M11/P4.2 D10 naming note (Java's Admin `KafkaFuture` "maps to `Task<T>`"): the `dotnet/CLAUDE.md` idiom row now carries the M15/P14 mapping (text 3), and the matching remark in `IAsyncProducer`'s xmldoc is replaced (`1567d020`).
-  - **Closed.** The Admin-xmldoc half of the M11/P4.2 entry's "For the user" item 4 (line 123): `IAdmin.cs:32`, `CreateTopicsResult.cs:30`, `ListTopicsResult.cs:105` and `DescribeClusterResult.cs:49-50`, by the S7 sweep (D18). Its `dotnet/CLAUDE.md:195` half stays open.
+  - **Closed.** The Admin-xmldoc half of the M11/P4.2 entry's "For the user" item 4 (line 122): `IAdmin.cs:32`, `CreateTopicsResult.cs:30`, `ListTopicsResult.cs:105` and `DescribeClusterResult.cs:49-50`, by S4 (`fbe72c47`, `CreateTopicsResult.cs`) and the S7 sweep (D18, `1567d020`, the other three). Its `dotnet/CLAUDE.md:196` half (item 4's `:195`) stays open.
   - **Gates at close:**
     - Unit tests 3010 → **3791** on net8.0 and net10.0; soak 165/165; grpc-server 101; perf-unit 47.
     - Native gRPC harness 169 → **248**: `__grpc_dotnet` 124, and `__grpc_dotnet_async` 45 → **124**, with `DOTNET_GRPC_SKIPS` (raw `--list` 127 / 127). The admin share is **79** per backend; the plan's 78 / 247 was corrected at Q5.
@@ -44,7 +44,7 @@ Newest first.
     - For the six producer / transaction RPCs, the core mock fails every key, where Java's `MockAdminClient` throws "Not implemented yet" from the call. Pre-P14 (the Rust core mock).
     - The known flake `ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext` failed twice in a row once during S5e.
   - **For the user:**
-    1. Follow-ups: FU-5 (tracked) — revisit making the 10 Result constructors public again, together with a public `KafkaFuture<T>.CompletedFuture(T)` (Java's `KafkaFuture.completedFuture`) and an async analog, so users can build Results (for example to mock `IAdmin`). It sits alongside FU-1 to FU-4, defined in the M11/P4.2 entry's "For the user" item 1 (line 120).
+    1. Follow-ups: FU-5 (tracked) — revisit making the 10 Result constructors public again, together with a public `KafkaFuture<T>.CompletedFuture(T)` (Java's `KafkaFuture.completedFuture`) and an async analog, so users can build Results (for example to mock `IAdmin`). It sits alongside FU-1 to FU-4, defined in the M11/P4.2 entry's "For the user" item 1 (line 119).
   - **M18/P1 is pushed** (`origin/prashah_dev_dotnet_binding` = `2d73a746` at this phase's base, PR #196). Its "not pushed" text below is historical and is left as written.
   - **Next unused dotnet N = 96.**
   - **Not pushed.** The user pushes with `git push-external`.

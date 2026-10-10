@@ -18,10 +18,10 @@
 #
 # Tags the result as confluent-kafka-rust/dotnet-grpc-server:dev.
 #
-# The image serves ProducerService + ConsumerService + AdminService (Admin in
-# this sync image only, M15/P12 D1 — see Program.cs); it drives the binding's
-# synchronous KafkaProducer<byte[],byte[]> / KafkaConsumer<byte[],byte[]> and
-# KafkaAdminClient over the C ABI. Requires
+# The image serves ProducerService + ConsumerService + AdminService (Admin over
+# IAdmin; the async image serves it over IAsyncAdmin, M15/P14 — see Program.cs);
+# it drives the binding's synchronous KafkaProducer<byte[],byte[]> /
+# KafkaConsumer<byte[],byte[]> and KafkaAdminClient over the C ABI. Requires
 # `cargo build --features ffi --release` to have produced the LINUX
 # libconfluent_kafka.so under rust/target/release/ first (build-grpc-images: build).
 

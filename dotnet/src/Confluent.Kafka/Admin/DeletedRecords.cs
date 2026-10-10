@@ -41,9 +41,9 @@ public sealed class DeletedRecords
     /// <c>get_low_watermark</c> documents <c>-1</c> for three different situations at
     /// once — the partition failed, the index was out of range, or the watermark really
     /// is <c>-1</c> — so the binding never reads it as a verdict. A partition that failed
-    /// faults its own <see cref="System.Threading.Tasks.Task"/> in
-    /// <see cref="DeleteRecordsResult.LowWatermarks"/> and produces no
-    /// <see cref="DeletedRecords"/> at all; if you are holding one, its partition
+    /// fails its own future in <see cref="DeleteRecordsResult.LowWatermarks"/>
+    /// (<see cref="AsyncDeleteRecordsResult.LowWatermarks"/> on the async flavour) and
+    /// produces no <see cref="DeletedRecords"/> at all; if you are holding one, its partition
     /// succeeded and this is its watermark.
     /// </para>
     /// <para>

@@ -44,8 +44,9 @@ grpc-image:
 # Build the *async* .NET gRPC backend image (dotnet_async backend, M8/P2).
 # Same build context and prerequisites as grpc-image; the image bakes
 # CONSUMER_FLAVOR=async so Program.cs hosts AsyncProducerServiceImpl +
-# AsyncConsumerServiceImpl (AsyncKafkaProducer / AsyncKafkaConsumer; no Admin,
-# M15/P12 D1). Mirrors the Python two-image shape (grpc-image-async).
+# AsyncConsumerServiceImpl + AsyncAdminServiceImpl (AsyncKafkaProducer /
+# AsyncKafkaConsumer, and admin over IAsyncAdmin since M15/P14). Mirrors the
+# Python two-image shape (grpc-image-async).
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
