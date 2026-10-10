@@ -28,12 +28,10 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The construction of the three topic results — Java's <c>protected</c> constructors
 /// (<c>CreateTopicsResult.java:35</c>, <c>DeleteTopicsResult.java:34</c>,
-/// <c>DescribeTopicsResult.java:37</c>). <see cref="DeleteTopicsResult"/> and
-/// <see cref="DescribeTopicsResult"/> publish theirs <c>public</c> on the
-/// still-<see langword="sealed"/> types (M15/P13.2 G1-6, D5), so a test or a mock can
-/// fabricate a result. <see cref="CreateTopicsResult"/>'s became <c>internal</c> when it
-/// moved to the sync flavour (M15/P14 S4, Q3 (b)): a recorded Java-parity deviation,
-/// follow-up FU-5. Pure managed; nothing native.
+/// <c>DescribeTopicsResult.java:37</c>). All three became <c>internal</c> when they moved
+/// to the sync flavour (M15/P14 S4, Q3 (b)): a recorded Java-parity deviation, follow-up
+/// FU-5. The fabrication round-trips below therefore build the async twins, whose
+/// constructors are internal too. Pure managed; nothing native.
 /// </summary>
 public sealed class PublicAdminTopicResultConstructionTests
 {
@@ -44,13 +42,12 @@ public sealed class PublicAdminTopicResultConstructionTests
     private const string BothNull = "topicIdFutures and nameFutures cannot both be null.";
 
     /// <summary>
-    /// Each type stays sealed and has exactly one constructor, whose parameters are Java's
+    /// Each type stays sealed, has no public constructor, and has exactly one
+    /// <c>internal</c> one (M15/P14 S4, Q3 (b), follow-up FU-5), whose parameters are Java's
     /// names with the types the accessors read (the accessor is the contract):
     /// <see cref="CreateTopicsResult"/>'s map is non-nullable, the other two take two
-    /// nullable maps of which exactly one must be non-null. <see cref="CreateTopicsResult"/>'s
-    /// constructor is <c>internal</c> and takes <see cref="KafkaFuture{T}"/> values
-    /// (M15/P14 S4, Q3 (b), follow-up FU-5) — asserted as internal, so a regression that
-    /// re-publishes it turns this red.
+    /// nullable maps of which exactly one must be non-null. Asserted as internal, so a
+    /// regression that re-publishes one turns this red.
     /// </summary>
     [Fact]
     public void Shape_OneConstructorPerType_MirroringJava()
@@ -59,28 +56,28 @@ public sealed class PublicAdminTopicResultConstructionTests
             typeof(CreateTopicsResult),
             (typeof(IReadOnlyDictionary<string, KafkaFuture<TopicMetadataAndConfig>>), "futures", NullableAnnotation.NotAnnotated));
 
-        AssertOnlyConstructor(
+        AssertOnlyInternalConstructor(
             typeof(DeleteTopicsResult),
-            (typeof(IReadOnlyDictionary<Uuid, Task>), "topicIdFutures", NullableAnnotation.Annotated),
-            (typeof(IReadOnlyDictionary<string, Task>), "nameFutures", NullableAnnotation.Annotated));
+            (typeof(IReadOnlyDictionary<Uuid, KafkaFuture>), "topicIdFutures", NullableAnnotation.Annotated),
+            (typeof(IReadOnlyDictionary<string, KafkaFuture>), "nameFutures", NullableAnnotation.Annotated));
 
-        AssertOnlyConstructor(
+        AssertOnlyInternalConstructor(
             typeof(DescribeTopicsResult),
-            (typeof(IReadOnlyDictionary<Uuid, Task<TopicDescription>>), "topicIdFutures", NullableAnnotation.Annotated),
-            (typeof(IReadOnlyDictionary<string, Task<TopicDescription>>), "nameFutures", NullableAnnotation.Annotated));
+            (typeof(IReadOnlyDictionary<Uuid, KafkaFuture<TopicDescription>>), "topicIdFutures", NullableAnnotation.Annotated),
+            (typeof(IReadOnlyDictionary<string, KafkaFuture<TopicDescription>>), "nameFutures", NullableAnnotation.Annotated));
 
         // The parameter types are exactly what the typed accessors publish.
         Assert.Equal(
-            typeof(IReadOnlyDictionary<Uuid, Task>),
+            typeof(IReadOnlyDictionary<Uuid, KafkaFuture>),
             typeof(DeleteTopicsResult).GetProperty(nameof(DeleteTopicsResult.TopicIdValues))!.PropertyType);
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task>),
+            typeof(IReadOnlyDictionary<string, KafkaFuture>),
             typeof(DeleteTopicsResult).GetProperty(nameof(DeleteTopicsResult.TopicNameValues))!.PropertyType);
         Assert.Equal(
-            typeof(IReadOnlyDictionary<Uuid, Task<TopicDescription>>),
+            typeof(IReadOnlyDictionary<Uuid, KafkaFuture<TopicDescription>>),
             typeof(DescribeTopicsResult).GetProperty(nameof(DescribeTopicsResult.TopicIdValues))!.PropertyType);
         Assert.Equal(
-            typeof(IReadOnlyDictionary<string, Task<TopicDescription>>),
+            typeof(IReadOnlyDictionary<string, KafkaFuture<TopicDescription>>),
             typeof(DescribeTopicsResult).GetProperty(nameof(DescribeTopicsResult.TopicNameValues))!.PropertyType);
     }
 
@@ -105,10 +102,11 @@ public sealed class PublicAdminTopicResultConstructionTests
     [Fact]
     public void DeleteAndDescribe_RequireExactlyOneMap_WithJavasMessages()
     {
-        Dictionary<Uuid, Task> deleteIds = new Dictionary<Uuid, Task>();
-        Dictionary<string, Task> deleteNames = new Dictionary<string, Task>();
-        Dictionary<Uuid, Task<TopicDescription>> describeIds = new Dictionary<Uuid, Task<TopicDescription>>();
-        Dictionary<string, Task<TopicDescription>> describeNames = new Dictionary<string, Task<TopicDescription>>();
+        Dictionary<Uuid, KafkaFuture> deleteIds = new Dictionary<Uuid, KafkaFuture>();
+        Dictionary<string, KafkaFuture> deleteNames = new Dictionary<string, KafkaFuture>();
+        Dictionary<Uuid, KafkaFuture<TopicDescription>> describeIds = new Dictionary<Uuid, KafkaFuture<TopicDescription>>();
+        Dictionary<string, KafkaFuture<TopicDescription>> describeNames =
+            new Dictionary<string, KafkaFuture<TopicDescription>>();
 
         foreach ((Action construct, string message) in new (Action, string)[]
         {
@@ -473,25 +471,20 @@ public sealed class PublicAdminTopicResultConstructionTests
     private static TopicMetadataAndConfig Metadata(int numPartitions) =>
         new TopicMetadataAndConfig(Uuid.Zero, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
 
-    private static void AssertOnlyConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
-    {
-        Assert.True(type.IsSealed, type.Name);
-
-        AssertParameters(Assert.Single(type.GetConstructors()), expected);
-    }
-
     /// <summary>
-    /// The sync-flavour twin of <see cref="AssertOnlyConstructor"/>: no public constructor at
-    /// all, and exactly one <c>internal</c> one (<see cref="MethodBase.IsAssembly"/>) with the
-    /// expected parameters.
+    /// No public constructor at all, and exactly one <c>internal</c> one
+    /// (<see cref="MethodBase.IsAssembly"/>) with the expected parameters. A <c>private</c>
+    /// constructor body behind it (<see cref="DescribeTopicsResult"/> has one, taking the
+    /// aggregate's comparers) is not part of the shape.
     /// </summary>
     private static void AssertOnlyInternalConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
     {
         Assert.True(type.IsSealed, type.Name);
         Assert.Empty(type.GetConstructors());
 
-        ConstructorInfo constructor = Assert.Single(type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
-        Assert.True(constructor.IsAssembly, type.Name);
+        ConstructorInfo constructor = Assert.Single(
+            type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
 
         AssertParameters(constructor, expected);
     }

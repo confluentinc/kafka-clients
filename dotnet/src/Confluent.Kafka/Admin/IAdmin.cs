@@ -124,7 +124,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <summary>
     /// Deletes topics — Java's <c>deleteTopics(TopicCollection, DeleteTopicsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per topic.
+    /// <see cref="KafkaFuture"/> per topic, whose <c>Get()</c> blocks the calling thread until
+    /// that topic completes.
     /// </summary>
     /// <param name="topics">
     /// The topics to delete, identified <b>either</b> by name <b>or</b> by id. Build one
@@ -139,8 +140,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic. A topic that fails faults only <em>its own</em>
-    /// awaitable; a partially failed batch is not a failed call.
+    /// One future per topic. A topic that fails fails only <em>its own</em>
+    /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <remarks>
     /// Java's name-collection convenience overloads
@@ -159,6 +160,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// null keys (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>
     DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null);
 
     /// <summary>
@@ -173,7 +175,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
     /// </returns>
     /// <remarks>
     /// <para>
@@ -195,6 +197,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// that is stricter than Java.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>
     DeleteTopicsResult DeleteTopics(
         IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null);
 
@@ -202,21 +205,22 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Describes topics — Java's
     /// <c>describeTopics(TopicCollection, DescribeTopicsOptions)</c>. Returns
     /// <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per topic.
+    /// <see cref="KafkaFuture{T}"/> per topic, whose <c>Get()</c> blocks the calling thread
+    /// until that topic completes.
     /// </summary>
     /// <param name="topics">
     /// The topics to describe, identified <b>either</b> by name <b>or</b> by id — see
     /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>. The choice also
     /// selects which of
     /// <see cref="DescribeTopicsResult.AllTopicNames"/> /
-    /// <see cref="DescribeTopicsResult.AllTopicIds"/> returns a task rather than
+    /// <see cref="DescribeTopicsResult.AllTopicIds"/> returns a future rather than
     /// <see langword="null"/>.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic, each carrying that topic's own
+    /// One future per topic, each carrying that topic's own
     /// <see cref="TopicDescription"/> or its own failure.
     /// </returns>
     /// <remarks>
@@ -240,6 +244,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// as "unset" and would silently substitute a default.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>
     DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null);
 
     /// <summary>
@@ -254,7 +259,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
     /// </returns>
     /// <remarks>
     /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
@@ -273,12 +278,15 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions?)"/>
     DescribeTopicsResult DescribeTopics(
         IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null);
 
     /// <summary>
     /// Lists the cluster's topics — Java's <c>listTopics(ListTopicsOptions)</c>. Returns
-    /// <b>immediately</b>, without waiting for the broker.
+    /// <b>immediately</b>, without waiting for the broker; the result carries one
+    /// <see cref="KafkaFuture{T}"/>, whose <c>Get()</c> blocks the calling thread until the
+    /// listing completes.
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
@@ -286,19 +294,21 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> awaitable over the whole listing, rather than one per key. There is no
+    /// ⚠ <b>One</b> future over the whole listing, rather than one per key. There is no
     /// per-topic outcome to report — the request carries no topic list, and
     /// <c>kafka_admin_ListTopicsResult_t</c> declares no per-key error accessor — so either
-    /// the call fails and the task faults, or the whole map succeeds.
+    /// the call fails and the future fails, or the whole map succeeds.
     /// </returns>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.ListTopics"/>
     ListTopicsResult ListTopics(ListTopicsOptions? options = null);
 
     /// <summary>
     /// Increases the partition count of the given topics — Java's
     /// <c>createPartitions(Map&lt;String, NewPartitions&gt;, CreatePartitionsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per topic.
+    /// <see cref="KafkaFuture"/> per topic, whose <c>Get()</c> blocks the calling thread until
+    /// that topic completes.
     /// </summary>
     /// <param name="newPartitions">
     /// Topic name → the new partition count for it (and, optionally, an explicit replica
@@ -311,8 +321,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One awaitable per topic. A topic that fails faults only <em>its own</em>
-    /// awaitable; a partially failed batch is not a failed call.
+    /// One future per topic. A topic that fails fails only <em>its own</em>
+    /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="newPartitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -321,6 +331,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.CreatePartitions"/>
     CreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null);
 
@@ -328,7 +339,8 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// Deletes the records before a given offset in each partition — Java's
     /// <c>deleteRecords(Map&lt;TopicPartition, RecordsToDelete&gt;, DeleteRecordsOptions)</c>.
     /// Returns <b>immediately</b>, without waiting for the broker; the result carries one
-    /// awaitable per partition.
+    /// <see cref="KafkaFuture{T}"/> per partition, whose <c>Get()</c> blocks the calling thread
+    /// until that partition completes.
     /// </summary>
     /// <param name="recordsToDelete">
     /// Topic partition → the offset before which its records are deleted. An offset of
@@ -339,7 +351,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="DeleteRecordsOptions"/> carries only a timeout, as Java's does.
     /// </param>
     /// <returns>
-    /// One awaitable per partition, each carrying that partition's own
+    /// One future per partition, each carrying that partition's own
     /// <see cref="DeletedRecords"/> or its own failure. ⚠ A resulting low watermark of
     /// <c>-1</c> is a <b>success</b> carrying <c>-1</c>, not a failure — see the note on
     /// <see cref="DeleteRecordsResult"/>.
@@ -351,6 +363,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.DeleteRecords"/>
     DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options = null);

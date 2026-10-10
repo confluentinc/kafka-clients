@@ -35,9 +35,10 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// One <see cref="TheoryAttribute"/> per Result pair, each row run on both flavours. The rows: all keys succeed;
 /// one fails; two fail (the aggregate rethrows the first in <b>key</b> order, not completion order); all fail; an
 /// unknown key; a null key; per-key independence (one key's outcome does not wait for another's, and the aggregate
-/// waits for every key); memoization (a projection is applied once per future, so its failure is the same instance
-/// on every <c>Get()</c>); and erasure identity (a key's void future is equal on every read and completes with its
-/// typed one).
+/// waits for every key); memoization (a projection or gathered aggregate is computed once per future, so its value or
+/// failure is the same instance on every <c>Get()</c>); and erasure identity (a key's void future is equal on every
+/// read and completes with its key). Each pair runs the rows that apply to its shape; the rows a pair omits, and why,
+/// are listed on its row data.
 /// </para>
 /// <para>
 /// Every wait is bounded: a sync <c>Get()</c> runs on a dedicated thread (<see cref="BlockingCall"/>), an async one
@@ -275,6 +276,434 @@ public sealed class AdminP14SyncCompositionTests
         }
     }
 
+    /// <summary>
+    /// <see cref="DeleteTopicsResult"/> / <see cref="AsyncDeleteTopicsResult"/>. Omitted: memoization (the result has
+    /// no projection — its only composite is <c>All()</c>).
+    /// </summary>
+    public static TheoryData<string, string> DeleteTopicsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity",
+        "by-id");
+
+    /// <summary>
+    /// <see cref="DescribeTopicsResult"/> / <see cref="AsyncDescribeTopicsResult"/>. Omitted: erasure identity (the
+    /// result has no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeTopicsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity",
+        "by-id");
+
+    /// <summary>
+    /// <see cref="ListTopicsResult"/> / <see cref="AsyncListTopicsResult"/>: one future and two projections, no keys.
+    /// Omitted: one-fails / two-fail / all-fail (one future, so they collapse into the fails row); unknown-key,
+    /// null-key and per-key independence (no keys); erasure identity (no void view; the identity row pins
+    /// <c>NamesToListings()</c>).
+    /// </summary>
+    public static TheoryData<string, string> ListTopicsRows => Rows(
+        "all-succeed",
+        "fails",
+        "memoization",
+        "identity");
+
+    /// <summary>
+    /// <see cref="CreatePartitionsResult"/> / <see cref="AsyncCreatePartitionsResult"/>. Omitted: memoization (no
+    /// projection).
+    /// </summary>
+    public static TheoryData<string, string> CreatePartitionsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity");
+
+    /// <summary>
+    /// <see cref="DeleteRecordsResult"/> / <see cref="AsyncDeleteRecordsResult"/>. Omitted: null-key
+    /// (<see cref="TopicPartition"/> is a value type, so a null key cannot be expressed); memoization (no projection);
+    /// erasure identity (no per-key void view; <c>All()</c> is covered by the outcome rows, and the per-key futures'
+    /// equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DeleteRecordsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "per-key-independence",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="DeleteTopicsResult"/> and <see cref="AsyncDeleteTopicsResult"/>: the per-key void futures and
+    /// <c>All()</c>, by name, and by id on the by-id row, compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DeleteTopicsRows))]
+    public async Task DeleteTopics_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        if (row == "by-id")
+        {
+            Uuid[] ids = { new Uuid(1L, 1L), new Uuid(1L, 2L), new Uuid(1L, 3L) };
+            VoidHarness<Uuid> byId = VoidHarness<Uuid>.DeleteTopicsById(flavour, ids);
+            Assert.True(byId.OtherSideIsNull, "a by-id result's TopicNameValues must be null");
+            Assert.True(
+                VoidHarness<string>.DeleteTopicsByName(flavour, s_topics).OtherSideIsNull,
+                "a by-name result's TopicIdValues must be null");
+
+            // The third id fails first in time; the aggregate reports the second, the first failure in key order.
+            KafkaException second = new KafkaException(3, "id two failed", isRetriable: true);
+            KafkaException third = new KafkaException(3, "id three failed", isRetriable: true);
+            byId.Fail(ids[2], third);
+            byId.Succeed(ids[0]);
+            byId.Fail(ids[1], second);
+
+            Assert.Equal(ids, byId.ValuesKeys());
+            AssertReturned(await byId.Value(ids[0]).Outcome());
+            Assert.Same(second, await byId.Value(ids[1]).Outcome());
+            Assert.Same(third, await byId.Value(ids[2]).Outcome());
+            Assert.Same(second, await byId.All().Outcome());
+            return;
+        }
+
+        await RunKeyedRow(row, VoidHarness<string>.DeleteTopicsByName(flavour, s_topics), "delta");
+    }
+
+    /// <summary>
+    /// <see cref="DescribeTopicsResult"/> and <see cref="AsyncDescribeTopicsResult"/>: the per-key futures and the
+    /// gathered <c>AllTopicNames()</c> / <c>AllTopicIds()</c> compose alike, the mismatched side being null on both.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeTopicsRows))]
+    public async Task DescribeTopics_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        switch (row)
+        {
+            case "by-id":
+                {
+                    Uuid[] ids = { new Uuid(2L, 1L), new Uuid(2L, 2L), new Uuid(2L, 3L) };
+                    ValuedHarness<Uuid, TopicDescription> byId = ValuedHarness<Uuid, TopicDescription>.DescribeTopicsById(flavour, ids);
+                    Assert.True(byId.OtherSideIsNull, "a by-id result's TopicNameValues and AllTopicNames() must be null");
+                    Assert.True(
+                        ValuedHarness<string, TopicDescription>.DescribeTopicsByName(flavour, s_topics).OtherSideIsNull,
+                        "a by-name result's TopicIdValues and AllTopicIds() must be null");
+
+                    foreach (Uuid id in ids)
+                    {
+                        byId.Succeed(id);
+                    }
+
+                    Assert.Equal(ids, byId.ValuesKeys());
+                    byId.AssertAllSucceeded(await byId.All().Outcome());
+                    Assert.Same(byId.Expected(ids[1]), await byId.Value(ids[1]).Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    ValuedHarness<string, TopicDescription> harness =
+                        ValuedHarness<string, TopicDescription>.DescribeTopicsByName(flavour, s_topics);
+                    foreach (string topic in s_topics)
+                    {
+                        harness.Succeed(topic);
+                    }
+
+                    // One aggregate gathers once, so every Get() of it hands out the same map ...
+                    FutureProbe aggregate = harness.All();
+                    object? gathered = await aggregate.Outcome();
+                    harness.AssertAllSucceeded(gathered);
+                    Assert.Same(gathered, await aggregate.Outcome());
+
+                    // ... and a new call is a new aggregate, as on both flavours before S4: it gathers afresh.
+                    Assert.NotSame(gathered, await harness.All().Outcome());
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, ValuedHarness<string, TopicDescription>.DescribeTopicsByName(flavour, s_topics), "delta");
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ListTopicsResult"/> and <see cref="AsyncListTopicsResult"/>: <c>NamesToListings()</c> and the two
+    /// projections over it compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListTopicsRows))]
+    public async Task ListTopics_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListTopicsHarness harness = ListTopicsHarness.For(flavour);
+        Dictionary<string, TopicListing> listings = new Dictionary<string, TopicListing>(StringComparer.Ordinal)
+        {
+            ["alpha"] = new TopicListing("alpha", new Uuid(3L, 1L), isInternal: false),
+            ["beta"] = new TopicListing("beta", new Uuid(3L, 2L), isInternal: true),
+        };
+
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    FutureProbe map = harness.NamesToListings();
+                    FutureProbe values = harness.Listings();
+                    FutureProbe names = harness.Names();
+                    map.AssertPending();
+                    values.AssertPending();
+                    names.AssertPending();
+
+                    harness.Operation.SetResult(listings);
+
+                    Assert.Same(listings, await map.Outcome());
+                    IReadOnlyCollection<TopicListing> listed =
+                        Assert.IsAssignableFrom<IReadOnlyCollection<TopicListing>>(await values.Outcome());
+                    Assert.Equal(listings.Values, listed);
+                    IReadOnlyCollection<string> named =
+                        Assert.IsAssignableFrom<IReadOnlyCollection<string>>(await names.Outcome());
+                    Assert.Equal(new[] { "alpha", "beta" }, named);
+                    break;
+                }
+
+            case "fails":
+                {
+                    KafkaException failure = new KafkaException(7, "listTopics failed", isRetriable: true);
+                    harness.Operation.SetException(failure);
+
+                    Assert.Same(failure, await harness.NamesToListings().Outcome());
+                    Assert.Same(failure, await harness.Listings().Outcome());
+                    Assert.Same(failure, await harness.Names().Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    harness.Operation.SetResult(listings);
+
+                    // A projection is applied once per future, so every Get() of it hands out the same collection ...
+                    FutureProbe values = harness.Listings();
+                    FutureProbe names = harness.Names();
+                    object? listed = await values.Outcome();
+                    object? named = await names.Outcome();
+                    Assert.Same(listed, await values.Outcome());
+                    Assert.Same(named, await names.Outcome());
+
+                    // ... and a new call is a new projection, as on both flavours before S4.
+                    Assert.NotSame(listed, await harness.Listings().Outcome());
+                    Assert.NotSame(named, await harness.Names().Outcome());
+                    break;
+                }
+
+            case "identity":
+                {
+                    // NamesToListings() is the operation's own future: equal on every call, done the moment it is.
+                    Assert.True(harness.NamesToListingsEqualAcrossCalls());
+                    FutureProbe map = harness.NamesToListings();
+                    Assert.False(map.IsDone);
+
+                    harness.Operation.SetResult(listings);
+
+                    Assert.True(map.IsDone);
+                    Assert.True(harness.NamesToListings().IsDone);
+                    Assert.True(harness.NamesToListingsEqualAcrossCalls());
+                    Assert.Same(listings, await map.Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="CreatePartitionsResult"/> and <see cref="AsyncCreatePartitionsResult"/>: the per-key void futures
+    /// and <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(CreatePartitionsRows))]
+    public Task CreatePartitions_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunKeyedRow(row, VoidHarness<string>.CreatePartitions(flavour, s_topics), "delta");
+
+    /// <summary>
+    /// <see cref="DeleteRecordsResult"/> and <see cref="AsyncDeleteRecordsResult"/>: the per-partition low watermarks
+    /// and the void <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DeleteRecordsRows))]
+    public Task DeleteRecords_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        TopicPartition[] partitions = { new TopicPartition("alpha", 0), new TopicPartition("alpha", 1), new TopicPartition("beta", 0) };
+        return RunKeyedRow(
+            row,
+            ValuedHarness<TopicPartition, DeletedRecords>.DeleteRecords(flavour, partitions),
+            new TopicPartition("gamma", 0));
+    }
+
+    /// <summary>
+    /// The rows every keyed Result shares, over <paramref name="harness"/>'s three keys in their key order.
+    /// </summary>
+    private static async Task RunKeyedRow<TKey>(string row, KeyedHarness<TKey> harness, TKey unknown)
+        where TKey : notnull
+    {
+        IReadOnlyList<TKey> keys = harness.Keys;
+        switch (row)
+        {
+            case "all-succeed":
+                {
+                    foreach (TKey key in keys)
+                    {
+                        harness.Succeed(key);
+                    }
+
+                    Assert.Equal(keys, harness.ValuesKeys());
+                    foreach (TKey key in keys)
+                    {
+                        FutureProbe value = harness.Value(key);
+                        Assert.True(value.IsDone, key.ToString());
+                        Assert.Same(harness.Expected(key), await value.Outcome());
+                    }
+
+                    harness.AssertAllSucceeded(await harness.All().Outcome());
+                    break;
+                }
+
+            case "one-fails":
+                {
+                    KafkaException failure = new KafkaException(38, "the second key failed", isRetriable: false);
+                    harness.Succeed(keys[0]);
+                    harness.Fail(keys[1], failure);
+                    harness.Succeed(keys[2]);
+
+                    Assert.Same(harness.Expected(keys[0]), await harness.Value(keys[0]).Outcome());
+                    Assert.Same(failure, await harness.Value(keys[1]).Outcome());
+                    Assert.Same(harness.Expected(keys[2]), await harness.Value(keys[2]).Outcome());
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "two-fail-first-in-key-order":
+                {
+                    // The last key fails FIRST in time, the first key last: the aggregate reports the first in key order.
+                    KafkaException first = new KafkaException(41, "the first key failed", isRetriable: false);
+                    KafkaException last = new KafkaException(43, "the last key failed", isRetriable: false);
+                    harness.Fail(keys[2], last);
+                    harness.Succeed(keys[1]);
+                    harness.Fail(keys[0], first);
+
+                    Assert.Same(first, await harness.All().Outcome());
+                    Assert.Same(last, await harness.Value(keys[2]).Outcome());
+                    Assert.Same(harness.Expected(keys[1]), await harness.Value(keys[1]).Outcome());
+                    break;
+                }
+
+            case "all-fail":
+                {
+                    KafkaException[] failures =
+                    {
+                        new KafkaException(41, "the first key failed", isRetriable: false),
+                        new KafkaException(42, "the second key failed", isRetriable: true),
+                        new KafkaException(43, "the third key failed", isRetriable: false),
+                    };
+
+                    // Completed in reverse key order, so key order and completion order disagree.
+                    for (int index = keys.Count - 1; index >= 0; index--)
+                    {
+                        harness.Fail(keys[index], failures[index]);
+                    }
+
+                    Assert.Same(failures[0], await harness.All().Outcome());
+                    for (int index = 0; index < keys.Count; index++)
+                    {
+                        Assert.Same(failures[index], await harness.Value(keys[index]).Outcome());
+                    }
+
+                    break;
+                }
+
+            case "unknown-key":
+                {
+                    // The per-key dictionary is the only key-taking member: it fails as a dictionary does, at the call.
+                    KeyNotFoundException failure = Assert.IsType<KeyNotFoundException>(harness.CallIndexer(unknown));
+                    Assert.Equal($"The given key '{unknown}' was not present in the dictionary.", failure.Message);
+                    Assert.False(harness.TryGetValue(unknown));
+                    Assert.False(harness.ContainsKey(unknown));
+                    break;
+                }
+
+            case "null-key":
+                {
+                    ArgumentNullException failure =
+                        Assert.IsType<ArgumentNullException>(harness.CallIndexer(default!));
+                    Assert.Equal("key", failure.ParamName);
+                    Assert.Equal(new ArgumentNullException("key").Message, failure.Message);
+                    break;
+                }
+
+            case "per-key-independence":
+                {
+                    FutureProbe second = harness.Value(keys[1]);
+                    FutureProbe all = harness.All();
+                    harness.Succeed(keys[0]);
+
+                    FutureProbe first = harness.Value(keys[0]);
+                    Assert.True(first.IsDone);
+                    Assert.Same(harness.Expected(keys[0]), await first.Outcome());
+
+                    Assert.False(second.IsDone);
+                    Assert.False(all.IsDone);
+                    second.AssertPending();
+                    all.AssertPending();
+
+                    harness.Succeed(keys[1]);
+                    Assert.Same(harness.Expected(keys[1]), await second.Outcome());
+
+                    // The third key is still outstanding, so the aggregate is too.
+                    Assert.False(all.IsDone);
+
+                    harness.Succeed(keys[2]);
+                    harness.AssertAllSucceeded(await all.Outcome());
+                    break;
+                }
+
+            case "erasure-identity":
+            case "key-identity":
+                {
+                    // A key's future is its key's own latch (or task): equal on every read, done the moment the key is.
+                    Assert.True(harness.ValueEqualAcrossReads(keys[0]));
+                    FutureProbe value = harness.Value(keys[0]);
+                    Assert.False(value.IsDone);
+
+                    harness.Succeed(keys[0]);
+
+                    Assert.True(value.IsDone);
+                    Assert.True(harness.Value(keys[0]).IsDone);
+                    Assert.True(harness.ValueEqualAcrossReads(keys[0]));
+                    Assert.Same(harness.Expected(keys[0]), await value.Outcome());
+
+                    KafkaException failure = new KafkaException(38, "the second key failed", isRetriable: false);
+                    harness.Fail(keys[1], failure);
+                    Assert.Same(failure, await harness.Value(keys[1]).Outcome());
+                    Assert.Same(failure, await harness.Value(keys[1]).Outcome());
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
     private static TheoryData<string, string> Rows(params string[] rows)
     {
         TheoryData<string, string> data = new TheoryData<string, string>();
@@ -394,5 +823,376 @@ public sealed class AdminP14SyncCompositionTests
         });
 
         internal Exception? CallValuesIndexer(string topic) => Thrown(() => _ = Values(topic));
+    }
+
+    /// <summary>
+    /// A keyed Result of either flavour, driven through its operation's own <c>SetResult</c> / <c>SetException</c>:
+    /// the per-key dictionary, its aggregate and the outcome a succeeded key gives.
+    /// </summary>
+    private abstract class KeyedHarness<TKey>
+        where TKey : notnull
+    {
+        protected KeyedHarness(IReadOnlyList<TKey> keys, bool otherSideIsNull)
+        {
+            Keys = keys;
+            OtherSideIsNull = otherSideIsNull;
+        }
+
+        internal IReadOnlyList<TKey> Keys { get; }
+
+        /// <summary>Whether the side of an exactly-one Result not requested is null (true for a one-sided Result).</summary>
+        internal bool OtherSideIsNull { get; }
+
+        internal abstract void Succeed(TKey key);
+
+        internal abstract void Fail(TKey key, Exception failure);
+
+        /// <summary>The outcome a succeeded key's future gives: its value, or <see cref="BlockingCall.Returned"/>.</summary>
+        internal abstract object? Expected(TKey key);
+
+        internal abstract IEnumerable<TKey> ValuesKeys();
+
+        internal abstract FutureProbe Value(TKey key);
+
+        internal abstract FutureProbe All();
+
+        internal abstract void AssertAllSucceeded(object? outcome);
+
+        internal abstract bool ValueEqualAcrossReads(TKey key);
+
+        internal abstract bool TryGetValue(TKey key);
+
+        internal abstract bool ContainsKey(TKey key);
+
+        internal Exception? CallIndexer(TKey key) => Thrown(() => _ = Value(key));
+    }
+
+    /// <summary>A Result whose per-key futures are void, over a <see cref="VoidKeyedAdminOperation{TKey}"/>.</summary>
+    private sealed class VoidHarness<TKey> : KeyedHarness<TKey>
+        where TKey : notnull
+    {
+        private readonly VoidKeyedAdminOperation<TKey> _operation;
+        private readonly Func<IReadOnlyDictionary<TKey, KafkaFuture>>? _syncValues;
+        private readonly Func<KafkaFuture>? _syncAll;
+        private readonly Func<IReadOnlyDictionary<TKey, AsyncKafkaFuture>>? _asyncValues;
+        private readonly Func<AsyncKafkaFuture>? _asyncAll;
+
+        private VoidHarness(
+            VoidKeyedAdminOperation<TKey> operation,
+            IReadOnlyList<TKey> keys,
+            bool otherSideIsNull,
+            Func<IReadOnlyDictionary<TKey, KafkaFuture>>? syncValues,
+            Func<KafkaFuture>? syncAll,
+            Func<IReadOnlyDictionary<TKey, AsyncKafkaFuture>>? asyncValues,
+            Func<AsyncKafkaFuture>? asyncAll)
+            : base(keys, otherSideIsNull)
+        {
+            _operation = operation;
+            _syncValues = syncValues;
+            _syncAll = syncAll;
+            _asyncValues = asyncValues;
+            _asyncAll = asyncAll;
+        }
+
+        internal static VoidHarness<string> DeleteTopicsByName(string flavour, IReadOnlyList<string> topics)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<string> operation =
+                new VoidKeyedAdminOperation<string>("deleteTopics", topics, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DeleteTopicsResult result = DeleteTopicsResult.From((operation, null));
+                return new VoidHarness<string>(
+                    operation, topics, result.TopicIdValues is null, () => result.TopicNameValues!, result.All, null, null);
+            }
+
+            AsyncDeleteTopicsResult asyncResult = AsyncDeleteTopicsResult.From((operation, null));
+            return new VoidHarness<string>(
+                operation,
+                topics,
+                asyncResult.TopicIdValues is null,
+                null,
+                null,
+                () => asyncResult.TopicNameValues!,
+                asyncResult.All);
+        }
+
+        internal static VoidHarness<Uuid> DeleteTopicsById(string flavour, IReadOnlyList<Uuid> ids)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<Uuid> operation =
+                new VoidKeyedAdminOperation<Uuid>("deleteTopics", ids, EqualityComparer<Uuid>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DeleteTopicsResult result = DeleteTopicsResult.From((null, operation));
+                return new VoidHarness<Uuid>(
+                    operation, ids, result.TopicNameValues is null, () => result.TopicIdValues!, result.All, null, null);
+            }
+
+            AsyncDeleteTopicsResult asyncResult = AsyncDeleteTopicsResult.From((null, operation));
+            return new VoidHarness<Uuid>(
+                operation,
+                ids,
+                asyncResult.TopicNameValues is null,
+                null,
+                null,
+                () => asyncResult.TopicIdValues!,
+                asyncResult.All);
+        }
+
+        internal static VoidHarness<string> CreatePartitions(string flavour, IReadOnlyList<string> topics)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            VoidKeyedAdminOperation<string> operation =
+                new VoidKeyedAdminOperation<string>("createPartitions", topics, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                CreatePartitionsResult result = CreatePartitionsResult.From(operation);
+                return new VoidHarness<string>(operation, topics, true, () => result.Values, result.All, null, null);
+            }
+
+            AsyncCreatePartitionsResult asyncResult = AsyncCreatePartitionsResult.From(operation);
+            return new VoidHarness<string>(operation, topics, true, null, null, () => asyncResult.Values, asyncResult.All);
+        }
+
+        internal override void Succeed(TKey key) => _operation.SetResult(key, true);
+
+        internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(TKey key) => BlockingCall.Returned;
+
+        internal override IEnumerable<TKey> ValuesKeys() =>
+            _syncValues is not null ? _syncValues().Keys.ToList() : _asyncValues!().Keys.ToList();
+
+        internal override FutureProbe Value(TKey key) =>
+            _syncValues is not null ? FutureProbe.Of(_syncValues()[key]) : FutureProbe.Of(_asyncValues!()[key]);
+
+        internal override FutureProbe All() =>
+            _syncAll is not null ? FutureProbe.Of(_syncAll()) : FutureProbe.Of(_asyncAll!());
+
+        internal override void AssertAllSucceeded(object? outcome) => AssertReturned(outcome);
+
+        internal override bool ValueEqualAcrossReads(TKey key) =>
+            _syncValues is not null ? _syncValues()[key] == _syncValues()[key] : _asyncValues!()[key] == _asyncValues()[key];
+
+        internal override bool TryGetValue(TKey key) =>
+            _syncValues is not null ? _syncValues().TryGetValue(key, out _) : _asyncValues!().TryGetValue(key, out _);
+
+        internal override bool ContainsKey(TKey key) =>
+            _syncValues is not null ? _syncValues().ContainsKey(key) : _asyncValues!().ContainsKey(key);
+    }
+
+    /// <summary>A Result whose per-key futures carry a value, over a <see cref="KeyedAdminOperation{TKey, TValue}"/>.</summary>
+    private sealed class ValuedHarness<TKey, TValue> : KeyedHarness<TKey>
+        where TKey : notnull
+        where TValue : class
+    {
+        private readonly KeyedAdminOperation<TKey, TValue> _operation;
+        private readonly Dictionary<TKey, TValue> _values;
+        private readonly Func<IReadOnlyDictionary<TKey, KafkaFuture<TValue>>>? _syncValues;
+        private readonly Func<IReadOnlyDictionary<TKey, AsyncKafkaFuture<TValue>>>? _asyncValues;
+        private readonly Func<FutureProbe> _all;
+        private readonly bool _allGathers;
+
+        private ValuedHarness(
+            KeyedAdminOperation<TKey, TValue> operation,
+            IReadOnlyList<TKey> keys,
+            Func<TKey, TValue> value,
+            bool otherSideIsNull,
+            Func<IReadOnlyDictionary<TKey, KafkaFuture<TValue>>>? syncValues,
+            Func<IReadOnlyDictionary<TKey, AsyncKafkaFuture<TValue>>>? asyncValues,
+            Func<FutureProbe> all,
+            bool allGathers)
+            : base(keys, otherSideIsNull)
+        {
+            _operation = operation;
+            _values = keys.ToDictionary(key => key, value);
+            _syncValues = syncValues;
+            _asyncValues = asyncValues;
+            _all = all;
+            _allGathers = allGathers;
+        }
+
+        internal static ValuedHarness<string, TopicDescription> DescribeTopicsByName(string flavour, IReadOnlyList<string> topics)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, TopicDescription> operation =
+                new KeyedAdminOperation<string, TopicDescription>("describeTopics", topics, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeTopicsResult result = DescribeTopicsResult.From((operation, null));
+                return new ValuedHarness<string, TopicDescription>(
+                    operation,
+                    topics,
+                    Description,
+                    result.TopicIdValues is null && result.AllTopicIds() is null,
+                    () => result.TopicNameValues!,
+                    null,
+                    () => FutureProbe.Of(result.AllTopicNames()!.Value),
+                    allGathers: true);
+            }
+
+            AsyncDescribeTopicsResult asyncResult = AsyncDescribeTopicsResult.From((operation, null));
+            return new ValuedHarness<string, TopicDescription>(
+                operation,
+                topics,
+                Description,
+                asyncResult.TopicIdValues is null && asyncResult.AllTopicIds() is null,
+                null,
+                () => asyncResult.TopicNameValues!,
+                () => FutureProbe.Of(asyncResult.AllTopicNames()!.Value),
+                allGathers: true);
+        }
+
+        internal static ValuedHarness<Uuid, TopicDescription> DescribeTopicsById(string flavour, IReadOnlyList<Uuid> ids)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<Uuid, TopicDescription> operation =
+                new KeyedAdminOperation<Uuid, TopicDescription>("describeTopics", ids, EqualityComparer<Uuid>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeTopicsResult result = DescribeTopicsResult.From((null, operation));
+                return new ValuedHarness<Uuid, TopicDescription>(
+                    operation,
+                    ids,
+                    id => Description(id.ToString()),
+                    result.TopicNameValues is null && result.AllTopicNames() is null,
+                    () => result.TopicIdValues!,
+                    null,
+                    () => FutureProbe.Of(result.AllTopicIds()!.Value),
+                    allGathers: true);
+            }
+
+            AsyncDescribeTopicsResult asyncResult = AsyncDescribeTopicsResult.From((null, operation));
+            return new ValuedHarness<Uuid, TopicDescription>(
+                operation,
+                ids,
+                id => Description(id.ToString()),
+                asyncResult.TopicNameValues is null && asyncResult.AllTopicNames() is null,
+                null,
+                () => asyncResult.TopicIdValues!,
+                () => FutureProbe.Of(asyncResult.AllTopicIds()!.Value),
+                allGathers: true);
+        }
+
+        internal static ValuedHarness<TopicPartition, DeletedRecords> DeleteRecords(
+            string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<TopicPartition, DeletedRecords> operation =
+                new KeyedAdminOperation<TopicPartition, DeletedRecords>(
+                    "deleteRecords", partitions, EqualityComparer<TopicPartition>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DeleteRecordsResult result = DeleteRecordsResult.From(operation);
+                return new ValuedHarness<TopicPartition, DeletedRecords>(
+                    operation,
+                    partitions,
+                    partition => new DeletedRecords(100L + partition.Partition),
+                    true,
+                    () => result.LowWatermarks,
+                    null,
+                    () => FutureProbe.Of(result.All()),
+                    allGathers: false);
+            }
+
+            AsyncDeleteRecordsResult asyncResult = AsyncDeleteRecordsResult.From(operation);
+            return new ValuedHarness<TopicPartition, DeletedRecords>(
+                operation,
+                partitions,
+                partition => new DeletedRecords(100L + partition.Partition),
+                true,
+                null,
+                () => asyncResult.LowWatermarks,
+                () => FutureProbe.Of(asyncResult.All()),
+                allGathers: false);
+        }
+
+        internal override void Succeed(TKey key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(TKey key) => _values[key];
+
+        internal override IEnumerable<TKey> ValuesKeys() =>
+            _syncValues is not null ? _syncValues().Keys.ToList() : _asyncValues!().Keys.ToList();
+
+        internal override FutureProbe Value(TKey key) =>
+            _syncValues is not null ? FutureProbe.Of(_syncValues()[key]) : FutureProbe.Of(_asyncValues!()[key]);
+
+        internal override FutureProbe All() => _all();
+
+        internal override void AssertAllSucceeded(object? outcome)
+        {
+            if (!_allGathers)
+            {
+                AssertReturned(outcome);
+                return;
+            }
+
+            // The gathered map: every key, in key order, each value the very instance its key completed with.
+            IReadOnlyDictionary<TKey, TValue> gathered = Assert.IsAssignableFrom<IReadOnlyDictionary<TKey, TValue>>(outcome);
+            Assert.Equal(Keys, gathered.Keys);
+            foreach (TKey key in Keys)
+            {
+                Assert.Same(_values[key], gathered[key]);
+            }
+        }
+
+        internal override bool ValueEqualAcrossReads(TKey key) =>
+            _syncValues is not null ? _syncValues()[key] == _syncValues()[key] : _asyncValues!()[key] == _asyncValues()[key];
+
+        internal override bool TryGetValue(TKey key) =>
+            _syncValues is not null ? _syncValues().TryGetValue(key, out _) : _asyncValues!().TryGetValue(key, out _);
+
+        internal override bool ContainsKey(TKey key) =>
+            _syncValues is not null ? _syncValues().ContainsKey(key) : _asyncValues!().ContainsKey(key);
+
+        private static TopicDescription Description(string name) =>
+            new TopicDescription(name, false, Array.Empty<TopicPartitionInfo>());
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListTopics_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
+    /// </summary>
+    private sealed class ListTopicsHarness
+    {
+        private readonly ListTopicsResult? _sync;
+        private readonly AsyncListTopicsResult? _async;
+
+        private ListTopicsHarness(
+            SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation,
+            ListTopicsResult? sync,
+            AsyncListTopicsResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> Operation { get; }
+
+        internal static ListTopicsHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation =
+                new SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>>("listTopics", adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListTopicsHarness(operation, ListTopicsResult.From(operation), null)
+                : new ListTopicsHarness(operation, null, AsyncListTopicsResult.From(operation));
+        }
+
+        internal FutureProbe NamesToListings() =>
+            _sync is not null ? FutureProbe.Of(_sync.NamesToListings()) : FutureProbe.Of(_async!.NamesToListings());
+
+        internal FutureProbe Listings() =>
+            _sync is not null ? FutureProbe.Of(_sync.Listings()) : FutureProbe.Of(_async!.Listings());
+
+        internal FutureProbe Names() => _sync is not null ? FutureProbe.Of(_sync.Names()) : FutureProbe.Of(_async!.Names());
+
+        internal bool NamesToListingsEqualAcrossCalls() =>
+            _sync is not null
+                ? _sync.NamesToListings() == _sync.NamesToListings()
+                : _async!.NamesToListings() == _async.NamesToListings();
     }
 }

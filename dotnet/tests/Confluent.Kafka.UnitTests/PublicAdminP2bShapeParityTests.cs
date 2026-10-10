@@ -49,9 +49,9 @@ public sealed class PublicAdminP2bShapeParityTests
 {
     /// <summary>
     /// The three new RPCs return their <c>*Result</c> <b>synchronously</b> — Java's
-    /// <c>Admin</c> methods do not block, so the <see cref="Task"/> mapping belongs on the
-    /// futures inside the result, never on the method (<c>admin-client.md</c> §1). This is
-    /// DoD §11's spirit for admin.
+    /// <c>Admin</c> methods do not block, so the future mapping (<see cref="KafkaFuture{T}"/>
+    /// since M15/P14 S4) belongs on the futures inside the result, never on the method
+    /// (<c>admin-client.md</c> §1). This is DoD §11's spirit for admin.
     /// </summary>
     [Fact]
     public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
@@ -100,7 +100,7 @@ public sealed class PublicAdminP2bShapeParityTests
 
     /// <summary>
     /// <see cref="ListTopicsResult"/> publishes Java's three <b>methods</b>, each yielding
-    /// a task — and <see cref="ListTopicsResult.Names"/> is an
+    /// a <see cref="KafkaFuture{T}"/> (M15/P14 S4) — and <see cref="ListTopicsResult.Names"/> is an
     /// <c>IReadOnlyCollection&lt;string&gt;</c> because <c>IReadOnlySet&lt;T&gt;</c>
     /// post-dates the netstandard2.0 floor (CLAUDE.md §3's idiom map), not because Java
     /// returns a collection — Java returns a <c>Set</c>.
@@ -115,16 +115,18 @@ public sealed class PublicAdminP2bShapeParityTests
         MethodInfo names = typeof(ListTopicsResult).GetMethod(
             nameof(ListTopicsResult.Names), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(Task<IReadOnlyDictionary<string, TopicListing>>), namesToListings.ReturnType);
-        Assert.Equal(typeof(Task<IReadOnlyCollection<TopicListing>>), listings.ReturnType);
-        Assert.Equal(typeof(Task<IReadOnlyCollection<string>>), names.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<string, TopicListing>>), namesToListings.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<TopicListing>>), listings.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<string>>), names.ReturnType);
 
         // Non-null: Java's namesToListings() returns the future field, and the two
         // projections are thenApply over it (ListTopicsResult.java:39-55) — none can be
-        // null.
-        Assert.Equal(1, NullableFlag(namesToListings.ReturnParameter));
-        Assert.Equal(1, NullableFlag(listings.ReturnParameter));
-        Assert.Equal(1, NullableFlag(names.ReturnParameter));
+        // null. The future is a struct since M15/P14 S4, so the exact CLR types above are
+        // what rule out a Nullable<> wrapper; position 0 of a generic struct carries no
+        // annotation, and the value's own non-nullability sits at position 1.
+        Assert.Equal(1, NullableAnnotation.Flag(namesToListings.ReturnParameter, 1));
+        Assert.Equal(1, NullableAnnotation.Flag(listings.ReturnParameter, 1));
+        Assert.Equal(1, NullableAnnotation.Flag(names.ReturnParameter, 1));
 
         // Java's result has no `all()` and no per-key map: one future is the whole shape.
         Assert.Null(typeof(ListTopicsResult).GetMethod("All", Type.EmptyTypes));
@@ -169,8 +171,9 @@ public sealed class PublicAdminP2bShapeParityTests
     /// <summary>
     /// <see cref="CreatePartitionsResult"/> is Java's shape-2 pair — a
     /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c> property plus <c>all()</c>
-    /// (<c>CreatePartitionsResult.java:39, :46</c>). The <c>Task&lt;bool&gt;</c> the void
-    /// bridge uses internally must <b>not</b> reach the public surface.
+    /// (<c>CreatePartitionsResult.java:39, :46</c>). The <c>bool</c> success token the void
+    /// bridge uses internally must <b>not</b> reach the public surface: since M15/P14 S4 each
+    /// value is the void <see cref="KafkaFuture"/>, not a <see cref="KafkaFuture{T}"/>.
     /// </summary>
     [Fact]
     public void CreatePartitionsResult_PublishesVoidFutures()
@@ -178,13 +181,13 @@ public sealed class PublicAdminP2bShapeParityTests
         PropertyInfo values = typeof(CreatePartitionsResult).GetProperty(
             nameof(CreatePartitionsResult.Values))!;
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, Task>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.PropertyType);
         Assert.Equal(1, NullableFlag(values));
         Assert.Null(values.SetMethod);
 
         MethodInfo all = typeof(CreatePartitionsResult).GetMethod(
             nameof(CreatePartitionsResult.All), Type.EmptyTypes)!;
-        Assert.Equal(typeof(Task), all.ReturnType);
+        Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
         // Unlike DeleteTopicsResult there is no by-id form, so neither accessor is
         // nullable and there is exactly one map.
@@ -197,18 +200,19 @@ public sealed class PublicAdminP2bShapeParityTests
     /// <summary>
     /// <see cref="DeleteRecordsResult"/> is keyed by the shipped
     /// <see cref="TopicPartition"/> and carries <see cref="DeletedRecords"/> per key
-    /// (<c>DeleteRecordsResult.java:40, :47</c>) — and, uniquely among the admin results
-    /// bound so far, Java makes its constructor <b>public</b>
-    /// (<c>DeleteRecordsResult.java:32</c>).
+    /// (<c>DeleteRecordsResult.java:40, :47</c>). Java makes its constructor <b>public</b>
+    /// (<c>DeleteRecordsResult.java:32</c>), uniquely among the admin results bound in P2b;
+    /// since M15/P14 S4 this one is <b>internal on purpose</b>, a recorded Java-parity
+    /// deviation (follow-up FU-5), so the test pins the internal constructor's shape instead.
     /// </summary>
     [Fact]
-    public void DeleteRecordsResult_IsKeyedByTopicPartition_AndHasJavasPublicConstructor()
+    public void DeleteRecordsResult_IsKeyedByTopicPartition_AndItsConstructorIsInternal()
     {
         PropertyInfo lowWatermarks = typeof(DeleteRecordsResult).GetProperty(
             nameof(DeleteRecordsResult.LowWatermarks))!;
 
         Assert.Equal(
-            typeof(IReadOnlyDictionary<TopicPartition, Task<DeletedRecords>>),
+            typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>>),
             lowWatermarks.PropertyType);
         Assert.Equal(1, NullableFlag(lowWatermarks));
         Assert.Null(lowWatermarks.SetMethod);
@@ -217,11 +221,14 @@ public sealed class PublicAdminP2bShapeParityTests
             nameof(DeleteRecordsResult.All), Type.EmptyTypes)!;
 
         // Java's all() is KafkaFuture<Void> — it reports success, not the watermarks.
-        Assert.Equal(typeof(Task), all.ReturnType);
+        Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        ConstructorInfo only = Assert.Single(typeof(DeleteRecordsResult).GetConstructors());
+        Assert.Empty(typeof(DeleteRecordsResult).GetConstructors());
+        ConstructorInfo only = Assert.Single(
+            typeof(DeleteRecordsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            candidate => candidate.IsAssembly);
         Assert.Equal(
-            new[] { typeof(IReadOnlyDictionary<TopicPartition, Task<DeletedRecords>>) },
+            new[] { typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>>) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
         Assert.Throws<ArgumentNullException>(() => new DeleteRecordsResult(null!));

@@ -44,18 +44,24 @@ public class NullableAnnotationTests
     /// The nullable leg is the load-bearing one. Reading the method's own attributes and
     /// falling back to <see cref="MemberInfo.DeclaringType"/> — skipping the method's own
     /// <c>NullableContextAttribute</c> scope — yields <see cref="NullableAnnotation.NotAnnotated"/>
-    /// for <c>AllTopicNames</c>, so this assertion fails on the unrouted decoder with no
-    /// source change needed anywhere else. The non-nullable leg holds it honest in the
-    /// other direction: a decoder hardwired to <see cref="NullableAnnotation.Annotated"/>
-    /// would pass the first assertion and fail this one.
+    /// for <see cref="Config.Get"/>, whose nullable return and nullable parameter put a
+    /// context of <see cref="NullableAnnotation.Annotated"/> on the method itself, so this
+    /// assertion fails on the unrouted decoder with no source change needed anywhere else.
+    /// The non-nullable leg holds it honest in the other direction: a decoder hardwired to
+    /// <see cref="NullableAnnotation.Annotated"/> would pass the first assertion and fail
+    /// this one.
+    /// <para>
+    /// The two legs read <see cref="Config"/>, not the topic Results they read before
+    /// M15/P14 S4: those now return a <see cref="KafkaFuture{T}"/>, a struct, whose
+    /// <c>?</c> lives in the CLR type (<see cref="Nullable{T}"/>) rather than in the
+    /// annotation, so they no longer carry a nullable reference return.
+    /// </para>
     /// </remarks>
     [Fact]
     public void Flag_OnAMethodInfo_ReadsTheReturnsAnnotation_NotTheDeclaringTypesContext()
     {
-        MethodInfo nullableReturn = typeof(DescribeTopicsResult).GetMethod(
-            nameof(DescribeTopicsResult.AllTopicNames), Type.EmptyTypes)!;
-        MethodInfo nonNullableReturn = typeof(ListTopicsResult).GetMethod(
-            nameof(ListTopicsResult.NamesToListings), Type.EmptyTypes)!;
+        MethodInfo nullableReturn = typeof(Config).GetMethod(nameof(Config.Get), new[] { typeof(string) })!;
+        MethodInfo nonNullableReturn = typeof(Config).GetMethod(nameof(Config.ToString), Type.EmptyTypes)!;
 
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag((MemberInfo)nullableReturn));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag((MemberInfo)nonNullableReturn));

@@ -96,8 +96,8 @@ internal static class NullableAnnotation
     /// which is where the compiler puts a return's flag. Reading the method's own attributes
     /// instead would find none (so <see cref="Own"/> is always null) and fall through to
     /// <see cref="MemberInfo.DeclaringType"/>, <b>skipping the method's own
-    /// <c>NullableContextAttribute</c> scope</b> — measured on
-    /// <c>ListTopicsResult.NamesToListings()</c>: widening its return to nullable moves
+    /// <c>NullableContextAttribute</c> scope</b> — measured (M15, while it returned a
+    /// <c>Task&lt;T&gt;</c>) on <c>ListTopicsResult.NamesToListings()</c>: widening its return to nullable moves
     /// <c>Flag(ReturnParameter)</c> to <see cref="Annotated"/> while the unrouted
     /// <c>MemberInfo</c> form stayed at <see cref="NotAnnotated"/>, i.e. green however the
     /// return is widened. (The sibling <see cref="Flag(ParameterInfo)"/> has always been
@@ -133,11 +133,15 @@ internal static class NullableAnnotation
     /// this overload exists (M15/P3).</b> <c>Task&lt;Node&gt;</c> and
     /// <c>Task&lt;Node?&gt;</c> both emit <see cref="NotAnnotated"/> at position 0 — the
     /// <see cref="System.Threading.Tasks.Task"/> itself is never null — and differ only at
-    /// position 1. Every M15 result accessor returns a <c>Task&lt;T&gt;</c>, so an
+    /// position 1. Every M15 result accessor returned a <c>Task&lt;T&gt;</c>, so an
     /// assertion written against position 0 is unfalsifiable for exactly the nullability
-    /// the accessor is about. The earlier phases' assertions are still correct as written:
-    /// they pin the <em>Task</em>'s own nullability (<c>DescribeTopicsResult</c>'s
-    /// accessors really do return <c>Task&lt;…&gt;?</c>), which is a different claim.
+    /// the accessor is about. The earlier phases' assertions pinned the <em>Task</em>'s own
+    /// nullability (<c>DescribeTopicsResult</c>'s aggregates returned
+    /// <c>Task&lt;…&gt;?</c>), which is a different claim. Since M15/P14 the sync Results
+    /// return a <see cref="KafkaFuture{T}"/>, a struct: position 0 of a generic struct is
+    /// <see cref="Oblivious"/>, and its <c>?</c> is <see cref="Nullable{T}"/> in the CLR
+    /// type, which the compiler encodes by the type argument alone — so a struct future's
+    /// nullability is asserted on the type, and only its value's at a position here.
     /// <para>
     /// A single-byte attribute means every position agrees, so it answers for any position;
     /// a member with no attribute of its own resolves against the enclosing context, which

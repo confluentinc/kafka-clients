@@ -164,7 +164,9 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal(
             typeof(Task<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>),
             all.ReturnType);
-        Assert.Equal(typeof(Task), typeof(DeleteRecordsResult).GetMethod(nameof(DeleteRecordsResult.All))!.ReturnType);
+        // (DeleteRecordsResult moved to KafkaFuture in M15/P14 S4, ahead of this result; the
+        // contrast pinned here is void versus the map.)
+        Assert.Equal(typeof(KafkaFuture), typeof(DeleteRecordsResult).GetMethod(nameof(DeleteRecordsResult.All))!.ReturnType);
 
         Assert.Equal(
             new[] { nameof(ListOffsetsResult.All), nameof(ListOffsetsResult.PartitionResult) },

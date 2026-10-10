@@ -71,6 +71,11 @@ public sealed class PublicAdminP14SurfaceTests
     private static readonly string[] s_syncConvertedResults =
     {
         nameof(CreateTopicsResult),
+        nameof(DeleteTopicsResult),
+        nameof(DescribeTopicsResult),
+        nameof(ListTopicsResult),
+        nameof(CreatePartitionsResult),
+        nameof(DeleteRecordsResult),
     };
 
     /// <summary>
@@ -80,6 +85,11 @@ public sealed class PublicAdminP14SurfaceTests
     private static readonly string[] s_syncConvertedRpcs =
     {
         nameof(IAdmin.CreateTopics),
+        nameof(IAdmin.DeleteTopics),
+        nameof(IAdmin.DescribeTopics),
+        nameof(IAdmin.ListTopics),
+        nameof(IAdmin.CreatePartitions),
+        nameof(IAdmin.DeleteRecords),
     };
 
     private static readonly string[] s_mockOnly =

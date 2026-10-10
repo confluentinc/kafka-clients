@@ -49,15 +49,15 @@ public sealed class PublicAdminP2aShapeParityTests
     /// Java publishes <c>Map&lt;Uuid, KafkaFuture&lt;Void&gt;&gt; topicIdValues()</c> and
     /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt; topicNameValues()</c>
     /// (<c>DeleteTopicsResult.java:56,:65</c>) — <b>Void</b>, so the .NET side is the
-    /// non-generic <see cref="Task"/>. The bridge resolves these with a <c>bool</c>
+    /// non-generic <see cref="KafkaFuture"/> (M15/P14 S4). The bridge resolves these with a <c>bool</c>
     /// success token internally (result shape 2); leaking that into the signature would
     /// publish a value Java does not have.
     /// </summary>
     [Fact]
     public void DeleteTopicsResult_ValuesAreVoidFutures_AndNullable()
     {
-        AssertNullableDictionary<Uuid, Task>(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicIdValues));
-        AssertNullableDictionary<string, Task>(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicNameValues));
+        AssertNullableDictionary<Uuid, KafkaFuture>(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicIdValues));
+        AssertNullableDictionary<string, KafkaFuture>(typeof(DeleteTopicsResult), nameof(DeleteTopicsResult.TopicNameValues));
     }
 
     /// <summary>
@@ -68,9 +68,9 @@ public sealed class PublicAdminP2aShapeParityTests
     [Fact]
     public void DescribeTopicsResult_ValuesCarryTheDescription_AndAreNullable()
     {
-        AssertNullableDictionary<Uuid, Task<TopicDescription>>(
+        AssertNullableDictionary<Uuid, KafkaFuture<TopicDescription>>(
             typeof(DescribeTopicsResult), nameof(DescribeTopicsResult.TopicIdValues));
-        AssertNullableDictionary<string, Task<TopicDescription>>(
+        AssertNullableDictionary<string, KafkaFuture<TopicDescription>>(
             typeof(DescribeTopicsResult), nameof(DescribeTopicsResult.TopicNameValues));
     }
 
@@ -86,7 +86,7 @@ public sealed class PublicAdminP2aShapeParityTests
     {
         // deleteTopics HAS all(), and has no typed aggregate.
         Assert.NotNull(typeof(DeleteTopicsResult).GetMethod("All", Type.EmptyTypes));
-        Assert.Equal(typeof(Task), typeof(DeleteTopicsResult).GetMethod("All", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(KafkaFuture), typeof(DeleteTopicsResult).GetMethod("All", Type.EmptyTypes)!.ReturnType);
         Assert.DoesNotContain(
             typeof(DeleteTopicsResult).GetMethods(BindingFlags.Public | BindingFlags.Instance),
             method => method.Name is "AllTopicNames" or "AllTopicIds");
@@ -98,10 +98,10 @@ public sealed class PublicAdminP2aShapeParityTests
             method => method.Name == "All");
 
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<string, TopicDescription>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<string, TopicDescription>>?),
             typeof(DescribeTopicsResult).GetMethod("AllTopicNames", Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
-            typeof(Task<IReadOnlyDictionary<Uuid, TopicDescription>>),
+            typeof(KafkaFuture<IReadOnlyDictionary<Uuid, TopicDescription>>?),
             typeof(DescribeTopicsResult).GetMethod("AllTopicIds", Type.EmptyTypes)!.ReturnType);
     }
 
@@ -112,11 +112,21 @@ public sealed class PublicAdminP2aShapeParityTests
     /// the matching <c>*Values</c> map is. The phase plan's sketch omitted the
     /// <c>?</c>; the Java source is the contract, so the annotation is here.
     /// </summary>
+    /// <remarks>
+    /// Since M15/P14 S4 the aggregate is a <see cref="KafkaFuture{T}"/>, a struct, so its
+    /// <c>?</c> is <see cref="Nullable{T}"/> in the CLR type rather than a nullable
+    /// annotation: the compiler encodes a nullable value type by its type argument alone, so
+    /// the annotation can no longer tell <c>T</c> from <c>T?</c>, and the type does. What the
+    /// annotation still carries is the gathered dictionary's own non-nullability, at
+    /// position 1.
+    /// </remarks>
     [Fact]
     public void DescribeTopicsResult_TypedAggregatesAreNullable()
     {
-        AssertNullableReturn(typeof(DescribeTopicsResult).GetMethod("AllTopicNames", Type.EmptyTypes)!);
-        AssertNullableReturn(typeof(DescribeTopicsResult).GetMethod("AllTopicIds", Type.EmptyTypes)!);
+        AssertNullableFutureReturn<IReadOnlyDictionary<string, TopicDescription>>(
+            typeof(DescribeTopicsResult).GetMethod("AllTopicNames", Type.EmptyTypes)!);
+        AssertNullableFutureReturn<IReadOnlyDictionary<Uuid, TopicDescription>>(
+            typeof(DescribeTopicsResult).GetMethod("AllTopicIds", Type.EmptyTypes)!);
     }
 
     /// <summary>
@@ -156,9 +166,9 @@ public sealed class PublicAdminP2aShapeParityTests
 
     /// <summary>
     /// The two RPCs take a <see cref="TopicCollection"/> and return their <c>*Result</c>
-    /// <b>synchronously</b> — Java's <c>Admin</c> methods do not block, so the
-    /// <see cref="Task"/> mapping belongs on the futures inside the result, never on the
-    /// method (<c>admin-client.md</c> §1). <c>Close</c> stays the one
+    /// <b>synchronously</b> — Java's <c>Admin</c> methods do not block, so the future
+    /// mapping (<see cref="KafkaFuture{T}"/> since M15/P14 S4) belongs on the futures inside
+    /// the result, never on the method (<c>admin-client.md</c> §1). <c>Close</c> stays the one
     /// <see cref="Task"/>-returning member.
     /// </summary>
     [Fact]
@@ -278,8 +288,11 @@ public sealed class PublicAdminP2aShapeParityTests
     private static void AssertNonNullableProperty(Type declaring, string propertyName) =>
         Assert.Equal(1, NullableFlag(declaring.GetProperty(propertyName)!));
 
-    private static void AssertNullableReturn(MethodInfo method) =>
-        Assert.Equal(2, NullableFlag(method.ReturnParameter));
+    private static void AssertNullableFutureReturn<TValue>(MethodInfo method)
+    {
+        Assert.Equal(typeof(KafkaFuture<TValue>), Nullable.GetUnderlyingType(method.ReturnType));
+        Assert.Equal(1, NullableAnnotation.Flag(method.ReturnParameter, 1));
+    }
 
     /// <summary>
     /// 1 = not-annotated-nullable, 2 = nullable, in the C# compiler's

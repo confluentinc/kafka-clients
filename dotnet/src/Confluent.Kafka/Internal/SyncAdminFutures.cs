@@ -22,12 +22,12 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// The compositions the sync admin Results (M15/P14 S4) share at their public boundary — the sync twin of
 /// <see cref="AsyncAdminFutures"/>: a keyed view of the sync flavour's latches presented as
-/// <see cref="KafkaFuture{T}"/>s, a projection and an all-of.
+/// <see cref="KafkaFuture{T}"/>s, a void erasure, a projection, an all-of and a gathering all-of.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Each composition is one of the S1 composites — <see cref="ProjectedSyncFuture{TIn, TOut}"/>,
-/// <see cref="AllOfSyncFuture"/> — over the
+/// <see cref="AllOfSyncFuture"/>, <see cref="GatheringAllOfSyncFuture{TKey, TValue}"/> — over the
 /// <see cref="KafkaFuture{T}.Source"/> of the futures it is given, so every future a sync Result hands out waits on the
 /// thread that calls <c>Get()</c>. Nothing here uses a <c>Task</c>, a <c>TaskCompletionSource</c> or
 /// <c>Task.Run</c>, and nothing needs a thread-pool thread (M15/P14 PLAN §3.3, D3, D5).
@@ -65,6 +65,48 @@ internal static class SyncAdminFutures
     /// </summary>
     internal static KafkaFuture AllOf<TValue>(IEnumerable<KafkaFuture<TValue>> futures) =>
         new KafkaFuture(new AllOfSyncFuture(futures.Select(static future => (SyncFutureSource)future.Source).ToList()));
+
+    /// <summary>
+    /// <see cref="AllOf{TValue}(IEnumerable{KafkaFuture{TValue}})"/> over futures without a value.
+    /// </summary>
+    internal static KafkaFuture AllOf(IEnumerable<KafkaFuture> futures) =>
+        new KafkaFuture(new AllOfSyncFuture(futures.Select(static future => future.Source).ToList()));
+
+    /// <summary>
+    /// Java's <c>allOf(...).thenApply(...)</c> gathering every value into one map (a <c>DescribeTopicsResult</c>
+    /// aggregate): it waits for every entry of <paramref name="futures"/> in its order, rethrows the first failure in
+    /// that order, and otherwise returns the values keyed with <paramref name="comparer"/>, an equal key replacing the
+    /// earlier one as Java's <c>HashMap.put</c> does (<see cref="GatheringAllOfSyncFuture{TKey, TValue}"/>).
+    /// </summary>
+    internal static KafkaFuture<IReadOnlyDictionary<TKey, TValue>> GatherAll<TKey, TValue>(
+        IEnumerable<KeyValuePair<TKey, KafkaFuture<TValue>>> futures, IEqualityComparer<TKey> comparer)
+        where TKey : notnull =>
+        new KafkaFuture<IReadOnlyDictionary<TKey, TValue>>(
+            new GatheringAllOfSyncFuture<TKey, TValue>(
+                futures
+                    .Select(static entry => new KeyValuePair<TKey, SyncFutureSource<TValue>>(entry.Key, entry.Value.Source))
+                    .ToList(),
+                comparer));
+
+    /// <summary>
+    /// A void-keyed operation's latches as Java's <c>Map&lt;K, KafkaFuture&lt;Void&gt;&gt;</c>: one
+    /// <see cref="KafkaFuture"/> per key over the <b>same</b> latch — no second completion — keyed with the
+    /// operation's own <paramref name="comparer"/> and in its key order. The <c>bool</c> is the void bridge's internal
+    /// success token and does not reach the public surface. Built once per Result, so a key's future is equal on every
+    /// read.
+    /// </summary>
+    internal static IReadOnlyDictionary<TKey, KafkaFuture> Erase<TKey>(
+        IReadOnlyDictionary<TKey, SyncFutureSource<bool>> sources, IEqualityComparer<TKey> comparer)
+        where TKey : notnull
+    {
+        Dictionary<TKey, KafkaFuture> erased = new Dictionary<TKey, KafkaFuture>(sources.Count, comparer);
+        foreach (KeyValuePair<TKey, SyncFutureSource<bool>> entry in sources)
+        {
+            erased.Add(entry.Key, new KafkaFuture(entry.Value));
+        }
+
+        return erased;
+    }
 }
 
 /// <summary>

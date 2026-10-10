@@ -14,14 +14,13 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.DeleteRecords"/> — the .NET realization of Java's
-/// <c>DeleteRecordsResult</c>: one awaitable <b>per topic partition</b>, handed back the
+/// <c>DeleteRecordsResult</c>: one future <b>per topic partition</b>, handed back the
 /// moment the request is submitted.
 /// </summary>
 /// <remarks>
@@ -36,17 +35,23 @@ namespace Confluent.Kafka.Admin;
 /// <c>get_low_watermark</c> returns <c>-1</c> for a failed partition, for an
 /// out-of-range index, <em>and</em> for a partition whose watermark genuinely is
 /// <c>-1</c> — so it cannot be a verdict. The authoritative signal is the entry's own
-/// <c>get_error</c>: a partition with a non-null error faults its
-/// <see cref="Task"/>; one with a null error completes with its
+/// <c>get_error</c>: a partition with a non-null error fails its
+/// <see cref="KafkaFuture{T}"/>; one with a null error completes with its
 /// <see cref="DeletedRecords"/>, whatever the number.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its partition (or, for
+/// <see cref="All"/>, every partition) has completed, and needs no thread-pool thread: the futures here are composed
+/// on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncDeleteRecordsResult"/>
 public sealed class DeleteRecordsResult
 {
-    private readonly IReadOnlyDictionary<TopicPartition, Task<DeletedRecords>> _futures;
+    private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> _futures;
 
     /// <summary>
-    /// Wraps one awaitable per topic partition — Java's <b>public</b>
+    /// Wraps one future per topic partition — Java's <b>public</b>
     /// <c>DeleteRecordsResult(Map&lt;TopicPartition, KafkaFuture&lt;DeletedRecords&gt;&gt;)</c>
     /// (<c>DeleteRecordsResult.java:32</c>). ⚠ Java declares it <b>public</b>, unlike most
     /// <c>*Result</c> constructors, which are package-private. (An earlier wording called
@@ -54,36 +59,40 @@ public sealed class DeleteRecordsResult
     /// <see cref="ListOffsetsResult"/> — and a count over Java's 60 <c>*Result</c> types
     /// finds <b>9</b>.)
     /// </summary>
-    /// <param name="lowWatermarks">One awaitable per topic partition.</param>
+    /// <remarks>
+    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
+    /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map.
+    /// </remarks>
+    /// <param name="lowWatermarks">One future per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="lowWatermarks"/> is null.</exception>
-    public DeleteRecordsResult(IReadOnlyDictionary<TopicPartition, Task<DeletedRecords>> lowWatermarks)
+    internal DeleteRecordsResult(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> lowWatermarks)
     {
         _futures = lowWatermarks ?? throw new ArgumentNullException(nameof(lowWatermarks));
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static DeleteRecordsResult From(KeyedAdminOperation<TopicPartition, DeletedRecords> operation) =>
-        new DeleteRecordsResult(operation.Tasks);
+        new DeleteRecordsResult(SyncAdminFutures.Wrap(operation.SyncSources));
 
     /// <summary>
-    /// One awaitable per requested topic partition, each carrying that partition's own
+    /// One future per requested topic partition, each carrying that partition's own
     /// <see cref="DeletedRecords"/> or its own failure — Java's <c>lowWatermarks()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartition, Task<DeletedRecords>> LowWatermarks => _futures;
+    public IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> LowWatermarks => _futures;
 
     /// <summary>
-    /// Completes when <b>every</b> partition's deletion has succeeded, and faults with
-    /// the first failure if any partition failed — Java's <c>all()</c>
+    /// Completes when <b>every</b> partition's deletion has succeeded, and fails with
+    /// the first failure in key order if any partition failed — Java's <c>all()</c>
     /// (<c>KafkaFuture.allOf</c>).
     /// </summary>
-    /// <returns>A task representing the whole batch.</returns>
+    /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every partition.</returns>
     /// <remarks>
     /// Java's <c>all()</c> is a <c>KafkaFuture&lt;Void&gt;</c>: it reports only whether
     /// everything succeeded, and the watermarks are read from
-    /// <see cref="LowWatermarks"/>. The non-generic <see cref="Task"/> is that shape.
+    /// <see cref="LowWatermarks"/>. The non-generic <see cref="KafkaFuture"/> is that shape.
     /// </remarks>
-    public Task All() => Task.WhenAll(_futures.Values);
+    public KafkaFuture All() => SyncAdminFutures.AllOf(_futures.Values);
 }

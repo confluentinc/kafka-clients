@@ -64,7 +64,7 @@ internal static class TopicProvisioning
             new DeleteTopicsOptions { TimeoutMs = OperationTimeoutMs });
         try
         {
-            deleteResult.TopicNameValues![topic].GetAwaiter().GetResult();
+            deleteResult.TopicNameValues![topic].Get();
             Console.WriteLine($">>> deleted '{topic}'");
         }
         catch (KafkaException e) when (e.Code == UnknownTopicOrPartitionCode)

@@ -14,25 +14,24 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.ListTopics"/> — the .NET realization of Java's
-/// <c>ListTopicsResult</c>: <b>one</b> awaitable over the whole cluster listing, handed
+/// <c>ListTopicsResult</c>: <b>one</b> future over the whole cluster listing, handed
 /// back the moment the request is submitted.
 /// </summary>
 /// <remarks>
 /// <para>
 /// ⚠ <b>One future, not one per topic — and that is the ABI's shape as much as Java's.</b>
 /// Every other admin RPC bound so far pre-registers the caller's keys and resolves one
-/// awaitable per key. <c>listTopics</c> cannot: the request carries no key array (the
+/// future per key. <c>listTopics</c> cannot: the request carries no key array (the
 /// topics are discovered from the response), and
 /// <c>kafka_admin_ListTopicsResult_t</c> declares <b>no <c>get_error</c> at all</b>.
 /// That absence is the ABI stating the semantics — there is no per-topic failure to
-/// attribute, so either the call fails and <em>this one</em> task faults, or the whole
+/// attribute, so either the call fails and <em>this one</em> future fails, or the whole
 /// map succeeds.
 /// </para>
 /// <para>
@@ -43,53 +42,58 @@ namespace Confluent.Kafka.Admin;
 /// independent requests would be a different shape — and could report three different
 /// cluster states.
 /// </para>
+/// <para>
+/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
+/// no thread-pool thread: the futures here are composed on the waiting thread, never over a <c>Task</c>.
+/// </para>
 /// </remarks>
+/// <seealso cref="AsyncListTopicsResult"/>
 public sealed class ListTopicsResult
 {
-    private readonly Task<IReadOnlyDictionary<string, TopicListing>> _future;
+    private readonly KafkaFuture<IReadOnlyDictionary<string, TopicListing>> _future;
 
     /// <summary>
-    /// Wraps the single awaitable — Java's package-private
+    /// Wraps the single future — Java's package-private
     /// <c>ListTopicsResult(KafkaFuture&lt;Map&lt;String, TopicListing&gt;&gt;)</c>.
     /// </summary>
-    internal ListTopicsResult(Task<IReadOnlyDictionary<string, TopicListing>> future)
+    internal ListTopicsResult(KafkaFuture<IReadOnlyDictionary<string, TopicListing>> future)
     {
         _future = future;
     }
 
     /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
+    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
     /// from an admin operation (M15/P14).
     /// </summary>
     internal static ListTopicsResult From(SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation) =>
-        new ListTopicsResult(operation.Task);
+        new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(operation.SyncSource));
 
     /// <summary>
     /// The topic names mapped to their listings — Java's <c>namesToListings()</c>.
     /// </summary>
     /// <returns>
-    /// A task yielding the map, or faulting with the call's own
+    /// A future yielding the map, or failing with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <remarks>
-    /// This is the underlying future itself, so every call returns the <b>same</b>
-    /// <see cref="Task"/> instance — no second task whose fault could go unobserved.
+    /// This is the underlying future itself, so every call returns an <b>equal</b>
+    /// <see cref="KafkaFuture{T}"/> — the same latch.
     /// </remarks>
-    public Task<IReadOnlyDictionary<string, TopicListing>> NamesToListings() => _future;
+    public KafkaFuture<IReadOnlyDictionary<string, TopicListing>> NamesToListings() => _future;
 
     /// <summary>
     /// The listings alone — Java's <c>listings()</c>
     /// (<c>namesToListings().thenApply(Map::values)</c>).
     /// </summary>
-    /// <returns>A task yielding the listings.</returns>
-    public Task<IReadOnlyCollection<TopicListing>> Listings() =>
+    /// <returns>A future yielding the listings.</returns>
+    public KafkaFuture<IReadOnlyCollection<TopicListing>> Listings() =>
         Project(static map => (IReadOnlyCollection<TopicListing>)new List<TopicListing>(map.Values));
 
     /// <summary>
     /// The topic names alone — Java's <c>names()</c>
     /// (<c>namesToListings().thenApply(Map::keySet)</c>).
     /// </summary>
-    /// <returns>A task yielding the names.</returns>
+    /// <returns>A future yielding the names.</returns>
     /// <remarks>
     /// Java returns a <c>Set&lt;String&gt;</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates
     /// the netstandard2.0 floor, so this is an <c>IReadOnlyCollection&lt;string&gt;</c> —
@@ -97,27 +101,21 @@ public sealed class ListTopicsResult
     /// <c>Subscription()</c> and friends (CLAUDE.md §3's idiom map). The names are
     /// distinct regardless, because they are the keys of a dictionary.
     /// </remarks>
-    public Task<IReadOnlyCollection<string>> Names() =>
+    public KafkaFuture<IReadOnlyCollection<string>> Names() =>
         Project(static map => (IReadOnlyCollection<string>)new List<string>(map.Keys));
 
     /// <summary>
-    /// Java's <c>thenApply</c>, in C#: derive a new task from the one future, so a
+    /// Java's <c>thenApply</c>, in C#: derive a new future from the one future, so a
     /// projection cannot observe a different cluster state than
     /// <see cref="NamesToListings"/> did.
     /// </summary>
     /// <remarks>
-    /// An <c>async</c> method rather than <c>ContinueWith</c>: awaiting rethrows the
-    /// underlying exception itself, so a faulted projection carries the same
-    /// <see cref="KafkaException"/> as the source rather than an extra
-    /// <see cref="AggregateException"/> wrapper. Each call allocates one task, exactly as
-    /// each Java <c>thenApply</c> allocates one <c>KafkaFuture</c> — and admin is
-    /// batch/administrative, with no per-record path to budget (<c>admin-client.md</c>
-    /// §10).
+    /// A <see cref="ProjectedSyncFuture{TIn, TOut}"/>: the projection runs once, on the first <c>Get()</c>'s thread,
+    /// and a failure of the source propagates as the same <see cref="KafkaException"/> instance. Each call builds one
+    /// future, exactly as each Java <c>thenApply</c> allocates one <c>KafkaFuture</c> — and admin is
+    /// batch/administrative, with no per-record path to budget (<c>admin-client.md</c> §10).
     /// </remarks>
-    private async Task<TResult> Project<TResult>(
-        Func<IReadOnlyDictionary<string, TopicListing>, TResult> select)
-    {
-        IReadOnlyDictionary<string, TopicListing> map = await _future.ConfigureAwait(false);
-        return select(map);
-    }
+    private KafkaFuture<TResult> Project<TResult>(
+        Func<IReadOnlyDictionary<string, TopicListing>, TResult> select) =>
+        SyncAdminFutures.Project(_future, select);
 }

@@ -54,7 +54,7 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>
-        DeleteTopicsResult.From(_native.DeleteTopics(topics, options, AdminFlavour.Async));
+        DeleteTopicsResult.From(_native.DeleteTopics(topics, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(
@@ -62,11 +62,11 @@ public sealed class KafkaAdminClient : IAdmin
         DeleteTopicsResult.From(_native.DeleteTopics(
             TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
             options,
-            AdminFlavour.Async));
+            AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
-        DescribeTopicsResult.From(_native.DescribeTopics(topics, options, AdminFlavour.Async));
+        DescribeTopicsResult.From(_native.DescribeTopics(topics, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(
@@ -74,22 +74,22 @@ public sealed class KafkaAdminClient : IAdmin
         DescribeTopicsResult.From(_native.DescribeTopics(
             TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
             options,
-            AdminFlavour.Async));
+            AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public ListTopicsResult ListTopics(ListTopicsOptions? options = null) =>
-        ListTopicsResult.From(_native.ListTopics(options, AdminFlavour.Async));
+        ListTopicsResult.From(_native.ListTopics(options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public CreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null) =>
-        CreatePartitionsResult.From(_native.CreatePartitions(newPartitions, options, AdminFlavour.Async));
+        CreatePartitionsResult.From(_native.CreatePartitions(newPartitions, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options = null) =>
-        DeleteRecordsResult.From(_native.DeleteRecords(recordsToDelete, options, AdminFlavour.Async));
+        DeleteRecordsResult.From(_native.DeleteRecords(recordsToDelete, options, AdminFlavour.Sync));
 
     /// <inheritdoc/>
     public DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
