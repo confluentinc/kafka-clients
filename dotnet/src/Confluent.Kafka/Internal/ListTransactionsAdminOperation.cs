@@ -53,13 +53,16 @@ namespace Confluent.Kafka.Internal;
 /// </para>
 /// <para>
 /// <b>The fail-fast group (sync flavour only, PLAN §3.3).</b> Java's <c>allByBrokerId()</c>
-/// completes on the first broker to fail <em>in time</em>, through a <c>whenComplete</c> per
-/// broker (<c>ListTransactionsResult.java:92-118</c>); a latch has no completion hook, and gains
-/// none. So the sync operation keeps a small group monitor of its own — the number of brokers
-/// still outstanding and the first failure — which <see cref="SetBrokerResult"/>,
-/// <see cref="SetBrokerException"/> and the countdown-zero sweep update under its lock, waking
-/// every waiter, whenever <b>they</b> complete a broker's latch.
-/// <see cref="WaitForBrokerGroup"/> is how a <see cref="FailFastGroupSyncFuture"/> waits on it.
+/// registers a <c>whenComplete</c> per broker, in map order, when the view's composition starts
+/// (<c>ListTransactionsResult.java:92-118</c>): of the brokers already complete then, the first
+/// faulted in discovery order wins, and otherwise the first to fail after it, in time. A latch
+/// has no completion hook, and gains none. So the sync operation keeps a small group monitor of
+/// its own — the number of brokers still outstanding, and a completion stamp and failure per
+/// broker — which <see cref="SetBrokerResult"/>, <see cref="SetBrokerException"/> and the
+/// countdown-zero sweep update under its lock, waking every waiter, whenever <b>they</b>
+/// complete a broker's latch. A <see cref="FailFastGroupSyncFuture"/> takes the group's
+/// <see cref="BrokerGroupWatermark"/> when its view is requested, and waits on the group through
+/// <see cref="WaitForBrokerGroup"/>, which picks that view's winner by the rule above.
 /// The monitor is armed by <see cref="PublishBrokers"/> before the outer stage completes, so a
 /// waiter that has seen the outer stage succeed sees an armed group; and it is never held across
 /// anything else (no native call, no latch lock, no user code). The async flavour keeps no
@@ -233,6 +236,10 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
 
         Dictionary<int, SyncFutureSource<IReadOnlyCollection<TransactionListing>>> latches =
             new Dictionary<int, SyncFutureSource<IReadOnlyCollection<TransactionListing>>>(brokerIds.Count);
+
+        // The distinct brokers in discovery order: the order the latch map below enumerates, which
+        // is the order the async flavour's gather walks its own map, built by the same loop.
+        List<int> discovered = new List<int>(brokerIds.Count);
         for (int i = 0; i < brokerIds.Count; i++)
         {
             int brokerId = brokerIds[i];
@@ -245,11 +252,12 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
                 new SyncCompletion<IReadOnlyCollection<TransactionListing>>(owner: null);
             completions.Add(brokerId, completion);
             latches.Add(brokerId, completion);
+            discovered.Add(brokerId);
         }
 
         // Arm the group first: no broker can complete before the map is published, and no waiter
         // reaches the group before the outer stage below has succeeded.
-        _group!.Arm(completions.Count);
+        _group!.Arm(discovered);
         Volatile.Write(ref _perBroker, completions);
         _byBrokerIdSync!.TrySetResult(latches);
     }
@@ -271,7 +279,7 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
         IAdminCompletion<IReadOnlyCollection<TransactionListing>>? completion = CompletionFor(brokerId);
         if (completion is not null && completion.TrySetResult(listings))
         {
-            _group?.Complete(failure: null);
+            _group?.Complete(brokerId, failure: null);
         }
     }
 
@@ -279,20 +287,41 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
     /// <param name="brokerId">The broker.</param>
     /// <param name="exception">That broker's error.</param>
     internal void SetBrokerException(int brokerId, Exception exception) =>
-        FailBroker(CompletionFor(brokerId), exception);
+        FailBroker(brokerId, CompletionFor(brokerId), exception);
+
+    /// <summary>
+    /// The fail-fast group's registration watermark: how many brokers have completed so far. A
+    /// <see cref="FailFastGroupSyncFuture"/> takes it when its view is requested, and hands it back to
+    /// <see cref="WaitForBrokerGroup"/>. Does not wait for any broker.
+    /// </summary>
+    /// <returns>
+    /// The stamp of the last broker completed, <c>0</c> if none has. It is <c>0</c> whenever the brokers are not yet
+    /// published, because no broker can complete before they are — so a view requested then registers when they
+    /// are, as Java's <c>allByBrokerId()</c> registers inside the outer future's <c>whenComplete</c>.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Async"/>.</exception>
+    internal int BrokerGroupWatermark() =>
+        (_group ?? throw AdminFlavourViews.WrongView(OperationName, _flavour, nameof(BrokerGroupWatermark))).Watermark();
 
     /// <summary>
     /// Waits, on the calling thread, until every broker has completed or one has failed, and
-    /// returns that first failure in time, or <see langword="null"/> if every broker succeeded.
+    /// returns the failure a view registered at <paramref name="watermark"/> reports, or
+    /// <see langword="null"/> if every broker succeeded.
     /// </summary>
-    /// <returns>The first broker failure in time, captured once; <see langword="null"/> if none failed.</returns>
+    /// <param name="watermark">The view's <see cref="BrokerGroupWatermark"/>, taken when it was requested.</param>
+    /// <returns>
+    /// Of the brokers already completed at <paramref name="watermark"/>, the first in discovery order that failed; if
+    /// none of them failed, the first to fail after it, in time; <see langword="null"/> if none failed. Each broker's
+    /// failure is captured once, so a waiter rethrows that broker's own exception instance.
+    /// </returns>
     /// <remarks>
     /// ⚠ Only after <see cref="SyncByBrokerId"/> has <b>succeeded</b>: the group is armed by
     /// <see cref="PublishBrokers"/>, and an unarmed group would wait for ever.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The operation is <see cref="AdminFlavour.Async"/>.</exception>
-    internal ExceptionDispatchInfo? WaitForBrokerGroup() =>
-        (_group ?? throw AdminFlavourViews.WrongView(OperationName, _flavour, nameof(WaitForBrokerGroup))).Wait();
+    internal ExceptionDispatchInfo? WaitForBrokerGroup(int watermark) =>
+        (_group ?? throw AdminFlavourViews.WrongView(OperationName, _flavour, nameof(WaitForBrokerGroup)))
+            .Wait(watermark);
 
     /// <summary>
     /// ⚠ <b>Countdown zero, never per callback</b> — a broker whose callback has not landed
@@ -323,6 +352,7 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
             if (!entry.Value.IsCompleted)
             {
                 FailBroker(
+                    entry.Key,
                     entry.Value,
                     new KafkaException(
                         string.Format(
@@ -336,11 +366,12 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
 
     // Every per-broker failure goes through here, so the group counts exactly the completions
     // that this call made.
-    private void FailBroker(IAdminCompletion<IReadOnlyCollection<TransactionListing>>? completion, Exception exception)
+    private void FailBroker(
+        int brokerId, IAdminCompletion<IReadOnlyCollection<TransactionListing>>? completion, Exception exception)
     {
         if (completion is not null && completion.TrySetException(exception))
         {
-            _group?.Complete(exception);
+            _group?.Complete(brokerId, exception);
         }
     }
 
@@ -357,35 +388,67 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
 
     /// <summary>
     /// The sync flavour's fail-fast group monitor (PLAN §3.3): how many brokers are still
-    /// outstanding, and the first to fail in time. Host scaffolding with no Java counterpart
-    /// (DoD #7): it stands in for the <c>whenComplete</c> per broker that Java's
+    /// outstanding, when each completed, and each one's failure. Host scaffolding with no Java
+    /// counterpart (DoD #7): it stands in for the <c>whenComplete</c> per broker that Java's
     /// <c>allByBrokerId()</c> registers, which a latch cannot offer.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Which failure a view reports.</b> Java registers its per-broker <c>whenComplete</c>s when the view's
+    /// composition starts, in map order (<c>ListTransactionsResult.java:92-118</c>): a broker already complete fires
+    /// there and then, in that order, and the rest fire as they complete. So among the brokers already complete at
+    /// that registration point, the first <b>in discovery order</b> that failed wins; failing that, the first to fail
+    /// after it, <b>in time</b>. The async flavour's gather walks <c>Task.WhenAny</c> over its brokers in discovery
+    /// order to the same effect. Here every completion takes a stamp, one more than the last, under the lock; a view
+    /// takes the current stamp as its watermark (<see cref="Watermark"/>) and picks its winner from the stamps
+    /// (<see cref="Wait"/>). Whether the group has an outcome does not depend on the watermark: once any broker has
+    /// failed the winner is fixed for every watermark, because the brokers at or below it no longer change and the
+    /// first failure in time is never replaced.
+    /// </para>
+    /// <para>
     /// Locks on <c>this</c>, as <see cref="SyncCompletion{T}"/> does: the instance is private to
-    /// its operation and never handed out. The lock is taken only for a few field updates, and
-    /// <see cref="Complete"/> runs after the broker's own latch has released its lock, so no
-    /// thread holds both.
+    /// its operation and never handed out. The lock is taken only for a few field updates and
+    /// reads, and <see cref="Complete"/> runs after the broker's own latch has released its lock,
+    /// so no thread holds both.
+    /// </para>
     /// </remarks>
     private sealed class BrokerGroup
     {
+        // Written once, by Arm, under the lock; every array is indexed by discovery order.
+        private Dictionary<int, int> _indexOf = new Dictionary<int, int>();
+        private int[] _completedAt = Array.Empty<int>();
+        private ExceptionDispatchInfo?[] _failures = Array.Empty<ExceptionDispatchInfo?>();
+
+        // The last stamp handed out: 0 until the first broker completes.
+        private int _sequence;
         private int _remaining;
-        private ExceptionDispatchInfo? _firstFailure;
+
+        // The discovery index of the first broker to fail in time; -1 while none has.
+        private int _firstFailure = -1;
         private volatile bool _done;
 
         /// <summary>Whether the group has an outcome. Never blocks.</summary>
         internal bool IsDone => _done;
 
         /// <summary>
-        /// Arms the group for <paramref name="brokers"/> distinct brokers. A group of none is done at once, with no
-        /// failure.
+        /// Arms the group for <paramref name="brokers"/>, the distinct brokers in discovery order. A group of none is
+        /// done at once, with no failure.
         /// </summary>
-        internal void Arm(int brokers)
+        internal void Arm(IReadOnlyList<int> brokers)
         {
             lock (this)
             {
-                _remaining = brokers;
-                if (brokers == 0)
+                Dictionary<int, int> indexOf = new Dictionary<int, int>(brokers.Count);
+                for (int i = 0; i < brokers.Count; i++)
+                {
+                    indexOf.Add(brokers[i], i);
+                }
+
+                _indexOf = indexOf;
+                _completedAt = new int[brokers.Count];
+                _failures = new ExceptionDispatchInfo?[brokers.Count];
+                _remaining = brokers.Count;
+                if (brokers.Count == 0)
                 {
                     _done = true;
                     Monitor.PulseAll(this);
@@ -395,43 +458,70 @@ internal sealed class ListTransactionsAdminOperation : AdminOperation
 
         /// <summary>
         /// One broker completed — <paramref name="failure"/> if it failed. Called once per
-        /// broker, by whichever call completed its latch.
+        /// broker, by whichever call completed its latch, so the broker is always one
+        /// <see cref="Arm"/> announced.
         /// </summary>
-        internal void Complete(Exception? failure)
+        internal void Complete(int brokerId, Exception? failure)
         {
             lock (this)
             {
+                int index = _indexOf[brokerId];
+                _completedAt[index] = ++_sequence;
                 _remaining--;
-                if (failure is not null && _firstFailure is null)
+                if (failure is not null)
                 {
-                    _firstFailure = ExceptionDispatchInfo.Capture(failure);
+                    _failures[index] = ExceptionDispatchInfo.Capture(failure);
+                    if (_firstFailure < 0)
+                    {
+                        _firstFailure = index;
+                    }
                 }
 
-                if (!_done && (_remaining == 0 || _firstFailure is not null))
+                if (!_done && (_remaining == 0 || _firstFailure >= 0))
                 {
-                    // Published last: a reader that sees it set sees the outcome, which no
-                    // later completion changes (the first failure is kept, never replaced).
+                    // Published last: a reader that sees it set sees an outcome that no later
+                    // completion changes (see the type remarks).
                     _done = true;
                     Monitor.PulseAll(this);
                 }
             }
         }
 
-        /// <summary>Waits until the group has an outcome, and returns its first failure, if any.</summary>
-        internal ExceptionDispatchInfo? Wait()
+        /// <summary>The stamp of the last broker completed; <c>0</c> if none has. Does not wait for any broker.</summary>
+        internal int Watermark()
         {
-            if (!_done)
+            lock (this)
             {
-                lock (this)
+                return _sequence;
+            }
+        }
+
+        /// <summary>
+        /// Waits until the group has an outcome, and returns the failure a view registered at
+        /// <paramref name="watermark"/> reports, if any.
+        /// </summary>
+        internal ExceptionDispatchInfo? Wait(int watermark)
+        {
+            lock (this)
+            {
+                while (!_done)
                 {
-                    while (!_done)
+                    Monitor.Wait(this);
+                }
+
+                // The brokers already complete at the registration point, in discovery order: a pending broker has no
+                // failure, and a completed one a stamp of at least 1.
+                for (int i = 0; i < _failures.Length; i++)
+                {
+                    if (_failures[i] is not null && _completedAt[i] <= watermark)
                     {
-                        Monitor.Wait(this);
+                        return _failures[i];
                     }
                 }
-            }
 
-            return _firstFailure;
+                // None of them failed: the first to fail after it, in time, or none at all.
+                return _firstFailure >= 0 ? _failures[_firstFailure] : null;
+            }
         }
     }
 }

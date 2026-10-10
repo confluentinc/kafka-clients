@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -2421,8 +2422,18 @@ public sealed class AdminP14SyncCompositionTests
     /// <see cref="ListTransactionsResult"/> / <see cref="AsyncListTransactionsResult"/> (M15/P14 S5f, PLAN §3.3): two
     /// stages — the broker discovery (<c>ByBrokerId()</c>'s own future) and one future per discovered broker — driven
     /// through the operation's own <c>FailDiscovery</c> / <c>PublishBrokers</c> / <c>SetBrokerResult</c> /
-    /// <c>SetBrokerException</c>. Every view is requested <b>before</b> the stage it waits on completes, and every
-    /// "fails before" claim is proven by asserting the other broker is still waiting, never by a sleep.
+    /// <c>SetBrokerException</c>. Every "fails before" claim is proven by asserting the other broker is still waiting,
+    /// never by a sleep.
+    /// <para>
+    /// Which broker's failure <c>AllByBrokerId()</c> and <c>All()</c> report, on both flavours, is Java's rule
+    /// (<c>ListTransactionsResult.java:92-118</c>: a new <c>allFuture</c> per call, and one <c>whenComplete</c> per
+    /// broker registered in map order inside the outer future's <c>whenComplete</c>). The registration point is the
+    /// later of the call and the brokers being published. Of the brokers already complete at that point, the first
+    /// faulted one in discovery order wins; if none of them failed, the first to fail after it, in time; if none fails,
+    /// the map completes. The async gather does this by walking <c>Task.WhenAny</c> over its brokers in discovery
+    /// order (an already-complete task is picked first, in list order); the sync group by stamping each broker's
+    /// completion and comparing the stamps with the watermark the view took when it was requested.
+    /// </para>
     /// <list type="bullet">
     /// <item><description>"fail-fast": brokers 1 and 2, and broker 2 fails while broker 1 is still waiting:
     /// <c>AllByBrokerId()</c> and <c>All()</c> fail with broker 2's own instance before broker 1 completes, as Java's
@@ -2437,13 +2448,25 @@ public sealed class AdminP14SyncCompositionTests
     /// an equal future on every call.</description></item>
     /// <item><description>"per-broker-independence": one broker's future does not wait for another's, and the
     /// aggregates wait for every broker.</description></item>
+    /// <item><description>"already-failed-first-in-discovery-order": brokers 1, 2 and 3; broker 3 fails, then broker
+    /// 2, then the views are requested: both fail at once with broker 2's instance (first faulted in discovery order),
+    /// broker 1 still waiting.</description></item>
+    /// <item><description>"registered-then-two-fail-first-in-time": the views are requested with the brokers known
+    /// and all running; broker 3 fails, then broker 2: broker 3's instance (first in time). Once broker 1 has
+    /// completed too, a view requested then reports broker 2's: each call registers on its own.</description></item>
+    /// <item><description>"registered-before-discovery-first-in-time": the views are requested while the discovery is
+    /// still running; the brokers are published, then broker 3 fails, then broker 2: broker 3's instance; a later view
+    /// as in the row above.</description></item>
+    /// <item><description>"already-failed-one-still-pending": broker 1 succeeds and broker 3 fails before the request,
+    /// broker 2 still running: the views fail at once with broker 3's instance, without waiting for broker 2.
+    /// </description></item>
     /// </list>
+    /// In the two "first-in-time" rows the second failure lands only once both views are done: the async gather's
+    /// outcome is fixed by then, and the sync <c>Get()</c> runs only after both failures, so it must pick by the
+    /// watermark it took at the request, not by what has failed by the time it runs.
     /// Omitted: unknown-key and null-key (no key-taking member: the per-broker map is a plain dictionary over the
-    /// discovered brokers); erasure identity (no void view); two-fail-first-in-key-order (the aggregate is fail-fast in
-    /// time, which the two-fail-first-in-time row pins); and a view first requested only <b>after</b> two brokers have
-    /// failed, where the flavours differ: the sync group reports the first failure in time, while the async gather
-    /// reports the first faulted broker in discovery order (<c>Task.WhenAny</c> over already-faulted tasks), as Java's
-    /// <c>whenComplete</c> attached after the fact fires in its map's iteration order. That case is not pinned here.
+    /// discovered brokers); erasure identity (no void view); two-fail-first-in-key-order (neither aggregate reports by
+    /// key order alone: the rule above governs, and the four rows ending this list pin it).
     /// </summary>
     public static TheoryData<string, string> ListTransactionsRows => Rows(
         "fail-fast",
@@ -2452,7 +2475,11 @@ public sealed class AdminP14SyncCompositionTests
         "zero-brokers",
         "two-fail-first-in-time",
         "memoization",
-        "per-broker-independence");
+        "per-broker-independence",
+        "already-failed-first-in-discovery-order",
+        "registered-then-two-fail-first-in-time",
+        "registered-before-discovery-first-in-time",
+        "already-failed-one-still-pending");
 
     /// <summary>
     /// <see cref="FenceProducersResult"/> and <see cref="AsyncFenceProducersResult"/>: the per-id void futures, the
@@ -2839,10 +2866,154 @@ public sealed class AdminP14SyncCompositionTests
                     break;
                 }
 
+            case "already-failed-first-in-discovery-order":
+                {
+                    // Broker 3 fails, then broker 2, all before the views are requested.
+                    operation.PublishBrokers(new[] { 1, 2, 3 });
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    FutureProbe first = harness.BrokerOf(brokers, 1);
+                    KafkaException third = new KafkaException(53, "broker 3 failed first", isRetriable: true);
+                    KafkaException second = new KafkaException(52, "broker 2 failed second", isRetriable: false);
+                    operation.SetBrokerException(3, third);
+                    operation.SetBrokerException(2, second);
+                    Assert.Same(third, await harness.BrokerOf(brokers, 3).Outcome());
+                    Assert.Same(second, await harness.BrokerOf(brokers, 2).Outcome());
+
+                    // Both were complete at the request, so the first faulted in discovery order wins: broker 2, though
+                    // broker 3 failed first. Done at the request, while broker 1 is still waiting.
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    Assert.True(all.IsDone, "AllByBrokerId() was not done at the request");
+                    Assert.True(flattened.IsDone, "All() was not done at the request");
+                    Assert.Same(second, await all.Outcome());
+                    Assert.Same(second, await flattened.Outcome());
+                    first.AssertPending();
+
+                    // Broker 1 completing changes neither, nor a view requested after it.
+                    IReadOnlyCollection<TransactionListing> listings = Listings(1);
+                    operation.SetBrokerResult(1, listings);
+                    Assert.Same(listings, await first.Outcome());
+                    Assert.Same(second, await all.Outcome());
+                    Assert.Same(second, await flattened.Outcome());
+                    Assert.Same(second, await harness.AllByBrokerId().Outcome());
+                    Assert.Same(second, await harness.All().Outcome());
+                    break;
+                }
+
+            case "registered-then-two-fail-first-in-time":
+                {
+                    // The views are requested with the brokers known and every one still running.
+                    operation.PublishBrokers(new[] { 1, 2, 3 });
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    Assert.False(all.IsDone, "AllByBrokerId() was done with every broker running");
+                    Assert.False(flattened.IsDone, "All() was done with every broker running");
+
+                    // Broker 3 fails first, and both views are done; only then does broker 2 fail.
+                    KafkaException third = new KafkaException(53, "broker 3 failed first", isRetriable: true);
+                    KafkaException second = new KafkaException(52, "broker 2 failed second", isRetriable: false);
+                    operation.SetBrokerException(3, third);
+                    AssertBecomesDone(all);
+                    AssertBecomesDone(flattened);
+                    operation.SetBrokerException(2, second);
+
+                    // Neither had completed at the request, so the first in time wins: broker 3.
+                    Assert.Same(third, await all.Outcome());
+                    Assert.Same(third, await flattened.Outcome());
+                    await AssertBrokerOneStillWaits(harness, brokers, all, third, laterView: second);
+                    break;
+                }
+
+            case "registered-before-discovery-first-in-time":
+                {
+                    // The views are requested while the discovery is still running: they register when the brokers are
+                    // published, before any can complete.
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    Assert.False(all.IsDone, "AllByBrokerId() was done before the discovery");
+                    Assert.False(flattened.IsDone, "All() was done before the discovery");
+
+                    operation.PublishBrokers(new[] { 1, 2, 3 });
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    Assert.False(all.IsDone, "AllByBrokerId() was done with every broker running");
+                    Assert.False(flattened.IsDone, "All() was done with every broker running");
+
+                    KafkaException third = new KafkaException(53, "broker 3 failed first", isRetriable: true);
+                    KafkaException second = new KafkaException(52, "broker 2 failed second", isRetriable: false);
+                    operation.SetBrokerException(3, third);
+                    AssertBecomesDone(all);
+                    AssertBecomesDone(flattened);
+                    operation.SetBrokerException(2, second);
+
+                    Assert.Same(third, await all.Outcome());
+                    Assert.Same(third, await flattened.Outcome());
+                    await AssertBrokerOneStillWaits(harness, brokers, all, third, laterView: second);
+                    break;
+                }
+
+            case "already-failed-one-still-pending":
+                {
+                    // Broker 1 succeeds and broker 3 fails before the request; broker 2 is still running.
+                    operation.PublishBrokers(new[] { 1, 2, 3 });
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    FutureProbe second = harness.BrokerOf(brokers, 2);
+                    KafkaException third = new KafkaException(53, "broker 3 could not list its transactions", isRetriable: true);
+                    operation.SetBrokerResult(1, Listings(1));
+                    operation.SetBrokerException(3, third);
+
+                    // The views fail at once with broker 3's instance, without waiting for broker 2.
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    Assert.True(all.IsDone, "AllByBrokerId() was not done at the request");
+                    Assert.True(flattened.IsDone, "All() was not done at the request");
+                    Assert.Same(third, await all.Outcome());
+                    Assert.Same(third, await flattened.Outcome());
+                    second.AssertPending();
+
+                    // Broker 2 completing later changes none of that; its own future has its own outcome.
+                    IReadOnlyCollection<TransactionListing> listings = Listings(2);
+                    operation.SetBrokerResult(2, listings);
+                    Assert.Same(listings, await second.Outcome());
+                    Assert.Same(third, await all.Outcome());
+                    Assert.Same(third, await harness.AllByBrokerId().Outcome());
+                    break;
+                }
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
         }
     }
+
+    /// <summary>
+    /// The tail of the two "first-in-time" ListTransactions rows: broker 1 is still waiting after the aggregate
+    /// failed; once it completes, its own future has its listings and <paramref name="all"/> still fails with
+    /// <paramref name="failure"/>. A view requested <b>now</b> registers with every broker complete, so it fails with
+    /// <paramref name="laterView"/>, the first faulted in discovery order: each call is its own registration.
+    /// </summary>
+    private static async Task AssertBrokerOneStillWaits(
+        ListTransactionsHarness harness, object? brokers, FutureProbe all, KafkaException failure, KafkaException laterView)
+    {
+        FutureProbe first = harness.BrokerOf(brokers, 1);
+        first.AssertPending();
+
+        IReadOnlyCollection<TransactionListing> listings = Listings(1);
+        harness.Operation.SetBrokerResult(1, listings);
+        Assert.Same(listings, await first.Outcome());
+        Assert.Same(failure, await all.Outcome());
+        Assert.Same(laterView, await harness.AllByBrokerId().Outcome());
+        Assert.Same(laterView, await harness.All().Outcome());
+    }
+
+    /// <summary>
+    /// Waits, within <see cref="BlockingCall.Deadline"/>, until <paramref name="probe"/>'s future is done, through its
+    /// non-blocking <c>IsDone</c> only: a sync future's <c>Get()</c> is not called, so it runs later, against what has
+    /// happened since.
+    /// </summary>
+    private static void AssertBecomesDone(FutureProbe probe) =>
+        Assert.True(
+            SpinWait.SpinUntil(() => probe.IsDone, BlockingCall.Deadline),
+            $"The future was not done within {BlockingCall.Deadline}.");
 
     /// <summary>One broker's listings: a distinct instance per call, carrying the broker's id.</summary>
     private static IReadOnlyCollection<TransactionListing> Listings(int broker) =>

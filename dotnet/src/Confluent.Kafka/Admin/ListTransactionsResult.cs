@@ -89,8 +89,8 @@ public sealed class ListTransactionsResult
     /// </summary>
     /// <returns>A future yielding every broker's listings, flattened.</returns>
     /// <remarks>
-    /// Java's <c>allByBrokerId().thenApply(...)</c>, so it fails exactly when, and with what,
-    /// <see cref="AllByBrokerId"/> does. Each call builds a new future.
+    /// Java's <c>allByBrokerId().thenApply(...)</c>, so it fails exactly when, and with what, an
+    /// <see cref="AllByBrokerId"/> requested by the same call does. Each call builds a new future.
     /// </remarks>
     public KafkaFuture<IReadOnlyCollection<TransactionListing>> All() =>
         SyncAdminFutures.Project(AllByBrokerId(), Flatten);
@@ -116,7 +116,12 @@ public sealed class ListTransactionsResult
     /// ⚠ <b>Fail-fast, as in Java</b> (<c>:92-118</c>): it completes with the full map once
     /// every broker has succeeded, and fails with a broker's error <b>as soon as that broker
     /// fails</b> — it does not wait for the brokers still running. "First" is first to
-    /// <em>complete</em>, not the lowest broker id.
+    /// <em>complete</em>, not the lowest broker id: of the brokers already complete when this
+    /// view is requested (none, if the brokers are not yet known), the first that failed in
+    /// discovery order; otherwise the first to fail after that, in time. Java registers one
+    /// <c>whenComplete</c> per broker, in its map's order, once the view is requested and the
+    /// brokers are known, and <see cref="AsyncListTransactionsResult.AllByBrokerId"/> reports the
+    /// same broker.
     /// </para>
     /// <para>
     /// ⚠ <b>Deviation, an empty map:</b> with no brokers this completes with an empty map. Java's
