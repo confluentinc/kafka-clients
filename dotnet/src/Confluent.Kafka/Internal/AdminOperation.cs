@@ -408,6 +408,12 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
     /// </summary>
     internal IEqualityComparer<TKey> KeyComparer => _keyComparer;
 
+    /// <summary>
+    /// The number of distinct keys under <see cref="KeyComparer"/>: the count of whichever view the flavour built, so
+    /// a core can read it without asking for a view, which would throw on the other flavour.
+    /// </summary>
+    internal int KeyCount => _perKey.Count;
+
     /// <summary>Resolves one key successfully with its marshalled value.</summary>
     internal void SetResult(TKey key, TValue value)
     {

@@ -2243,11 +2243,11 @@ internal sealed class NativeAdminClient : IDisposable
             // DISTINCT RESOURCE NAMED ACROSS THE ROWS (`distinct_config_resources`, which
             // counts a sentinel row too, and de-duplicates on `(for_id(type), name)`). Every
             // key is named by at least one row — its ops, or its sentinel — so the count is
-            // the number of DISTINCT keys, which is `Tasks.Count`: the bridge is keyed by
+            // the number of DISTINCT keys, which is `KeyCount`: the bridge is keyed by
             // `s_configResourceComparer`, and two keys equal under it are equal under the
             // ABI's `(for_id(type), name)` too (ConfigResource's ctor folds an undefined type
             // to Unknown, as `for_id` does). That one direction is what makes this arm safe:
-            // the ABI can never fire MORE callbacks than `Tasks.Count`, so the countdown never
+            // the ABI can never fire MORE callbacks than `KeyCount`, so the countdown never
             // under-counts and the operation is never freed before its last callback. The
             // converse does not hold for names that collapse under NUL-terminated UTF-8 (an
             // embedded NUL, or lone surrogates that encode to U+FFFD) — a known pre-existing
@@ -2256,7 +2256,9 @@ internal sealed class NativeAdminClient : IDisposable
             // value equality, so two equal resources can be two keys there and still get
             // ONE callback — a countdown armed with 2 would never reach zero and would root
             // the GCHandle and the client reference forever (Critic 85, finding 85.1).
-            operation.SetPendingCallbacks(operation.Tasks.Count);
+            // `KeyCount`, not `Tasks.Count`: the count is flavour-independent, and the Tasks view throws on a
+            // sync-flavour operation (M15/P14 S5a).
+            operation.SetPendingCallbacks(operation.KeyCount);
 
             submit(
                 _handle.DangerousGetHandle(),
