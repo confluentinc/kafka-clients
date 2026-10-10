@@ -62,6 +62,28 @@ The user approved the plan "with all PM recommendations including Q3 (add a foll
 
 **The other rule-file edits in §10 are approved in principle only.** Their exact text goes to the user before it is applied, at the S4 checkpoint or at S7. Only the a/b rule above is approved verbatim.
 
+**Q5 checkpoint rulings (after S4 and Critic pass 1).** The user's words: "go S5a, approve 1–8, phase tag fine, confirm all 3".
+- S5a-S7 proceed with the S4 pattern unchanged.
+- The §10 rule edits below are approved **verbatim**. Each is appended to its existing row and tagged "M15/P14" (no calendar date). They are applied at S7, together with the a/b rule, and no rule-file edit beyond them is approved.
+  1. `dotnet/CLAUDE.md:59-61`, after "...`MockAdminClient`, M15)": "; since M15/P14 that is the sync flavour, beside the async `IAsyncAdmin` (`AsyncKafkaAdminClient` / `AsyncMockAdminClient`)."
+  2. `dotnet/CLAUDE.md:431-433`, appended: "Since M15/P14 it ships in two flavours over one internal core: sync `IAdmin` (`KafkaAdminClient` / `MockAdminClient`; Results hold `KafkaFuture` / `KafkaFuture<T>`) and async `IAsyncAdmin` (`AsyncKafkaAdminClient` / `AsyncMockAdminClient`; `Async*Result` types hold `AsyncKafkaFuture` / `AsyncKafkaFuture<T>`)."
+  3. `dotnet/CLAUDE.md:487`, the idiom-map `Future<RecordMetadata>` row.
+     - C# cell, appended: "Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule."
+     - Rule cell, appended: "admin: one completion per key, ffi §B6 shape 4 (M15/P14)".
+  4. `dotnet/CLAUDE.md:561`, the "Returns `Future<T>`" row, appended: "Admin (M15/P14): every RPC returns its Result at once, as in Java; the Result holds one `KafkaFuture<T>` per key on `IAdmin` and one `AsyncKafkaFuture<T>` per key on `IAsyncAdmin`. Only `Close` waits."
+  5. `dotnet/CLAUDE.md:533`, the Disposal row, appended: "Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close(TimeSpan)` over the sync `kafka_admin_AdminClient_close`."
+  6. `dotnet/.claude/rules/ffi-marshalling.md:2023`, §B6 sub-shapes 4a/4b, appended: "(M15/P14: read 'one `Task` per key' as 'one completion per key': a `TaskCompletionSource` with `RunContinuationsAsynchronously` on the async flavour, or a `SyncCompletion` latch on the sync flavour, chosen by the operation's `AdminFlavour`. `AdminCallbacks` and the countdown do not depend on the flavour.)"
+  7. `dotnet/.claude/rules/ffi-marshalling.md`, a new bullet at the end of the §B7 Anti-patterns list: "A sync admin Result composed over Tasks (`Task.WhenAll`, an `async` projection, `ContinueWith`) and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`, `.Result`). This is sync-over-async: with `RunContinuationsAsynchronously` the composite needs a thread-pool thread to complete, so a saturated pool starves it. Compose over `SyncFutureSource` instead (`ProjectedSyncFuture`, `AllOfSyncFuture`, `GatheringAllOfSyncFuture`), which runs on the thread that calls `Get()` (M15/P14)."
+  8. `dotnet/.claude/rules/bindings.md:59-60`, appended to the host-idioms bullet: "A binding may offer both a blocking and an awaitable type for Java's `Future`; .NET does (`KafkaFuture` / `AsyncKafkaFuture`, M11/P4.2, M15/P14)."
+- The a/b rule goes directly under the §4 table (after the "Non-blocking **action**" row), under the heading "M15/P14: `Task` or `AsyncKafkaFuture` on an async interface", with its two lines and the examples given above.
+- Three Manager calls are confirmed:
+  - a default sync future's `IsDone` throws the same `InvalidOperationException` as `Get()`;
+  - the DescribeTopics aggregates are nullable futures, null on the side not requested;
+  - the 44 `NativeAdminClient` delegators deleted in S3b stay deleted.
+- Two corrections for later slices:
+  - the harness admin share is **79**, not 78, so S6 expects `__grpc_dotnet_async` 45 + 79 = **124** and the native harness 169 + 79 = **248**. That supersedes the 78 / 123 / 247 in §6.3 and §8, and the STATUS entry uses 124 / 248;
+  - the S7 xmldoc sweep also fixes the roughly 40 internal `NativeAdminClient` xmldocs that say "the async flavour's clients call this" (the sync clients call them too).
+
 **Process.** No progress log or slice log in this PLAN at any point; the evidence goes once into the STATUS entry at S7. Commits stay on `prashah_dev_dotnet_binding` in the main tree. The user pushes.
 
 ---
