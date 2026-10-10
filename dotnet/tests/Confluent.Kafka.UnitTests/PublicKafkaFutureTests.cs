@@ -26,16 +26,18 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The public <see cref="KafkaFuture{T}"/> on its own (M11/P4.2 S1, PLAN §7 N1–N3, N9, N10), built through its
 /// <c>internal</c> constructor over a <see cref="SyncCompletion{T}"/>: the default-value guard, the same-instance
-/// contract of <see cref="KafkaFuture{T}.Get"/> on success and on failure, D6's reference-identity equality, and the
-/// approved member set (no <c>Get(TimeSpan)</c>: D7 deferred, FU-4). The latch mechanics — blocking, first
-/// completion wins, the set/get race — are <c>Interop/SyncCompletionTests</c> (N4–N6). Everything here is available
-/// on the netstandard2.0 floor, so it also compiles on net462.
+/// contract of <see cref="KafkaFuture{T}.Get"/> on success and on failure, D6's reference-identity equality, the
+/// public <see cref="KafkaFuture{T}.IsDone"/> (M15/P14 Q2), and the approved member set (no <c>Get(TimeSpan)</c>: D7
+/// deferred, FU-4). The latch mechanics — blocking, first completion wins, the set/get race — are
+/// <c>Interop/SyncCompletionTests</c> (N4–N6). Everything here is available on the netstandard2.0 floor, so it also
+/// compiles on net462.
 /// </summary>
 public sealed class PublicKafkaFutureTests
 {
-    // PLAN §3, verbatim — the twin of AsyncKafkaFuture's.
+    // M15/P14 S1, verbatim — neutral between producer and admin use, the twin of AsyncKafkaFuture's.
     private const string DefaultValueMessage =
-        "This KafkaFuture is a default value and carries no send; only IProducer.Send returns a usable one.";
+        "This KafkaFuture is a default value and is bound to no operation; only IProducer.Send and the IAdmin result "
+        + "types return a usable one.";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
@@ -48,12 +50,70 @@ public sealed class PublicKafkaFutureTests
         // Twice each: a call on a default value latches nothing, so it stays unusable.
         for (int call = 0; call < 2; call++)
         {
-            AssertDefaultGetThrows(() => viaDefault.Get());
-            AssertDefaultGetThrows(() => viaNew.Get());
+            AssertDefaultThrows(() => viaDefault.Get());
+            AssertDefaultThrows(() => viaNew.Get());
         }
 
         // A value-type result does not change it: the guard is on the missing completion, not on a null T.
-        AssertDefaultGetThrows(() => default(KafkaFuture<long>).Get());
+        AssertDefaultThrows(() => default(KafkaFuture<long>).Get());
+    }
+
+    [Fact]
+    public void Default_IsDone_ThrowsInvalidOperationException_WithTheSameMessage()
+    {
+        // M15/P14: a default value is bound to no operation, so it has no "done" to report; returning false would let
+        // a polling caller spin forever without a signal.
+        KafkaFuture<RecordMetadata> viaDefault = default(KafkaFuture<RecordMetadata>);
+        KafkaFuture<RecordMetadata> viaNew = new KafkaFuture<RecordMetadata>();
+
+        for (int call = 0; call < 2; call++)
+        {
+            AssertDefaultThrows(() => viaDefault.IsDone);
+            AssertDefaultThrows(() => viaNew.IsDone);
+        }
+
+        AssertDefaultThrows(() => default(KafkaFuture<long>).IsDone);
+    }
+
+    [Theory]
+    [InlineData("result")]
+    [InlineData("exception")]
+    public void IsDone_IsFalseUntilCompleted_ThenTrue_OnSuccessAndOnFailure(string outcome)
+    {
+        SyncCompletion<RecordMetadata> completion = new SyncCompletion<RecordMetadata>();
+        KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> copy = future;
+
+        Assert.False(future.IsDone);
+        Assert.False(copy.IsDone);
+
+        // A Get() started while pending is still blocked: IsDone did not complete anything.
+        RecordMetadata metadata = NewMetadata();
+        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        object? observed = null;
+        Thread waiter = StartThread(() =>
+        {
+            try
+            {
+                observed = future.Get();
+            }
+            catch (Exception exception)
+            {
+                observed = exception;
+            }
+        });
+        Assert.False(waiter.Join(TimeSpan.FromMilliseconds(100)), "Get() returned before the latch completed.");
+        Assert.False(future.IsDone);
+
+        Assert.True(outcome == "result" ? completion.TrySetResult(metadata) : completion.TrySetException(cause));
+
+        Assert.True(future.IsDone);
+        Assert.True(copy.IsDone);
+        Assert.True(waiter.Join(s_deadline), $"Get() did not return within {s_deadline}.");
+        Assert.Same(outcome == "result" ? metadata : cause, observed);
+
+        // Stays true: a completed latch never reverts.
+        Assert.True(future.IsDone);
     }
 
     [Fact]
@@ -207,8 +267,8 @@ public sealed class PublicKafkaFutureTests
         // Exactly one interface: IEquatable<self> (D6).
         Assert.Equal(new[] { typeof(IEquatable<KafkaFuture<RecordMetadata>>) }, type.GetInterfaces());
 
-        // Declared public instance methods: Get + D6's three. No Get(TimeSpan) (D7 deferred, FU-4), no
-        // GetAwaiter / ConfigureAwait, no IsDone / IsCancelled / Cancel, no ToString override.
+        // Declared public instance methods: Get, IsDone's getter (M15/P14 Q2) + D6's three. No Get(TimeSpan) (D7
+        // deferred, FU-4), no GetAwaiter / ConfigureAwait, no IsCancelled / Cancel, no ToString override.
         string[] instanceMethods = type
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Select(Signature)
@@ -220,6 +280,7 @@ public sealed class PublicKafkaFutureTests
                 "Confluent.Kafka.RecordMetadata Get()",
                 "System.Boolean Equals(Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata])",
                 "System.Boolean Equals(System.Object)",
+                "System.Boolean get_IsDone()",
                 "System.Int32 GetHashCode()",
             },
             instanceMethods);
@@ -249,25 +310,30 @@ public sealed class PublicKafkaFutureTests
             },
             staticMethods);
 
-        // No public constructor; the one internal constructor takes the completion.
+        // No public constructor; the one internal constructor takes the source (M15/P14 S1: the latch's base, so a
+        // composite can stand behind the future too).
         Assert.Empty(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
         ConstructorInfo constructor = Assert.Single(type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
         Assert.True(constructor.IsAssembly);
         Assert.Equal(
-            new[] { typeof(SyncCompletion<RecordMetadata>) },
+            new[] { typeof(SyncFutureSource<RecordMetadata>) },
             constructor.GetParameters().Select(parameter => parameter.ParameterType).ToArray());
 
-        // No public fields or properties; the one private field is a readonly managed completion — never a native
-        // pointer (S-1).
+        // No public fields; one public property, the read-only IsDone (M15/P14 Q2). The one private field is a
+        // readonly managed source — never a native pointer (S-1).
         Assert.Empty(type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
-        Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
+        PropertyInfo isDone = Assert.Single(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
+        Assert.Equal("IsDone", isDone.Name);
+        Assert.Equal(typeof(bool), isDone.PropertyType);
+        Assert.True(isDone.CanRead);
+        Assert.False(isDone.CanWrite);
         FieldInfo field = Assert.Single(type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance));
         Assert.True(field.IsPrivate);
         Assert.True(field.IsInitOnly);
-        Assert.Equal(typeof(SyncCompletion<RecordMetadata>), field.FieldType);
+        Assert.Equal(typeof(SyncFutureSource<RecordMetadata>), field.FieldType);
     }
 
-    private static void AssertDefaultGetThrows(Func<object?> get)
+    private static void AssertDefaultThrows(Func<object?> get)
     {
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(get);
         Assert.Equal(DefaultValueMessage, thrown.Message);

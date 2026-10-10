@@ -631,16 +631,11 @@ public sealed class PublicSyncProducerKafkaFutureTests
         return (NativeProducer)nativeField.GetValue(producer)!;
     }
 
-    /// <summary>Whether the future's latch has completed — its internal state, read without blocking.</summary>
-    private static bool IsDone(KafkaFuture<RecordMetadata> future)
-    {
-        FieldInfo completionField = typeof(KafkaFuture<RecordMetadata>).GetField(
-                "_completion", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("KafkaFuture._completion was renamed; update this test");
-        SyncCompletion<RecordMetadata> completion = (SyncCompletion<RecordMetadata>?)completionField.GetValue(future)
-            ?? throw new InvalidOperationException("the future is a default value");
-        return completion.IsDone;
-    }
+    /// <summary>
+    /// Whether the future's latch has completed, read without blocking — the public <see cref="KafkaFuture{T}.IsDone"/>
+    /// since M15/P14 Q2, which reads the latch's own flag (it read the private field by reflection before).
+    /// </summary>
+    private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone;
 
     private static bool IsParked(Thread? thread) =>
         thread is not null && (thread.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0;

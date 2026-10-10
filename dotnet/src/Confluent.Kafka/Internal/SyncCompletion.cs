@@ -19,13 +19,17 @@ using System.Threading;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The managed latch behind one sync send's <see cref="KafkaFuture{T}"/> — Java's
+/// The managed latch behind a <see cref="KafkaFuture{T}"/> — for one sync send, Java's
 /// <c>FutureRecordMetadata</c> latch (<c>ProduceRequestResult</c>'s <c>CountDownLatch</c>), a plain lock plus
 /// <see cref="Monitor"/>. It is completed exactly once, by whichever of <see cref="TrySetResult"/> /
 /// <see cref="TrySetException"/> comes first, and <see cref="Get"/> blocks until then.
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
+/// <item><description>
+/// <b>A <see cref="SyncFutureSource{T}"/> (M15/P14 S1).</b> The base declares no field, so the latch's size, and the
+/// sync send's allocation budget, are unchanged; <see cref="Get"/> and <see cref="IsDone"/> are its overrides.
+/// </description></item>
 /// <item><description>
 /// <b>No <c>Task</c>.</b> Never a <c>Task</c>, a <c>TaskCompletionSource</c> or a per-send
 /// <c>ManualResetEventSlim</c>: a blocked <see cref="Get"/> parks on <see cref="Monitor.Wait(object)"/>, so it is
@@ -57,7 +61,7 @@ namespace Confluent.Kafka.Internal;
 /// </list>
 /// </remarks>
 /// <typeparam name="T">The completion's value: <see cref="RecordMetadata"/> for a producer send.</typeparam>
-internal sealed class SyncCompletion<T>
+internal sealed class SyncCompletion<T> : SyncFutureSource<T>
 {
     private const string GetOnOwningPumpMessage =
         "KafkaFuture.Get() was called on this producer's send-completion thread — from inside a delivery callback — " +
@@ -78,7 +82,7 @@ internal sealed class SyncCompletion<T>
     /// <summary>
     /// Whether the latch has been completed — a volatile read that never blocks (the latch's <c>isDone()</c>).
     /// </summary>
-    internal bool IsDone => _done;
+    internal override bool IsDone => _done;
 
     /// <summary>
     /// Completes the latch with <paramref name="value"/> and releases every waiter, unless it is already completed.
@@ -128,7 +132,7 @@ internal sealed class SyncCompletion<T>
     /// <exception cref="InvalidOperationException">
     /// Called on the owning pump's own thread while the latch is not completed (D9).
     /// </exception>
-    internal T Get()
+    internal override T Get()
     {
         if (!_done)
         {

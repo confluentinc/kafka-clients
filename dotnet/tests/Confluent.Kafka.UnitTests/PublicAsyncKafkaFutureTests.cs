@@ -31,9 +31,10 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicAsyncKafkaFutureTests
 {
-    // D3, verbatim.
+    // D3's guard; the message is M15/P14 S1's, verbatim — neutral between producer and admin use.
     private const string DefaultValueMessage =
-        "This AsyncKafkaFuture is a default value and carries no send; only IAsyncProducer.Send returns a usable one.";
+        "This AsyncKafkaFuture is a default value and is bound to no operation; only IAsyncProducer.Send and the "
+        + "IAsyncAdmin result types return a usable one.";
 
     [Fact]
     public void Default_Get_ThrowsInvalidOperationException_WithItsMessage()
