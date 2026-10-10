@@ -38,7 +38,8 @@ public sealed class ThreadPoolStarvationCollection
 /// M15/P14 — the sync admin flavour needs no thread-pool thread. With the pool capped at
 /// <see cref="Environment.ProcessorCount"/> and every worker held on a gate, a sync <c>CreateTopics</c> on the public
 /// <see cref="MockAdminClient"/> still returns its <c>All().Get()</c> and <c>NumPartitions(t).Get()</c>, while the
-/// async flavour's <c>All()</c>, composed the same way, cannot complete until the gate opens.
+/// async flavour's <c>All()</c>, composed the same way, cannot complete until the gate opens; and the sync
+/// <c>Close(TimeSpan)</c> still returns within its timeout.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -60,7 +61,8 @@ public sealed class ThreadPoolStarvationCollection
 /// <para>
 /// <b>What it catches.</b> A sync composite that hands its work to the pool — e.g. a projection computed through
 /// <c>Task.Run(...).GetAwaiter().GetResult()</c> — blocks behind the queued blockers, so the sync row's thread does not
-/// return within its deadline.
+/// return within its deadline. Likewise a sync <c>Close</c> built over the async close (<c>close_async</c> plus
+/// <c>GetAwaiter().GetResult()</c>): the async close resumes on a pool thread, so the close row does not return.
 /// </para>
 /// </remarks>
 [Collection(ThreadPoolStarvationCollection.Name)]
@@ -69,8 +71,11 @@ public sealed class AdminP14SyncStarvationTests
     private const string SyncTopic = "starve-sync";
     private const string ControlTopic = "starve-control";
 
-    /// <summary>How long the sync row may take. It needs no pool thread, so it returns in well under this.</summary>
+    /// <summary>How long the sync rows may take. They need no pool thread, so they return in well under this.</summary>
     private static readonly TimeSpan s_syncDeadline = TimeSpan.FromSeconds(10);
+
+    /// <summary>The close row's own timeout — the bound its <c>Close</c> must return within.</summary>
+    private static readonly TimeSpan s_closeTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>How long the control is watched for a completion it must not reach while the pool is starved.</summary>
     private static readonly TimeSpan s_controlWindow = TimeSpan.FromSeconds(2);
@@ -96,45 +101,14 @@ public sealed class AdminP14SyncStarvationTests
         using MockAdminClient sync = new MockAdminClient(1);
         NativeAdminClient control = NativeAdminClient.CreateMock(1);
 
-        int processors = Environment.ProcessorCount;
-        int blockers = 2 * processors;
-        ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
-        ThreadPool.GetMaxThreads(out int maxWorkers, out int maxIo);
-
-        Gate gate = new Gate();
-        int started = 0;
-        int finished = 0;
-        int probeRan = 0;
-        bool restored = false;
+        StarvedPool pool = new StarvedPool();
         Thread? syncRow = null;
         AsyncKafkaFuture controlAll = default;
         AsyncKafkaFuture<int> controlPartitions = default;
 
         try
         {
-            Assert.True(ThreadPool.SetMinThreads(processors, minIo), "SetMinThreads(ProcessorCount) was refused");
-            Assert.True(ThreadPool.SetMaxThreads(processors, maxIo), "SetMaxThreads(ProcessorCount) was refused");
-
-            for (int i = 0; i < blockers; i++)
-            {
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    Interlocked.Increment(ref started);
-                    gate.Wait(s_blockerBound);
-                    Interlocked.Increment(ref finished);
-                });
-            }
-
-            // Settle only, not an assertion: let the workers take their blockers. How many can is not knowable here —
-            // this test may itself run on a pool worker, and the runner can hold another — and it does not matter:
-            // the blockers still queued sit ahead of anything queued later, which the probe below proves.
-            Settle(ref started);
-
-            ThreadPool.QueueUserWorkItem(_ => Interlocked.Exchange(ref probeRan, 1));
-            Thread.Sleep(s_probeWindow);
-            Assert.True(
-                Volatile.Read(ref probeRan) == 0,
-                "the pool is not saturated: a work item queued behind the blockers ran");
+            pool.Saturate();
 
             // Sync row: the public mock, on a thread of its own, with every pool worker held.
             int partitions = -1;
@@ -181,7 +155,7 @@ public sealed class AdminP14SyncStarvationTests
             using (Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(ControlTopic))
             {
                 Assert.NotNull(callback);
-                callback!(key.Pointer, IntPtr.Zero, MakeError(41, "control failed"), userData);
+                callback!(key.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(41, "control failed"), userData);
             }
 
             Assert.True(
@@ -191,19 +165,14 @@ public sealed class AdminP14SyncStarvationTests
             Assert.False(
                 controlPartitions.Get().IsCompleted,
                 "the async NumPartitions(t).Get() completed on a starved pool");
-            Assert.True(Volatile.Read(ref probeRan) == 0, "the pool stayed saturated for the whole test");
+            pool.AssertStillSaturated();
         }
         finally
         {
-            gate.Open();
-            syncRow?.Join(s_releaseDeadline);
-            restored = ThreadPool.SetMaxThreads(maxWorkers, maxIo) & ThreadPool.SetMinThreads(minWorkers, minIo);
+            pool.Release(syncRow);
         }
 
-        Assert.True(restored, "the thread pool's min/max could not be restored");
-        Assert.True(
-            SpinWait.SpinUntil(() => Volatile.Read(ref finished) == blockers && Volatile.Read(ref probeRan) == 1, s_releaseDeadline),
-            "the blockers and the probe did not drain once the gate opened");
+        pool.AssertReleased();
 
         // Once the pool is free the control completes with the failure it was given: it was starved, not broken.
         AssertFailedWith(controlAll.Get(), 41, "control failed");
@@ -213,28 +182,55 @@ public sealed class AdminP14SyncStarvationTests
     }
 
     /// <summary>
-    /// Waits until <paramref name="started"/> has held still for <see cref="s_settleQuiet"/>, bounded by
-    /// <see cref="s_settleDeadline"/>.
+    /// The close row (PLAN §7.4, S5g): the sync <c>Close(TimeSpan)</c> on the public <see cref="MockAdminClient"/>
+    /// returns within its timeout, without error, while every pool worker is held — it parks its own thread inside the
+    /// native client's synchronous close and needs no pool thread to resume. Afterwards the client is closed.
     /// </summary>
-    private static void Settle(ref int started)
+    [Fact]
+    public void Close_OnAStarvedThreadPool_TheSyncCloseReturnsWithinItsTimeout()
     {
-        DateTime deadline = DateTime.UtcNow + s_settleDeadline;
-        int seen = Volatile.Read(ref started);
-        DateTime quietSince = DateTime.UtcNow;
-        while (DateTime.UtcNow < deadline)
+        MockAdminClient sync = new MockAdminClient(1);
+
+        StarvedPool pool = new StarvedPool();
+        Thread? closeRow = null;
+
+        try
         {
-            Thread.Sleep(10);
-            int now = Volatile.Read(ref started);
-            if (now != seen)
+            pool.Saturate();
+
+            Exception? closeFailure = null;
+            closeRow = new Thread(() =>
             {
-                seen = now;
-                quietSince = DateTime.UtcNow;
-            }
-            else if (now > 0 && DateTime.UtcNow - quietSince >= s_settleQuiet)
+                try
+                {
+                    sync.Close(s_closeTimeout);
+                }
+                catch (Exception exception)
+                {
+                    closeFailure = exception;
+                }
+            })
             {
-                return;
-            }
+                IsBackground = true,
+                Name = "starvation-close-row",
+            };
+            closeRow.Start();
+            Assert.True(
+                closeRow.Join(s_closeTimeout),
+                "the sync Close(TimeSpan) did not return within its timeout on a starved pool");
+            Assert.Null(closeFailure);
+            pool.AssertStillSaturated();
         }
+        finally
+        {
+            pool.Release(closeRow);
+        }
+
+        pool.AssertReleased();
+
+        ObjectDisposedException closed = Assert.Throws<ObjectDisposedException>(() => sync.ListTopics());
+        Assert.Equal(nameof(MockAdminClient), closed.ObjectName);
+        TestTimeout.Run(sync.Dispose, s_releaseDeadline);
     }
 
     private static bool Completes(AsyncKafkaFuture future, TimeSpan window)
@@ -259,12 +255,109 @@ public sealed class AdminP14SyncStarvationTests
         Assert.Equal(message, failure.Message);
     }
 
-    private static IntPtr MakeError(int code, string message)
+    /// <summary>
+    /// The process-wide thread pool, capped at <see cref="Environment.ProcessorCount"/> workers with every one held on
+    /// a gate. Construct it before the <c>try</c>, <see cref="Saturate"/> inside it, <see cref="Release"/> in the
+    /// <c>finally</c> and <see cref="AssertReleased"/> after it, so the pool's limits are restored on every path.
+    /// </summary>
+    private sealed class StarvedPool
     {
-        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
+        private readonly Gate _gate = new Gate();
+        private readonly int _processors = Environment.ProcessorCount;
+        private readonly int _minWorkers;
+        private readonly int _minIo;
+        private readonly int _maxWorkers;
+        private readonly int _maxIo;
+        private int _blockers;
+        private int _started;
+        private int _finished;
+        private int _probeRan;
+        private bool _restored;
+
+        internal StarvedPool()
+        {
+            ThreadPool.GetMinThreads(out _minWorkers, out _minIo);
+            ThreadPool.GetMaxThreads(out _maxWorkers, out _maxIo);
+        }
+
+        /// <summary>
+        /// Caps the pool, queues <c>2P</c> gate-blocked items, and asserts a probe queued behind them does not run.
+        /// </summary>
+        internal void Saturate()
+        {
+            Assert.True(ThreadPool.SetMinThreads(_processors, _minIo), "SetMinThreads(ProcessorCount) was refused");
+            Assert.True(ThreadPool.SetMaxThreads(_processors, _maxIo), "SetMaxThreads(ProcessorCount) was refused");
+
+            _blockers = 2 * _processors;
+            for (int i = 0; i < _blockers; i++)
+            {
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    Interlocked.Increment(ref _started);
+                    _gate.Wait(s_blockerBound);
+                    Interlocked.Increment(ref _finished);
+                });
+            }
+
+            // Settle only, not an assertion: let the workers take their blockers. How many can is not knowable here —
+            // this test may itself run on a pool worker, and the runner can hold another — and it does not matter:
+            // the blockers still queued sit ahead of anything queued later, which the probe below proves.
+            Settle();
+
+            ThreadPool.QueueUserWorkItem(_ => Interlocked.Exchange(ref _probeRan, 1));
+            Thread.Sleep(s_probeWindow);
+            Assert.True(
+                Volatile.Read(ref _probeRan) == 0,
+                "the pool is not saturated: a work item queued behind the blockers ran");
+        }
+
+        /// <summary>Asserts the probe has still not run: the pool stayed saturated for the whole row.</summary>
+        internal void AssertStillSaturated() =>
+            Assert.True(Volatile.Read(ref _probeRan) == 0, "the pool stayed saturated for the whole test");
+
+        /// <summary>Opens the gate, joins the row's thread, and restores the pool's original limits (max first).</summary>
+        internal void Release(Thread? row)
+        {
+            _gate.Open();
+            row?.Join(s_releaseDeadline);
+            _restored = ThreadPool.SetMaxThreads(_maxWorkers, _maxIo) & ThreadPool.SetMinThreads(_minWorkers, _minIo);
+        }
+
+        /// <summary>Asserts the limits were restored and every blocker and the probe drained.</summary>
+        internal void AssertReleased()
+        {
+            Assert.True(_restored, "the thread pool's min/max could not be restored");
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => Volatile.Read(ref _finished) == _blockers && Volatile.Read(ref _probeRan) == 1,
+                    s_releaseDeadline),
+                "the blockers and the probe did not drain once the gate opened");
+        }
+
+        /// <summary>
+        /// Waits until the started count has held still for <see cref="s_settleQuiet"/>, bounded by
+        /// <see cref="s_settleDeadline"/>.
+        /// </summary>
+        private void Settle()
+        {
+            DateTime deadline = DateTime.UtcNow + s_settleDeadline;
+            int seen = Volatile.Read(ref _started);
+            DateTime quietSince = DateTime.UtcNow;
+            while (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(10);
+                int now = Volatile.Read(ref _started);
+                if (now != seen)
+                {
+                    seen = now;
+                    quietSince = DateTime.UtcNow;
+                }
+                else if (now > 0 && DateTime.UtcNow - quietSince >= s_settleQuiet)
+                {
+                    return;
+                }
+            }
+        }
     }
 
     /// <summary>

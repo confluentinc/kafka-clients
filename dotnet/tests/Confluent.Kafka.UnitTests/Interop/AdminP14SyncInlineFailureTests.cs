@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Threading;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Internal;
@@ -35,8 +34,6 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </remarks>
 public sealed class AdminP14SyncInlineFailureTests
 {
-    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
-
     /// <summary>
     /// <see cref="CreateTopicsResult"/>: both topics fail inside the submit. On return every view is done — the erased
     /// <c>Values</c>, <c>All()</c> and a typed accessor — and each <c>Get()</c> throws the exact delivered error, the
@@ -57,8 +54,8 @@ public sealed class AdminP14SyncInlineFailureTests
                 // `topics` holds NewTopic_t handles, not names, so each key is pinned here.
                 using Utf8Marshal.PinnedUtf8String alphaKey = Utf8Marshal.Pin("inline-alpha");
                 using Utf8Marshal.PinnedUtf8String betaKey = Utf8Marshal.Pin("inline-beta");
-                callback(betaKey.Pointer, IntPtr.Zero, MakeError(42, "beta failed inline"), userData);
-                callback(alphaKey.Pointer, IntPtr.Zero, MakeError(41, "alpha failed inline"), userData);
+                callback(betaKey.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(42, "beta failed inline"), userData);
+                callback(alphaKey.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(41, "alpha failed inline"), userData);
             }));
 
         Assert.True(result.Values["inline-alpha"].IsDone, "the inline callback ran before the RPC returned");
@@ -66,34 +63,11 @@ public sealed class AdminP14SyncInlineFailureTests
         Assert.True(result.All().IsDone, "every key was done before the RPC returned");
         Assert.True(result.NumPartitions("inline-beta").IsDone, "a projection is done when its key is");
 
-        KafkaException alpha = AssertThrew(BlockingCall.RunWait(() => result.Values["inline-alpha"].Get()), 41, "alpha failed inline");
-        AssertThrew(BlockingCall.RunWait(() => result.Values["inline-beta"].Get()), 42, "beta failed inline");
-        AssertThrew(BlockingCall.RunGet(() => result.NumPartitions("inline-beta").Get()), 42, "beta failed inline");
-        Assert.Same(alpha, AssertThrew(BlockingCall.RunWait(() => result.All().Get()), 41, "alpha failed inline"));
+        KafkaException alpha = AdminP14FlavourSeamTests.AssertThrew(BlockingCall.RunWait(() => result.Values["inline-alpha"].Get()), 41, "alpha failed inline");
+        AdminP14FlavourSeamTests.AssertThrew(BlockingCall.RunWait(() => result.Values["inline-beta"].Get()), 42, "beta failed inline");
+        AdminP14FlavourSeamTests.AssertThrew(BlockingCall.RunGet(() => result.NumPartitions("inline-beta").Get()), 42, "beta failed inline");
+        Assert.Same(alpha, AdminP14FlavourSeamTests.AssertThrew(BlockingCall.RunWait(() => result.All().Get()), 41, "alpha failed inline"));
 
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(
-            SpinWait.SpinUntil(() => handle.IsClosed, s_deadline),
-            "the operation must have released its reference to the client");
-    }
-
-    private static KafkaException AssertThrew(object? outcome, int code, string message)
-    {
-        KafkaException failure = Assert.IsType<KafkaException>(outcome);
-        Assert.Equal(code, failure.Code);
-        Assert.Equal(message, failure.Message);
-        return failure;
-    }
-
-    /// <summary>
-    /// Builds an <b>owned</b> <c>kafka_common_KafkaError_t</c> standing in for the one native would hand the callback;
-    /// the trampoline frees it via <see cref="KafkaException.FromHandle"/>.
-    /// </summary>
-    private static IntPtr MakeError(int code, string message)
-    {
-        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
+        AdminP14FlavourSeamTests.AssertReleasedOnDispose(admin, handle);
     }
 }

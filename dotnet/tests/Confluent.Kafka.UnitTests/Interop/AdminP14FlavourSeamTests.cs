@@ -79,8 +79,8 @@ public sealed class AdminP14FlavourSeamTests
                 // `topics` holds NewTopic_t handles, not names, so each key is pinned here.
                 using Utf8Marshal.PinnedUtf8String alphaKey = Utf8Marshal.Pin("inline-alpha");
                 using Utf8Marshal.PinnedUtf8String betaKey = Utf8Marshal.Pin("inline-beta");
-                callback(alphaKey.Pointer, IntPtr.Zero, MakeError(41, "alpha failed inline"), userData);
-                callback(betaKey.Pointer, IntPtr.Zero, MakeError(42, "beta failed inline"), userData);
+                callback(alphaKey.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(41, "alpha failed inline"), userData);
+                callback(betaKey.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(42, "beta failed inline"), userData);
             });
 
         Assert.True(operation.SyncSources["inline-alpha"].IsDone, "the inline callback ran before the RPC returned");
@@ -112,7 +112,7 @@ public sealed class AdminP14FlavourSeamTests
             (nativeHandle, keys, count, timeoutMs, retryOnQuotaViolation, callback, userData) =>
             {
                 callback(keys[0], IntPtr.Zero, userData);
-                callback(keys[1], MakeError(3, "kept inline"), userData);
+                callback(keys[1], AdminP4OperationLifetimeTests.MakeError(3, "kept inline"), userData);
             },
             (nativeHandle, keys, count, timeoutMs, retryOnQuotaViolation, callback, userData) =>
                 throw new InvalidOperationException("a by-name delete must not reach the by-id submit"));
@@ -140,7 +140,7 @@ public sealed class AdminP14FlavourSeamTests
             options: null,
             AdminFlavour.Sync,
             (nativeHandle, timeoutMs, listInternal, callback, userData) =>
-                callback(IntPtr.Zero, MakeError(7, "list failed inline"), userData));
+                callback(IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(7, "list failed inline"), userData));
 
         Assert.True(operation.SyncSource.IsDone, "the inline callback ran before the RPC returned");
         AssertThrew(BlockingCall.RunGet(() => operation.SyncSource.Get()), 7, "list failed inline");
@@ -289,7 +289,7 @@ public sealed class AdminP14FlavourSeamTests
         int completingThread = RunOnForeignThread(() =>
         {
             using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin("foreign-topic");
-            capturedCallback!(key.Pointer, IntPtr.Zero, MakeError(29, "failed on a foreign thread"), capturedUserData);
+            capturedCallback!(key.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(29, "failed on a foreign thread"), capturedUserData);
         });
 
         AssertThrew(waiter.Join(), 29, "failed on a foreign thread");
@@ -351,7 +351,7 @@ public sealed class AdminP14FlavourSeamTests
         waiter.AssertBlocked();
 
         int completingThread = RunOnForeignThread(
-            () => capturedCallback!(IntPtr.Zero, MakeError(11, "list failed on a foreign thread"), capturedUserData));
+            () => capturedCallback!(IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(11, "list failed on a foreign thread"), capturedUserData));
 
         AssertThrew(waiter.Join(), 11, "list failed on a foreign thread");
         AssertThreeDistinctThreads(completingThread, waiter.CallingThreadId);
@@ -391,7 +391,7 @@ public sealed class AdminP14FlavourSeamTests
             });
 
         FireKey(capturedCallback!, "independent-ok", IntPtr.Zero, capturedUserData);
-        FireKey(capturedCallback!, "independent-bad", MakeError(37, "only this key failed"), capturedUserData);
+        FireKey(capturedCallback!, "independent-bad", AdminP4OperationLifetimeTests.MakeError(37, "only this key failed"), capturedUserData);
 
         Assert.True(Assert.IsType<bool>(BlockingCall.RunGet(() => operation.SyncSources["independent-ok"].Get())));
         AssertThrew(BlockingCall.RunGet(() => operation.SyncSources["independent-bad"].Get()), 37, "only this key failed");
@@ -430,7 +430,7 @@ public sealed class AdminP14FlavourSeamTests
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
             {
                 using Utf8Marshal.PinnedUtf8String stray = Utf8Marshal.Pin("never-requested");
-                callback(stray.Pointer, IntPtr.Zero, MakeError(5, "a key nobody asked for"), userData);
+                callback(stray.Pointer, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(5, "a key nobody asked for"), userData);
             });
 
         Assert.True(operation.SyncSources["unanswered-topic"].IsDone, "countdown zero faults the unanswered key");
@@ -573,7 +573,11 @@ public sealed class AdminP14FlavourSeamTests
         Assert.NotEqual(waitingThread, completingThread);
     }
 
-    private static KafkaException AssertThrew(object? outcome, int code, string message)
+    /// <summary>
+    /// Asserts a <see cref="BlockingCall"/> outcome is a <see cref="KafkaException"/> with exactly this code and
+    /// message, and returns it. Shared by the M15/P14 sync-flavour tests.
+    /// </summary>
+    internal static KafkaException AssertThrew(object? outcome, int code, string message)
     {
         KafkaException failure = Assert.IsType<KafkaException>(outcome);
         Assert.Equal(code, failure.Code);
@@ -587,23 +591,11 @@ public sealed class AdminP14FlavourSeamTests
     /// span-the-op reference. Polled within the deadline because, on the real-native rows,
     /// the dispatcher's own release can trail the latch it just completed.
     /// </summary>
-    private static void AssertReleasedOnDispose(NativeAdminClient admin, SafeAdminHandle handle)
+    internal static void AssertReleasedOnDispose(NativeAdminClient admin, SafeAdminHandle handle)
     {
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.True(
             SpinWait.SpinUntil(() => handle.IsClosed, s_deadline),
             "every operation must have released its reference to the client");
-    }
-
-    /// <summary>
-    /// Builds an <b>owned</b> <c>kafka_common_KafkaError_t</c> standing in for the one native
-    /// would hand the callback; the trampoline frees it via <see cref="KafkaException.FromHandle"/>.
-    /// </summary>
-    private static IntPtr MakeError(int code, string message)
-    {
-        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
     }
 }

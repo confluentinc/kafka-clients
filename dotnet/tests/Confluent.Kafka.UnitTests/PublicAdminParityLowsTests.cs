@@ -24,9 +24,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the small Java-parity fixes from the <c>f2f397e5</c> AdminClient audit: the three
-/// <c>*Result</c> constructors Java declares public (G4-10), the result collections Java
-/// returns as unmodifiable views (G3-11), and the closed SCRAM alteration hierarchy (G4-13).
+/// Pins the small Java-parity items from the <c>f2f397e5</c> AdminClient audit: the three
+/// <c>*Result</c> constructors Java declares public (G4-10) — kept <c>internal</c> here on both
+/// flavours as a recorded deviation (M15/P14 Q3 (b), follow-up FU-5) — the result collections
+/// Java returns as unmodifiable views (G3-11), and the closed SCRAM alteration hierarchy (G4-13).
 /// </summary>
 public sealed class PublicAdminParityLowsTests
 {
@@ -34,11 +35,21 @@ public sealed class PublicAdminParityLowsTests
 
     /// <summary>
     /// G4-10: Java's <c>DescribeClientQuotasResult(KafkaFuture)</c> is public
-    /// (<c>DescribeClientQuotasResult.java:39</c>), so a caller can fabricate one.
+    /// (<c>DescribeClientQuotasResult.java:39</c>), so a Java caller can fabricate one. Ours is
+    /// <c>internal</c> on both flavours — a recorded parity deviation (M15/P14 Q3 (b), follow-up
+    /// FU-5) — so this pins that it is internal, and that it behaves as Java's when reached
+    /// through <c>InternalsVisibleTo</c>.
     /// </summary>
     [Fact]
-    public async Task G4_10_DescribeClientQuotasResult_IsPubliclyConstructible()
+    public async Task G4_10_DescribeClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
     {
+        AssertJavaTwinConstructorIsInternal(
+            typeof(DescribeClientQuotasResult),
+            typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>));
+        AssertJavaTwinConstructorIsInternal(
+            typeof(AsyncDescribeClientQuotasResult),
+            typeof(AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>));
+
         ClientQuotaEntity entity = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "alice" });
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> quotas =
@@ -62,12 +73,19 @@ public sealed class PublicAdminParityLowsTests
 
     /// <summary>
     /// G4-10: Java's <c>AlterClientQuotasResult(Map)</c> is public
-    /// (<c>AlterClientQuotasResult.java:38</c>). The map is held by reference, as Java holds
-    /// it, and <c>All()</c> faults with an entity's failure.
+    /// (<c>AlterClientQuotasResult.java:38</c>). Ours is <c>internal</c> on both flavours — a
+    /// recorded parity deviation (M15/P14 Q3 (b), follow-up FU-5). Reached through
+    /// <c>InternalsVisibleTo</c>, the map is held by reference, as Java holds it, and
+    /// <c>All()</c> faults with an entity's failure.
     /// </summary>
     [Fact]
-    public async Task G4_10_AlterClientQuotasResult_IsPubliclyConstructible()
+    public async Task G4_10_AlterClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
     {
+        AssertJavaTwinConstructorIsInternal(
+            typeof(AlterClientQuotasResult), typeof(IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture>));
+        AssertJavaTwinConstructorIsInternal(
+            typeof(AsyncAlterClientQuotasResult), typeof(IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture>));
+
         ClientQuotaEntity alice = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "alice" });
         ClientQuotaEntity bob = new ClientQuotaEntity(
@@ -95,11 +113,18 @@ public sealed class PublicAdminParityLowsTests
 
     /// <summary>
     /// G4-10: Java's <c>AlterUserScramCredentialsResult(Map)</c> is public
-    /// (<c>AlterUserScramCredentialsResult.java:38</c>).
+    /// (<c>AlterUserScramCredentialsResult.java:38</c>). Ours is <c>internal</c> on both
+    /// flavours — a recorded parity deviation (M15/P14 Q3 (b), follow-up FU-5) — and behaves as
+    /// Java's when reached through <c>InternalsVisibleTo</c>.
     /// </summary>
     [Fact]
-    public async Task G4_10_AlterUserScramCredentialsResult_IsPubliclyConstructible()
+    public async Task G4_10_AlterUserScramCredentialsResult_ConstructorIsInternal_ARecordedDeviation()
     {
+        AssertJavaTwinConstructorIsInternal(
+            typeof(AlterUserScramCredentialsResult), typeof(IReadOnlyDictionary<string, KafkaFuture>));
+        AssertJavaTwinConstructorIsInternal(
+            typeof(AsyncAlterUserScramCredentialsResult), typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>));
+
         KafkaException failure = new KafkaException("bob failed");
         Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
@@ -191,5 +216,19 @@ public sealed class PublicAdminParityLowsTests
         Assert.True(constructor.IsFamilyAndAssembly, "expected a private protected constructor");
         Assert.True(typeof(UserScramCredentialUpsertion).IsSealed);
         Assert.True(typeof(UserScramCredentialDeletion).IsSealed);
+    }
+
+    /// <summary>
+    /// The Result has no public constructor, and the twin of Java's public one — the constructor taking exactly
+    /// <paramref name="parameterType"/> — exists and is <c>internal</c>.
+    /// </summary>
+    private static void AssertJavaTwinConstructorIsInternal(Type result, Type parameterType)
+    {
+        Assert.Empty(result.GetConstructors(BindingFlags.Instance | BindingFlags.Public));
+
+        ConstructorInfo? twin = result.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null, new[] { parameterType }, null);
+        Assert.True(twin is not null, $"{result.Name} has no ({parameterType.Name}) constructor");
+        Assert.True(twin!.IsAssembly, $"{result.Name}({parameterType.Name}) is not internal");
     }
 }
