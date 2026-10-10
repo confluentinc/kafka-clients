@@ -79,6 +79,15 @@ public sealed class AdminP14SyncCompositionTests
     /// <summary>The feature names of the S5e <c>UpdateFeatures</c> Result.</summary>
     private static readonly string[] s_features = { "metadata.version", "group.version", "transaction.version" };
 
+    /// <summary>
+    /// The transactional ids of the S5f producer and transaction Results: distinct under the ordinal comparer the bridge
+    /// keys them by, and equal under a case-insensitive one (see <see cref="s_groups"/>).
+    /// </summary>
+    private static readonly string[] s_transactionalIds = { "txn", "Txn", "TXN" };
+
+    /// <summary>A transactional id none of <see cref="s_transactionalIds"/> equals ordinally.</summary>
+    private const string UnknownTransactionalId = "tXn";
+
     public static TheoryData<string, string> CreateTopicsRows => Rows(
         "all-succeed",
         "one-fails",
@@ -2326,6 +2335,537 @@ public sealed class AdminP14SyncCompositionTests
     public Task UpdateFeatures_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
         RunKeyedRow(row, VoidHarness<string>.UpdateFeatures(flavour, s_features), "kraft.version");
 
+    /// <summary>
+    /// <see cref="FenceProducersResult"/> / <see cref="AsyncFenceProducersResult"/> (M15/P14 S5f), keyed by
+    /// transactional id under the ordinal comparer the bridge keys by (<see cref="s_transactionalIds"/>).
+    /// <c>FencedProducers</c> is the per-key dictionary, its futures the payload-erased ids' own (Java's
+    /// <c>fencedProducers()</c>, <c>FenceProducersResult.java:43</c>); <c>All()</c> is Java's <c>allOf</c> (<c>:67-68</c>).
+    /// "projections" pins <c>ProducerId</c> / <c>EpochId</c> (<c>:53</c>, <c>:60</c>): each is its id's value or that id's
+    /// own failure instance, and still waiting while its id is. "unknown-key" and "null-key" pin both kinds of guard: the
+    /// dictionary's own, and the projections' Java precondition (<c>:74-77</c>) at the call, before completion and after
+    /// it. "memoization" pins that one projection future rethrows the same instance on every <c>Get()</c>, and that each
+    /// call is a new projection, as Java's <c>thenApply</c> is. Omitted: the gathering-aggregate memoization row
+    /// (<c>All()</c> is a void all-of and gathers nothing).
+    /// </summary>
+    public static TheoryData<string, string> FenceProducersRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "erasure-identity",
+        "projections",
+        "memoization");
+
+    /// <summary>
+    /// <see cref="DescribeTransactionsResult"/> / <see cref="AsyncDescribeTransactionsResult"/> (M15/P14 S5f), keyed by
+    /// transactional id under the ordinal comparer the bridge keys by (<see cref="s_transactionalIds"/>). The Result has
+    /// no per-key dictionary (Java publishes none), so the per-key member is <c>Description(transactionalId)</c>
+    /// (<c>DescribeTransactionsResult.java:43</c>), and "unknown-key" / "null-key" pin its own guards at the call, before
+    /// completion and after it: Java's <c>IllegalArgumentException</c> (<c>:47</c>), and the binding's
+    /// <see cref="ArgumentNullException"/>. <c>All()</c> gathers the map (<c>:62-73</c>). Omitted: erasure identity (no
+    /// void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeTransactionsRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "null-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="DescribeProducersResult"/> / <see cref="AsyncDescribeProducersResult"/> (M15/P14 S5f), keyed by
+    /// partition. The per-key member is <c>PartitionResult(partition)</c> (<c>DescribeProducersResult.java:36</c>), so
+    /// "unknown-key" pins its Java precondition (<c>:39-40</c>) at the call, before completion and after it.
+    /// <c>All()</c> gathers the map (<c>:45-57</c>). Omitted: null-key (<see cref="TopicPartition"/> is a value type);
+    /// erasure identity (no void view; its equal-on-every-read half is the key-identity row).
+    /// </summary>
+    public static TheoryData<string, string> DescribeProducersRows => Rows(
+        "all-succeed",
+        "one-fails",
+        "two-fail-first-in-key-order",
+        "all-fail",
+        "unknown-key",
+        "per-key-independence",
+        "memoization",
+        "key-identity");
+
+    /// <summary>
+    /// <see cref="AbortTransactionResult"/> / <see cref="AsyncAbortTransactionResult"/> (M15/P14 S5f): one void future,
+    /// <c>All()</c> (<c>AbortTransactionResult.java:41</c>), and no keys. Omitted: one-fails / two-fail / all-fail (one
+    /// future, so they collapse into the fails row); unknown-key, null-key and per-key independence (no keys: Java keeps
+    /// a one-entry map but publishes no per-partition view); memoization (no projection or aggregate: <c>All()</c> is the
+    /// operation's own future); erasure identity (the identity row pins <c>All()</c>, which is the one void view).
+    /// </summary>
+    public static TheoryData<string, string> AbortTransactionRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="TerminateTransactionResult"/> / <see cref="AsyncTerminateTransactionResult"/> (M15/P14 S5f): the rows
+    /// and omissions of <see cref="AbortTransactionRows"/>, over <c>Result()</c> (<c>TerminateTransactionResult.java:36</c>).
+    /// </summary>
+    public static TheoryData<string, string> ForceTerminateTransactionRows => Rows(
+        "all-succeed",
+        "fails",
+        "identity");
+
+    /// <summary>
+    /// <see cref="ListTransactionsResult"/> / <see cref="AsyncListTransactionsResult"/> (M15/P14 S5f, PLAN §3.3): two
+    /// stages — the broker discovery (<c>ByBrokerId()</c>'s own future) and one future per discovered broker — driven
+    /// through the operation's own <c>FailDiscovery</c> / <c>PublishBrokers</c> / <c>SetBrokerResult</c> /
+    /// <c>SetBrokerException</c>. Every view is requested <b>before</b> the stage it waits on completes, and every
+    /// "fails before" claim is proven by asserting the other broker is still waiting, never by a sleep.
+    /// <list type="bullet">
+    /// <item><description>"fail-fast": brokers 1 and 2, and broker 2 fails while broker 1 is still waiting:
+    /// <c>AllByBrokerId()</c> and <c>All()</c> fail with broker 2's own instance before broker 1 completes, as Java's
+    /// per-broker <c>whenComplete</c> does (<c>ListTransactionsResult.java:92-118</c>).</description></item>
+    /// <item><description>"outer-fails": the discovery fails, and all three views fail with its instance.</description></item>
+    /// <item><description>"all-succeed": equal maps, in discovery order, and the flattened listings.</description></item>
+    /// <item><description>"zero-brokers": an empty map completes every view empty (the recorded deviation: Java's
+    /// <c>allByBrokerId()</c> never completes).</description></item>
+    /// <item><description>"two-fail-first-in-time": the last broker fails first, and the aggregate reports it — not the
+    /// first in key order.</description></item>
+    /// <item><description>"memoization": one aggregate gathers once; a new call gathers afresh; <c>ByBrokerId()</c> is
+    /// an equal future on every call.</description></item>
+    /// <item><description>"per-broker-independence": one broker's future does not wait for another's, and the
+    /// aggregates wait for every broker.</description></item>
+    /// </list>
+    /// Omitted: unknown-key and null-key (no key-taking member: the per-broker map is a plain dictionary over the
+    /// discovered brokers); erasure identity (no void view); two-fail-first-in-key-order (the aggregate is fail-fast in
+    /// time, which the two-fail-first-in-time row pins); and a view first requested only <b>after</b> two brokers have
+    /// failed, where the flavours differ: the sync group reports the first failure in time, while the async gather
+    /// reports the first faulted broker in discovery order (<c>Task.WhenAny</c> over already-faulted tasks), as Java's
+    /// <c>whenComplete</c> attached after the fact fires in its map's iteration order. That case is not pinned here.
+    /// </summary>
+    public static TheoryData<string, string> ListTransactionsRows => Rows(
+        "fail-fast",
+        "outer-fails",
+        "all-succeed",
+        "zero-brokers",
+        "two-fail-first-in-time",
+        "memoization",
+        "per-broker-independence");
+
+    /// <summary>
+    /// <see cref="FenceProducersResult"/> and <see cref="AsyncFenceProducersResult"/>: the per-id void futures, the
+    /// <c>ProducerId</c> / <c>EpochId</c> projections and <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(FenceProducersRows))]
+    public async Task FenceProducers_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        FenceProducersHarness harness = FenceProducersHarness.For(flavour, s_transactionalIds);
+        IReadOnlyList<string> keys = harness.Keys;
+        switch (row)
+        {
+            case "unknown-key":
+                {
+                    // The dictionary fails as a dictionary does; the projections throw Java's precondition at the call.
+                    await RunKeyedRow(row, harness, UnknownTransactionalId);
+                    string expected = new ArgumentException(
+                        "TransactionalId `" + UnknownTransactionalId + "` was not included in the request",
+                        "transactionalId").Message;
+                    AssertArgument(harness.CallProducerId(UnknownTransactionalId), "transactionalId", expected);
+                    AssertArgument(harness.CallEpochId(UnknownTransactionalId), "transactionalId", expected);
+
+                    SucceedEvery(harness);
+                    AssertArgument(harness.CallProducerId(UnknownTransactionalId), "transactionalId", expected);
+                    AssertArgument(harness.CallEpochId(UnknownTransactionalId), "transactionalId", expected);
+                    break;
+                }
+
+            case "null-key":
+                {
+                    await RunKeyedRow(row, harness, UnknownTransactionalId);
+                    AssertNullArgument(harness.CallProducerId(null!), "transactionalId");
+                    AssertNullArgument(harness.CallEpochId(null!), "transactionalId");
+
+                    SucceedEvery(harness);
+                    AssertNullArgument(harness.CallProducerId(null!), "transactionalId");
+                    AssertNullArgument(harness.CallEpochId(null!), "transactionalId");
+                    break;
+                }
+
+            case "projections":
+                {
+                    FutureProbe firstId = harness.ProducerId(keys[0]);
+                    FutureProbe secondEpoch = harness.EpochId(keys[1]);
+                    firstId.AssertPending();
+
+                    harness.Succeed(keys[0]);
+
+                    AssertValue(harness.ExpectedProducerId(keys[0]), await firstId.Outcome());
+                    AssertValue(harness.ExpectedEpoch(keys[0]), await harness.EpochId(keys[0]).Outcome());
+
+                    // The second id is still outstanding, so its projections are too.
+                    secondEpoch.AssertPending();
+                    KafkaException failure = new KafkaException(47, "the second producer could not be fenced", isRetriable: false);
+                    harness.Fail(keys[1], failure);
+
+                    Assert.Same(failure, await secondEpoch.Outcome());
+                    Assert.Same(failure, await harness.ProducerId(keys[1]).Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    KafkaException failure = new KafkaException(47, "the first producer could not be fenced", isRetriable: false);
+                    harness.Fail(keys[0], failure);
+                    harness.Succeed(keys[1]);
+
+                    // One projection future checks once, so every Get() of it rethrows the same instance ...
+                    (bool fresh, FutureProbe first, FutureProbe second) = harness.TwoProducerIds(keys[0]);
+                    Assert.Same(failure, await first.Outcome());
+                    Assert.Same(failure, await first.Outcome());
+
+                    // ... and each call is a new projection over the same id, on both flavours.
+                    Assert.True(fresh, "two ProducerId() calls returned an equal future");
+                    Assert.Same(failure, await second.Outcome());
+
+                    FutureProbe epoch = harness.EpochId(keys[1]);
+                    AssertValue(harness.ExpectedEpoch(keys[1]), await epoch.Outcome());
+                    AssertValue(harness.ExpectedEpoch(keys[1]), await epoch.Outcome());
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, harness, UnknownTransactionalId);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeTransactionsResult"/> and <see cref="AsyncDescribeTransactionsResult"/>: the per-id futures
+    /// <c>Description</c> hands out and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeTransactionsRows))]
+    public async Task DescribeTransactions_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        LookupHarness<string, TransactionDescription> harness =
+            LookupHarness<string, TransactionDescription>.DescribeTransactions(flavour, s_transactionalIds);
+        switch (row)
+        {
+            case "unknown-key":
+                {
+                    // Java's guard (DescribeTransactionsResult.java:47): at the call, before completion and after it.
+                    string expected = new ArgumentException(
+                        "TransactionalId `" + UnknownTransactionalId + "` was not included in the request",
+                        "transactionalId").Message;
+                    AssertArgument(harness.CallIndexer(UnknownTransactionalId), "transactionalId", expected);
+                    Assert.False(harness.ContainsKey(UnknownTransactionalId));
+                    Assert.True(harness.ContainsKey(s_transactionalIds[0]));
+
+                    SucceedEvery(harness);
+                    AssertArgument(harness.CallIndexer(UnknownTransactionalId), "transactionalId", expected);
+                    break;
+                }
+
+            case "null-key":
+                {
+                    AssertNullArgument(harness.CallIndexer(null!), "transactionalId");
+                    SucceedEvery(harness);
+                    AssertNullArgument(harness.CallIndexer(null!), "transactionalId");
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, harness, UnknownTransactionalId);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="DescribeProducersResult"/> and <see cref="AsyncDescribeProducersResult"/>: the per-partition futures
+    /// <c>PartitionResult</c> hands out and the gathered <c>All()</c> compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DescribeProducersRows))]
+    public async Task DescribeProducers_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState> harness =
+            LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState>.DescribeProducers(
+                flavour, TopicPartitions());
+        TopicPartition unknown = new TopicPartition("gamma", 0);
+        switch (row)
+        {
+            case "unknown-key":
+                {
+                    // Java's guard (DescribeProducersResult.java:39-40): at the call, before completion and after it.
+                    string expected = new ArgumentException(
+                        "Topic partition " + unknown + " was not included in the request", "partition").Message;
+                    AssertArgument(harness.CallIndexer(unknown), "partition", expected);
+                    Assert.False(harness.ContainsKey(unknown));
+                    Assert.True(harness.ContainsKey(harness.Keys[0]));
+
+                    SucceedEvery(harness);
+                    AssertArgument(harness.CallIndexer(unknown), "partition", expected);
+                    break;
+                }
+
+            default:
+                await RunKeyedRow(row, harness, unknown);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="AbortTransactionResult"/> and <see cref="AsyncAbortTransactionResult"/>: <c>All()</c> composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AbortTransactionRows))]
+    public Task AbortTransaction_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunSingleRow(row, SingleHarness<bool>.AbortTransaction(flavour), true);
+
+    /// <summary>
+    /// <see cref="TerminateTransactionResult"/> and <see cref="AsyncTerminateTransactionResult"/>: <c>Result()</c>
+    /// composes alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ForceTerminateTransactionRows))]
+    public Task ForceTerminateTransaction_SyncAndAsyncResults_ComposeAlike(string row, string flavour) =>
+        RunSingleRow(row, SingleHarness<bool>.ForceTerminateTransaction(flavour), true);
+
+    /// <summary>
+    /// <see cref="ListTransactionsResult"/> and <see cref="AsyncListTransactionsResult"/>: <c>ByBrokerId()</c>, the
+    /// fail-fast <c>AllByBrokerId()</c> and <c>All()</c> over the two stages compose alike.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ListTransactionsRows))]
+    public async Task ListTransactions_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
+    {
+        ListTransactionsHarness harness = ListTransactionsHarness.For(flavour);
+        ListTransactionsAdminOperation operation = harness.Operation;
+        switch (row)
+        {
+            case "fail-fast":
+                {
+                    // Every view requested while the discovery is still running ...
+                    FutureProbe byBroker = harness.ByBrokerId();
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    byBroker.AssertPending();
+                    all.AssertPending();
+
+                    // ... then the brokers are known, and both are still running: so are the aggregates.
+                    operation.PublishBrokers(new[] { 1, 2 });
+                    object? brokers = await byBroker.Outcome();
+                    FutureProbe first = harness.BrokerOf(brokers, 1);
+                    all.AssertPending();
+                    flattened.AssertPending();
+                    first.AssertPending();
+
+                    // Broker 2 fails while broker 1 is still waiting: the aggregates fail at once, with broker 2's own
+                    // instance, and broker 1 is still waiting after they have.
+                    KafkaException failure = new KafkaException(51, "broker 2 could not list its transactions", isRetriable: true);
+                    operation.SetBrokerException(2, failure);
+
+                    Assert.Same(failure, await all.Outcome());
+                    Assert.Same(failure, await flattened.Outcome());
+                    Assert.Same(failure, await harness.BrokerOf(brokers, 2).Outcome());
+                    Assert.True(all.IsDone);
+                    first.AssertPending();
+
+                    // A view requested now fails the same way, broker 1 still waiting.
+                    Assert.Same(failure, await harness.AllByBrokerId().Outcome());
+                    first.AssertPending();
+
+                    // Broker 1 completing later changes none of that; its own future has its own outcome.
+                    IReadOnlyCollection<TransactionListing> listings = Listings(1);
+                    operation.SetBrokerResult(1, listings);
+                    Assert.Same(listings, await first.Outcome());
+                    Assert.Same(failure, await all.Outcome());
+                    Assert.Same(failure, await harness.AllByBrokerId().Outcome());
+                    break;
+                }
+
+            case "outer-fails":
+                {
+                    FutureProbe byBroker = harness.ByBrokerId();
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    all.AssertPending();
+
+                    KafkaException failure = new KafkaException(35, "the brokers could not be discovered", isRetriable: false);
+                    operation.FailDiscovery(failure);
+
+                    // The discovery's own instance, on every view, requested before the failure and after it.
+                    Assert.Same(failure, await byBroker.Outcome());
+                    Assert.Same(failure, await all.Outcome());
+                    Assert.Same(failure, await flattened.Outcome());
+                    Assert.Same(failure, await harness.ByBrokerId().Outcome());
+                    Assert.Same(failure, await harness.AllByBrokerId().Outcome());
+                    Assert.Same(failure, await harness.All().Outcome());
+                    break;
+                }
+
+            case "all-succeed":
+                {
+                    // Discovered out of numeric order: every map keeps the discovery order.
+                    int[] discovered = { 3, 1, 2 };
+                    Dictionary<int, IReadOnlyCollection<TransactionListing>> expected =
+                        discovered.ToDictionary(broker => broker, Listings);
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+
+                    operation.PublishBrokers(discovered);
+                    foreach (int broker in discovered)
+                    {
+                        operation.SetBrokerResult(broker, expected[broker]);
+                    }
+
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    Assert.Equal(discovered, harness.BrokerIdsOf(brokers));
+                    foreach (int broker in discovered)
+                    {
+                        Assert.Same(expected[broker], await harness.BrokerOf(brokers, broker).Outcome());
+                    }
+
+                    AssertGathered(discovered, expected, await all.Outcome());
+                    Assert.Equal(
+                        discovered.SelectMany(broker => expected[broker]).ToList(),
+                        Assert.IsAssignableFrom<IReadOnlyCollection<TransactionListing>>(await flattened.Outcome()));
+                    break;
+                }
+
+            case "zero-brokers":
+                {
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    operation.PublishBrokers(Array.Empty<int>());
+
+                    Assert.Empty(harness.BrokerIdsOf(await harness.ByBrokerId().Outcome()));
+                    Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(
+                        await all.Outcome()));
+                    Assert.Empty(Assert.IsAssignableFrom<IReadOnlyCollection<TransactionListing>>(await flattened.Outcome()));
+                    break;
+                }
+
+            case "two-fail-first-in-time":
+                {
+                    // The last broker in discovery order fails first, the first last: the aggregate reports the first in time.
+                    operation.PublishBrokers(new[] { 1, 2, 3 });
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+                    all.AssertPending();
+
+                    KafkaException earlier = new KafkaException(51, "broker 3 failed first", isRetriable: true);
+                    KafkaException later = new KafkaException(52, "broker 1 failed last", isRetriable: false);
+                    operation.SetBrokerException(3, earlier);
+                    Assert.Same(earlier, await all.Outcome());
+                    Assert.Same(earlier, await flattened.Outcome());
+
+                    operation.SetBrokerException(1, later);
+                    operation.SetBrokerResult(2, Listings(2));
+                    Assert.Same(earlier, await all.Outcome());
+                    Assert.Same(earlier, await flattened.Outcome());
+
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    Assert.Same(later, await harness.BrokerOf(brokers, 1).Outcome());
+                    Assert.Same(earlier, await harness.BrokerOf(brokers, 3).Outcome());
+                    break;
+                }
+
+            case "memoization":
+                {
+                    int[] discovered = { 1, 2 };
+                    Dictionary<int, IReadOnlyCollection<TransactionListing>> expected =
+                        discovered.ToDictionary(broker => broker, Listings);
+                    operation.PublishBrokers(discovered);
+                    foreach (int broker in discovered)
+                    {
+                        operation.SetBrokerResult(broker, expected[broker]);
+                    }
+
+                    // One aggregate gathers once, so every Get() of it hands out the same map ...
+                    FutureProbe all = harness.AllByBrokerId();
+                    object? gathered = await all.Outcome();
+                    AssertGathered(discovered, expected, gathered);
+                    Assert.Same(gathered, await all.Outcome());
+                    FutureProbe flattened = harness.All();
+                    object? listings = await flattened.Outcome();
+                    Assert.Same(listings, await flattened.Outcome());
+
+                    // ... a new call is a new aggregate, which gathers afresh ...
+                    Assert.True(harness.AggregatesFreshPerCall(), "two AllByBrokerId() or All() calls returned an equal future");
+                    Assert.NotSame(gathered, await harness.AllByBrokerId().Outcome());
+                    Assert.NotSame(listings, await harness.All().Outcome());
+
+                    // ... and ByBrokerId() is one future, whose map is the same on every Get() and every call.
+                    Assert.True(harness.ByBrokerIdEqualAcrossCalls());
+                    FutureProbe byBroker = harness.ByBrokerId();
+                    object? brokers = await byBroker.Outcome();
+                    Assert.Same(brokers, await byBroker.Outcome());
+                    Assert.Same(brokers, await harness.ByBrokerId().Outcome());
+                    break;
+                }
+
+            case "per-broker-independence":
+                {
+                    operation.PublishBrokers(new[] { 1, 2 });
+                    object? brokers = await harness.ByBrokerId().Outcome();
+                    FutureProbe first = harness.BrokerOf(brokers, 1);
+                    FutureProbe second = harness.BrokerOf(brokers, 2);
+                    FutureProbe all = harness.AllByBrokerId();
+                    FutureProbe flattened = harness.All();
+
+                    IReadOnlyCollection<TransactionListing> firstListings = Listings(1);
+                    operation.SetBrokerResult(1, firstListings);
+                    Assert.Same(firstListings, await first.Outcome());
+
+                    // The second broker is still outstanding, so the aggregates are too.
+                    second.AssertPending();
+                    all.AssertPending();
+                    flattened.AssertPending();
+
+                    IReadOnlyCollection<TransactionListing> secondListings = Listings(2);
+                    operation.SetBrokerResult(2, secondListings);
+                    Assert.Same(secondListings, await second.Outcome());
+                    AssertGathered(
+                        new[] { 1, 2 },
+                        new Dictionary<int, IReadOnlyCollection<TransactionListing>> { [1] = firstListings, [2] = secondListings },
+                        await all.Outcome());
+                    Assert.Equal(
+                        firstListings.Concat(secondListings).ToList(),
+                        Assert.IsAssignableFrom<IReadOnlyCollection<TransactionListing>>(await flattened.Outcome()));
+                    break;
+                }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>One broker's listings: a distinct instance per call, carrying the broker's id.</summary>
+    private static IReadOnlyCollection<TransactionListing> Listings(int broker) =>
+        new[] { new TransactionListing("txn-" + broker, 100L + broker, TransactionState.Ongoing) };
+
+    /// <summary>
+    /// Asserts <paramref name="outcome"/> is an <c>AllByBrokerId()</c> map over <paramref name="brokers"/>, in that
+    /// order, each value the very instance its broker completed with.
+    /// </summary>
+    private static void AssertGathered(
+        IReadOnlyList<int> brokers,
+        IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> expected,
+        object? outcome)
+    {
+        IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>> gathered =
+            Assert.IsAssignableFrom<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(outcome);
+        Assert.Equal(brokers, gathered.Keys);
+        foreach (int broker in brokers)
+        {
+            Assert.Same(expected[broker], gathered[broker]);
+        }
+    }
+
     /// <summary>The rows every Result over one future and no keys shares.</summary>
     private static async Task RunSingleRow<T>(string row, SingleHarness<T> harness, T value)
     {
@@ -2338,7 +2878,7 @@ public sealed class AdminP14SyncCompositionTests
 
                     harness.Operation.SetResult(value);
 
-                    AssertValue(value, await future.Outcome());
+                    AssertSingle(harness, value, await future.Outcome());
                     break;
                 }
 
@@ -2366,12 +2906,29 @@ public sealed class AdminP14SyncCompositionTests
                     Assert.True(future.IsDone);
                     Assert.True(harness.Future().IsDone);
                     Assert.True(harness.EqualAcrossCalls());
-                    AssertValue(value, await future.Outcome());
+                    AssertSingle(harness, value, await future.Outcome());
                     break;
                 }
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(row), row, "unknown row");
+        }
+    }
+
+    /// <summary>
+    /// Asserts a single future's outcome: <see cref="BlockingCall.Returned"/> for a void Result's (whose operation
+    /// completes with the void bridge's success token, which the future does not carry), otherwise
+    /// <paramref name="value"/>.
+    /// </summary>
+    private static void AssertSingle<T>(SingleHarness<T> harness, T value, object? outcome)
+    {
+        if (harness.IsVoid)
+        {
+            AssertReturned(outcome);
+        }
+        else
+        {
+            AssertValue(value, outcome);
         }
     }
 
@@ -3570,6 +4127,292 @@ public sealed class AdminP14SyncCompositionTests
     }
 
     /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.FenceProducers_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter
+    /// (M15/P14 S5f): the payload-erased <c>FencedProducers</c> dictionary as the per-key view, the void all-of
+    /// <c>All()</c>, and the <c>ProducerId</c> / <c>EpochId</c> projections of each id's own value.
+    /// </summary>
+    private sealed class FenceProducersHarness : KeyedHarness<string>
+    {
+        private readonly KeyedAdminOperation<string, ProducerIdAndEpoch> _operation;
+        private readonly Dictionary<string, ProducerIdAndEpoch> _values;
+        private readonly FenceProducersResult? _sync;
+        private readonly AsyncFenceProducersResult? _async;
+
+        private FenceProducersHarness(
+            KeyedAdminOperation<string, ProducerIdAndEpoch> operation,
+            IReadOnlyList<string> ids,
+            FenceProducersResult? sync,
+            AsyncFenceProducersResult? async)
+            : base(ids, true)
+        {
+            _operation = operation;
+
+            // A distinct producer id and epoch per transactional id.
+            _values = new Dictionary<string, ProducerIdAndEpoch>(StringComparer.Ordinal);
+            for (int index = 0; index < ids.Count; index++)
+            {
+                _values.Add(ids[index], new ProducerIdAndEpoch(5_000L + index, (short)(index + 2)));
+            }
+
+            _sync = sync;
+            _async = async;
+        }
+
+        internal static FenceProducersHarness For(string flavour, IReadOnlyList<string> ids)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, ProducerIdAndEpoch> operation =
+                new KeyedAdminOperation<string, ProducerIdAndEpoch>("fenceProducers", ids, StringComparer.Ordinal, adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new FenceProducersHarness(operation, ids, FenceProducersResult.From(operation), null)
+                : new FenceProducersHarness(operation, ids, null, AsyncFenceProducersResult.From(operation));
+        }
+
+        internal override void Succeed(string key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(string key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(string key) => BlockingCall.Returned;
+
+        internal override IEnumerable<string> ValuesKeys() =>
+            _sync is not null ? _sync.FencedProducers.Keys.ToList() : _async!.FencedProducers.Keys.ToList();
+
+        internal override FutureProbe Value(string key) =>
+            _sync is not null ? FutureProbe.Of(_sync.FencedProducers[key]) : FutureProbe.Of(_async!.FencedProducers[key]);
+
+        internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        internal override void AssertAllSucceeded(object? outcome) => AssertReturned(outcome);
+
+        internal override bool ValueEqualAcrossReads(string key) =>
+            _sync is not null
+                ? _sync.FencedProducers[key] == _sync.FencedProducers[key]
+                : _async!.FencedProducers[key] == _async.FencedProducers[key];
+
+        internal override bool TryGetValue(string key) =>
+            _sync is not null ? _sync.FencedProducers.TryGetValue(key, out _) : _async!.FencedProducers.TryGetValue(key, out _);
+
+        internal override bool ContainsKey(string key) =>
+            _sync is not null ? _sync.FencedProducers.ContainsKey(key) : _async!.FencedProducers.ContainsKey(key);
+
+        internal long ExpectedProducerId(string key) => _values[key].ProducerId;
+
+        internal short ExpectedEpoch(string key) => _values[key].Epoch;
+
+        internal FutureProbe ProducerId(string key) =>
+            _sync is not null ? FutureProbe.Of(_sync.ProducerId(key)) : FutureProbe.Of(_async!.ProducerId(key));
+
+        internal FutureProbe EpochId(string key) =>
+            _sync is not null ? FutureProbe.Of(_sync.EpochId(key)) : FutureProbe.Of(_async!.EpochId(key));
+
+        internal Exception? CallProducerId(string key) => Thrown(() => _ = ProducerId(key));
+
+        internal Exception? CallEpochId(string key) => Thrown(() => _ = EpochId(key));
+
+        /// <summary>
+        /// Two <c>ProducerId</c> calls for <paramref name="key"/>: whether they are different futures, and both, so the
+        /// caller observes each outcome.
+        /// </summary>
+        internal (bool Fresh, FutureProbe First, FutureProbe Second) TwoProducerIds(string key)
+        {
+            if (_sync is not null)
+            {
+                KafkaFuture<long> first = _sync.ProducerId(key);
+                KafkaFuture<long> second = _sync.ProducerId(key);
+                return (first != second, FutureProbe.Of(first), FutureProbe.Of(second));
+            }
+
+            AsyncKafkaFuture<long> asyncFirst = _async!.ProducerId(key);
+            AsyncKafkaFuture<long> asyncSecond = _async.ProducerId(key);
+            return (asyncFirst != asyncSecond, FutureProbe.Of(asyncFirst), FutureProbe.Of(asyncSecond));
+        }
+    }
+
+    /// <summary>
+    /// A keyed Result with no per-key dictionary (M15/P14 S5f) — <see cref="DescribeTransactionsResult"/>'s
+    /// <c>Description(transactionalId)</c> or <see cref="DescribeProducersResult"/>'s <c>PartitionResult(partition)</c>
+    /// is its per-key member, and the keys it answers for are those that member does not reject — with a gathering
+    /// <c>All()</c>.
+    /// </summary>
+    private sealed class LookupHarness<TKey, TValue> : KeyedHarness<TKey>
+        where TKey : notnull
+        where TValue : class
+    {
+        private readonly KeyedAdminOperation<TKey, TValue> _operation;
+        private readonly Dictionary<TKey, TValue> _values;
+        private readonly Func<TKey, KafkaFuture<TValue>>? _syncLookup;
+        private readonly Func<TKey, AsyncKafkaFuture<TValue>>? _asyncLookup;
+        private readonly Func<FutureProbe> _all;
+
+        private LookupHarness(
+            KeyedAdminOperation<TKey, TValue> operation,
+            IReadOnlyList<TKey> keys,
+            Func<TKey, TValue> value,
+            Func<TKey, KafkaFuture<TValue>>? syncLookup,
+            Func<TKey, AsyncKafkaFuture<TValue>>? asyncLookup,
+            Func<FutureProbe> all)
+            : base(keys, true)
+        {
+            _operation = operation;
+            _values = keys.ToDictionary(key => key, value);
+            _syncLookup = syncLookup;
+            _asyncLookup = asyncLookup;
+            _all = all;
+        }
+
+        internal static LookupHarness<string, TransactionDescription> DescribeTransactions(
+            string flavour, IReadOnlyList<string> ids)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<string, TransactionDescription> operation =
+                new KeyedAdminOperation<string, TransactionDescription>(
+                    "describeTransactions", ids, StringComparer.Ordinal, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeTransactionsResult result = DescribeTransactionsResult.From(operation);
+                return new LookupHarness<string, TransactionDescription>(
+                    operation, ids, Transaction, result.Description, null, () => FutureProbe.Of(result.All()));
+            }
+
+            AsyncDescribeTransactionsResult asyncResult = AsyncDescribeTransactionsResult.From(operation);
+            return new LookupHarness<string, TransactionDescription>(
+                operation, ids, Transaction, null, asyncResult.Description, () => FutureProbe.Of(asyncResult.All()));
+        }
+
+        internal static LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState> DescribeProducers(
+            string flavour, IReadOnlyList<TopicPartition> partitions)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation =
+                new KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState>(
+                    "describeProducers", partitions, EqualityComparer<TopicPartition>.Default, adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                DescribeProducersResult result = DescribeProducersResult.From(operation);
+                return new LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState>(
+                    operation, partitions, Producers, result.PartitionResult, null, () => FutureProbe.Of(result.All()));
+            }
+
+            AsyncDescribeProducersResult asyncResult = AsyncDescribeProducersResult.From(operation);
+            return new LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState>(
+                operation, partitions, Producers, null, asyncResult.PartitionResult, () => FutureProbe.Of(asyncResult.All()));
+        }
+
+        internal override void Succeed(TKey key) => _operation.SetResult(key, _values[key]);
+
+        internal override void Fail(TKey key, Exception failure) => _operation.SetException(key, failure);
+
+        internal override object? Expected(TKey key) => _values[key];
+
+        internal override IEnumerable<TKey> ValuesKeys() => Keys.Where(Answers).ToList();
+
+        internal override FutureProbe Value(TKey key) =>
+            _syncLookup is not null ? FutureProbe.Of(_syncLookup(key)) : FutureProbe.Of(_asyncLookup!(key));
+
+        internal override FutureProbe All() => _all();
+
+        internal override void AssertAllSucceeded(object? outcome)
+        {
+            // The gathered map: every key, in key order, each value the very instance its key completed with.
+            IReadOnlyDictionary<TKey, TValue> gathered = Assert.IsAssignableFrom<IReadOnlyDictionary<TKey, TValue>>(outcome);
+            Assert.Equal(Keys, gathered.Keys);
+            foreach (TKey key in Keys)
+            {
+                Assert.Same(_values[key], gathered[key]);
+            }
+        }
+
+        internal override bool ValueEqualAcrossReads(TKey key) =>
+            _syncLookup is not null ? _syncLookup(key) == _syncLookup(key) : _asyncLookup!(key) == _asyncLookup(key);
+
+        internal override bool TryGetValue(TKey key) => Answers(key);
+
+        internal override bool ContainsKey(TKey key) => Answers(key);
+
+        private static TransactionDescription Transaction(string transactionalId) =>
+            new TransactionDescription(
+                1,
+                TransactionState.Ongoing,
+                1_000L + transactionalId.Sum(character => (long)character),
+                3,
+                60_000L,
+                1_700_000_000_000L,
+                new[] { new TopicPartition("alpha", 0) });
+
+        private static DescribeProducersResult.PartitionProducerState Producers(TopicPartition partition) =>
+            new DescribeProducersResult.PartitionProducerState(
+                new[] { new ProducerState(2_000L + partition.Partition, 2, 7, 1_700_000_000_000L, null, null) });
+
+        private bool Answers(TKey key) => CallIndexer(key) is null;
+    }
+
+    /// <summary>
+    /// <see cref="AdminP14SyncCompositionTests.ListTransactions_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter
+    /// (M15/P14 S5f): the three views of a <c>listTransactions</c> Result of either flavour over one operation of that
+    /// flavour, and the per-broker futures of a resolved <c>ByBrokerId()</c> map.
+    /// </summary>
+    private sealed class ListTransactionsHarness
+    {
+        private readonly ListTransactionsResult? _sync;
+        private readonly AsyncListTransactionsResult? _async;
+
+        private ListTransactionsHarness(
+            ListTransactionsAdminOperation operation, ListTransactionsResult? sync, AsyncListTransactionsResult? async)
+        {
+            Operation = operation;
+            _sync = sync;
+            _async = async;
+        }
+
+        internal ListTransactionsAdminOperation Operation { get; }
+
+        internal static ListTransactionsHarness For(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            ListTransactionsAdminOperation operation = new ListTransactionsAdminOperation(adminFlavour);
+            return adminFlavour == AdminFlavour.Sync
+                ? new ListTransactionsHarness(operation, ListTransactionsResult.From(operation), null)
+                : new ListTransactionsHarness(operation, null, AsyncListTransactionsResult.From(operation));
+        }
+
+        internal FutureProbe ByBrokerId() =>
+            _sync is not null ? FutureProbe.Of(_sync.ByBrokerId()) : FutureProbe.Of(_async!.ByBrokerId());
+
+        internal FutureProbe AllByBrokerId() =>
+            _sync is not null ? FutureProbe.Of(_sync.AllByBrokerId()) : FutureProbe.Of(_async!.AllByBrokerId());
+
+        internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
+
+        /// <summary>The broker ids of a resolved <c>ByBrokerId()</c> map, in its order.</summary>
+        internal IReadOnlyList<int> BrokerIdsOf(object? byBrokerId) =>
+            _sync is not null
+                ? Assert.IsAssignableFrom<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
+                    byBrokerId).Keys.ToList()
+                : Assert.IsAssignableFrom<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
+                    byBrokerId).Keys.ToList();
+
+        /// <summary><paramref name="brokerId"/>'s own future, from a resolved <c>ByBrokerId()</c> map.</summary>
+        internal FutureProbe BrokerOf(object? byBrokerId, int brokerId) =>
+            _sync is not null
+                ? FutureProbe.Of(
+                    Assert.IsAssignableFrom<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
+                        byBrokerId)[brokerId])
+                : FutureProbe.Of(
+                    Assert.IsAssignableFrom<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
+                        byBrokerId)[brokerId]);
+
+        /// <summary>Whether <c>ByBrokerId()</c> hands out an equal future on every call.</summary>
+        internal bool ByBrokerIdEqualAcrossCalls() =>
+            _sync is not null ? _sync.ByBrokerId() == _sync.ByBrokerId() : _async!.ByBrokerId() == _async.ByBrokerId();
+
+        /// <summary>Whether <c>AllByBrokerId()</c> and <c>All()</c> each hand out a new future per call.</summary>
+        internal bool AggregatesFreshPerCall() =>
+            _sync is not null
+                ? _sync.AllByBrokerId() != _sync.AllByBrokerId() && _sync.All() != _sync.All()
+                : _async!.AllByBrokerId() != _async.AllByBrokerId() && _async.All() != _async.All();
+    }
+
+    /// <summary>
     /// <see cref="AdminP14SyncCompositionTests.ListTopics_SyncAndAsyncResults_ComposeAlike"/>'s flavour adapter.
     /// </summary>
     private sealed class ListTopicsHarness
@@ -4141,21 +4984,63 @@ public sealed class AdminP14SyncCompositionTests
     /// A Result over one future and no keys, of either flavour (M15/P14 S5d and S5e) — <see cref="DescribeAclsResult"/>'s
     /// <c>Values()</c>, <see cref="DescribeClientQuotasResult"/>'s <c>Entities()</c>, or the single accessor of a
     /// delegation-token or <c>DescribeFeatures</c> Result — driven through its operation's own <c>SetResult</c> /
-    /// <c>SetException</c>. <typeparamref name="T"/> may be a value type (the expiry timestamps).
+    /// <c>SetException</c>. <typeparamref name="T"/> may be a value type (the expiry timestamps). A void Result
+    /// (<c>AbortTransaction</c>, <c>ForceTerminateTransaction</c>, M15/P14 S5f) is a <see cref="SingleHarness{T}"/> of
+    /// <see langword="bool"/>, the void bridge's success token, with <see cref="IsVoid"/> set.
     /// </summary>
     private sealed class SingleHarness<T>
     {
         private readonly Func<FutureProbe> _future;
         private readonly Func<bool> _equalAcrossCalls;
 
-        private SingleHarness(SingleAdminOperation<T> operation, Func<FutureProbe> future, Func<bool> equalAcrossCalls)
+        private SingleHarness(
+            SingleAdminOperation<T> operation, Func<FutureProbe> future, Func<bool> equalAcrossCalls, bool isVoid = false)
         {
             Operation = operation;
             _future = future;
             _equalAcrossCalls = equalAcrossCalls;
+            IsVoid = isVoid;
         }
 
         internal SingleAdminOperation<T> Operation { get; }
+
+        /// <summary>Whether the future is void: it completes with no value, whatever the operation carries.</summary>
+        internal bool IsVoid { get; }
+
+        internal static SingleHarness<bool> AbortTransaction(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("abortTransaction", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                AbortTransactionResult result = AbortTransactionResult.From(operation);
+                return new SingleHarness<bool>(
+                    operation, () => FutureProbe.Of(result.All()), () => result.All() == result.All(), isVoid: true);
+            }
+
+            AsyncAbortTransactionResult asyncResult = AsyncAbortTransactionResult.From(operation);
+            return new SingleHarness<bool>(
+                operation, () => FutureProbe.Of(asyncResult.All()), () => asyncResult.All() == asyncResult.All(), isVoid: true);
+        }
+
+        internal static SingleHarness<bool> ForceTerminateTransaction(string flavour)
+        {
+            AdminFlavour adminFlavour = FlavourOf(flavour);
+            SingleAdminOperation<bool> operation = new SingleAdminOperation<bool>("forceTerminateTransaction", adminFlavour);
+            if (adminFlavour == AdminFlavour.Sync)
+            {
+                TerminateTransactionResult result = TerminateTransactionResult.From(operation);
+                return new SingleHarness<bool>(
+                    operation, () => FutureProbe.Of(result.Result()), () => result.Result() == result.Result(), isVoid: true);
+            }
+
+            AsyncTerminateTransactionResult asyncResult = AsyncTerminateTransactionResult.From(operation);
+            return new SingleHarness<bool>(
+                operation,
+                () => FutureProbe.Of(asyncResult.Result()),
+                () => asyncResult.Result() == asyncResult.Result(),
+                isVoid: true);
+        }
 
         internal static SingleHarness<IReadOnlyCollection<AclBinding>> DescribeAcls(string flavour)
         {

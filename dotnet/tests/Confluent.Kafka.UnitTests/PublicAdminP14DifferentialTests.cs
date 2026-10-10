@@ -2067,6 +2067,302 @@ public sealed class PublicAdminP14DifferentialTests
     }
 
     /// <summary>
+    /// <c>FenceProducers</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1396</c>
+    /// throws from the call; the core mock fails every id instead): both mocks key the result by the requested ids, in
+    /// request order and once per distinct id, and each id's erased future, its <c>ProducerId</c> / <c>EpochId</c>
+    /// projections and <c>All()</c> fail alike; an empty request is an empty success on both.
+    /// </summary>
+    [Fact]
+    public async Task FenceProducers_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] ids = { "diff-fp-b", "diff-fp-a" };
+        string[] requested = { ids[0], ids[1], ids[0] };
+
+        FenceProducersResult syncResult = sync.FenceProducers(requested);
+        AsyncFenceProducersResult asyncResult = async.FenceProducers(requested);
+        Assert.Equal(ids, syncResult.FencedProducers.Keys);
+        Assert.Equal(ids, asyncResult.FencedProducers.Keys);
+
+        foreach (string id in ids)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.FencedProducers[id]), FutureProbe.Of(asyncResult.FencedProducers[id])));
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.ProducerId(id)), FutureProbe.Of(asyncResult.ProducerId(id))));
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.EpochId(id)), FutureProbe.Of(asyncResult.EpochId(id))));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        FenceProducersResult syncEmpty = sync.FenceProducers(Array.Empty<string>());
+        AsyncFenceProducersResult asyncEmpty = async.FenceProducers(Array.Empty<string>());
+        Assert.Empty(syncEmpty.FencedProducers);
+        Assert.Empty(asyncEmpty.FencedProducers);
+        Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
+    }
+
+    /// <summary>
+    /// <c>DescribeTransactions</c> (M15/P14 S5f), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1376</c> throws from the call; the core mock fails every id instead): each requested id's
+    /// <c>Description</c> and <c>All()</c> fail alike; an empty request gathers an equal, empty map on both.
+    /// </summary>
+    [Fact]
+    public async Task DescribeTransactions_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] ids = { "diff-dt-b", "diff-dt-a", "diff-dt-b" };
+
+        DescribeTransactionsResult syncResult = sync.DescribeTransactions(ids);
+        AsyncDescribeTransactionsResult asyncResult = async.DescribeTransactions(ids);
+        foreach (string id in ids)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.Description(id)), FutureProbe.Of(asyncResult.Description(id))));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<string, TransactionDescription>>(
+            await Agree(
+                FutureProbe.Of(sync.DescribeTransactions(Array.Empty<string>()).All()),
+                FutureProbe.Of(async.DescribeTransactions(Array.Empty<string>()).All()))));
+    }
+
+    /// <summary>
+    /// <c>DescribeProducers</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1371</c>
+    /// throws from the call; the core mock fails every partition instead): each requested partition's
+    /// <c>PartitionResult</c> and <c>All()</c> fail alike, a repeated partition included; an empty request gathers an
+    /// equal, empty map on both.
+    /// </summary>
+    [Fact]
+    public async Task DescribeProducers_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        TopicPartition[] partitions =
+        {
+            new TopicPartition("diff-dp", 1), new TopicPartition("diff-dp", 0), new TopicPartition("diff-dp", 1),
+        };
+
+        DescribeProducersResult syncResult = sync.DescribeProducers(partitions);
+        AsyncDescribeProducersResult asyncResult = async.DescribeProducers(partitions);
+        foreach (TopicPartition partition in partitions)
+        {
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(
+                    FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
+        }
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>>(
+            await Agree(
+                FutureProbe.Of(sync.DescribeProducers(Array.Empty<TopicPartition>()).All()),
+                FutureProbe.Of(async.DescribeProducers(Array.Empty<TopicPartition>()).All()))));
+    }
+
+    /// <summary>
+    /// <c>ListTransactions</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1391</c>
+    /// throws from the call; the core mock fails the broker discovery instead): <c>ByBrokerId()</c>,
+    /// <c>AllByBrokerId()</c> and <c>All()</c> fail alike, with every filter set as with none.
+    /// </summary>
+    [Fact]
+    public async Task ListTransactions_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        ListTransactionsOptions filtered = new ListTransactionsOptions
+        {
+            FilteredStates = new[] { TransactionState.Ongoing },
+            FilteredProducerIds = new[] { 7L },
+            FilteredDuration = 1_000L,
+            FilteredTransactionalIdPattern = "diff-lt-.*",
+        };
+
+        foreach (ListTransactionsOptions? options in new[] { null, filtered })
+        {
+            ListTransactionsResult syncResult = sync.ListTransactions(options);
+            AsyncListTransactionsResult asyncResult = async.ListTransactions(options);
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.ByBrokerId()), FutureProbe.Of(asyncResult.ByBrokerId())));
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.AllByBrokerId()), FutureProbe.Of(asyncResult.AllByBrokerId())));
+            AssertKafka(
+                UnsupportedVersionCode,
+                NotImplementedYet,
+                await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        }
+    }
+
+    /// <summary>
+    /// <c>AbortTransaction</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1381</c>
+    /// throws from the call; the core mock fails the one completion instead): <c>All()</c> fails alike.
+    /// </summary>
+    [Fact]
+    public async Task AbortTransaction_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AbortTransactionSpec spec = new AbortTransactionSpec(new TopicPartition("diff-at", 3), 91_234L, 7, 42);
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(FutureProbe.Of(sync.AbortTransaction(spec).All()), FutureProbe.Of(async.AbortTransaction(spec).All())));
+    }
+
+    /// <summary>
+    /// <c>ForceTerminateTransaction</c> (M15/P14 S5f), which Java's mock does not implement
+    /// (<c>MockAdminClient.java:1386</c> throws from the call; the core mock fails the one completion instead):
+    /// <c>Result()</c> fails alike.
+    /// </summary>
+    [Fact]
+    public async Task ForceTerminateTransaction_OnBothMocks_FailsAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+
+        AssertKafka(
+            UnsupportedVersionCode,
+            NotImplementedYet,
+            await Agree(
+                FutureProbe.Of(sync.ForceTerminateTransaction("diff-ft").Result()),
+                FutureProbe.Of(async.ForceTerminateTransaction("diff-ft").Result())));
+    }
+
+    /// <summary>
+    /// The synchronous argument guards of the producer and transaction members (M15/P14 S5f) throw alike on both mocks —
+    /// the same type, parameter name and message — before any future exists: a null argument where a member takes a
+    /// required reference, a null element (or a partition with a null topic) where it takes a collection, and a request
+    /// string the native client cannot take unchanged (an embedded NUL). The Results' own lookup guards
+    /// (<c>ProducerId</c>, <c>EpochId</c>, <c>Description</c>, <c>PartitionResult</c>) are at the call on both flavours.
+    /// </summary>
+    [Fact]
+    public void ProducersAndTransactionsGuards_OnBothMocks_ThrowAlike()
+    {
+        using MockAdminClient sync = new MockAdminClient(1);
+        using AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        string[] nullId = { "diff-pg", null! };
+        string[] nulId = { "diff\0pg" };
+        TopicPartition[] nullTopic = { new TopicPartition("diff-pg", 0), default };
+        TopicPartition[] nulTopic = { new TopicPartition("diff\0pg", 0) };
+        AbortTransactionSpec nullTopicSpec = new AbortTransactionSpec(default, 1L, 1, 1);
+        AbortTransactionSpec nulTopicSpec = new AbortTransactionSpec(new TopicPartition("diff\0pg", 0), 1L, 1, 1);
+        ListTransactionsOptions nulPattern = new ListTransactionsOptions { FilteredTransactionalIdPattern = "diff\0pg" };
+
+        AssertThrowAlike(() => sync.FenceProducers(null!), () => async.FenceProducers(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.FenceProducers(nullId), () => async.FenceProducers(nullId));
+        AssertThrowAlike<ArgumentException>(() => sync.FenceProducers(nulId), () => async.FenceProducers(nulId));
+
+        AssertThrowAlike(() => sync.DescribeTransactions(null!), () => async.DescribeTransactions(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.DescribeTransactions(nullId), () => async.DescribeTransactions(nullId));
+        AssertThrowAlike<ArgumentException>(() => sync.DescribeTransactions(nulId), () => async.DescribeTransactions(nulId));
+
+        AssertThrowAlike(() => sync.DescribeProducers(null!), () => async.DescribeProducers(null!));
+        AssertThrowAlike<ArgumentException>(() => sync.DescribeProducers(nullTopic), () => async.DescribeProducers(nullTopic));
+        AssertThrowAlike<ArgumentException>(() => sync.DescribeProducers(nulTopic), () => async.DescribeProducers(nulTopic));
+
+        AssertThrowAlike<ArgumentException>(() => sync.ListTransactions(nulPattern), () => async.ListTransactions(nulPattern));
+
+        AssertThrowAlike(() => sync.AbortTransaction(null!), () => async.AbortTransaction(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AbortTransaction(nullTopicSpec), () => async.AbortTransaction(nullTopicSpec));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.AbortTransaction(nulTopicSpec), () => async.AbortTransaction(nulTopicSpec));
+
+        AssertThrowAlike(() => sync.ForceTerminateTransaction(null!), () => async.ForceTerminateTransaction(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.ForceTerminateTransaction("diff\0pg"), () => async.ForceTerminateTransaction("diff\0pg"));
+
+        FenceProducersResult syncFenced = sync.FenceProducers(new[] { "diff-pg" });
+        AsyncFenceProducersResult asyncFenced = async.FenceProducers(new[] { "diff-pg" });
+        AssertThrowAlike(() => syncFenced.ProducerId(null!), () => asyncFenced.ProducerId(null!));
+        AssertThrowAlike(() => syncFenced.EpochId(null!), () => asyncFenced.EpochId(null!));
+        AssertThrowAlike<ArgumentException>(() => syncFenced.ProducerId("diff-missing"), () => asyncFenced.ProducerId("diff-missing"));
+        AssertThrowAlike<ArgumentException>(() => syncFenced.EpochId("diff-missing"), () => asyncFenced.EpochId("diff-missing"));
+
+        DescribeTransactionsResult syncDescribed = sync.DescribeTransactions(new[] { "diff-pg" });
+        AsyncDescribeTransactionsResult asyncDescribed = async.DescribeTransactions(new[] { "diff-pg" });
+        AssertThrowAlike(() => syncDescribed.Description(null!), () => asyncDescribed.Description(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => syncDescribed.Description("diff-missing"), () => asyncDescribed.Description("diff-missing"));
+
+        DescribeProducersResult syncProducers = sync.DescribeProducers(new[] { new TopicPartition("diff-pg", 0) });
+        AsyncDescribeProducersResult asyncProducers = async.DescribeProducers(new[] { new TopicPartition("diff-pg", 0) });
+        TopicPartition missing = new TopicPartition("diff-missing", 0);
+        AssertThrowAlike<ArgumentException>(
+            () => syncProducers.PartitionResult(missing), () => asyncProducers.PartitionResult(missing));
+
+        // The rows' own pins: each guard names the member's own parameter, with the binding's (or Java's) message.
+        Assert.Equal("transactionalIds", Assert.Throws<ArgumentNullException>(() => sync.FenceProducers(null!)).ParamName);
+        Assert.Equal("transactionalIds", Assert.Throws<ArgumentNullException>(() => sync.DescribeTransactions(null!)).ParamName);
+        Assert.Equal("partitions", Assert.Throws<ArgumentNullException>(() => sync.DescribeProducers(null!)).ParamName);
+        Assert.Equal("spec", Assert.Throws<ArgumentNullException>(() => sync.AbortTransaction(null!)).ParamName);
+        Assert.Equal(
+            "transactionalId", Assert.Throws<ArgumentNullException>(() => sync.ForceTerminateTransaction(null!)).ParamName);
+        Assert.Equal("transactionalId", Assert.Throws<ArgumentNullException>(() => syncFenced.ProducerId(null!)).ParamName);
+        Assert.Equal("transactionalId", Assert.Throws<ArgumentNullException>(() => syncDescribed.Description(null!)).ParamName);
+        AssertArgument(
+            "The transactional ids must not contain a null element.", "transactionalIds", () => sync.FenceProducers(nullId));
+        AssertArgument(
+            "The transactional ids must not contain a null element.", "transactionalIds", () => sync.DescribeTransactions(nullId));
+        AssertArgument(
+            "The partitions must not contain a topic partition with a null topic.",
+            "partitions",
+            () => sync.DescribeProducers(nullTopic));
+        AssertArgument(
+            "The abort transaction spec must not carry a topic partition with a null topic.",
+            "spec",
+            () => sync.AbortTransaction(nullTopicSpec));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "transactionalIds", () => sync.FenceProducers(nulId));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "transactionalIds", () => sync.DescribeTransactions(nulId));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "partitions", () => sync.DescribeProducers(nulTopic));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "options", () => sync.ListTransactions(nulPattern));
+        AssertArgument(Internal.AdminStrings.InvalidStringMessage, "spec", () => sync.AbortTransaction(nulTopicSpec));
+        AssertArgument(
+            Internal.AdminStrings.InvalidStringMessage, "transactionalId", () => sync.ForceTerminateTransaction("diff\0pg"));
+        AssertArgument(
+            "TransactionalId `diff-missing` was not included in the request",
+            "transactionalId",
+            () => syncFenced.ProducerId("diff-missing"));
+        AssertArgument(
+            "TransactionalId `diff-missing` was not included in the request",
+            "transactionalId",
+            () => syncDescribed.Description("diff-missing"));
+        AssertArgument(
+            "Topic partition " + missing + " was not included in the request",
+            "partition",
+            () => syncProducers.PartitionResult(missing));
+    }
+
+    /// <summary>
     /// <paramref name="call"/> throws exactly <see cref="ArgumentException"/>, naming <paramref name="parameterName"/>
     /// with <paramref name="message"/>.
     /// </summary>
