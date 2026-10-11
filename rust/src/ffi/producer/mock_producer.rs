@@ -136,7 +136,7 @@ unsafe fn mock<'a>(self_: *const kafka_producer_MockProducer_t) -> &'a MockProdu
 }
 
 fn box_mock(producer: MockProducer<GenericValue, GenericValue>) -> *mut kafka_producer_MockProducer_t {
-    let handle: Box<Handle> = ProducerHandle::new(|| Ok(producer)).expect("the mock constructor cannot fail");
+    let handle: Box<Handle> = ProducerHandle::new(|| Ok(producer), false).expect("the mock constructor cannot fail");
     Box::into_raw(handle) as *mut kafka_producer_MockProducer_t
 }
 

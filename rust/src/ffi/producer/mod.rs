@@ -167,6 +167,12 @@ pub(crate) struct Client {
     txn_control_busy: AtomicBool,
     /// Tasks spawned by `_cb` calls, awaited by `destroy`.
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Whether `close(Duration)` rejects a negative timeout, as
+    /// `KafkaProducer.close` does (`KafkaProducer.java:1392`). Java's
+    /// `MockProducer.close(Duration)` never reads the timeout
+    /// (`MockProducer.java:436-442`), so the mock's view passes a negative one
+    /// on as zero.
+    rejects_negative_close_timeout: bool,
 }
 
 impl Client {
@@ -345,7 +351,14 @@ where
     /// Builds the producer with `make`, inside the context of a fresh
     /// multi-thread runtime (a `KafkaProducer` spawns its Sender task on
     /// construction), and wraps it with the runtime and the submission task.
-    pub(crate) fn new(make: impl FnOnce() -> Result<P, Error>) -> Result<Box<Self>, Error> {
+    ///
+    /// `rejects_negative_close_timeout` is true for a `KafkaProducer`, whose
+    /// `close(Duration)` rejects a negative timeout, and false for the mock,
+    /// whose `close(Duration)` ignores it.
+    pub(crate) fn new(
+        make: impl FnOnce() -> Result<P, Error>,
+        rejects_negative_close_timeout: bool,
+    ) -> Result<Box<Self>, Error> {
         init_default_logger();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -365,6 +378,7 @@ where
             queued_sends: AtomicUsize::new(0),
             txn_control_busy: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
+            rejects_negative_close_timeout,
         });
         client.spawn(submission_loop(Arc::clone(&client), submit_rx));
         Ok(Box::new(Self { producer, client, runtime }))
@@ -1003,8 +1017,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
     with_drain_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move { p.close().await });
 }
 
-/// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds,
-/// negative values rejected as in Java.
+/// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds.
+///
+/// A negative `timeout` is rejected with
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
+/// negative.") on a `KafkaProducer`, as in Java; a `MockProducer`, whose Java
+/// `close(Duration)` never reads the timeout, closes as for zero.
 ///
 /// # Safety
 ///
@@ -1014,16 +1032,18 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
     self_: *const kafka_producer_Producer_t,
     timeout: i64,
 ) -> *mut kafka_common_Error_t {
-    let timeout = match close_timeout(timeout) {
+    // SAFETY: the caller passes a live view (see `# Safety`).
+    let client = unsafe { client_ref(self_) };
+    let timeout = match close_timeout(client, timeout) {
         Ok(timeout) => timeout,
         Err(error) => return box_error(error),
     };
-    with_drain(unsafe { client_ref(self_) }, move |p| async move {
-        p.close_with_timeout(timeout).await
-    })
+    with_drain(client, move |p| async move { p.close_with_timeout(timeout).await })
 }
 
-/// `Producer.close(Duration timeout)`, completion queued.
+/// `Producer.close(Duration timeout)`, completion queued; a negative
+/// `timeout` is handled as by [`kafka_producer_Producer_close_with_timeout`],
+/// its rejection delivered through `cb`.
 ///
 /// # Safety
 ///
@@ -1035,8 +1055,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     cb: kafka_producer_Producer_close_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: the caller passes a live view (see `# Safety`).
     let client = unsafe { client_ref(self_) };
-    match close_timeout(timeout) {
+    match close_timeout(client, timeout) {
         Ok(timeout) => {
             with_drain_cb(client, cb, opaque, move |p| async move { p.close_with_timeout(timeout).await });
         },
@@ -1044,10 +1065,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     }
 }
 
-fn close_timeout(timeout: i64) -> Result<Duration, Error> {
-    u64::try_from(timeout)
-        .map(Duration::from_millis)
-        .map_err(|_| Error::local_illegal_argument("The timeout cannot be negative."))
+/// The `Duration` for a `close(Duration)` timeout in milliseconds: a negative
+/// one is an error for a `KafkaProducer` and zero for the mock (see
+/// [`Client::rejects_negative_close_timeout`]).
+fn close_timeout(client: &Client, timeout: i64) -> Result<Duration, Error> {
+    match u64::try_from(timeout) {
+        Ok(millis) => Ok(Duration::from_millis(millis)),
+        Err(_) if client.rejects_negative_close_timeout => {
+            Err(Error::local_illegal_argument("The timeout cannot be negative."))
+        },
+        Err(_) => Ok(Duration::ZERO),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,14 +1116,64 @@ mod tests {
     use std::sync::atomic::AtomicI32;
 
     use super::*;
+    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
     use crate::ffi::producer::mock_producer::{
-        kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_destroy,
-        kafka_producer_MockProducer_with_auto_complete,
+        kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_closed,
+        kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_with_auto_complete,
     };
     use crate::ffi::producer::producer_record::{
         kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
     };
+    use crate::ffi::util::c_str_to_string;
+
+    /// Records a `void` completion's outcome: `None` for success, the
+    /// error's message otherwise.
+    unsafe extern "C" fn record_outcome(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        let outcome = if error.is_null() {
+            None
+        } else {
+            // SAFETY: a non-null `error` is owned by this completion.
+            let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+            // SAFETY: as above; freed once.
+            unsafe { kafka_common_Error_destroy(error) };
+            Some(message)
+        };
+        // SAFETY: `opaque` is the test's slot, alive until the callbacks ran.
+        *unsafe { &*(opaque as *const Mutex<Vec<Option<String>>>) }.lock().unwrap() = vec![outcome];
+    }
+
+    /// Java's `MockProducer.close(Duration)` never reads the timeout
+    /// (`MockProducer.java:436-442`), so the mock closes on a negative one
+    /// instead of rejecting it as `KafkaProducer` does; both forms.
+    #[test]
+    fn mock_close_with_timeout_treats_a_negative_timeout_as_zero() {
+        // SAFETY: every handle is live until it is destroyed below.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            assert!(kafka_producer_Producer_close_with_timeout(view, -1).is_null());
+            assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
+            kafka_producer_MockProducer_destroy(mock);
+
+            let outcome = Mutex::new(Vec::new());
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            kafka_producer_Producer_close_with_timeout_cb(
+                view,
+                -1,
+                record_outcome,
+                &outcome as *const Mutex<Vec<Option<String>>> as *mut c_void,
+            );
+            while outcome.lock().unwrap().is_empty() {
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::yield_now();
+            }
+            assert_eq!(*outcome.lock().unwrap(), [None]);
+            assert_eq!(kafka_producer_MockProducer_closed(mock), 1);
+            kafka_producer_MockProducer_destroy(mock);
+        }
+    }
 
     unsafe extern "C" fn count_send(
         value: *mut kafka_common_KafkaFuture_t,

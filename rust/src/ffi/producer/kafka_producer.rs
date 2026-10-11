@@ -173,7 +173,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     };
     let key_serializer = unsafe { serializer_from(key_serializer) };
     let value_serializer = unsafe { serializer_from(value_serializer) };
-    match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer)) {
+    match ProducerHandle::new(|| KafkaProducer::new(config, key_serializer, value_serializer), true) {
         Ok(handle) => {
             unsafe { *out_new = Box::into_raw(handle) as *mut kafka_producer_KafkaProducer_t };
             std::ptr::null_mut()
@@ -387,6 +387,7 @@ mod tests {
     };
     use crate::ffi::producer::{
         kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_with_timeout,
+        kafka_producer_Producer_close_with_timeout_cb,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
 
@@ -399,6 +400,17 @@ mod tests {
         let value = GenericValue::new(&null as *const kafka_Bytes_t as *mut c_void);
         assert_eq!(BytesPassthrough.serialize("t", Some(&value)).unwrap(), None);
         assert_eq!(BytesPassthrough.serialize("t", None).unwrap(), None);
+    }
+
+    /// Stores the message of the error a `void` completion was given.
+    unsafe extern "C" fn record_rejection(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert!(!error.is_null(), "a negative timeout is rejected");
+        // SAFETY: the completion owns `error`; it is read, then freed once.
+        let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+        // SAFETY: as above.
+        unsafe { kafka_common_Error_destroy(error) };
+        // SAFETY: `opaque` is the test's slot, alive until the callbacks ran.
+        *unsafe { &*(opaque as *const std::sync::Mutex<Option<String>>) }.lock().unwrap() = Some(message);
     }
 
     #[test]
@@ -436,6 +448,15 @@ mod tests {
             kafka_producer_ProducerRecord_destroy(record);
 
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
+            let rejected = std::sync::Mutex::new(None);
+            kafka_producer_Producer_close_with_timeout_cb(
+                view,
+                -1,
+                record_rejection,
+                &rejected as *const std::sync::Mutex<Option<String>> as *mut c_void,
+            );
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
+            assert_eq!(rejected.lock().unwrap().as_deref(), Some("The timeout cannot be negative."));
             let error = kafka_producer_Producer_close_with_timeout(view, -1);
             assert_eq!(
                 c_str_to_string(kafka_common_Error_message(error)),

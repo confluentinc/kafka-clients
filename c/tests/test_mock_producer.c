@@ -1095,15 +1095,53 @@ void test_close_async(void) {
     TEST_ASSERT_FALSE(result.had_error);
     TEST_ASSERT_TRUE(kafka_producer_MockProducer_closed(f.mock));
 
-    /* `close_with_timeout` rejects a negative timeout before touching the
-     * producer. */
-    kafka_common_Error_t *err = kafka_producer_Producer_close_with_timeout(f.producer, -1);
-    TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
-    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
-    kafka_common_Error_destroy(err);
-
     fixture_destroy(&f);
+}
+
+/* close_with_timeout_cb closes the mock producer, a negative timeout too:
+ * Java's MockProducer.close(Duration) never reads the timeout
+ * (MockProducer.java:436-442); only a KafkaProducer rejects it
+ * (test_kafka_producer.c). */
+void test_close_with_timeout_async(void) {
+    int64_t timeouts[] = { 1000, -1 };
+    for (size_t i = 0; i < sizeof(timeouts) / sizeof(timeouts[0]); i++) {
+        fixture_t f;
+        fixture_init(&f, 1);
+
+        op_result_t result;
+        memset(&result, 0, sizeof(result));
+        kafka_producer_Producer_close_with_timeout_cb(f.producer, timeouts[i], on_operation, &result);
+
+        TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &result.fired, 1));
+        TEST_ASSERT_FALSE(result.had_error);
+        TEST_ASSERT_TRUE(kafka_producer_MockProducer_closed(f.mock));
+
+        fixture_destroy(&f);
+    }
+}
+
+/* close_with_timeout (sync) closes the mock producer, a negative timeout too
+ * (see test_close_with_timeout_async); a send after it is rejected. */
+void test_close_with_timeout(void) {
+    int64_t timeouts[] = { 1000, -1 };
+    for (size_t i = 0; i < sizeof(timeouts) / sizeof(timeouts[0]); i++) {
+        fixture_t f;
+        fixture_init(&f, 1);
+
+        TEST_ASSERT_NULL(kafka_producer_Producer_close_with_timeout(f.producer, timeouts[i]));
+        TEST_ASSERT_TRUE(kafka_producer_MockProducer_closed(f.mock));
+
+        kafka_producer_ProducerRecord_t *record = make_record("t", -1, NULL, NULL);
+        kafka_common_KafkaFuture_t *future = NULL;
+        kafka_common_Error_t *err = kafka_producer_Producer_send(f.producer, record, &future);
+        TEST_ASSERT_NOT_NULL(err);
+        TEST_ASSERT_EQUAL_STRING("MockProducer is already closed.", kafka_common_Error_message(err));
+        TEST_ASSERT_NULL(future);
+        kafka_common_Error_destroy(err);
+        kafka_producer_ProducerRecord_destroy(record);
+
+        fixture_destroy(&f);
+    }
 }
 
 void test_async_callbacks_single_thread(void) {
@@ -2205,6 +2243,8 @@ int main(void) {
     RUN_TEST(test_future_get_async);
     RUN_TEST(test_flush_async);
     RUN_TEST(test_close_async);
+    RUN_TEST(test_close_with_timeout_async);
+    RUN_TEST(test_close_with_timeout);
     RUN_TEST(test_async_callbacks_single_thread);
     RUN_TEST(test_callbacks_notify_fires_once_per_transition);
 
