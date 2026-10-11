@@ -1836,8 +1836,9 @@ mod tests {
         assert_eq!(own.message(), "own");
 
         let literal = catch_task_panic("kafka_x_cb", async {
-            panic!("literal");
-            #[allow(unreachable_code)]
+            if std::hint::black_box(true) {
+                panic!("literal");
+            }
             Ok::<(), Error>(())
         })
         .await
@@ -1850,8 +1851,9 @@ mod tests {
 
         let formatted = catch_task_panic("kafka_y_cb", async {
             let n = 2;
-            panic!("formatted {n}");
-            #[allow(unreachable_code)]
+            if std::hint::black_box(true) {
+                panic!("formatted {n}");
+            }
             Ok::<(), Error>(())
         })
         .await
