@@ -24,9 +24,8 @@ Python client. It exercises the async API through the full integration matrix
 against a real broker (the sync server covers the sync client).
 
 Uses grpc.aio (asyncio server) rather than a thread pool: the async client's
-completions already run on the event loop (the client's notify hook schedules
-the callback pump with loop.call_soon_threadsafe), so awaiting the coroutines
-is the natural fit. All RPC
+completions already marshal onto the event loop (loop.call_soon_threadsafe from
+the C dispatcher thread), so awaiting the coroutines is the natural fit. All RPC
 handlers run as tasks on a single event loop, so the producer/consumer id maps
 need no lock — id allocation and dict pops happen without an intervening await.
 
@@ -38,6 +37,7 @@ BackendPool waits for.
 """
 
 import asyncio
+import datetime as _dt
 import logging
 import os
 import sys
@@ -47,8 +47,16 @@ import grpc
 # Ensure the Python wrapper module is importable regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import producer as kp  # noqa: E402  (AsyncKafkaProducer / AsyncMockProducer / KafkaError)
-import consumer as kc  # noqa: E402  (AsyncKafkaConsumer / AsyncMockConsumer / TopicPartition / ...)
+# The gRPC integration servers speak the new ``confluent_kafka`` package
+# (CLAUDE.md, Python Binding Conventions, Modules), not the retired top-level
+# ``producer.py`` / ``consumer.py``.
+from confluent_kafka.producer import AsyncKafkaProducer, AsyncMockProducer  # noqa: E402
+from confluent_kafka.consumer import (  # noqa: E402
+    AsyncKafkaConsumer,
+    AsyncMockConsumer,
+    OffsetAndMetadata,
+)
+from confluent_kafka.common import KafkaError  # noqa: E402
 import admin as ka  # noqa: E402  (AsyncAdminClient / AsyncMockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
@@ -56,11 +64,9 @@ import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
 import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
-# Error codes generated from kafka_common_ErrorCode_e
-# (python tools/generate_error_code.py). Private plumbing: the servicers stamp the
-# real code on errors of their own making, so the Rust client can tell those
-# apart from an error the client actually reported.
-import _error_code as ec  # noqa: E402
+import chaos_service_pb2_grpc as chpb_grpc  # noqa: E402  (generated)
+# ChaosWorkloadService: chaos-harness workloads run inside this server.
+from grpc_chaos import AsyncChaosWorkloadService  # noqa: E402
 
 # Proto<->Python translation helpers shared with the sync server (see
 # grpc_translate.py); client-agnostic, so reused verbatim.
@@ -68,6 +74,10 @@ from grpc_translate import (  # noqa: E402
     CallbackLog,
     GroupMetadataStore,
     LoggingRebalanceListener,
+    # The error codes the servicers stamp on errors of their own making, so the
+    # Rust client can tell those apart from an error the client reported.
+    _LOCAL_ILLEGAL_STATE,
+    _REQUEST_TIMED_OUT,
     _admin_abort_transaction_spec,
     _admin_acl_bindings,
     _admin_acl_filter,
@@ -144,6 +154,7 @@ from grpc_translate import (  # noqa: E402
     _record_to_proto,
     _tp,
     _tp_to_proto,
+    ignore_commit_completion,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -162,8 +173,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # GroupMetadataStore shared with the other service.
         self._group_metadata = group_metadata
         self._next_id = 1
-        # AsyncProducer invokes on_delivery on the loop (inside its callback
-        # pump), so this log is in fact only touched from the loop; CallbackLog
+        # AsyncProducer invokes the delivery callback on the loop (inside its
+        # completion drain), so this log is in fact only touched from the loop; CallbackLog
         # locks anyway, which is what the consumer service genuinely needs.
         self._callback_log = CallbackLog()
 
@@ -176,9 +187,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             # Empty config selects AsyncMockProducer for client-side smoke
             # testing — useful when developing without a real broker.
             if not config or all(not v for v in config.values()):
-                producer = kp.AsyncMockProducer(auto_complete=True)
+                # Java's MockProducer(autoComplete, partitioner, keySerializer,
+                # valueSerializer); a None serializer is bytes_serializer().
+                producer = AsyncMockProducer(auto_complete=True, partitioner=None,
+                                      key_serializer=None, value_serializer=None)
             else:
-                producer = kp.AsyncKafkaProducer(config)
+                producer = AsyncKafkaProducer(configs=config)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateProducer failed")
             return pb.CreateProducerResponse(producer_id=0, error=_kafka_error_to_proto(e))
@@ -193,7 +207,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.SendResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             record = _proto_to_producer_record(request.record)
@@ -201,33 +215,30 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("invalid record")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # with_callback => register a real on_delivery through producer.py so the
-        # Rust harness can read back (via GetCallbackLog) what the binding's own
-        # callback saw. On AsyncProducer it fires on the event loop, in the same
-        # pump step that resolves the record future, so it has run by the time
-        # the await below resumes.
-        on_delivery = None
+        # with_callback => register a real delivery callback through the client so
+        # the Rust harness can read back (via GetCallbackLog) what the binding's own
+        # callback saw. On AsyncProducer it fires on the event loop.
+        callback = None
         if request.with_callback:
-            on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
+            callback = make_logging_delivery_callback(self._callback_log, request.producer_id)
         # AsyncProducer.send is a coroutine that returns an asyncio.Future.
         try:
-            future = await producer.send(record, on_delivery=on_delivery)
-        except kp.KafkaError as e:
+            future = await producer.send(record=record, callback=callback)
+        except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("send raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
-        # Await the record future on the event loop; the client's notify hook
-        # schedules the callback pump that resolves it. Bounded like the sync
-        # server's 120s.
+        # Await the record future on the event loop; completions hop onto the
+        # loop from the C dispatcher thread. Bounded like the sync server's 120s.
         try:
             metadata = await asyncio.wait_for(future, timeout=120)
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except asyncio.TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                code=ec.REQUEST_TIMED_OUT,
+                code=_REQUEST_TIMED_OUT,
                 message="python async server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("awaiting future raised")
@@ -244,11 +255,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.init_transactions()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -256,11 +267,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.begin_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -268,11 +279,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.commit_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -280,11 +291,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.abort_transaction()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -292,20 +303,20 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         group_metadata = self._group_metadata.get(request.group_metadata_id)
         if group_metadata is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown group_metadata_id {request.group_metadata_id}"))
         # Translate the flat OffsetEntry list and pass the consumer's stored
         # group-metadata object; the producer stages the offsets in the ongoing
         # transaction (they commit only if the transaction commits).
         offsets = _proto_offset_entries_to_dict(request.offsets)
         try:
-            await producer.send_offsets_to_transaction(offsets, group_metadata)
-        except kp.KafkaError as e:
+            await producer.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -313,11 +324,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.flush()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
@@ -325,11 +336,11 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.PartitionsForResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
-            infos = await producer.partitions_for(request.topic)
-        except kp.KafkaError as e:
+            infos = await producer.partitions_for(topic=request.topic)
+        except KafkaError as e:
             return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
         return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
 
@@ -337,32 +348,39 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.MetricsResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
         try:
             # metrics() is sync on AsyncProducer (Java metrics() does not block).
             snapshot = producer.metrics()
-        except kp.KafkaError as e:
+        except KafkaError as e:
             return pb.MetricsResponse(error=_kafka_error_to_proto(e))
         return pb.MetricsResponse(metrics=pb.MetricList(
-            metrics=[_metric_to_proto(m) for m in snapshot]))
+            metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
-    async def Close(self, request, context):
-        producer = self._producers.pop(request.producer_id, None)
+    async def _close(self, producer_id, timeout):
+        producer = self._producers.pop(producer_id, None)
         if producer is None:
             # Close is idempotent — silent success on unknown id mirrors
             # the Java client's behavior.
             return pb.StatusResponse()
         try:
-            await producer.close()
-        except kp.KafkaError as e:
+            if timeout is None:
+                await producer.close()
+            else:
+                await producer.close(timeout=timeout)
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
 
+    async def Close(self, request, context):
+        return await self._close(request.producer_id, None)
+
     async def CloseTimeout(self, request, context):
-        # AsyncProducer.close() doesn't take a timeout. Best-effort mapping:
-        # ignore the timeout and call close() unconditionally.
-        return await self.Close(pb.CloseRequest(producer_id=request.producer_id), context)
+        # AsyncKafkaProducer.close(*, timeout=...) is Java's close(Duration), the
+        # FFI's close_with_timeout. timeout_ms is milliseconds; Duration is seconds.
+        timeout = _dt.timedelta(milliseconds=request.timeout_ms)
+        return await self._close(request.producer_id, timeout)
 
     async def GetCallbackLog(self, request, context):
         # Readable after Close on purpose — close() flushes, so the delivery
@@ -373,21 +391,19 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
-    Ops that block in the Rust consumer are coroutines and are awaited (seek
-    and commit_async included: both await the background task, and seek may run
-    a rebalance listener); the non-blocking state reads
-    (assignment/subscription/paused/wakeup) live on the shared _ConsumerBase and
-    are sync — called directly, never awaited."""
+    Methods Java waits in are coroutines and are awaited (seek included: it
+    waits on the background thread, which may run a rebalance listener); the
+    others (assignment/subscription/paused/commit_nowait/wakeup) are plain
+    methods, called directly."""
 
     def __init__(self, group_metadata):
         self._consumers = {}
         # GroupMetadataStore shared with the other service.
         self._group_metadata = group_metadata
         self._next_id = 1
-        # Rebalance-listener and commit callbacks are pumped on the event loop
-        # (the consumer's notify hook schedules Consumer__execute_callbacks with
-        # call_soon_threadsafe), the same loop GetCallbackLog is served on. The
-        # lock is kept so CallbackLog stays identical between the two servers.
+        # Rebalance-listener and commit callbacks run on the event loop, inside
+        # the consumer call that delivers them; CallbackLog's lock is shared with
+        # the sync server.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -398,16 +414,16 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     def _unknown_consumer(self, consumer_id):
         return pb.KafkaError(
-            code=ec.LOCAL_ILLEGAL_STATE,
+            code=_LOCAL_ILLEGAL_STATE,
             message=f"unknown consumer_id {consumer_id}")
 
     async def CreateConsumer(self, request, context):
         config = dict(request.config)
         try:
             if not config or all(not v for v in config.values()):
-                consumer = kc.AsyncMockConsumer("earliest")
+                consumer = AsyncMockConsumer(offset_reset_strategy="earliest")
             else:
-                consumer = kc.AsyncKafkaConsumer(config)
+                consumer = AsyncKafkaConsumer(configs=config)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateConsumer failed")
             return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(e))
@@ -426,7 +442,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             await coro_fn(consumer)
             return pb.StatusResponse()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
             LOG.exception("consumer op raised")
@@ -434,30 +450,29 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     async def Subscribe(self, request, context):
         # with_listener => a real ConsumerRebalanceListener whose invocations
-        # land in the callback log. LoggingRebalanceListener's methods are plain
-        # functions (shared with the sync server); the binding would also accept
-        # coroutine methods here, scheduled on the loop by the callback pump.
+        # land in the callback log (plain methods; an async def one would be
+        # awaited on the loop).
         listener = None
         if request.with_listener:
             listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
         return await self._run_status(
             request.consumer_id,
-            lambda c: c.subscribe(list(request.topics), listener=listener))
+            lambda c: c.subscribe(topics=list(request.topics), callback=listener))
 
     async def Unsubscribe(self, request, context):
         return await self._run_status(request.consumer_id, lambda c: c.unsubscribe())
 
     async def Assign(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return await self._run_status(request.consumer_id, lambda c: c.assign(parts))
+        return await self._run_status(request.consumer_id, lambda c: c.assign(partitions=parts))
 
     async def Poll(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.PollResponse(error=self._unknown_consumer(request.consumer_id))
         try:
-            records = await consumer.poll(request.timeout_ms / 1000.0)
-        except kc.KafkaError as e:
+            records = await consumer.poll(timeout=request.timeout_ms / 1000.0)
+        except KafkaError as e:
             return cpb.PollResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("poll raised")
@@ -469,16 +484,17 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         async def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
             if offsets:
-                await c.commit(offsets)
+                await c.commit(offsets=offsets)
             else:
                 await c.commit()
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
-        # commit_async only *initiates* the commit, but the Rust consumer awaits
-        # its background task to enqueue it, so on the async client it is a
-        # coroutine driven through the `_cb` twin. The callback fires on a later
-        # poll/commit/close, pumped on the event loop.
+        # commit_nowait (Java's commitAsync) does not wait, so it is a plain def,
+        # called directly. The callback runs inside a later poll/commit/close; a
+        # listener callback the core delivers while the commit waits for its
+        # offsets runs on this loop (an async def one in a task the next awaited
+        # call waits for).
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -486,10 +502,14 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if request.with_callback:
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
         try:
-            await consumer.commit_async(_proto_offsets_to_dict(request.offsets) or None,
-                                        callback=callback)
+            offsets = _proto_offsets_to_dict(request.offsets)
+            if offsets:
+                consumer.commit_nowait(offsets=offsets,
+                                       callback=callback or ignore_commit_completion)
+            else:
+                consumer.commit_nowait(callback=callback)
             return pb.StatusResponse()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
             LOG.exception("commit_async raised")
@@ -500,8 +520,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return cpb.CommittedResponse(error=self._unknown_consumer(request.consumer_id))
         try:
-            result = await consumer.committed([_tp(p) for p in request.partitions])
-        except kc.KafkaError as e:
+            result = await consumer.committed(partitions=[_tp(p) for p in request.partitions])
+        except KafkaError as e:
             return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
                    for tp, oam in result.items()]
@@ -512,8 +532,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return cpb.PositionResponse(error=self._unknown_consumer(request.consumer_id))
         try:
-            offset = await consumer.position(_tp(request.partition))
-        except kc.KafkaError as e:
+            offset = await consumer.position(partition=_tp(request.partition))
+        except KafkaError as e:
             return cpb.PositionResponse(error=_kafka_error_to_proto(e))
         return cpb.PositionResponse(offset=offset)
 
@@ -524,15 +544,16 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             tp = _tp(request.partition)
             if request.HasField("metadata") or request.HasField("leader_epoch"):
-                oam = kc.OffsetAndMetadata(
-                    request.offset,
-                    request.metadata if request.HasField("metadata") else "",
-                    request.leader_epoch if request.HasField("leader_epoch") else None)
-                await consumer.seek(tp, oam)
+                oam = OffsetAndMetadata(
+                    offset=request.offset,
+                    metadata=request.metadata if request.HasField("metadata") else "",
+                    leader_epoch=(request.leader_epoch
+                                  if request.HasField("leader_epoch") else None))
+                await consumer.seek(partition=tp, offset_and_metadata=oam)
             else:
-                await consumer.seek(tp, request.offset)
+                await consumer.seek(partition=tp, offset=request.offset)
             return pb.StatusResponse()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
             LOG.exception("seek raised")
@@ -540,19 +561,19 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     async def SeekToBeginning(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return await self._run_status(request.consumer_id, lambda c: c.seek_to_beginning(parts))
+        return await self._run_status(request.consumer_id, lambda c: c.seek_to_beginning(partitions=parts))
 
     async def SeekToEnd(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return await self._run_status(request.consumer_id, lambda c: c.seek_to_end(parts))
+        return await self._run_status(request.consumer_id, lambda c: c.seek_to_end(partitions=parts))
 
     async def Pause(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return await self._run_status(request.consumer_id, lambda c: c.pause(parts))
+        return await self._run_status(request.consumer_id, lambda c: c.pause(partitions=parts))
 
     async def Resume(self, request, context):
         parts = [_tp(p) for p in request.partitions]
-        return await self._run_status(request.consumer_id, lambda c: c.resume(parts))
+        return await self._run_status(request.consumer_id, lambda c: c.resume(partitions=parts))
 
     async def _long_offsets(self, request, end):
         consumer = self._get(request.consumer_id)
@@ -560,8 +581,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.LongOffsetsResponse(error=self._unknown_consumer(request.consumer_id))
         parts = [_tp(p) for p in request.partitions]
         try:
-            result = await (consumer.end_offsets(parts) if end else consumer.beginning_offsets(parts))
-        except kc.KafkaError as e:
+            result = await (consumer.end_offsets(partitions=parts) if end
+                            else consumer.beginning_offsets(partitions=parts))
+        except KafkaError as e:
             return cpb.LongOffsetsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.LongOffsetMapEntry(partition=_tp_to_proto(tp), offset=off) for tp, off in result.items()]
         return cpb.LongOffsetsResponse(offsets=cpb.LongOffsetMap(entries=entries))
@@ -578,16 +600,19 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.OffsetAndTimestampResponse(error=self._unknown_consumer(request.consumer_id))
         spec = {_tp(e.partition): e.timestamp for e in request.timestamps}
         try:
-            result = await consumer.offsets_for_times(spec)
-        except kc.KafkaError as e:
+            result = await consumer.offsets_for_times(timestamps_to_search=spec)
+        except KafkaError as e:
             return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
+        # New value type: accessors are methods; a partition with no offset at or
+        # after its timestamp maps to None (Java null) and is omitted.
         entries = [
             cpb.OffsetAndTimestampMapEntry(
                 partition=_tp_to_proto(tp),
                 offset=cpb.OffsetAndTimestamp(
-                    offset=oat.offset, timestamp=oat.timestamp,
-                    leader_epoch=oat.leader_epoch if oat.leader_epoch is not None else None))
-            for tp, oat in result.items()
+                    offset=oat.offset(), timestamp=oat.timestamp(),
+                    leader_epoch=(oat.leader_epoch()
+                                  if oat.leader_epoch() is not None else None)))
+            for tp, oat in result.items() if oat is not None
         ]
         return cpb.OffsetAndTimestampResponse(offsets=cpb.OffsetAndTimestampMap(entries=entries))
 
@@ -596,8 +621,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.PartitionsForResponse(error=self._unknown_consumer(request.consumer_id))
         try:
-            infos = await consumer.partitions_for(request.topic)
-        except kc.KafkaError as e:
+            infos = await consumer.partitions_for(topic=request.topic)
+        except KafkaError as e:
             return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
         return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
 
@@ -607,7 +632,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.ListTopicsResponse(error=self._unknown_consumer(request.consumer_id))
         try:
             topics = await consumer.list_topics()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return cpb.ListTopicsResponse(error=_kafka_error_to_proto(e))
         entries = [cpb.TopicPartitionInfoEntry(topic=t, partitions=[_partition_info_to_proto(i) for i in infos])
                    for t, infos in topics.items()]
@@ -643,7 +668,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except Exception as e:  # noqa: BLE001
             return pb.MetricsResponse(error=_kafka_error_to_proto(e))
         return pb.MetricsResponse(metrics=pb.MetricList(
-            metrics=[_metric_to_proto(m) for m in snapshot]))
+            metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
     async def Paused(self, request, context):
         consumer = self._get(request.consumer_id)
@@ -661,7 +686,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return cpb.GroupMetadataResponse(error=pb.KafkaError(
-                code=ec.LOCAL_ILLEGAL_STATE,
+                code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             group_metadata = consumer.group_metadata()
@@ -686,8 +711,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
+            # Java's close(). Its deprecated close(Duration) is not translated
+            # (CLAUDE.md, Python Binding Conventions, Class family), so the
+            # request carries no timeout.
             await consumer.close()
-        except kc.KafkaError as e:
+        except KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
 
@@ -744,7 +772,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
 
     def _unknown_admin(self, admin_id):
         return pb.KafkaError(
-            code=ec.LOCAL_ILLEGAL_STATE,
+            code=_LOCAL_ILLEGAL_STATE,
             message=f"unknown admin_id {admin_id}")
 
     async def CreateTopics(self, request, context):
@@ -1485,6 +1513,7 @@ async def serve():
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
+    chpb_grpc.add_ChaosWorkloadServiceServicer_to_server(AsyncChaosWorkloadService(), server)
     bound_port = server.add_insecure_port(f"{host}:{port}")
     await server.start()
     # The Rust BackendPool waits for "listening" on stderr and parses the bound

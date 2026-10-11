@@ -1,90 +1,141 @@
-# Python Binding
+# confluent_kafka (Rust-core Python client)
 
-Python bindings for the Rust Kafka client (`confluent-kafka-rust-python`). The
-modules sit over a hand-written CPython extension, `_confluentkafka`, which
+The Python client built on the Rust core's C FFI. Its surface is the Java Kafka
+client (Apache Kafka 4.3.1) mapped to idiomatic Python, ruled by the
+`## Python Binding Conventions` section of the repository's `CLAUDE.md`. The
+package sits over a hand-written CPython extension, `_confluentkafka`, which
 links the Rust library's C API (`../rust`, feature `ffi`).
-
-- **Modules:** `producer.py`, `consumer.py` and `admin.py`, mirroring the Java
-  client's producer, consumer and admin APIs.
-- **Two shapes of each client:** a synchronous class (`KafkaProducer`, whose
-  sends return `concurrent.futures.Future`; `KafkaConsumer`, whose operations
-  block like Java's; `AdminClient`), and an asyncio class whose methods are
-  coroutines (`AsyncKafkaProducer`, `AsyncKafkaConsumer`, `AsyncAdminClient`).
-- **Mocks:** `MockProducer`, `MockConsumer`, `MockAdminClient` and their async
-  variants, backed by the Rust client's in-memory mocks.
-
-## Consumer threading model
-
-The consumer binding sits directly over the C API's two entry-point families
-and has no thread of its own:
-
-- **`KafkaConsumer` / `MockConsumer` (sync)** call the *blocking* C functions
-  with the GIL released. Every method that blocks in Java blocks here
-  (`poll`, `commit`, `position`, `committed`, `seek`, `subscribe`, `close`,
-  ...). A rebalance listener (`subscribe(topics, listener=...)`) or a
-  `commit_async(callback=...)` completion callback runs **on the calling
-  thread, inside the call that triggers it**, and that call does not return
-  until the callback has -- Java's "callbacks run on the polling thread"
-  guarantee. A callback that raises fails the triggering operation with a
-  `KafkaError` carrying its message. The Rust consumer is single-owner: a
-  second thread calling into the consumer while an operation is in flight gets
-  a `KafkaError` (LocalConcurrentModification), and the non-blocking state
-  reads (`assignment()`, `subscription()`, `paused()`) return empty
-  collections meanwhile. Use `wakeup()` from another thread to abort a
-  blocking call (it fails with a `Wakeup` error); `Ctrl-C` only takes effect
-  once the native call returns.
-- **`AsyncKafkaConsumer` / `AsyncMockConsumer` (asyncio)** call the `_cb`
-  twins. The operation runs on the Rust runtime and queues its completion --
-  and every listener / commit-callback invocation it triggers -- on the
-  client's callback queue. The client's notify hook fires once each time that
-  queue goes from empty to non-empty, and the binding schedules the pump
-  (`Consumer__execute_callbacks`) on the event loop with
-  `call_soon_threadsafe`, so **every callback runs on the loop thread**.
-  Listener methods and commit callbacks may therefore be coroutines: a
-  coroutine listener method is scheduled as a task and the rebalance does not
-  advance until it finishes (its exception, if any, is reported to the client
-  as the listener's failure). `commit_async` and `seek` are coroutines too,
-  because the Rust consumer awaits its background task for them.
-- **Re-entrancy.** A callback that must reach back into its consumer (e.g.
-  `commit_sync` from `on_partitions_revoked`) does so through a
-  `ConsumerHandle` obtained beforehand from `consumer.handle()`
-  (`AsyncConsumerHandle`, with coroutine methods, on the asyncio consumer).
-  Handle operations bypass the single-owner guard; the consumer's own methods
-  would be rejected as concurrent access. On a mock-derived handle only
-  `wakeup()` works -- drive the `MockConsumer` directly.
-- **Records.** `record.key` / `record.value` are `bytes` (or `None`), copied
-  out of the record batch when the record object is created, so they outlive
-  the `ConsumerRecords` that produced them. `record.headers` is a
-  `list[(str, bytes | None)]`.
-- **Mock usage.** `MockConsumer` mirrors Java's: `add_record`,
-  `update_beginning_offsets` / `update_end_offsets` / `update_duration_offsets`,
-  `update_partitions`, `set_poll_error` / `set_offsets_error`,
-  `set_max_poll_records`, `should_rebalance` / `reset_should_rebalance`,
-  `last_poll_timeout`, and `rebalance(partitions)`, which drives the registered
-  listener (a topic subscription is required). `AsyncMockConsumer.rebalance`
-  is a coroutine.
 
 ## Status
 
 **In Development:** the API is subject to large changes and the stability is not guaranteed.
 
+## Import paths
+
+The package mirrors Java's package tree with the `clients` segment dropped
+(`CLAUDE.md`, Python Binding Conventions, Modules). Import each name from its own
+module — the package root does **not** re-export the everyday client names; it
+exports only `Duration` and the Java built-in exception classes:
+
+```python
+from confluent_kafka.producer import (
+    KafkaProducer, MockProducer, AsyncKafkaProducer, AsyncMockProducer,
+    ProducerRecord, RecordMetadata, Callback,
+)
+from confluent_kafka.consumer import (
+    KafkaConsumer, MockConsumer, AsyncKafkaConsumer, AsyncMockConsumer,
+    ConsumerRebalanceListener, OffsetAndMetadata, CloseOptions,
+    SubscriptionPattern,
+)
+from confluent_kafka.common import (
+    TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
+    MetricName, Metric, KafkaMetric, TimestampType, Headers,
+    KafkaError,  # Java's org.apache.kafka.common.KafkaException
+)
+from confluent_kafka.common.errors import RetriableError  # typed hierarchy
+from confluent_kafka.common.serialization import (
+    bytes_serializer, string_serializer, int_serializer, json_serializer,  # etc.
+)
+
+# The Java built-in exception classes and the Duration alias live at the
+# package root:
+from confluent_kafka import (
+    IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
+    TimeoutError, NoSuchElementError, NullPointerError, Duration,
+)
+```
+
+The native extension is `_confluentkafka` (private): the package imports it; it
+is never a public import path.
+
+## Async peers
+
+Each async client lives in the same module as its sync peer, `Async`-prefixed
+(`AsyncKafkaProducer`, `AsyncKafkaConsumer`). A method is `async def` on the
+async class iff Java waits in it (on the background thread, the network, or a
+rebalance listener it runs); the others (`assignment()`, `subscription()`,
+`metrics()`, `group_metadata()`, `commit_nowait()`, `wakeup()`) stay plain
+`def` on both.
+
+## Producer
+
+- `send(record=…, callback=cb)` returns a future for the record's
+  `RecordMetadata`; like Java's, it cannot be cancelled. `cb(metadata,
+  exception)` is Java's `Callback`: it runs on the producer's background
+  completion thread (`KafkaProducer`) or on the event loop
+  (`AsyncKafkaProducer`), one at a time in completion order, before the future
+  completes; a raising callback is logged. `metadata` is never `None`: on
+  failure every field but the topic and partition is -1.
+- `close()` waits for the records sent before it; `close(timeout=…)` waits at
+  most `timeout`, then fails what is left. Neither cancels a future.
+- A `send()` that returned belongs to the `flush()` or transaction call after it
+  (`commit_transaction()` includes it, `abort_transaction()` discards it).
+- `MockProducer` is Java's `MockProducer`: sends complete, and callbacks run, on
+  the calling thread.
+
+## Consumer
+
+- `poll(timeout=…)` runs the deserializers on the caller's thread. A failing one
+  raises `RecordDeserializationError` (after the records before it, if any, were
+  returned) and leaves the position at the record:
+  `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
+- `commit()` is Java's `commitSync` and waits; `commit_nowait(callback=cb)` is
+  Java's `commitAsync`. `cb(offsets, exception)` is Java's
+  `OffsetCommitCallback`; `offsets` is `None` when the commit failed and for
+  an explicit empty `offsets`, as Java passes `null`.
+- The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
+  on the caller's thread, inside the call that delivers them (`poll()`,
+  `commit()`, `commit_nowait()`, `unsubscribe()`, `close()`, …), and the
+  rebalance does not advance until the listener returns. A listener may call
+  back into its consumer (`commit()`, `seek()`, `position()`, …); on
+  `AsyncKafkaConsumer` those calls block the event loop for their duration.
+  On `AsyncKafkaConsumer` a listener method may be `async def`; it is awaited
+  on the event loop. A listener's `KafkaError` is raised as it is from the
+  call that delivered it; any other exception is wrapped as
+  `KafkaError("User rebalance callback throws an error")` with it as the
+  cause.
+- `KafkaConsumer` is not thread-safe: a call while another thread is inside it
+  raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
+  thread, it makes the waiting call raise `WakeupError`.
+- `close(option=CloseOptions.timeout(…))` bounds the close;
+  `close(timeout=…)` is Java's deprecated `close(Duration)` and warns.
+- A deserializer defaults to the `key.deserializer` / `value.deserializer`
+  config key, else to `bytes_deserializer()`; the consumer closes both when it
+  closes.
+- `MockConsumer` is Java's `MockConsumer`: `add_record(record=…)` takes the
+  `ConsumerRecord` the test builds and `poll()` returns it as is (the mock has no
+  deserializers). Nothing binds its type parameters, so annotate it as Java
+  writes them: `c: MockConsumer[str, str] =
+  MockConsumer(offset_reset_strategy="earliest")`.
+
+## Errors
+
+Errors are a typed hierarchy caught by class, not a flat error with a `code()`.
+There is no `code()` / `is_retriable()` / `is_fatal()` on the surface —
+retriability is `except RetriableError`, and each Java exception class has a
+`…Error` Python analog in the module of its Java package (generated from the
+Java sources). The Java built-in exception classes (`IllegalStateError`,
+`IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
+`NoSuchElementError`, `NullPointerError`) live at the package root.
 
 ## Directory Structure
 
 ```
-producer.py, consumer.py, admin.py   # The Python API
+confluent_kafka/        # The client package, one module per Java package
+admin.py                # Admin client (sync and asyncio), outside the package
 _confluentkafka.c       # Hand-written CPython extension over the C API
-_error_code.py          # Generated from ../rust/src/ffi/common.rs
 tinycthread.{c,h}, c11threads_compat.h  # C11 threads shim (macOS)
 setup.py, pyproject.toml
 grpc_server.py, grpc_server_async.py, grpc_translate.py
                         # gRPC servers for the multilanguage tests
 Dockerfile.grpc, Dockerfile.grpc.async  # Their images
+examples/               # Runnable producer and consumer examples
 test/
 ├── unit/               # pytest unit tests, no broker needed
-├── static/             # Source checks: format arity, _error_code.py staleness
+├── integration/        # Broker-backed binding tests (testcontainers; skip without Docker)
+├── static/             # Source checks: format arity
 └── performance/        # Latency-budget and benchmark tests (need a broker)
-tools/                  # format_arity.py, generate_error_code.py
+tools/                  # format_arity.py
 soak/                   # Long-running soak client — see soak/README.md
 Makefile                # Targets the repository root's Makefile delegates to
 ```
@@ -120,13 +171,14 @@ pip install .[dev]        # test and benchmark dependencies
 
 ```bash
 python -m pytest test/unit      # unit tests
+python -m pytest test/integration   # broker-backed tests (Docker)
 python -m pytest test/static    # static checks of the extension source
 python -m pytest soak/test      # soak client unit tests
+python -m mypy --strict confluent_kafka test/unit/test_typing.py   # typecheck
 ```
 
 The static checks read source files only, so they need neither the Rust
-library nor the extension built. When `../rust/src/ffi/common.rs` changes,
-regenerate the error codes with `python tools/generate_error_code.py`.
+library nor the extension built.
 
 The Python arms of the multilanguage integration suite (`__grpc_python`,
 `__grpc_python_async`) run the Rust test harness against the gRPC servers
@@ -141,8 +193,9 @@ be run directly:
 
 ```bash
 make build                # pip install -e . against ../rust/target/$(PROFILE)
-make test                 # unit, static and soak tests, then test-integration
+make test                 # typecheck, unit, integration, static and soak tests, then test-integration
 make test-unit            # unit tests only
+make typecheck            # mypy --strict over the package and test/unit/test_typing.py
 make check-static         # static checks only
 make test-integration     # gRPC images + the __grpc_python arms (Linux, Docker)
 make test-performance     # latency-budget tests (idle machine, broker needed)
@@ -152,6 +205,9 @@ make clean
 ```
 
 `PROFILE` (`release` by default, or `debug`) selects which Rust build to link.
+`CLIENT_VERSION=2` runs the benchmarks against the PyPI librdkafka client in
+its own venv (`make init-venv-librdkafka` at the root): it installs the same
+top-level `confluent_kafka` package as this client, so the two cannot share one.
 
 ## License
 

@@ -24,16 +24,14 @@
 //! the C FFI. With only `integration-tests` enabled the `__rust` arm is the whole
 //! expansion.
 //!
-//! # What a client with no transactional producer can and cannot reach
+//! # What these admin-only scenarios can and cannot reach
 //!
-//! The Rust `Producer` trait does not implement the transactional API
-//! (`init_transactions` / `begin_transaction` / ... — see
-//! `src/producer/producer.rs`), and `enable.idempotence` defaults to `true`
-//! in `ProducerConfig` but nothing on the send path ever calls
-//! `ProducerBatch::set_producer_state`, so every record this client produces
-//! carries `RecordBatch::NO_PRODUCER_ID` (`src/producer/internals/sender.rs`).
-//! The earlier revision of this file concluded from that that five of its six
-//! scenarios could only be error paths and left `abortTransaction` as an
+//! None of these scenarios starts a transactional producer. (The client has one
+//! — `KafkaProducer::init_transactions` / `begin_transaction` / ... — and the
+//! `AdminFenceProducersTest` translations that pair it with `fenceProducers`
+//! live in `producer_transactions_test.rs`.) An earlier revision of this file,
+//! written before the transactional producer existed, concluded that five of its
+//! six scenarios could only be error paths and left `abortTransaction` as an
 //! `#[ignore]`d skeleton. Measured against a real broker, most of that was wrong:
 //!
 //!   - **`fenceProducers` on a fresh transactional id creates a transaction.**
@@ -62,7 +60,8 @@
 //!     populated only while a transaction is **in progress**
 //!     (`ProducerStateEntry.currentTxnFirstOffset` is set by an
 //!     `addPartitionsToTxn` + append sequence). Those need a transactional
-//!     producer, so they are exercised on their `None` / empty side only. A
+//!     producer, which these scenarios do not start, so they are exercised on
+//!     their `None` / empty side only. A
 //!     dropped field is still caught, because `None` is what the assertions
 //!     demand and a backend reporting `Some(0)` fails.
 //!   - `TransactionState::{Ongoing, PrepareAbort, PrepareCommit, CompleteAbort,
@@ -91,19 +90,9 @@ use confluent_kafka::common::TopicPartition;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, txn_single_broker};
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
-
-/// A single-broker cluster whose transaction-state log is replicated with a
-/// factor of 1, so the transaction coordinator is usable on one node (the
-/// defaults require three replicas).
-fn txn_single_broker() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string());
-    props.insert("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string());
-    ClusterConfig::with_properties(props)
-}
 
 /// A transaction-capable single-broker cluster that is *isolated* from the one
 /// returned by [`txn_single_broker`].
@@ -180,13 +169,21 @@ fn lists_id(listings: &[TransactionListing], transactional_id: &str) -> bool {
 /// # Why this is a `docker exec` rather than a Rust producer
 ///
 /// A producer state entry exists only for a producer that appends with a real
-/// producer id, i.e. an idempotent or transactional one. This client does neither
-/// (see the module note), and no other admin RPC creates one: the transaction
-/// coordinator's own writes to `__transaction_state` and the group coordinator's
-/// to `__consumer_offsets` carry no producer id. So the only way to make
-/// `describeProducers`' value non-empty is a producer from outside this client,
-/// and the broker image already ships one —
-/// `kafka-console-producer.sh --producer-property enable.idempotence=true`.
+/// producer id, i.e. an idempotent or transactional one, and no admin RPC creates
+/// one: the transaction coordinator's own writes to `__transaction_state` and the
+/// group coordinator's to `__consumer_offsets` carry no producer id.
+///
+/// An earlier revision of this note claimed this client's producer never appends
+/// with a producer id, so an outside producer was the only option. That is no
+/// longer true: the native `KafkaProducer` with `enable.idempotence=true` does
+/// populate the partition's producer state, and `describeProducers` reports it —
+/// `producer_transactions_test.rs`'s
+/// `test_producer_id_expiration_with_no_transactions` asserts exactly that against
+/// a real broker. The `docker exec` of the image's
+/// `kafka-console-producer.sh --producer-property enable.idempotence=true` is
+/// kept because it keeps these admin scenarios independent of the producer under
+/// test: a producer regression then fails the producer suites, not the admin
+/// `describeProducers` value arms.
 ///
 /// The container is found by Docker network rather than by image tag so the
 /// helper does not restate `KAFKA_TAG`, and the *container* listener is used for

@@ -8,14 +8,17 @@ it stands. The dated, step-by-step record of how it got here lives in
 **Last verified against the tree:** 2026-09-27
 **Coverage:** Producer (including idempotence and transactions), Consumer
 (KIP-848) and AdminClient are all translated. The C FFI and the Python bindings
-cover all three.
+cover all three: the `confluent_kafka` Python package covers the producer and
+the consumer, and the admin client has a separate, older module
+(`python/admin.py`).
 
 > **Paths:** the repository has three top-level directories, `rust/`, `python/`
 > and `c/` (see [structure.md](structure.md#top-level)). Paths in this document
 > such as `src/…`, `tests/…`, `generator/…`, `xtask/…`,
 > `multilanguage-test-server/` and `consumer-perf/` are relative to `rust/`.
 > Run `cargo` commands from there. Binding paths are given from the repository
-> root. Line-number citations are as of the "last verified" date above.
+> root. Line-number citations are as of the "last verified" date above, except
+> where a section gives its own date.
 
 ---
 
@@ -1104,12 +1107,25 @@ sync call returning a `<Rpc>Result_t` whose `_values()` map holds one
 The first client created from C initializes the default `RUST_LOG` logger
 (`src/ffi/common.rs`, `init_default_logger`).
 
-### Python bindings (`python/`)
+### Python client (`python/`)
 
-`producer.py`, `consumer.py` and `admin.py` sit over a hand-written CPython
-extension (`_confluentkafka.c`) that links the `confluent_kafka` cdylib.
-`python/setup.py` resolves the library under `../rust/target/`, and
-`CONFLUENT_KAFKA_LIB_DIR` overrides that.
+The `confluent_kafka` package is the Java producer and consumer surface in
+Python. It is generated from CLAUDE.md's `## Python Binding Conventions`, the
+Java source and the C header, and [python/README.md](../../python/README.md) is
+its user guide.
+
+It mirrors Java's packages with `clients` dropped (`confluent_kafka.producer`,
+`.consumer`, `.common`, `.common.errors`, `.common.serialization`, …), one file
+per Java class. Each family has a non-instantiable base, a `Kafka*` client, a
+`Mock*`, and an `Async*` peer of each.
+
+`MockProducer` is plain Python translated from Java's mock. The other clients
+call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+marshalling layer that links the `confluent_kafka` cdylib
+(`python/setup.py:37-40`). `setup.py` resolves the library under
+`../rust/target/`, and `CONFLUENT_KAFKA_LIB_DIR` overrides that. The error
+classes and the config key-type table (`_config_types.py`) are generated from
+the Java sources by `cargo xtask generate-error-codes`.
 
 Each module offers both shapes. Both drive the `_cb` entry points; they
 differ only in who waits for the completion:
@@ -1133,18 +1149,11 @@ differ only in who waits for the completion:
 No extension thread exists any more; the old dispatcher thread and the
 producer's two helper threads went with the `_async` functions.
 
-For the producer these are `Producer` / `KafkaProducer` / `MockProducer` and
-`AsyncProducer` / `AsyncKafkaProducer` / `AsyncMockProducer`, all on a shared
-`_ProducerBase`. The consumer and admin modules follow the same pattern: the
-admin module has `Admin` / `AdminClient` / `MockAdminClient` and their `Async*`
-twins (an admin RPC returns a result object whose per-key futures are
-`concurrent.futures.Future`s or awaitables over `kafka_common_KafkaFuture_t`),
-and the consumer module also has `ConsumerHandle`. Interface objects passed
-to the extension are held by the Python client object until the C release
-point (D3), so the extension never relies on Rust to drop a reference.
-
-`grpc_server.py`, `grpc_server_async.py` and `grpc_translate.py` back the
-Python arm of the multilanguage tests.
+`admin.py` is the older admin binding. It is paused and outside the
+conventions, and keeps its flat `KafkaError` and positional value types through
+the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+`grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
+multilanguage tests, and `soak/` holds the long-running soak client.
 
 ### Multilanguage test harness
 

@@ -222,15 +222,13 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` an owned error not used
-/// afterwards.
+/// afterwards, or NULL to clear the pending error as Java's `null` does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     self_: *mut kafka_consumer_MockConsumer_t,
     error: *mut kafka_common_Error_t,
 ) {
-    let Some(error) = (unsafe { take_error(error) }) else {
-        return;
-    };
+    let error = unsafe { take_error(error) };
     unsafe { with_mock_void(self_, "setPollException", |mock| mock.set_poll_error(error)) }
 }
 
@@ -240,15 +238,13 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` an owned error not used
-/// afterwards.
+/// afterwards, or NULL to clear the pending error as Java's `null` does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     self_: *mut kafka_consumer_MockConsumer_t,
     error: *mut kafka_common_Error_t,
 ) {
-    let Some(error) = (unsafe { take_error(error) }) else {
-        return;
-    };
+    let error = unsafe { take_error(error) };
     unsafe { with_mock_void(self_, "setOffsetsException", |mock| mock.set_offsets_error(error)) }
 }
 

@@ -40,6 +40,35 @@
 //! The first client created from C initializes the default `RUST_LOG` logger
 //! ([`common::init_default_logger`]).
 //!
+//! # Panics never cross the C boundary
+//!
+//! Every exported function catches a Rust panic before it can unwind into its
+//! caller, which would abort the process. After a caught panic the function
+//! returns its failure value instead: NULL, `false`, -1 (0 for a `*_count`
+//! accessor), NaN for a `double`, `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR`
+//! for `kafka_common_Error_code`, or an error handle for a function that returns
+//! one. A function with an `out_error` parameter also stores an error describing
+//! the panic there. A function that reports ordinary failures through a
+//! completion callback reports the panic through that callback instead, exactly
+//! once, unless its documentation says that a synchronous failure does not
+//! invoke the callback. Such a function reports the panic as a synchronous
+//! failure, through its return value and `out_error` where it has one, and the
+//! guard itself does not invoke the callback. If such a panic is raised after
+//! the record or request was already handed to the library's background work,
+//! the callback can still fire for it later; on a return that reports a panic,
+//! do not release `user_data` yourself: the callback, or the
+//! `user_data_destroy` hook where there is one, releases it when it runs. The
+//! error's code is `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message
+//! begins `Rust panic caught at the FFI boundary in <function>`.
+//!
+//! A panic is a bug in this library and may leave the handle it happened on in
+//! an inconsistent state: destroy that handle and create a new one. Later calls
+//! on it can keep failing, because a poisoned lock is never cleared.
+//!
+//! The same paragraphs open the generated C header (`header` in
+//! `cbindgen.toml`). The mechanism is the [`ffi_guard`] attribute, whose runtime
+//! half is `common::ffi_guard_or`.
+//!
 //! # Feature Gate
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
@@ -52,3 +81,132 @@ mod error_predicates;
 pub(crate) mod kafka_future;
 pub(crate) mod producer;
 pub(crate) mod util;
+
+/// Guards an exported function against a Rust panic unwinding into its C
+/// caller; see the module docs and the `ffi-macros` crate.
+pub(crate) use ffi_macros::ffi_guard;
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// Every Rust file under `src/ffi`, with its path relative to the crate root
+    /// and its source text, in a stable order.
+    fn sources() -> Vec<(String, String)> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read src/ffi") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut paths = Vec::new();
+        walk(&root.join("src/ffi"), &mut paths);
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).expect("read source");
+                let rel = path.strip_prefix(root).expect("under the crate root").display().to_string();
+                (rel, text)
+            })
+            .collect()
+    }
+
+    /// Whether the attribute that ends on the line just above `index` is an
+    /// `#[ffi_guard...]`. The attribute may span several lines, so this walks up
+    /// from its last line to the line that opens it. Comment lines inside the
+    /// attribute are part of it (the `on_panic` closures carry the soundness
+    /// comment clippy requires above their `unsafe` block); a comment directly
+    /// above `#[unsafe(no_mangle)]` is not an attribute and fails.
+    fn preceded_by_ffi_guard(lines: &[&str], index: usize) -> bool {
+        let Some(mut line) = index.checked_sub(1) else {
+            return false;
+        };
+        let last = lines[line].trim();
+        if !last.ends_with(']') || last.starts_with("//") {
+            return false;
+        }
+        loop {
+            let text = lines[line].trim_start();
+            if text.starts_with("#[") {
+                return text.starts_with("#[ffi_guard");
+            }
+            if line == 0 || text.is_empty() {
+                return false;
+            }
+            line -= 1;
+        }
+    }
+
+    /// Every exported function is guarded against a panic unwinding into C (D8 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`): each
+    /// `#[unsafe(no_mangle)]` must be immediately preceded by the last line of an
+    /// `#[ffi_guard...]` attribute. A new entry point without one fails here with
+    /// its file and line.
+    #[test]
+    #[ignore = "the split FFI is not guarded yet; #207 is ported onto it in the next commits"]
+    fn test_every_exported_function_is_guarded() {
+        let mut offenders = Vec::new();
+        let mut total = 0;
+        for (file, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            let mut exported = 0;
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[unsafe(no_mangle)]" {
+                    continue;
+                }
+                exported += 1;
+                if !preceded_by_ffi_guard(&lines, index) {
+                    offenders.push(format!("{file}:{}", index + 1));
+                }
+            }
+            total += exported;
+        }
+        assert!(
+            offenders.is_empty(),
+            "exported functions without #[ffi_guard] directly above #[unsafe(no_mangle)]: {offenders:?}"
+        );
+        // Sanity check that the scan saw the whole surface rather than, say, a
+        // renamed attribute spelling: 2306 exports after the FFI was split into
+        // one file per class.
+        assert!(total >= 2306, "only {total} exported functions found");
+    }
+
+    /// The scanner itself: a guard directly above passes, including one whose
+    /// attribute spans lines, with or without a `// SAFETY:` comment inside its
+    /// closure; anything else between the guard and `#[unsafe(no_mangle)]`
+    /// (another attribute, a comment line), or no guard at all, fails.
+    #[test]
+    fn test_preceded_by_ffi_guard() {
+        let guarded = ["/// Docs.", "#[ffi_guard]", "#[unsafe(no_mangle)]"];
+        assert!(preceded_by_ffi_guard(&guarded, 2));
+        let multi_line = [
+            "#[ffi_guard(",
+            "    on_panic = |err| unsafe { callback(box_error(err), user_data) }",
+            ")]",
+            "#[unsafe(no_mangle)]",
+        ];
+        assert!(preceded_by_ffi_guard(&multi_line, 3));
+        let safety_comment_inside = [
+            "#[ffi_guard(on_panic = |err| {",
+            "    // SAFETY: the guard fires the caller's own callback once.",
+            "    unsafe { callback(box_error(err), user_data) }",
+            "})]",
+            "#[unsafe(no_mangle)]",
+        ];
+        assert!(preceded_by_ffi_guard(&safety_comment_inside, 4));
+        let comment_between = ["#[ffi_guard]", "// see [D8]", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&comment_between, 2));
+        let other_attribute_between = ["#[ffi_guard]", "#[allow(dead_code)]", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&other_attribute_between, 2));
+        let unguarded = ["/// Docs.", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&unguarded, 1));
+        let first_line = ["#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&first_line, 0));
+    }
+}

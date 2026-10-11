@@ -55,7 +55,10 @@ from admin import (
     _to_partition_info,
     _close_ms, _ms,
 )
-from producer import KafkaError
+# The admin binding is paused and keeps its flat ``KafkaError`` (code /
+# is_retriable / is_fatal). It now lives in the private package shim that
+# replaced the retired top-level ``producer.py``.
+from confluent_kafka._legacy_compat import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
 UNKNOWN_TOPIC_OR_PARTITION = 3
@@ -2646,6 +2649,24 @@ def test_alter_user_scram_credentials_accepts_an_explicitly_empty_salt():
         assert sorted(out) == ["explicit-empty", "generated"]
         for user in ("explicit-empty", "generated"):
             assert str(out[user]) == "Not implemented yet"
+
+
+def test_byte_arguments_of_2_gib_raise_overflow_error(two_gib_bytes):
+    # The C API takes int32_t lengths; a plain cast turned 2**31 into a
+    # negative length, which it reads as empty. Each argument is checked before
+    # the call is submitted, so the error is raised synchronously.
+    info = ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096)
+    with MockAdminClient(1) as admin:
+        with pytest.raises(OverflowError, match=r"^hmac exceeds 2 GiB$"):
+            admin.renew_delegation_token(two_gib_bytes)
+        with pytest.raises(OverflowError, match=r"^hmac exceeds 2 GiB$"):
+            admin.expire_delegation_token(two_gib_bytes)
+        with pytest.raises(OverflowError, match=r"^password exceeds 2 GiB$"):
+            admin.alter_user_scram_credentials(
+                [UserScramCredentialUpsertion("alice", info, two_gib_bytes)])
+        with pytest.raises(OverflowError, match=r"^salt exceeds 2 GiB$"):
+            admin.alter_user_scram_credentials(
+                [UserScramCredentialUpsertion("alice", info, b"pw", salt=two_gib_bytes)])
 
 
 def test_create_delegation_token_without_a_renewer_raises():

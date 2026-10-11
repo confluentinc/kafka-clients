@@ -108,6 +108,7 @@ rust/xtask/             # format, format-check, check-generated,
 rust/tests/             # integration + multilanguage tests (see below)
 rust/examples/          # transactional examples (txn_*)
 rust/consumer-perf/     # consumer benchmark harness (workspace member)
+rust/ffi-macros/        # proc-macro crate: #[ffi_guard], the panic guard on every C export
 rust/multilanguage-test-server/  # gRPC protos + server backing the
                                  # multilanguage tests of every language
 rust/tools/verifiable-clients/   # Rust verifiable producer/consumer
@@ -374,14 +375,20 @@ c/
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
-├── producer.py, consumer.py, admin.py
+├── confluent_kafka/    # the Python client (producer + consumer), generated
+│   │                   # from CLAUDE.md's Python Binding Conventions
+│   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
+│   ├── common/                # value types, KafkaError, errors/,
+│   │                          # serialization/, config/, …
+│   └── *_error.py             # Java built-in exceptions at the root
+├── admin.py            # older admin binding, paused (not in the package)
 ├── _sync_wait.py       # SyncWaiter: the sync clients' sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
-├── _error_code.py      # generated from kafka_common_ErrorCode_e in
-│                       # rust/src/ffi/common.rs by tools/generate_error_code.py
+├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py
-├── Dockerfile.grpc, Dockerfile.grpc.async
-├── test/{unit,static,performance}/, soak/, tools/
+├── Dockerfile.grpc, Dockerfile.grpc.async, requirements-grpc{,-tools}.txt
+├── examples/
+├── test/{unit,integration,static,performance}/, soak/, tools/
 └── setup.py, pyproject.toml, Makefile, README.md
 ```
 
@@ -428,6 +435,8 @@ rust/tests/                  # 59 .rs files across 4 cargo test targets
 │                       # mock_consumer_test.rs, trait_surface_check.rs,
 │                       # consumer_config_test.rs, consumer_record(s)_test.rs,
 │                       # offset_and_metadata_test.rs, close_options_test.rs
+├── chaos/              # target `chaos`: fault-injection harness, run with
+│                       # `cargo xtask chaos` (chaos-fault-injection-harness.md)
 ├── performance/        # target `performance`, `test = false` in Cargo.toml —
 │                       # excluded from plain `cargo test`; run explicitly
 └── integration/        # 27 test files + main.rs, Docker required

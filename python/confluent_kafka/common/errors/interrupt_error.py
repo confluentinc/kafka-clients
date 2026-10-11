@@ -1,0 +1,61 @@
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""``InterruptError``: Java's ``org.apache.kafka.common.errors.InterruptException``.
+
+GENERATED, DO NOT EDIT. Produced from the Java source by
+``cargo xtask generate-error-codes`` (CLAUDE.md, Python Binding Conventions,
+Errors) and validated for staleness by ``cargo xtask check-generated``.
+"""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from confluent_kafka import _throwable
+from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka.common.kafka_error import KafkaError
+
+__all__ = ["InterruptError"]
+
+
+class InterruptError(KafkaError):
+    """An unchecked wrapper for InterruptedException
+
+    Java: ``org.apache.kafka.common.errors.InterruptException``.
+    """
+
+    __module__ = "confluent_kafka.common.errors"
+
+    _ffi_id: ClassVar[int] = -12  # kafka_common_ErrorCode_INTERRUPT
+
+    @java_forms(
+        Form("cause"),
+        Form("message", "cause"),
+        Form("message"),
+    )
+    def __init__(
+        self,
+        *,
+        message: str | None = UNSET,
+        cause: BaseException | None = UNSET,
+        _java_form: int = -1,
+    ) -> None:
+        if _java_form == 0:
+            _throwable.init(self, _throwable.cause_message(cause), cause)
+        elif _java_form == 1:
+            _throwable.init(self, message, cause)
+        else:
+            _throwable.init(self, message, None)
+        self._java_kwargs = _throwable.kwargs(message=message, cause=cause)

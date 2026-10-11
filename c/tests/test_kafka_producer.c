@@ -178,6 +178,49 @@ void test_destroy_null(void) {
     kafka_producer_ProducerConfig_destroy(NULL);
 }
 
+/* Captures the error message a queued close completion delivers. */
+typedef struct {
+    atomic_int fired;
+    char message[128];
+} close_result_t;
+
+static void on_close(kafka_common_Error_t *error, void *opaque) {
+    close_result_t *r = (close_result_t *)opaque;
+    if (error != NULL) {
+        const char *m = kafka_common_Error_message(error);
+        strncpy(r->message, m ? m : "", sizeof(r->message) - 1);
+        kafka_common_Error_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* A KafkaProducer rejects a negative close timeout with Java's
+ * KafkaProducer.close(Duration) message (KafkaProducer.java:1393-1394), on both
+ * the blocking and the `_cb` entry point, and stays open for a real close. */
+void test_close_with_negative_timeout_is_rejected(void) {
+    kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
+    const kafka_producer_Producer_t *view = kafka_producer_KafkaProducer__as_Producer(producer);
+
+    kafka_common_Error_t *err = kafka_producer_Producer_close_with_timeout(view, -1);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    callback_pump_t pump;
+    callback_pump_install(&pump, view);
+    close_result_t result;
+    atomic_init(&result.fired, 0);
+    memset(result.message, 0, sizeof(result.message));
+    kafka_producer_Producer_close_with_timeout_cb(view, -1, on_close, &result);
+    TEST_ASSERT_TRUE(callback_pump_until(&pump, &result.fired, 1));
+    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", result.message);
+
+    err = kafka_producer_Producer_close_with_timeout(view, 0);
+    TEST_ASSERT_NULL(err);
+    kafka_producer_KafkaProducer_destroy(producer);
+    callback_pump_destroy(&pump);
+}
+
 void test_create_with_string_serializers(void) {
     /* `new KafkaProducer<>(config, new StringSerializer(), new StringSerializer())`:
      * the `__as_Serializer` views share the class handles, which the caller
@@ -650,6 +693,7 @@ int main(void) {
     RUN_TEST(test_destroy_null);
     RUN_TEST(test_create_with_string_serializers);
     RUN_TEST(test_create_multiple_config);
+    RUN_TEST(test_close_with_negative_timeout_is_rejected);
 
     /* Send */
     RUN_TEST(test_send_cb_unreachable_broker_fails_future_with_timeout);
