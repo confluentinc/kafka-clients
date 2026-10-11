@@ -1434,7 +1434,7 @@ mod tests {
 
             kafka_producer_MockProducer_destroy(mock);
             let destroyed = Some("The client was destroyed before the future completed".to_string());
-            assert_eq!(*seen.lock().unwrap(), [destroyed.clone()]);
+            assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&destroyed));
             kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
             assert_eq!(*seen.lock().unwrap(), [destroyed.clone(), destroyed]);
             kafka_common_KafkaFuture_destroy(future);
