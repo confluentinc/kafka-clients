@@ -317,10 +317,15 @@ impl AdminClassHandle {
 
     /// Awaits every spawned task, fires the pending callbacks and drops the
     /// client (see the module docs).
+    ///
+    /// A panic caught earlier may have poisoned `tasks`; it is taken
+    /// regardless, so the handle is still freed and every pending callback
+    /// still fires exactly once.
     pub(crate) fn destroy(self) {
         let Self { client, runtime, mock } = self;
         loop {
-            let tasks: Vec<JoinHandle<()>> = std::mem::take(&mut *client.tasks.lock().unwrap());
+            let tasks: Vec<JoinHandle<()>> =
+                std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
             if tasks.is_empty() {
                 break;
             }

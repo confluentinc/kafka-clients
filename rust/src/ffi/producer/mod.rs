@@ -382,11 +382,16 @@ where
 
     /// Stops the submission task, awaits every spawned task, fires the
     /// pending callbacks and drops the producer (see the module docs).
+    ///
+    /// A panic caught earlier may have poisoned `submit_tx` or `tasks`; both
+    /// are taken regardless, so the handle is still freed and every pending
+    /// callback still fires exactly once.
     pub(crate) fn destroy(self) {
         let Self { producer, client, runtime } = self;
-        drop(client.submit_tx.lock().unwrap().take());
+        drop(client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner).take());
         loop {
-            let tasks: Vec<JoinHandle<()>> = std::mem::take(&mut *client.tasks.lock().unwrap());
+            let tasks: Vec<JoinHandle<()>> =
+                std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
             if tasks.is_empty() {
                 break;
             }
@@ -1075,4 +1080,63 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     opaque: *mut c_void,
 ) {
     unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+    use std::sync::atomic::AtomicI32;
+
+    use super::*;
+    use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
+    use crate::ffi::producer::mock_producer::{
+        kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_destroy,
+        kafka_producer_MockProducer_with_auto_complete,
+    };
+    use crate::ffi::producer::producer_record::{
+        kafka_producer_ProducerRecord_destroy, kafka_producer_ProducerRecord_new,
+    };
+
+    unsafe extern "C" fn count_send(
+        value: *mut kafka_common_KafkaFuture_t,
+        error: *mut kafka_common_Error_t,
+        opaque: *mut c_void,
+    ) {
+        assert!(error.is_null());
+        // SAFETY: `value` is the future this completion owns.
+        unsafe { kafka_common_KafkaFuture_destroy(value) };
+        // SAFETY: `opaque` is the test's counter, alive until destroy returns.
+        unsafe { &*(opaque as *const AtomicI32) }.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A panic that poisoned the client's locks does not stop `_destroy`: it
+    /// still stops the submission task, awaits it and fires the queued
+    /// `send_cb` completion exactly once.
+    #[test]
+    fn destroy_tolerates_poisoned_locks() {
+        let sends = AtomicI32::new(0);
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            kafka_producer_Producer_send_cb(view, record, count_send, &sends as *const AtomicI32 as *mut c_void);
+
+            let client = Arc::clone(client_ref(view));
+            let poisoner = std::thread::spawn(move || {
+                let _tasks = client.tasks.lock().unwrap();
+                let _submit_tx = client.submit_tx.lock().unwrap();
+                panic!("poison the client's locks");
+            });
+            assert!(poisoner.join().is_err());
+            let client = client_ref(view);
+            assert!(client.tasks.is_poisoned());
+            assert!(client.submit_tx.is_poisoned());
+
+            kafka_producer_MockProducer_destroy(mock);
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
 }

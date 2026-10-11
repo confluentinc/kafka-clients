@@ -365,10 +365,15 @@ impl ConsumerClassHandle {
     /// that sits queued for `__execute_callbacks`, so awaiting it first would
     /// never return. Every pending callback thus fires exactly once, on the
     /// destroying thread (CLAUDE.md §4 rule 5).
+    ///
+    /// A panic caught earlier may have poisoned `tasks`; it is taken
+    /// regardless, so the handle is still freed and every pending callback
+    /// still fires exactly once.
     pub(crate) fn destroy(self) {
         let Self { client, runtime } = self;
         loop {
-            let tasks: Vec<JoinHandle<()>> = std::mem::take(&mut *client.tasks.lock().unwrap());
+            let tasks: Vec<JoinHandle<()>> =
+                std::mem::take(&mut *client.tasks.lock().unwrap_or_else(PoisonError::into_inner));
             if tasks.is_empty() {
                 break;
             }
