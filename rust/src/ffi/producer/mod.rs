@@ -73,7 +73,9 @@
 //!
 //! `_destroy` on a class handle stops the submission task, waits for the
 //! tasks spawned by `_cb` calls, runs the still-pending callbacks so each
-//! fires exactly once (§4 rule 5), and drops the producer. It does not
+//! fires exactly once (§4 rule 5), and drops the producer; the
+//! `kafka_common_KafkaFuture_get_cb` calls still waiting on its futures fire
+//! last, once each (see `ffi::kafka_future`). It does not
 //! `close` the producer: as in Rust, a `KafkaProducer` dropped without
 //! `close` is force-closed with a warning, so a caller that wants a graceful
 //! shutdown calls `close` first.
@@ -405,7 +407,9 @@ where
     }
 
     /// Stops the submission task, awaits every spawned task, fires the
-    /// pending callbacks and drops the producer (see the module docs).
+    /// pending callbacks and drops the producer (see the module docs), then
+    /// stops the runtime and fires the completions of the
+    /// `KafkaFuture_get_cb` calls still waiting, each exactly once.
     ///
     /// A panic caught earlier may have poisoned `submit_tx` or `tasks`; both
     /// are taken regardless, so the handle is still freed and every pending
@@ -435,8 +439,15 @@ where
             drop(producer);
         }
         client.queue.execute();
+        let queue = Arc::clone(&client.queue);
         drop(client);
         runtime.shutdown_timeout(Duration::from_secs(5));
+        // Shutting the runtime down dropped the `KafkaFuture_get_cb` tasks
+        // still waiting, each queuing its completion as it went (see
+        // `ffi::kafka_future`): run them, closing the queue first so a later
+        // `get_cb` on a future of this producer runs inline.
+        queue.close();
+        queue.execute();
     }
 }
 
@@ -1220,7 +1231,9 @@ mod tests {
     use crate::ffi::common::fail_point;
     use crate::ffi::common::panic_probe::{Probe, on_error, on_value};
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
+    use crate::ffi::kafka_future::{
+        kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get_cb, kafka_common_KafkaFuture_t,
+    };
     use crate::ffi::producer::mock_producer::{
         kafka_producer_MockProducer__as_Producer, kafka_producer_MockProducer_closed,
         kafka_producer_MockProducer_destroy, kafka_producer_MockProducer_with_auto_complete,
@@ -1397,5 +1410,54 @@ mod tests {
             assert_eq!(sends.load(Ordering::SeqCst), 1);
             kafka_producer_ProducerRecord_destroy(record);
         }
+    }
+
+    /// A `KafkaFuture_get_cb` still waiting on a send the mock never completes
+    /// fires once, from the producer's `_destroy`, with the destroyed-client
+    /// error; a `get_cb` after it fires inline with the same error.
+    #[test]
+    fn destroy_fires_a_waiting_future_get_cb_once() {
+        let topic = CString::new("topic").unwrap();
+        let seen: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+        // SAFETY: every handle is live until it is destroyed below.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(0);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            let mut future = std::ptr::null_mut();
+            assert!(kafka_producer_Producer_send(view, record, &mut future).is_null());
+            let opaque = &seen as *const Mutex<Vec<Option<String>>> as *mut c_void;
+            kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "still waiting");
+            assert!(seen.lock().unwrap().is_empty());
+
+            kafka_producer_MockProducer_destroy(mock);
+            let destroyed = Some("The client was destroyed before the future completed".to_string());
+            assert_eq!(*seen.lock().unwrap(), [destroyed.clone()]);
+            kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
+            assert_eq!(*seen.lock().unwrap(), [destroyed.clone(), destroyed]);
+            kafka_common_KafkaFuture_destroy(future);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// Records a `KafkaFuture_get_cb` completion's error message, or `None`.
+    unsafe extern "C" fn record_future(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        let outcome = if error.is_null() {
+            None
+        } else {
+            assert!(value.is_null());
+            // SAFETY: a non-null `error` is owned by this completion.
+            let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+            // SAFETY: as above; freed once.
+            unsafe { kafka_common_Error_destroy(error) };
+            Some(message)
+        };
+        // SAFETY: `opaque` is the test's slot, alive until the test ends.
+        unsafe { &*(opaque as *const Mutex<Vec<Option<String>>>) }
+            .lock()
+            .unwrap()
+            .push(outcome);
     }
 }

@@ -57,7 +57,9 @@
 //!
 //! `_destroy` waits for the tasks spawned by `_cb` calls, runs the
 //! still-pending callbacks so each fires exactly once (§4 rule 5), drops the
-//! client and shuts the runtime down. It does not `close` the client: as in
+//! client and shuts the runtime down; the `kafka_common_KafkaFuture_get_cb`
+//! calls still waiting on its futures fire last, once each (see
+//! `ffi::kafka_future`). It does not `close` the client: as in
 //! Rust, a `KafkaAdminClient` dropped without `close` stops its background
 //! task without waiting for in-flight work, so a caller that wants a
 //! graceful shutdown calls `close` first.
@@ -334,7 +336,9 @@ impl AdminClassHandle {
     }
 
     /// Awaits every spawned task, fires the pending callbacks and drops the
-    /// client (see the module docs).
+    /// client (see the module docs), then stops the runtime and fires the
+    /// completions of the `KafkaFuture_get_cb` calls still waiting, each
+    /// exactly once.
     ///
     /// A panic caught earlier may have poisoned `tasks`; it is taken
     /// regardless, so the handle is still freed and every pending callback
@@ -356,12 +360,19 @@ impl AdminClassHandle {
         client.queue.execute();
         // A `KafkaAdminClient` needs the runtime context to stop its
         // background task on drop; the runtime is shut down last.
+        let queue = Arc::clone(&client.queue);
         {
             let _enter = runtime.enter();
             drop(mock);
             drop(client);
         }
         runtime.shutdown_timeout(Duration::from_secs(5));
+        // Shutting the runtime down dropped the `KafkaFuture_get_cb` tasks
+        // still waiting, each queuing its completion as it went (see
+        // `ffi::kafka_future`): run them, closing the queue first so a later
+        // `get_cb` on a future of this client runs inline.
+        queue.close();
+        queue.execute();
     }
 }
 

@@ -32,6 +32,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
@@ -81,6 +82,9 @@ pub(crate) struct CallbackQueue {
     /// The thread currently inside [`execute`](Self::execute), so a nested
     /// call from within a callback returns instead of deadlocking.
     owner: Mutex<Option<ThreadId>>,
+    /// Set by [`close`](Self::close), read and written under `pending`'s
+    /// lock so a push is either queued before the close or run inline after.
+    closed: AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -136,19 +140,45 @@ impl CallbackQueue {
             pushed: Notify::new(),
             running: Mutex::new(()),
             owner: Mutex::new(None),
+            closed: AtomicBool::new(false),
         }
     }
 
-    /// Queues `job` and fires the notify hook when the vector was empty.
+    /// Queues `job` and fires the notify hook when the vector was empty; once
+    /// the queue is [closed](Self::close), runs `job` on the calling thread
+    /// instead.
     pub(crate) fn push(&self, job: CallbackJob) {
         let was_empty = {
             let mut pending = lock(&self.pending);
+            if self.closed.load(Ordering::Relaxed) {
+                drop(pending);
+                job();
+                return;
+            }
             let was_empty = pending.is_empty();
             pending.push_back(job);
             was_empty
         };
         self.pushed.notify_one();
         self.notify_if(was_empty);
+    }
+
+    /// Closes the queue, for a client's `_destroy` that has stopped the
+    /// client's runtime and is about to run the last queued callbacks: no
+    /// `__execute_callbacks` can run after it, so a completion pushed later
+    /// runs on the pushing thread, as a client-less handle runs every
+    /// completion. The only such completion is a `KafkaFuture_get_cb` on a
+    /// future that outlived its client: it runs on the thread calling
+    /// `get_cb`.
+    pub(crate) fn close(&self) {
+        let _pending = lock(&self.pending);
+        self.closed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`close`](Self::close) ran.
+    pub(crate) fn is_closed(&self) -> bool {
+        let _pending = lock(&self.pending);
+        self.closed.load(Ordering::Relaxed)
     }
 
     /// Fires the notify hook when the vector has just gone from empty to
@@ -238,6 +268,29 @@ mod tests {
         assert_eq!(queue.execute(), 3);
         assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
         assert!(queue.is_empty());
+        assert_eq!(queue.execute(), 0);
+    }
+
+    /// A job pushed before `close` stays queued for the last drain; one
+    /// pushed after runs at once, on the pushing thread.
+    #[test]
+    fn a_push_after_close_runs_inline() {
+        let queue = CallbackQueue::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let before = ran.clone();
+        queue.push(Box::new(move || before.lock().unwrap().push("before")));
+        assert!(!queue.is_closed());
+        queue.close();
+        assert!(queue.is_closed());
+        let after = ran.clone();
+        let pusher = thread::current().id();
+        queue.push(Box::new(move || {
+            assert_eq!(thread::current().id(), pusher);
+            after.lock().unwrap().push("after");
+        }));
+        assert_eq!(*ran.lock().unwrap(), ["after"], "run inline, not queued");
+        assert_eq!(queue.execute(), 1);
+        assert_eq!(*ran.lock().unwrap(), ["after", "before"]);
         assert_eq!(queue.execute(), 0);
     }
 

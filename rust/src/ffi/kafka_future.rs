@@ -41,6 +41,13 @@
 //! callback on the owning client's callbacks vector (drained by that client's
 //! `__execute_callbacks`); a future with no client invokes the callback inline,
 //! on the calling thread, before `get_cb` returns.
+//!
+//! A future may outlive its client. The client's `_destroy` fires the callback
+//! of every `get_cb` still waiting, exactly once, before it returns: with the
+//! value when the future has resolved, else with a
+//! `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error, "The client was
+//! destroyed before the future completed". A `get_cb` after that invokes the
+//! callback inline, the same way, as for a future with no client.
 
 // FFI type names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
@@ -50,10 +57,13 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use futures_util::FutureExt;
+
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic_value, kafka_common_Error_t, spawn_callback_task, take_error,
+    box_error, catch_task_panic, caught_panic_error, deliver_panic_value, kafka_common_Error_t, spawn_callback_task,
+    take_error,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{destroy_boxed, kafka_List_t, list_elements};
@@ -182,6 +192,22 @@ impl FutureInner {
         Ok(self.result.get_or_init(|| value).clone())
     }
 
+    /// Resolves the future without waiting, for a future whose client is
+    /// destroyed: nothing is left to complete it, so it answers its value
+    /// when it has one and [`CLIENT_DESTROYED`] otherwise.
+    fn resolve_now(&self) -> Result<Arc<FfiValue>, Error> {
+        if let Some(cached) = self.result.get() {
+            return Ok(cached.clone());
+        }
+        match self.future.get().now_or_never() {
+            Some(result) => {
+                let value = result?;
+                Ok(self.result.get_or_init(|| value).clone())
+            },
+            None => Err(Error::local_illegal_state(CLIENT_DESTROYED)),
+        }
+    }
+
     async fn resolve_future(&self, timeout: Option<Duration>) -> Result<Arc<FfiValue>, Error> {
         match timeout {
             None => self.future.get().await,
@@ -277,6 +303,59 @@ pub type kafka_common_KafkaFuture_get_cb_t =
 pub type kafka_common_KafkaFuture_get_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
+/// The error a `get_cb` completion carries when the future's client was
+/// destroyed before the future resolved. No Java counterpart: a Java
+/// `KafkaFuture` outlives its client.
+const CLIENT_DESTROYED: &str = "The client was destroyed before the future completed";
+
+/// The completion a `get_cb` task owes its caller, delivered exactly once: by
+/// [`complete`](Self::complete) when the task resolves the future, or, when the
+/// task is dropped first, by `Drop`. A client's `_destroy` does not join these
+/// tasks (they wait on futures it cannot wait for), so shutting its runtime
+/// down drops the ones still waiting, as does spawning onto a runtime already
+/// shut down; `Drop` then queues the completion with
+/// [`FutureInner::resolve_now`]'s answer, and `_destroy`'s last drain runs it.
+///
+/// No Java counterpart (DoD #7): Java's `KafkaFuture` has no C callback whose
+/// delivery must survive its task being dropped.
+struct PendingGet {
+    fn_name: &'static str,
+    cb: kafka_common_KafkaFuture_get_cb_t,
+    opaque: SendPtr,
+    /// Moved into the queued job, so the value outlives a handle destroyed
+    /// before the callback runs.
+    inner: Arc<FutureInner>,
+    queue: Arc<CallbackQueue>,
+    delivered: bool,
+}
+
+impl PendingGet {
+    /// Queues the completion with `result`.
+    fn complete(mut self, result: Result<Arc<FfiValue>, Error>) {
+        self.queue_completion(result);
+    }
+
+    fn queue_completion(&mut self, result: Result<Arc<FfiValue>, Error>) {
+        self.delivered = true;
+        let (cb, opaque, inner) = (self.cb, self.opaque, Arc::clone(&self.inner));
+        self.queue.push(Box::new(move || {
+            deliver(cb, result, opaque);
+            drop(inner);
+        }));
+    }
+}
+
+impl Drop for PendingGet {
+    fn drop(&mut self) {
+        if !self.delivered {
+            let inner = Arc::clone(&self.inner);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.resolve_now()))
+                .unwrap_or_else(|payload| Err(caught_panic_error(self.fn_name, payload)));
+            self.queue_completion(result);
+        }
+    }
+}
+
 /// Delivers a resolution to a `_cb_t` callback.
 fn deliver(cb: kafka_common_KafkaFuture_get_cb_t, result: Result<Arc<FfiValue>, Error>, opaque: SendPtr) {
     match result {
@@ -304,15 +383,14 @@ fn get_cb(
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
     match (inner.runtime.clone(), inner.queue.clone()) {
+        // The client was destroyed: its runtime is gone, so the future is
+        // answered now, on this thread, as a client-less one would be.
+        (Some(_), Some(queue)) if queue.is_closed() => deliver(cb, inner.resolve_now(), opaque),
         (Some(runtime), Some(queue)) => {
+            let pending = PendingGet { fn_name, cb, opaque, inner, queue, delivered: false };
             spawn_callback_task(&runtime, async move {
-                let result = catch_task_panic(fn_name, inner.resolve_async(timeout)).await;
-                // `inner` moves into the job so the value outlives a handle
-                // destroyed before the callback runs.
-                queue.push(Box::new(move || {
-                    deliver(cb, result, opaque);
-                    drop(inner);
-                }));
+                let result = catch_task_panic(fn_name, pending.inner.resolve_async(timeout)).await;
+                pending.complete(result);
             });
         },
         _ => deliver(cb, inner.resolve(timeout), opaque),
@@ -388,7 +466,9 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
 
 /// The non-blocking form of [`kafka_common_KafkaFuture_get`]: `cb` receives
 /// the value or the error through the owning client's `__execute_callbacks`,
-/// or inline before this returns when the future belongs to no client.
+/// or inline before this returns when the future belongs to no client. A
+/// call still waiting when the client is destroyed fires from its `_destroy`,
+/// and one after it inline (see the module docs).
 ///
 /// # Safety
 ///
@@ -918,6 +998,88 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(queue.execute(), 0);
         unsafe { kafka_common_KafkaFuture_destroy(f) };
+    }
+
+    /// A `get_cb` task the client's runtime drops while it waits (its
+    /// `_destroy` shutting the runtime down) still queues its completion,
+    /// once, with the destroyed-client error; one whose future had resolved
+    /// gets the value; after the queue is closed a `get_cb` runs inline.
+    #[test]
+    fn a_dropped_get_cb_task_still_delivers_once() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let queue = Arc::new(CallbackQueue::new());
+        let pending = KafkaFutureImpl::<i64>::new();
+        let f = box_future(
+            map_future(&pending.future()),
+            Some(runtime.handle().clone()),
+            Some(queue.clone()),
+        );
+        let seen: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+        let opaque = &seen as *const _ as *mut c_void;
+        unsafe { kafka_common_KafkaFuture_get_cb(f, record, opaque) };
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(queue.execute(), 0, "still waiting");
+
+        runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(seen.lock().unwrap().is_empty(), "queued, not fired");
+        queue.close();
+        assert_eq!(queue.execute(), 1);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].value.is_null());
+            assert_eq!(seen[0].error.as_deref(), Some(CLIENT_DESTROYED));
+        }
+
+        // After the close: inline, with the value once the future resolved.
+        unsafe { kafka_common_KafkaFuture_get_cb(f, record, opaque) };
+        assert_eq!(seen.lock().unwrap()[1].error.as_deref(), Some(CLIENT_DESTROYED));
+        assert!(pending.complete(5));
+        unsafe { kafka_common_KafkaFuture_get_with_timeout_cb(f, 100, record, opaque) };
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 3, "each call fired once, inline");
+            assert!(seen[2].error.is_none());
+            assert_eq!(unsafe { *(seen[2].value as *const i64) }, 5);
+        }
+        assert_eq!(queue.execute(), 0);
+        unsafe { kafka_common_KafkaFuture_destroy(f) };
+    }
+
+    /// A `PendingGet` dropped undelivered queues one completion: the value of
+    /// a resolved future, the destroyed-client error for a pending one.
+    #[test]
+    fn a_dropped_pending_get_queues_one_completion() {
+        let queue = Arc::new(CallbackQueue::new());
+        let seen: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+        let opaque = SendPtr(&seen as *const _ as *mut c_void);
+        let resolved = KafkaFuture::completed_future(Ok(3i64));
+        let pending = KafkaFutureImpl::<i64>::new();
+        // Held so the resolved value outlives the job that delivers it.
+        let mut held = Vec::new();
+        for future in [map_future(&resolved), map_future(&pending.future())] {
+            let inner = Arc::new(FutureInner { future, result: OnceLock::new(), runtime: None, queue: None });
+            held.push(Arc::clone(&inner));
+            drop(PendingGet {
+                fn_name: "kafka_common_KafkaFuture_get_cb",
+                cb: record,
+                opaque,
+                inner,
+                queue: queue.clone(),
+                delivered: false,
+            });
+        }
+        assert_eq!(queue.execute(), 2);
+        let seen = seen.into_inner().unwrap();
+        assert!(seen[0].error.is_none());
+        assert_eq!(unsafe { *(seen[0].value as *const i64) }, 3);
+        assert_eq!(seen[1].error.as_deref(), Some(CLIENT_DESTROYED));
+        assert_eq!(queue.execute(), 0);
+        drop(held);
     }
 
     /// A C `BaseFunction`: counts its calls on `self` and answers a pointer to

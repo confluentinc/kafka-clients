@@ -334,7 +334,7 @@ where
 /// the payload dropped under a second guard: a payload's destructor is
 /// arbitrary code, and one that panicked would unwind out of the catching
 /// frame after all, so whatever that second panic carries is leaked.
-fn caught_panic_error(fn_name: &'static str, payload: Box<dyn Any + Send>) -> Error {
+pub(crate) fn caught_panic_error(fn_name: &'static str, payload: Box<dyn Any + Send>) -> Error {
     let error = panic_error(fn_name, &*payload);
     if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
         std::mem::forget(nested);
