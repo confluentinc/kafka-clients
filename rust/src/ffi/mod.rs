@@ -266,6 +266,184 @@ mod tests {
         assert!(i8_exports >= 263, "only {i8_exports} int8_t exports found");
     }
 
+    /// Every export guarded with an explicit `fallback`, other than the byte
+    /// codes pinned above, with the value it returns on a caught panic: the
+    /// borrowed `const kafka_common_Error_t *` getters (NULL, as for no error),
+    /// the C enum getters (their `UNKNOWN` enumerator, or the first one when the
+    /// enum has none) and the integers whose derived value is a valid answer
+    /// (`NewTopic` counts, where -1 is the broker default; `*_count` / `*_size`
+    /// accessors whose 0 is legal; `TimestampType.id`, whose -1 is
+    /// `NO_TIMESTAMP_TYPE`). An enum value is compared by its last path segment.
+    /// Pins the set in both directions, so a new explicit fallback, or one
+    /// dropped back to the derived value, is a reviewed change.
+    #[test]
+    fn test_explicit_fallbacks() {
+        const BYTE_CODES: [&str; 10] = [
+            "kafka_admin_AlterConfigOp_OpType_id",
+            "kafka_admin_FeatureUpdate_UpgradeType_code",
+            "kafka_admin_ScramMechanism_type",
+            "kafka_common_ElectionType_value",
+            "kafka_common_IsolationLevel_id",
+            "kafka_common_acl_AclOperation_code",
+            "kafka_common_acl_AclPermissionType_code",
+            "kafka_common_config_ConfigResource_Type_id",
+            "kafka_common_resource_PatternType_code",
+            "kafka_common_resource_ResourceType_code",
+        ];
+        const EXPECTED: [(&str, &str); 57] = [
+            ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
+            (
+                "kafka_admin_ConfigEntry_ConfigSource__enum",
+                "kafka_admin_ConfigEntry_ConfigSource_UNKNOWN",
+            ),
+            (
+                "kafka_admin_ConfigEntry_ConfigType__enum",
+                "kafka_admin_ConfigEntry_ConfigType_UNKNOWN",
+            ),
+            ("kafka_admin_DeleteAclsResult_FilterResult_error", "null()"),
+            (
+                "kafka_admin_DeleteTopicsResult__enum",
+                "kafka_admin_DeleteTopicsResult_BY_TOPIC_ID",
+            ),
+            (
+                "kafka_admin_DescribeTopicsResult__enum",
+                "kafka_admin_DescribeTopicsResult_BY_TOPIC_ID",
+            ),
+            (
+                "kafka_admin_FeatureUpdate_UpgradeType__enum",
+                "kafka_admin_FeatureUpdate_UpgradeType_UNKNOWN",
+            ),
+            ("kafka_admin_LogDirDescription_error", "null()"),
+            ("kafka_admin_NewTopic_num_partitions", "0"),
+            ("kafka_admin_NewTopic_replication_factor", "0"),
+            ("kafka_admin_OffsetSpec__enum", "kafka_admin_OffsetSpec_EARLIEST"),
+            ("kafka_admin_ReplicaInfo_size", "-1"),
+            ("kafka_admin_ScramMechanism__enum", "kafka_admin_ScramMechanism_UNKNOWN"),
+            ("kafka_admin_TransactionState__enum", "kafka_admin_TransactionState_UNKNOWN"),
+            (
+                "kafka_admin_UserScramCredentialAlteration__enum",
+                "kafka_admin_UserScramCredentialAlteration_UPSERTION",
+            ),
+            ("kafka_common_ClassicGroupState__enum", "kafka_common_ClassicGroupState_UNKNOWN"),
+            ("kafka_common_ConsumerCommitFailedError_source", "null()"),
+            ("kafka_common_ConsumerLogTruncationError_source", "null()"),
+            ("kafka_common_ConsumerNoOffsetForPartitionError_source", "null()"),
+            ("kafka_common_ConsumerOffsetOutOfRangeError_source", "null()"),
+            ("kafka_common_ConsumerRetriableCommitFailedError_source", "null()"),
+            ("kafka_common_DuplicateResourceError_source", "null()"),
+            ("kafka_common_ElectionType__enum", "kafka_common_ElectionType_PREFERRED"),
+            ("kafka_common_Error_source", "null()"),
+            ("kafka_common_GroupAuthorizationError_source", "null()"),
+            ("kafka_common_GroupState__enum", "kafka_common_GroupState_UNKNOWN"),
+            ("kafka_common_GroupType__enum", "kafka_common_GroupType_UNKNOWN"),
+            ("kafka_common_InvalidTopicError_source", "null()"),
+            (
+                "kafka_common_IsolationLevel__enum",
+                "kafka_common_IsolationLevel_READ_UNCOMMITTED",
+            ),
+            ("kafka_common_MetricValue__enum", "kafka_common_MetricValue_DOUBLE"),
+            ("kafka_common_QuotaViolationError_source", "null()"),
+            (
+                "kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum",
+                "kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY",
+            ),
+            ("kafka_common_RecordDeserializationError_source", "null()"),
+            ("kafka_common_RecordTooLargeError_source", "null()"),
+            ("kafka_common_ResourceNotFoundError_source", "null()"),
+            ("kafka_common_ThrottlingQuotaExceededError_source", "null()"),
+            ("kafka_common_TopicAuthorizationError_source", "null()"),
+            ("kafka_common_TopicCollection__enum", "kafka_common_TopicCollection_TOPIC_IDS"),
+            ("kafka_common_acl_AclOperation__enum", "kafka_common_acl_AclOperation_UNKNOWN"),
+            (
+                "kafka_common_acl_AclPermissionType__enum",
+                "kafka_common_acl_AclPermissionType_UNKNOWN",
+            ),
+            (
+                "kafka_common_config_ConfigResource_Type__enum",
+                "kafka_common_config_ConfigResource_Type_UNKNOWN",
+            ),
+            (
+                "kafka_common_config_SslClientAuth__enum",
+                "kafka_common_config_SslClientAuth_REQUIRED",
+            ),
+            (
+                "kafka_common_metrics_MetricValueProvider__enum",
+                "kafka_common_metrics_MetricValueProvider_MEASURABLE",
+            ),
+            (
+                "kafka_common_metrics_Sensor_RecordingLevel__enum",
+                "kafka_common_metrics_Sensor_RecordingLevel_INFO",
+            ),
+            (
+                "kafka_common_metrics_TimeUnit__enum",
+                "kafka_common_metrics_TimeUnit_NANOSECONDS",
+            ),
+            ("kafka_common_metrics_stats_Rate_window_size", "-1"),
+            ("kafka_common_metrics_stats_SampledStat_Sample_event_count", "-1"),
+            ("kafka_common_metrics_stats_SimpleRate_window_size", "-1"),
+            (
+                "kafka_common_quota_ClientQuotaMatch__enum",
+                "kafka_common_quota_ClientQuotaMatch_DEFAULT",
+            ),
+            (
+                "kafka_common_record_TimestampType__enum",
+                "kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE",
+            ),
+            ("kafka_common_record_TimestampType_id", "-2"),
+            (
+                "kafka_common_resource_PatternType__enum",
+                "kafka_common_resource_PatternType_UNKNOWN",
+            ),
+            (
+                "kafka_common_resource_ResourceType__enum",
+                "kafka_common_resource_ResourceType_UNKNOWN",
+            ),
+            (
+                "kafka_common_security_auth_SecurityProtocol__enum",
+                "kafka_common_security_auth_SecurityProtocol_PLAINTEXT",
+            ),
+            (
+                "kafka_consumer_CloseOptions_GroupMembershipOperation__enum",
+                "kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP",
+            ),
+            ("kafka_consumer_GroupProtocol__enum", "kafka_consumer_GroupProtocol_CLASSIC"),
+            ("kafka_producer_MockProducer_commit_count", "-1"),
+        ];
+        let mut found = Vec::new();
+        for (_, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[unsafe(no_mangle)]" || index == 0 {
+                    continue;
+                }
+                let Some(fallback) = lines[index - 1]
+                    .trim()
+                    .strip_prefix("#[ffi_guard(fallback = ")
+                    .and_then(|rest| rest.strip_suffix(")]"))
+                else {
+                    continue;
+                };
+                let name = lines[index + 1..]
+                    .iter()
+                    .find_map(|line| line.split("fn ").nth(1))
+                    .and_then(|rest| rest.split('(').next())
+                    .expect("an exported fn has a name");
+                if BYTE_CODES.contains(&name) {
+                    continue;
+                }
+                let value = fallback.rsplit("::").next().expect("rsplit yields one item");
+                found.push((name.to_string(), value.to_string()));
+            }
+        }
+        found.sort();
+        let mut expected: Vec<(String, String)> = EXPECTED
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
     /// The scanner itself: a guard directly above passes, including one whose
     /// attribute spans lines, with or without a `// SAFETY:` comment inside its
     /// closure; anything else between the guard and `#[unsafe(no_mangle)]`
