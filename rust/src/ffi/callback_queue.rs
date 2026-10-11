@@ -84,10 +84,42 @@ pub(crate) struct CallbackQueue {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // A callback never unwinds into Rust (it is an `extern "C"` call), so a
-    // poisoned guard can only come from a test; the queue's invariants do not
-    // depend on the critical section completing.
+    // A C callback never unwinds into Rust (it is an `extern "C"` call), but
+    // the Rust half of a job can panic while `execute` holds `running`, which
+    // poisons it; the queue's invariants do not depend on the critical section
+    // completing, and `Executing` restores the rest.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The snapshot [`CallbackQueue::execute`] is running, as an RAII guard: on
+/// every exit, a panicking job's included, it clears the queue's `owner`, so
+/// the thread is not left marked as executing (every later `execute` on it
+/// would return 0 and run nothing), and it puts the jobs not yet run back at
+/// the front of the vector in their order, so their callbacks still fire.
+///
+/// No Java counterpart: Java has no C callback vector (see the module docs).
+struct Executing<'a> {
+    queue: &'a CallbackQueue,
+    remaining: std::vec::IntoIter<CallbackJob>,
+}
+
+impl Drop for Executing<'_> {
+    fn drop(&mut self) {
+        let unrun: Vec<CallbackJob> = self.remaining.by_ref().collect();
+        if !unrun.is_empty() {
+            let was_empty = {
+                let mut pending = lock(&self.queue.pending);
+                let was_empty = pending.is_empty();
+                for job in unrun.into_iter().rev() {
+                    pending.push_front(job);
+                }
+                was_empty
+            };
+            self.queue.pushed.notify_one();
+            self.queue.notify_if(was_empty);
+        }
+        *lock(&self.queue.owner) = None;
+    }
 }
 
 impl Default for CallbackQueue {
@@ -116,6 +148,12 @@ impl CallbackQueue {
             was_empty
         };
         self.pushed.notify_one();
+        self.notify_if(was_empty);
+    }
+
+    /// Fires the notify hook when the vector has just gone from empty to
+    /// non-empty.
+    fn notify_if(&self, was_empty: bool) {
         if was_empty && let Some((notify, opaque)) = *lock(&self.notify) {
             // SAFETY: the hook and its opaque pointer were registered together
             // by the C caller, who keeps the opaque alive until it replaces the
@@ -138,6 +176,11 @@ impl CallbackQueue {
     /// notify hook fires and the caller drains again later. Concurrent calls
     /// are serialized; a nested call from inside a running callback (same
     /// thread) returns 0 immediately instead of deadlocking.
+    ///
+    /// A job that panics unwinds out of this call (the client's
+    /// `__execute_callbacks` guard reports it); [`Executing`] still clears the
+    /// owner and puts the jobs it left unrun back at the front of the vector,
+    /// so the next drain runs each of them once.
     pub(crate) fn execute(&self) -> i32 {
         let me = thread::current().id();
         if *lock(&self.owner) == Some(me) {
@@ -147,10 +190,11 @@ impl CallbackQueue {
         *lock(&self.owner) = Some(me);
         let snapshot: Vec<CallbackJob> = lock(&self.pending).drain(..).collect();
         let count = snapshot.len();
-        for job in snapshot {
+        let mut executing = Executing { queue: self, remaining: snapshot.into_iter() };
+        for job in executing.remaining.by_ref() {
             job();
         }
-        *lock(&self.owner) = None;
+        drop(executing);
         i32::try_from(count).unwrap_or(i32::MAX)
     }
 
@@ -246,6 +290,57 @@ mod tests {
         assert_eq!(queue.execute(), 1);
         assert_eq!(nested.load(Ordering::SeqCst), 0, "the nested call neither runs nor deadlocks");
         assert_eq!(queue.execute(), 1, "the callback queued inside is left for the next drain");
+    }
+
+    #[test]
+    fn a_panicking_callback_leaves_the_queue_usable_and_the_rest_queued() {
+        let queue = CallbackQueue::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let r = ran.clone();
+        queue.push(Box::new(move || r.lock().unwrap().push("first")));
+        queue.push(Box::new(|| panic!("callback boom")));
+        let r = ran.clone();
+        queue.push(Box::new(move || r.lock().unwrap().push("third")));
+        let r = ran.clone();
+        queue.push(Box::new(move || r.lock().unwrap().push("fourth")));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| queue.execute()));
+        assert!(unwound.is_err(), "the job's panic unwinds out of execute");
+        assert_eq!(*ran.lock().unwrap(), ["first"]);
+        // The same thread is not left marked as executing: the next drain runs
+        // the jobs the panic left unrun, in order, each once.
+        assert_eq!(queue.execute(), 2);
+        assert_eq!(*ran.lock().unwrap(), ["first", "third", "fourth"]);
+        assert!(queue.is_empty());
+        assert_eq!(queue.execute(), 0);
+    }
+
+    /// Counts into the registered counter only, leaving `NOTIFIES` to
+    /// `notify_fires_once_per_empty_to_non_empty_transition`, which runs in
+    /// parallel.
+    unsafe extern "C" fn count_into_opaque(opaque: *mut c_void) {
+        // SAFETY: Test code: the opaque is the `AtomicI32` the test registered,
+        // alive until the hook is cleared.
+        let counter = unsafe { &*(opaque as *const AtomicI32) };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn requeued_callbacks_fire_the_notify_hook() {
+        let queue = CallbackQueue::new();
+        let opaque = Box::new(AtomicI32::new(0));
+        queue.set_notify(Some(count_into_opaque), &*opaque as *const AtomicI32 as *mut c_void);
+        queue.push(Box::new(|| panic!("callback boom")));
+        queue.push(Box::new(|| {}));
+        assert_eq!(opaque.load(Ordering::SeqCst), 1);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| queue.execute()));
+        assert!(unwound.is_err());
+        assert_eq!(
+            opaque.load(Ordering::SeqCst),
+            2,
+            "the vector went from empty to non-empty again"
+        );
+        queue.set_notify(None, std::ptr::null_mut());
+        assert_eq!(queue.execute(), 1);
     }
 
     #[test]
