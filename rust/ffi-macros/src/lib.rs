@@ -21,24 +21,35 @@
 //! ```text
 //! #[ffi_guard]
 //! #[unsafe(no_mangle)]
-//! pub unsafe extern "C" fn kafka_x_new(out_error: *mut *mut kafka_common_Error_t) -> *mut T { BODY }
+//! pub unsafe extern "C" fn kafka_x_X_new(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
+//!     BODY
+//! }
 //! ```
 //!
 //! into
 //!
 //! ```text
 //! #[unsafe(no_mangle)]
-//! pub unsafe extern "C" fn kafka_x_new(out_error: *mut *mut kafka_common_Error_t) -> *mut T {
-//!     crate::ffi::common::ffi_guard_or("kafka_x_new", ON_PANIC, move || { BODY })
+//! pub unsafe extern "C" fn kafka_x_X_new(config: *const C, out_new: *mut *mut kafka_x_X_t) -> *mut kafka_common_Error_t {
+//!     crate::ffi::common::ffi_guard_or("kafka_x_X_new", ON_PANIC, move || { BODY })
 //! }
 //! ```
 //!
 //! `ffi_guard_or` runs the body under `std::panic::catch_unwind`. On a panic it
 //! turns the payload into a `crate::common::Error` and hands it to the
 //! `ON_PANIC` closure, whose value the entry point returns. The body itself is
-//! not touched: every parameter of a C entry point is a pointer, a number or a
-//! function pointer, so the `move` closure copies them and `return` inside the
-//! body still returns the entry point's value.
+//! not touched: every parameter of a C entry point is a pointer, a number, a
+//! by-value `repr(C)` struct of those or a function pointer, so the `move`
+//! closure copies them and `return` inside the body still returns the entry
+//! point's value.
+//!
+//! The error is reported through the return value only. A fallible entry point
+//! returns `kafka_common_Error_t *` (null on success), so a caught panic is that
+//! returned error: code `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`, message
+//! beginning `Rust panic caught at the FFI boundary in <function>`. Its
+//! `out_<name>` parameters are left unwritten, the body having stopped before
+//! it delivered a value; the C caller reads them only when the call returned
+//! null.
 //!
 //! # The on-panic value
 //!
@@ -48,40 +59,39 @@
 //! | return type | on panic |
 //! |---|---|
 //! | `()` | nothing to return; the panic is only logged |
+//! | `i8` | `0`: an `int8_t` boolean reads it as false |
 //! | `bool` | `false` |
-//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` (a count is never negative: C feeds it to `malloc` and to a `for` bound) |
+//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size` (a count or size is never negative: C feeds it to `malloc` and to a `for` bound) |
 //! | `f64` | `f64::NAN` |
 //! | `kafka_common_ErrorCode_e` | `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR` |
+//! | `kafka_Bytes_t` | `kafka_Bytes_t::NULL`, Java's `null` array |
 //! | `*mut kafka_common_Error_t` | a boxed error, because null means success |
 //! | `*const kafka_common_Error_t` | a boxed error, leaked on purpose: the caller never frees a borrowed pointer, and null would read as "no error" |
 //! | any other `*mut T` / `*const T` | null |
+//! | any other C enum, `<Enum>_e` | a compile error naming the function: no enumerator means "failed", so the entry point names one with `fallback` |
 //! | anything else | a compile error naming the function |
-//!
-//! When the function has a parameter named exactly `out_error` of type
-//! `*mut *mut kafka_common_Error_t`, `ON_PANIC` also stores the boxed error
-//! there, when the pointer is non-null, before returning the value above. A
-//! per-record `out_errors` array is never written: its length is not known to
-//! be valid on the panic path.
 //!
 //! # Overrides
 //!
-//! - `#[ffi_guard(fallback = <expr>)]` replaces the value only; the `out_error`
-//!   store above still happens.
+//! - `#[ffi_guard(fallback = <expr>)]` replaces the derived value.
 //! - `#[ffi_guard(on_panic = |err| <expr>)]` takes full control. The closure
-//!   receives the `crate::common::Error` and evaluates to the return type; no
-//!   `out_error` store is generated. Callback-style entry points use it to fire
-//!   their callback exactly once with the error.
+//!   receives the `crate::common::Error` and evaluates to the return type. A
+//!   `_cb` entry point uses it to report the panic the way it reports every
+//!   other outcome: it queues its completion, carrying the error, on the
+//!   client's callback queue, exactly once, and `__execute_callbacks` runs it
+//!   like any other completion.
 //!
 //! The two are mutually exclusive.
 //!
 //! # Hardcoded paths
 //!
 //! The expansion names `crate::ffi::common::ffi_guard_or`,
-//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_ErrorCode_e`
-//! and `crate::common::Error`. That is deliberate: the attribute exists only for
-//! the `confluent_kafka` crate's own `ffi` module, where those items live, and a
-//! procedural macro has no other way to name the crate that invokes it short of
-//! an extra argument at every one of its call sites.
+//! `crate::ffi::common::box_error`, `crate::ffi::common::kafka_common_ErrorCode_e`,
+//! `crate::ffi::util::kafka_Bytes_t` and `crate::common::Error`. That is
+//! deliberate: the attribute exists only for the `confluent_kafka` crate's own
+//! `ffi` module, where those items live, and a procedural macro has no other
+//! way to name the crate that invokes it short of an extra argument at every
+//! one of its call sites.
 //!
 //! # Placement
 //!
@@ -142,12 +152,42 @@
 //! }
 //! # fn main() {}
 //! ```
+//!
+//! So is a C enum without a `fallback`:
+//!
+//! ```compile_fail
+//! # mod common { pub struct Error; }
+//! # mod ffi {
+//! #     pub mod common {
+//! #         pub fn ffi_guard_or<R>(
+//! #             _: &'static str,
+//! #             _: impl FnOnce(crate::common::Error) -> R,
+//! #             body: impl FnOnce() -> R,
+//! #         ) -> R {
+//! #             body()
+//! #         }
+//! #     }
+//! # }
+//! use ffi_macros::ffi_guard;
+//!
+//! #[derive(Clone, Copy)]
+//! #[repr(C)]
+//! pub enum kafka_x_Kind_e {
+//!     kafka_x_Kind_A,
+//! }
+//!
+//! #[ffi_guard]
+//! extern "C" fn kafka_x_X__enum() -> kafka_x_Kind_e {
+//!     kafka_x_Kind_e::kafka_x_Kind_A
+//! }
+//! # fn main() {}
+//! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{ToTokens, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{AttrStyle, Expr, ExprClosure, FnArg, Ident, ItemFn, Pat, ReturnType, Signature, Token, Type};
+use syn::{AttrStyle, Expr, ExprClosure, Ident, ItemFn, ReturnType, Signature, Token, Type};
 
 /// Guards an `extern "C"` entry point against a Rust panic unwinding into its
 /// caller; see the [crate documentation](crate) for the expansion, the derived
@@ -242,7 +282,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     })
 }
 
-/// The on-panic closure derived from the signature (D2, D3), with `fallback`
+/// The on-panic closure derived from the signature (D2), with `fallback`
 /// replacing the derived value when given.
 fn generated_on_panic(sig: &Signature, fallback: Option<Expr>) -> syn::Result<TokenStream2> {
     let error = Ident::new("__ffi_guard_error", Span::call_site());
@@ -250,32 +290,13 @@ fn generated_on_panic(sig: &Signature, fallback: Option<Expr>) -> syn::Result<To
         Some(expr) => (expr.into_token_stream(), false),
         None => derived_fallback(sig, &error)?,
     };
-    let store = out_error_param(sig)?.map(|out_error| {
-        let boxed = if value_uses_error {
-            quote!(::core::clone::Clone::clone(&#error))
-        } else {
-            quote!(#error)
-        };
-        // The emitted block is sound under the entry point's `# Safety`, which
-        // requires a non-null `out_error` to point to a writable slot; the null check
-        // is emitted with it, and `box_error` hands the slot a fresh owned handle.
-        quote! {
-            if !#out_error.is_null() {
-                unsafe { *#out_error = crate::ffi::common::box_error(#boxed) };
-            }
-        }
-    });
-    let param = if store.is_some() || value_uses_error {
-        quote!(#error)
-    } else {
-        quote!(_)
-    };
+    let param = if value_uses_error { quote!(#error) } else { quote!(_) };
     let output = match &sig.output {
         ReturnType::Default => TokenStream2::new(),
         ReturnType::Type(arrow, ty) => quote!(#arrow #ty),
     };
     Ok(quote! {
-        move |#param: crate::common::Error| #output { #store #value }
+        move |#param: crate::common::Error| #output { #value }
     })
 }
 
@@ -285,6 +306,7 @@ fn derived_fallback(sig: &Signature, error: &Ident) -> syn::Result<(TokenStream2
         ReturnType::Default => return Ok((TokenStream2::new(), false)),
         ReturnType::Type(_, ty) => ty.as_ref(),
     };
+    let name = sig.ident.to_string();
     let derived = match ty {
         Type::Tuple(tuple) if tuple.elems.is_empty() => Some((TokenStream2::new(), false)),
         // Null would tell the caller "no error", so an error-returning function
@@ -297,10 +319,12 @@ fn derived_fallback(sig: &Signature, error: &Ident) -> syn::Result<(TokenStream2
         Type::Ptr(ptr) if ptr.mutability.is_some() => Some((quote!(::core::ptr::null_mut()), false)),
         Type::Ptr(_) => Some((quote!(::core::ptr::null()), false)),
         _ => path_ident(ty).and_then(|ident| {
-            let value = if ident == "bool" {
+            let value = if ident == "i8" {
+                quote!(0)
+            } else if ident == "bool" {
                 quote!(false)
             } else if ident == "i16" || ident == "i32" || ident == "i64" {
-                if sig.ident.to_string().ends_with("_count") {
+                if name.ends_with("_count") || name.ends_with("_size") {
                     quote!(0)
                 } else {
                     quote!(-1)
@@ -309,6 +333,8 @@ fn derived_fallback(sig: &Signature, error: &Ident) -> syn::Result<(TokenStream2
                 quote!(::core::primitive::f64::NAN)
             } else if ident == "kafka_common_ErrorCode_e" {
                 quote!(crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR)
+            } else if ident == "kafka_Bytes_t" {
+                quote!(crate::ffi::util::kafka_Bytes_t::NULL)
             } else {
                 return None;
             };
@@ -316,39 +342,21 @@ fn derived_fallback(sig: &Signature, error: &Ident) -> syn::Result<(TokenStream2
         }),
     };
     derived.ok_or_else(|| {
-        syn::Error::new_spanned(
-            ty,
+        let ty_text = ty.to_token_stream();
+        let message = if path_ident(ty).is_some_and(|ident| ident.to_string().ends_with("_e")) {
             format!(
-                "`#[ffi_guard]` cannot derive a panic fallback for `{}`, which returns `{}`: \
-                 add `#[ffi_guard(fallback = <expr>)]` or `#[ffi_guard(on_panic = |err| <expr>)]`",
-                sig.ident,
-                ty.to_token_stream()
-            ),
-        )
+                "`#[ffi_guard]` cannot derive a panic fallback for `{name}`, which returns the C enum `{ty_text}`: \
+                 no enumerator means \"failed\", so name the one to return with \
+                 `#[ffi_guard(fallback = <expr>)]`, or use `#[ffi_guard(on_panic = |err| <expr>)]`"
+            )
+        } else {
+            format!(
+                "`#[ffi_guard]` cannot derive a panic fallback for `{name}`, which returns `{ty_text}`: \
+                 add `#[ffi_guard(fallback = <expr>)]` or `#[ffi_guard(on_panic = |err| <expr>)]`"
+            )
+        };
+        syn::Error::new_spanned(ty, message)
     })
-}
-
-/// The `out_error` parameter D3 writes to, if the function has one.
-fn out_error_param(sig: &Signature) -> syn::Result<Option<&Ident>> {
-    for input in &sig.inputs {
-        let FnArg::Typed(param) = input else { continue };
-        let Pat::Ident(pat) = param.pat.as_ref() else { continue };
-        if pat.ident != "out_error" {
-            continue;
-        }
-        if is_error_out_param(&param.ty) {
-            return Ok(Some(&pat.ident));
-        }
-        return Err(syn::Error::new_spanned(
-            &param.ty,
-            format!(
-                "`#[ffi_guard]`: the `out_error` parameter of `{}` is not `*mut *mut kafka_common_Error_t`; \
-                 spell out `#[ffi_guard(on_panic = |err| <expr>)]`",
-                sig.ident
-            ),
-        ));
-    }
-    Ok(None)
 }
 
 /// The last segment of a plain path type: `i32`, or `kafka_common_Error_t` in
@@ -370,15 +378,6 @@ fn path_ident(ty: &Type) -> Option<&Ident> {
 /// Whether `ty` names the opaque `kafka_common_Error_t` handle.
 fn is_error_handle(ty: &Type) -> bool {
     path_ident(ty).is_some_and(|ident| ident == "kafka_common_Error_t")
-}
-
-/// Whether `ty` is `*mut *mut kafka_common_Error_t`.
-fn is_error_out_param(ty: &Type) -> bool {
-    let Type::Ptr(outer) = ty else { return false };
-    let Type::Ptr(inner) = outer.elem.as_ref() else {
-        return false;
-    };
-    outer.mutability.is_some() && inner.mutability.is_some() && is_error_handle(&inner.elem)
 }
 
 #[cfg(test)]
@@ -465,6 +464,12 @@ mod tests {
             ),
             (
                 quote!(
+                    extern "C" fn f() -> i8 {}
+                ),
+                quote!(move |_: crate::common::Error| -> i8 { 0 }),
+            ),
+            (
+                quote!(
                     extern "C" fn f() -> bool {}
                 ),
                 quote!(move |_: crate::common::Error| -> bool { false }),
@@ -500,6 +505,20 @@ mod tests {
                 quote!(move |_: crate::common::Error| -> kafka_common_ErrorCode_e {
                     crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
                 }),
+            ),
+            (
+                quote!(
+                    extern "C" fn f() -> crate::ffi::common::kafka_common_ErrorCode_e {}
+                ),
+                quote!(move |_: crate::common::Error| -> crate::ffi::common::kafka_common_ErrorCode_e {
+                    crate::ffi::common::kafka_common_ErrorCode_e::kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+                }),
+            ),
+            (
+                quote!(
+                    extern "C" fn f() -> kafka_Bytes_t {}
+                ),
+                quote!(move |_: crate::common::Error| -> kafka_Bytes_t { crate::ffi::util::kafka_Bytes_t::NULL }),
             ),
             (
                 quote!(
@@ -539,103 +558,87 @@ mod tests {
     }
 
     #[test]
-    fn test_count_suffix_selects_zero_for_every_integer_width() {
-        for ty in [quote!(i16), quote!(i32), quote!(i64)] {
+    fn test_count_and_size_suffixes_select_zero_for_every_integer_width() {
+        for suffix in ["count", "size"] {
+            let name = Ident::new(&format!("kafka_x_topics_{suffix}"), Span::call_site());
+            let misplaced = Ident::new(&format!("kafka_x_{suffix}_get"), Span::call_site());
+            for ty in [quote!(i16), quote!(i32), quote!(i64)] {
+                assert_eq!(
+                    on_panic_of(quote!(extern "C" fn #name() -> #ty {})),
+                    quote!(move |_: crate::common::Error| -> #ty { 0 }).to_string(),
+                    "for {name} -> {ty}"
+                );
+                // Only a suffix counts: the word elsewhere in the name does not.
+                assert_eq!(
+                    on_panic_of(quote!(extern "C" fn #misplaced() -> #ty {})),
+                    quote!(move |_: crate::common::Error| -> #ty { -1 }).to_string(),
+                    "for {misplaced} -> {ty}"
+                );
+            }
+        }
+        // `kafka_List_size`, the shape the suffix exists for.
+        assert_eq!(
+            on_panic_of(quote!(
+                extern "C" fn kafka_List_size(list: *const kafka_List_t) -> i32 {}
+            )),
+            quote!(move |_: crate::common::Error| -> i32 { 0 }).to_string()
+        );
+    }
+
+    #[test]
+    fn test_i8_is_zero_whatever_the_name() {
+        for name in ["kafka_x_X_is_closed", "kafka_x_X_topics_count", "kafka_x_X_byte"] {
+            let name = Ident::new(name, Span::call_site());
             assert_eq!(
-                on_panic_of(quote!(extern "C" fn kafka_x_topics_count() -> #ty {})),
-                quote!(move |_: crate::common::Error| -> #ty { 0 }).to_string()
-            );
-            // Only a suffix counts: `_count` elsewhere in the name does not.
-            assert_eq!(
-                on_panic_of(quote!(extern "C" fn kafka_x_count_get() -> #ty {})),
-                quote!(move |_: crate::common::Error| -> #ty { -1 }).to_string()
+                on_panic_of(quote!(extern "C" fn #name() -> i8 {})),
+                quote!(move |_: crate::common::Error| -> i8 { 0 }).to_string(),
+                "for {name}"
             );
         }
     }
 
     #[test]
-    fn test_out_error_is_stored_before_the_value_is_returned() {
+    fn test_out_parameters_are_never_written() {
+        // An `out_<name>` slot, an `out_error`-named one included, is left alone:
+        // the error is the return value.
         assert_eq!(
             on_panic_of(quote! {
-                extern "C" fn f(config: *const u8, out_error: *mut *mut kafka_common_Error_t) -> *mut kafka_x_t {}
-            }),
-            quote! {
-                move |__ffi_guard_error: crate::common::Error| -> *mut kafka_x_t {
-                    if !out_error.is_null() {
-                        unsafe { *out_error = crate::ffi::common::box_error(__ffi_guard_error) };
-                    }
-                    ::core::ptr::null_mut()
-                }
-            }
-            .to_string()
-        );
-        // A unit function stores the error and returns nothing.
-        assert_eq!(
-            on_panic_of(quote!(
-                extern "C" fn f(out_error: *mut *mut kafka_common_Error_t) {}
-            )),
-            quote! {
-                move |__ffi_guard_error: crate::common::Error| {
-                    if !out_error.is_null() {
-                        unsafe { *out_error = crate::ffi::common::box_error(__ffi_guard_error) };
-                    }
-                }
-            }
-            .to_string()
-        );
-    }
-
-    #[test]
-    fn test_out_error_and_error_return_each_get_a_handle() {
-        assert_eq!(
-            on_panic_of(quote! {
-                extern "C" fn f(out_error: *mut *mut kafka_common_Error_t) -> *mut kafka_common_Error_t {}
+                extern "C" fn kafka_x_X_new(
+                    config: *const u8,
+                    out_new: *mut *mut kafka_x_X_t,
+                ) -> *mut kafka_common_Error_t {}
             }),
             quote! {
                 move |__ffi_guard_error: crate::common::Error| -> *mut kafka_common_Error_t {
-                    if !out_error.is_null() {
-                        unsafe {
-                            *out_error = crate::ffi::common::box_error(::core::clone::Clone::clone(&__ffi_guard_error))
-                        };
-                    }
                     crate::ffi::common::box_error(__ffi_guard_error)
                 }
             }
             .to_string()
         );
-    }
-
-    #[test]
-    fn test_out_errors_array_is_never_written() {
         assert_eq!(
             on_panic_of(quote!(
-                extern "C" fn f(out_errors: *mut *mut kafka_common_Error_t, count: i32) -> i32 {}
+                extern "C" fn f(out_error: *mut i32) -> i32 {}
             )),
             quote!(move |_: crate::common::Error| -> i32 { -1 }).to_string()
         );
     }
 
     #[test]
-    fn test_fallback_replaces_the_value_but_keeps_the_out_error_store() {
+    fn test_fallback_replaces_the_value() {
         let expanded = expand_str(
             quote!(fallback = 42),
             quote!(
-                extern "C" fn f(out_error: *mut *mut kafka_common_Error_t) -> u8 {
+                extern "C" fn f(out_value: *mut u8) -> u8 {
                     1
                 }
             ),
         )
         .unwrap();
         let expected = quote! {
-            extern "C" fn f(out_error: *mut *mut kafka_common_Error_t) -> u8 {
+            extern "C" fn f(out_value: *mut u8) -> u8 {
                 crate::ffi::common::ffi_guard_or(
                     "f",
-                    move |__ffi_guard_error: crate::common::Error| -> u8 {
-                        if !out_error.is_null() {
-                            unsafe { *out_error = crate::ffi::common::box_error(__ffi_guard_error) };
-                        }
-                        42
-                    },
+                    move |_: crate::common::Error| -> u8 { 42 },
                     move || { 1 }
                 )
             }
@@ -646,17 +649,17 @@ mod tests {
     #[test]
     fn test_on_panic_closure_is_emitted_verbatim() {
         let expanded = expand_str(
-            quote!(on_panic = |err| unsafe { callback(box_error(err), user_data) }),
+            quote!(on_panic = |err| deliver(cb, opaque, Err(err))),
             quote!(
-                extern "C" fn f(out_error: *mut *mut kafka_common_Error_t, callback: Cb, user_data: *mut c_void) {}
+                extern "C" fn f(self_: *const X, cb: Cb, opaque: *mut c_void) {}
             ),
         )
         .unwrap();
         let expected = quote! {
-            extern "C" fn f(out_error: *mut *mut kafka_common_Error_t, callback: Cb, user_data: *mut c_void) {
+            extern "C" fn f(self_: *const X, cb: Cb, opaque: *mut c_void) {
                 crate::ffi::common::ffi_guard_or(
                     "f",
-                    |err| unsafe { callback(box_error(err), user_data) },
+                    |err| deliver(cb, opaque, Err(err)),
                     move || {}
                 )
             }
@@ -694,19 +697,38 @@ mod tests {
     }
 
     #[test]
-    fn test_mistyped_out_error_is_rejected() {
+    fn test_c_enum_requires_an_explicit_fallback() {
+        let item = quote!(
+            extern "C" fn kafka_common_IsolationLevel__enum(
+                self_: *const kafka_common_IsolationLevel_t,
+            ) -> kafka_common_IsolationLevel_e {
+                kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
+            }
+        );
         assert_eq!(
+            expand_str(TokenStream2::new(), item.clone()).unwrap_err(),
+            "`#[ffi_guard]` cannot derive a panic fallback for `kafka_common_IsolationLevel__enum`, which returns \
+             the C enum `kafka_common_IsolationLevel_e`: no enumerator means \"failed\", so name the one to return \
+             with `#[ffi_guard(fallback = <expr>)]`, or use `#[ffi_guard(on_panic = |err| <expr>)]`"
+        );
+        // A path to the enum is recognised the same way.
+        assert!(
             expand_str(
                 TokenStream2::new(),
                 quote!(
-                    extern "C" fn kafka_x_new(out_error: *mut i32) -> i32 {
-                        0
-                    }
+                    extern "C" fn f() -> crate::ffi::common::isolation_level::kafka_common_IsolationLevel_e {}
                 )
             )
-            .unwrap_err(),
-            "`#[ffi_guard]`: the `out_error` parameter of `kafka_x_new` is not `*mut *mut kafka_common_Error_t`; \
-             spell out `#[ffi_guard(on_panic = |err| <expr>)]`"
+            .unwrap_err()
+            .contains("which returns the C enum")
+        );
+        // Naming the enumerator is accepted.
+        assert!(
+            expand_str(
+                quote!(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED),
+                item
+            )
+            .is_ok()
         );
     }
 

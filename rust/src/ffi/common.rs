@@ -1411,6 +1411,8 @@ mod tests {
         ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerNoOffsetForPartitionError,
         ConsumerOffsetOutOfRangeError, ConsumerRetriableCommitFailedError,
     };
+    use crate::ffi::common::isolation_level::kafka_common_IsolationLevel_e;
+    use crate::ffi::util::kafka_Bytes_t;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::CStr;
@@ -1807,7 +1809,7 @@ mod tests {
         assert!(!error.is_null(), "expected an error handle");
         // SAFETY: Test helper: `error` is non-null (asserted above) and every caller passes
         // a handle freshly produced by `#[ffi_guard]`'s panic path
-        // (`box_error(panic_error(..))`, either returned or stored through `out_error`) and
+        // (`box_error(panic_error(..))`, returned by the guarded call) and
         // not yet destroyed, which satisfies `kafka_common_Error_message`'s `# Safety`. For
         // a non-null handle it returns the NUL-terminated `message_cstring` pointer, valid
         // until destroy, and the text is copied into an owned `String` before the handle is
@@ -1997,48 +1999,86 @@ mod tests {
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard]
-    unsafe extern "C" fn guarded_new(panic: bool, out_error: *mut *mut kafka_common_Error_t) -> *mut u8 {
+    unsafe extern "C" fn guarded_i8(panic: bool) -> i8 {
+        if panic {
+            panic!("i8 boom");
+        }
+        1
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_topics_size(panic: bool) -> i32 {
+        if panic {
+            panic!("size boom");
+        }
+        4
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_bytes(panic: bool) -> kafka_Bytes_t {
+        if panic {
+            panic!("bytes boom");
+        }
+        kafka_Bytes_t::from_slice(b"value")
+    }
+
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED)]
+    unsafe extern "C" fn guarded_enum(panic: bool) -> kafka_common_IsolationLevel_e {
+        if panic {
+            panic!("enum boom");
+        }
+        kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
+    }
+
+    /// A fallible entry point in the CLAUDE.md §4 shape: the error is returned,
+    /// the value delivered through `out_new`.
+    ///
+    /// # Safety
+    ///
+    /// `out_new` must point to a writable slot.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_new(panic: bool, out_new: *mut *mut u8) -> *mut kafka_common_Error_t {
         if panic {
             panic!("constructor boom");
         }
-        std::ptr::dangling_mut()
+        // SAFETY: Test code: per this function's `# Safety`, `out_new` points to a writable
+        // slot; one value is written into it.
+        unsafe { *out_new = std::ptr::dangling_mut() };
+        std::ptr::null_mut()
     }
 
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
-    #[ffi_guard]
-    unsafe extern "C" fn guarded_flush(out_error: *mut *mut kafka_common_Error_t) {
-        panic!("flush boom");
-    }
-
-    /// # Safety
-    ///
-    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` must be null or point to a writable slot, because the guard
-    /// stores the panic's error handle there.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard(fallback = 42)]
-    unsafe extern "C" fn guarded_fallback(out_error: *mut *mut kafka_common_Error_t) -> i32 {
+    unsafe extern "C" fn guarded_fallback() -> i32 {
         panic!("fallback boom");
     }
 
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; `out_error` is read by nothing (the custom `on_panic` path does not store
-    /// into it), so the caller has nothing to uphold.
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard(on_panic = |err| {
         ON_PANIC_SAW.with(|saw| *saw.borrow_mut() = Some((err.message().to_owned(), error_code_of(&err))));
         7
     })]
-    unsafe extern "C" fn guarded_on_panic(out_error: *mut *mut kafka_common_Error_t) -> i32 {
-        // Named `out_error` on purpose: the test checks nothing is stored there.
-        let _ = out_error;
+    unsafe extern "C" fn guarded_on_panic() -> i32 {
         panic!("custom path");
     }
 
@@ -2210,76 +2250,64 @@ mod tests {
     }
 
     #[test]
-    fn ffi_guard_stores_the_error_in_out_error() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the guard's generated
-        // store writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3), and the `bool` argument needs nothing further.
-        let result = unsafe { guarded_new(true, &mut out_error) };
-        assert!(result.is_null());
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, code) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_new", "constructor boom"));
-        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
-
-        // A unit function reports through `out_error` too.
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the guard's generated
-        // store writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3).
-        unsafe { guarded_flush(&mut out_error) };
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, _) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_flush", "flush boom"));
-    }
-
-    #[test]
-    fn ffi_guard_tolerates_null_out_error() {
-        // SAFETY: Test code: a NULL `out_error` is passed deliberately to exercise the
-        // guard's documented null tolerance: the generated store is skipped when the
-        // pointer is null, so nothing is written through it, and the `bool` argument needs
-        // nothing further.
+    fn ffi_guard_i8_size_and_bytes_fallbacks() {
+        // SAFETY: Test code: `guarded_i8`, `guarded_topics_size` and `guarded_bytes` are
+        // `extern "C"` test functions under `#[ffi_guard]` taking only a `bool`; the calls are
+        // `unsafe` solely because the functions are declared `unsafe extern "C"`, with no
+        // pointer arguments or preconditions to uphold. The returned `kafka_Bytes_t` is only
+        // inspected, never dereferenced.
         unsafe {
-            assert!(guarded_new(true, std::ptr::null_mut()).is_null());
-            guarded_flush(std::ptr::null_mut());
+            assert_eq!(guarded_i8(true), 0, "an int8_t boolean reads as false");
+            assert_eq!(guarded_topics_size(true), 0, "a size is never negative");
+            let bytes = guarded_bytes(true);
+            assert!(bytes.data.is_null(), "Java's null array");
+            assert_eq!(bytes.len, 0);
         }
     }
 
     #[test]
-    fn ffi_guard_fallback_override_keeps_the_out_error_store() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; the `fallback = 42`
-        // override replaces only the return value and keeps the generated store, which
-        // writes exactly one fresh `box_error` handle into it when the body panics
-        // (`ffi-macros`, D3).
-        assert_eq!(unsafe { guarded_fallback(&mut out_error) }, 42);
-        // SAFETY: Test code: `out_error` now holds the fresh handle the guard stored on the
-        // panic path, not yet freed by anyone, so `take_error` (which asserts non-null)
-        // consumes it exactly once.
-        let (message, _) = unsafe { take_error(out_error) };
-        assert_eq!(message, panic_message("guarded_fallback", "fallback boom"));
+    fn ffi_guard_enum_takes_the_named_fallback() {
+        // SAFETY: Test code: `guarded_enum` is an `extern "C"` test function under
+        // `#[ffi_guard]` taking only a `bool`; the call is `unsafe` solely because it is
+        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to uphold.
+        let level = unsafe { guarded_enum(true) };
+        assert_eq!(
+            level,
+            kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED
+        );
+    }
+
+    #[test]
+    fn ffi_guard_returns_the_error_and_leaves_out_unwritten() {
+        let mut out_new: *mut u8 = std::ptr::null_mut();
+        // SAFETY: Test code: `out_new` is a live local that outlives the call, so `&mut
+        // out_new` is the writable slot `guarded_new`'s `# Safety` asks for; the body panics
+        // before writing it, and the guard writes nothing there.
+        let error = unsafe { guarded_new(true, &mut out_new) };
+        assert!(out_new.is_null(), "the out slot is left unwritten on a panic");
+        // SAFETY: Test code: `error` is the fresh handle the guard returned on the panic
+        // path, not yet freed by anyone, so `take_error` (which asserts non-null) consumes it
+        // exactly once.
+        let (message, code) = unsafe { take_error(error) };
+        assert_eq!(message, panic_message("guarded_new", "constructor boom"));
+        assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+    }
+
+    #[test]
+    fn ffi_guard_fallback_override_replaces_the_value() {
+        // SAFETY: Test code: `guarded_fallback` takes no arguments and has no preconditions;
+        // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
+        assert_eq!(unsafe { guarded_fallback() }, 42);
     }
 
     #[test]
     fn ffi_guard_on_panic_closure_takes_full_control() {
-        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-        // SAFETY: Test code: `out_error` is a live local that outlives the call, so `&mut
-        // out_error` is a valid `*mut *mut kafka_common_Error_t`; with an explicit
-        // `on_panic` closure no store is generated (asserted null afterwards), so nothing
-        // is written through it.
-        assert_eq!(unsafe { guarded_on_panic(&mut out_error) }, 7);
+        // SAFETY: Test code: `guarded_on_panic` takes no arguments and has no preconditions;
+        // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
+        assert_eq!(unsafe { guarded_on_panic() }, 7);
         let (message, code) = ON_PANIC_SAW.with(|saw| saw.borrow_mut().take()).expect("the closure ran");
         assert_eq!(message, panic_message("guarded_on_panic", "custom path"));
         assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
-        // No `out_error` store is generated around an explicit closure.
-        assert!(out_error.is_null());
     }
 
     #[test]
@@ -2409,12 +2437,13 @@ mod tests {
     #[test]
     fn ffi_guard_passes_through_when_nothing_panics() {
         // SAFETY: Test code: every `guarded_*` call here takes only a `bool`, no argument,
-        // or `&mut out_error`, a live local that outlives the call;
-        // `guarded_const_pointer(false)` returns a pointer to the `c"value"` literal, which
-        // is `'static`, so `CStr::from_ptr` reads a valid NUL-terminated string;
-        // `guarded_mut_pointer(false)` returns a dangling pointer that is only compared
-        // against null, never dereferenced; and `guarded_new(false, ..)` does not panic, so
-        // the guard writes nothing through `out_error` (asserted null afterwards).
+        // or `&mut out_new`, a live local that outlives the call and is the writable slot
+        // `guarded_new` asks for; `guarded_const_pointer(false)` returns a pointer to the
+        // `c"value"` literal, which is `'static`, so `CStr::from_ptr` reads a valid
+        // NUL-terminated string; `guarded_bytes(false)` views the `'static` `b"value"`
+        // literal, so the slice built from it is valid; and `guarded_mut_pointer(false)` and
+        // the value written into `out_new` are dangling pointers that are only compared
+        // against null, never dereferenced.
         unsafe {
             assert!(guarded_bool(false));
             assert_eq!(guarded_i16(false), 16);
@@ -2432,9 +2461,18 @@ mod tests {
             assert_eq!(guarded_early_return(true), 5);
             assert_eq!(guarded_early_return(false), 6);
 
-            let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
-            assert!(!guarded_new(false, &mut out_error).is_null());
-            assert!(out_error.is_null(), "a call that does not panic leaves out_error alone");
+            assert_eq!(guarded_i8(false), 1);
+            assert_eq!(guarded_topics_size(false), 4);
+            let bytes = guarded_bytes(false);
+            assert_eq!(std::slice::from_raw_parts(bytes.data, bytes.len as usize), b"value");
+            assert_eq!(
+                guarded_enum(false),
+                kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_COMMITTED
+            );
+
+            let mut out_new: *mut u8 = std::ptr::null_mut();
+            assert!(guarded_new(false, &mut out_new).is_null(), "success returns no error");
+            assert!(!out_new.is_null(), "and delivers the value");
         }
     }
 }
