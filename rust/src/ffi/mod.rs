@@ -43,27 +43,31 @@
 //! # Panics never cross the C boundary
 //!
 //! Every exported function catches a Rust panic before it can unwind into its
-//! caller, which would abort the process. After a caught panic the function
-//! returns its failure value instead: NULL, `false`, -1 (0 for a `*_count`
-//! accessor), NaN for a `double`, `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR`
-//! for `kafka_common_Error_code`, or an error handle for a function that returns
-//! one. A function with an `out_error` parameter also stores an error describing
-//! the panic there. A function that reports ordinary failures through a
-//! completion callback reports the panic through that callback instead, exactly
-//! once, unless its documentation says that a synchronous failure does not
-//! invoke the callback. Such a function reports the panic as a synchronous
-//! failure, through its return value and `out_error` where it has one, and the
-//! guard itself does not invoke the callback. If such a panic is raised after
-//! the record or request was already handed to the library's background work,
-//! the callback can still fire for it later; on a return that reports a panic,
-//! do not release `user_data` yourself: the callback, or the
-//! `user_data_destroy` hook where there is one, releases it when it runs. The
-//! error's code is `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message
-//! begins `Rust panic caught at the FFI boundary in <function>`.
+//! caller, which would abort the process, and reports it instead. A fallible
+//! function returns the panic as its `kafka_common_Error_t *` and leaves its
+//! `out_<name>` parameters unwritten, as for any other failure: read them only
+//! after a NULL return. The error's code is
+//! `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its message begins
+//! `Rust panic caught at the FFI boundary in <function>`. Any other function
+//! returns its failure value: NULL for a pointer, 0 for an `int8_t` boolean, -1
+//! for another integer (0 for a `*_count` or `*_size` accessor, which is never
+//! negative), NaN for a `double`, a NULL `kafka_Bytes_t` (Java's `null` array),
+//! `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR` for `kafka_common_Error_code`,
+//! the enumerator its documentation names for another C enum, or, for an
+//! accessor returning a borrowed `const kafka_common_Error_t *`, an error
+//! describing the panic that is never freed. A function returning nothing only
+//! logs the panic.
+//!
+//! A `_cb` function reports a caught panic the way it reports every other
+//! outcome: it queues its completion, carrying the error and the caller's
+//! `opaque`, on the client's callback queue, exactly once, and the client's
+//! `__execute_callbacks` runs it like any other completion. That completion is
+//! where `opaque` comes back to be released; there is no other release hook.
 //!
 //! A panic is a bug in this library and may leave the handle it happened on in
 //! an inconsistent state: destroy that handle and create a new one. Later calls
-//! on it can keep failing, because a poisoned lock is never cleared.
+//! on it can keep failing, because a poisoned lock is never cleared; its
+//! `_destroy` still frees it and runs its pending callbacks, each exactly once.
 //!
 //! The same paragraphs open the generated C header (`header` in
 //! `cbindgen.toml`). The mechanism is the [`ffi_guard`] attribute, whose runtime
