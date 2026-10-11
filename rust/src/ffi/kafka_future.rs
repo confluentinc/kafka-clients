@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::common::{box_error, kafka_common_Error_t, spawn_callback_task, take_error};
 use crate::ffi::util::{destroy_boxed, kafka_List_t, list_elements};
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ fn get_cb(
     let opaque = SendPtr(opaque);
     match (inner.runtime.clone(), inner.queue.clone()) {
         (Some(runtime), Some(queue)) => {
-            runtime.spawn(async move {
+            spawn_callback_task(&runtime, async move {
                 let result = inner.resolve_async(timeout).await;
                 // `inner` moves into the job so the value outlives a handle
                 // destroyed before the callback runs.

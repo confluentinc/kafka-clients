@@ -67,7 +67,7 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -75,7 +75,7 @@ use tokio::task::JoinHandle;
 use crate::admin::{Admin, MockAdminClient};
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t};
+use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task};
 use crate::ffi::kafka_future::{
     FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t,
     map_future, map_future_handle, map_void_future,
@@ -210,14 +210,23 @@ impl Client {
     }
 
     /// Spawns `future` on the client's runtime and remembers it for `destroy`.
+    ///
+    /// The registration has two phases, so nothing that can panic runs once the
+    /// task exists: the `tasks` lock and the room for the handle are taken first,
+    /// the spawn aborts the process if it panics ([`spawn_callback_task`]), and
+    /// the push cannot reallocate. A `_cb` entry point's guard can then queue its
+    /// completion on a panic without a task already spawned queueing a second
+    /// one, and `destroy` never misses a task (§4 item 6 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`). A spawned task that
+    /// takes this lock itself waits only for the push.
     fn spawn<F>(self: &Arc<Self>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let handle = self.runtime.spawn(future);
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
+        tasks.reserve(1);
+        tasks.push(spawn_callback_task(&self.runtime, future));
     }
 
     /// Drives `op` to completion on the calling thread.

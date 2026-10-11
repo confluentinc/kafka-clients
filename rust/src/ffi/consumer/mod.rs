@@ -85,7 +85,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -100,7 +100,7 @@ use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, map_topic_partition_i64, sorted_topic_partition_list,
     topic_partition_i64_map, topic_partition_ref,
 };
-use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, take_error};
+use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task, take_error};
 use crate::ffi::consumer::close_options::{close_options_ref, kafka_consumer_CloseOptions_t};
 use crate::ffi::consumer::consumer_group_metadata::box_group_metadata;
 pub(crate) use crate::ffi::consumer::consumer_group_metadata::{
@@ -282,14 +282,23 @@ impl Client {
     }
 
     /// Spawns `future` on the client's runtime and remembers it for `destroy`.
+    ///
+    /// The registration has two phases, so nothing that can panic runs once the
+    /// task exists: the `tasks` lock and the room for the handle are taken first,
+    /// the spawn aborts the process if it panics ([`spawn_callback_task`]), and
+    /// the push cannot reallocate. A `_cb` entry point's guard can then queue its
+    /// completion on a panic without a task already spawned queueing a second
+    /// one, and `destroy` never misses a task (§4 item 6 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`). A spawned task that
+    /// takes this lock itself waits only for the push.
     pub(crate) fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let handle = self.runtime.spawn(future);
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
+        tasks.reserve(1);
+        tasks.push(spawn_callback_task(&self.runtime, future));
     }
 
     /// Drives `future` on the calling thread with the blocking flag set, so

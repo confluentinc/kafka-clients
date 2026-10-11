@@ -171,21 +171,18 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
 /// can panic inside `spawn` after the task is queued: the C caller's thread is
 /// not one of the runtime's workers, so the task is queued and a worker is then
 /// woken, and a failed wake is `expect("failed to wake I/O driver")`
-/// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would fire
-/// the callback from `on_panic` while the queued task fires it too, and would
-/// skip the producer's `pending_tasks` registration after the spawn, which
+/// (`runtime/io/driver.rs:260`, tokio 1.52.0). Unwinding from there would queue
+/// the completion from `on_panic` while the queued task queues it too, and
+/// would skip the client's `tasks` registration after the spawn, which
 /// `destroy` relies on. So the process aborts, as every panic at the boundary
 /// did before `#[ffi_guard]`: the OS refused to wake the runtime. See §4 item 6
 /// of `design/current/appsec-7665-4521-ffi-panic-guard.md`.
 ///
+/// Every task the FFI spawns holding a C callback or `opaque` goes through
+/// here: the producer, consumer and admin `Client::spawn` and
+/// `kafka_common_KafkaFuture_get_cb`.
+///
 /// No Java counterpart: Java has no C boundary.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into the split FFI's `Client::spawn` when #207 is ported onto it"
-    )
-)]
 pub(crate) fn spawn_callback_task<F>(runtime: &tokio::runtime::Handle, task: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,

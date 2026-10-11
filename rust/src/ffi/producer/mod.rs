@@ -93,7 +93,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -106,7 +106,7 @@ use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_d
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_destroy};
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
-use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t};
+use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task};
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
     offset_and_metadata_ref,
@@ -171,14 +171,23 @@ pub(crate) struct Client {
 
 impl Client {
     /// Spawns `future` on the client's runtime and remembers it for `destroy`.
+    ///
+    /// The registration has two phases, so nothing that can panic runs once the
+    /// task exists: the `tasks` lock and the room for the handle are taken first,
+    /// the spawn aborts the process if it panics ([`spawn_callback_task`]), and
+    /// the push cannot reallocate. A `_cb` entry point's guard can then queue its
+    /// completion on a panic without a task already spawned queueing a second
+    /// one, and `destroy` never misses a task (§4 item 6 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`). A spawned task that
+    /// takes this lock itself waits only for the push.
     fn spawn<F>(self: &Arc<Self>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let handle = self.runtime.spawn(future);
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
+        tasks.reserve(1);
+        tasks.push(spawn_callback_task(&self.runtime, future));
     }
 
     /// Waits until every `send_cb` that had returned before this call was
