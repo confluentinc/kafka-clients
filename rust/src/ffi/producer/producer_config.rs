@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use crate::common::Error;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::producer::partitioner::{
     SharedPartitioner, SharedPartitionerAdapter, kafka_producer_Partitioner_t, take_partitioner,
 };
@@ -79,6 +80,7 @@ pub(crate) unsafe fn producer_config_ref<'a>(
 /// # Safety
 ///
 /// `props` must be a live map of C strings and `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     props: *const kafka_Map_t,
@@ -101,6 +103,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
 /// # Safety
 ///
 /// `self_` and `partitioner` must be live handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
     self_: *mut kafka_producer_ProducerConfig_t,
@@ -115,6 +118,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_destroy(self_: *mut kafka_producer_ProducerConfig_t) {
     if !self_.is_null() {

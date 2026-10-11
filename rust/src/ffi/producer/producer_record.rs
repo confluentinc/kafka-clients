@@ -38,6 +38,7 @@ use crate::ffi::common::header::internals::record_headers::{
     RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, c_str_to_string, into_c_string, owned_c_string};
 use crate::producer::{ProducerRecord, ProducerRecordOptions, ProducerRecordOptionsBuilder};
 
@@ -123,6 +124,7 @@ unsafe fn deliver(
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
     topic: *const c_char,
@@ -136,6 +138,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
     topic: *const c_char,
@@ -157,6 +160,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 ///
 /// `topic` must be a NUL-terminated string and `out_with_partition_key` a
 /// valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
     topic: *const c_char,
@@ -183,6 +187,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 ///
 /// `topic` must be a NUL-terminated string, `headers` a live handle and
 /// `out_with_partition_key_headers` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_headers(
     topic: *const c_char,
@@ -211,6 +216,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 ///
 /// `topic` must be a NUL-terminated string and
 /// `out_with_partition_timestamp_key` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_key(
     topic: *const c_char,
@@ -238,6 +244,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_
 /// # Safety
 ///
 /// `options` must be a live handle and `out_with_options` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_options(
     options: *const kafka_producer_ProducerRecordOptions_t,
@@ -257,6 +264,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_options(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_topic(
     self_: *const kafka_producer_ProducerRecord_t,
@@ -270,6 +278,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_topic(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_headers(
     self_: *const kafka_producer_ProducerRecord_t,
@@ -283,6 +292,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_headers(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_key(
     self_: *const kafka_producer_ProducerRecord_t,
@@ -295,6 +305,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_key(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
     self_: *const kafka_producer_ProducerRecord_t,
@@ -307,6 +318,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const kafka_producer_ProducerRecord_t) -> i64 {
     unsafe { producer_record_ref(self_) }.timestamp().unwrap_or(-1)
@@ -317,6 +329,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const kafka_producer_ProducerRecord_t) -> i32 {
     unsafe { producer_record_ref(self_) }.partition().unwrap_or(-1)
@@ -328,6 +341,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_to_string(
     self_: *const kafka_producer_ProducerRecord_t,
@@ -341,6 +355,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_to_string(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed or consumed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_destroy(self_: *mut kafka_producer_ProducerRecord_t) {
     if !self_.is_null() {
@@ -391,6 +406,7 @@ unsafe fn with_builder(
 
 /// `ProducerRecordOptionsBuilder::new()`: owned, freed with
 /// [`kafka_producer_ProducerRecordOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_new() -> *mut kafka_producer_ProducerRecordOptionsBuilder_t
 {
@@ -402,6 +418,7 @@ pub extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_new() -> *mut kafk
 /// # Safety
 ///
 /// `self_` must be a live handle and `topic` a NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_topic(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -416,6 +433,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_topic(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_partition(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -429,6 +447,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_partiti
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_timestamp(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -442,6 +461,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_timesta
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_key(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -455,6 +475,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_key(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_value(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -476,6 +497,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_value(
 /// # Safety
 ///
 /// `self_` must be a live handle and `headers` null or a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_headers(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -493,6 +515,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_headers
 /// # Safety
 ///
 /// `self_` must be a live handle and `out_build` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_build(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -514,6 +537,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_destroy(
     self_: *mut kafka_producer_ProducerRecordOptionsBuilder_t,
@@ -528,6 +552,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_destroy(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptions_destroy(
     self_: *mut kafka_producer_ProducerRecordOptions_t,

@@ -26,6 +26,7 @@ use std::ffi::{CString, c_char};
 
 use crate::common::TopicPartition;
 use crate::ffi::common::topic_partition::{kafka_common_TopicPartition_t, topic_partition_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, owned_c_string};
 use crate::producer::RecordMetadata;
 
@@ -72,6 +73,7 @@ unsafe fn inner<'a>(metadata: *const kafka_producer_RecordMetadata_t) -> &'a Rec
 /// # Safety
 ///
 /// `topic_partition` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
     topic_partition: *const kafka_common_TopicPartition_t,
@@ -97,6 +99,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_offset(self_: *const kafka_producer_RecordMetadata_t) -> i8 {
     i8::from(unsafe { record_metadata_ref(self_) }.has_offset())
@@ -107,6 +110,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_offset(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(self_: *const kafka_producer_RecordMetadata_t) -> i64 {
     unsafe { record_metadata_ref(self_) }.offset()
@@ -117,6 +121,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_timestamp(
     self_: *const kafka_producer_RecordMetadata_t,
@@ -129,6 +134,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_timestamp(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(self_: *const kafka_producer_RecordMetadata_t) -> i64 {
     unsafe { record_metadata_ref(self_) }.timestamp()
@@ -139,6 +145,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_key_size(
     self_: *const kafka_producer_RecordMetadata_t,
@@ -151,6 +158,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_key_size(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_value_size(
     self_: *const kafka_producer_RecordMetadata_t,
@@ -163,6 +171,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_value_size(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
     self_: *const kafka_producer_RecordMetadata_t,
@@ -175,6 +184,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(self_: *const kafka_producer_RecordMetadata_t) -> i32 {
     unsafe { record_metadata_ref(self_) }.partition()
@@ -185,6 +195,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_to_string(
     self_: *const kafka_producer_RecordMetadata_t,
@@ -197,6 +208,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_to_string(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(self_: *mut kafka_producer_RecordMetadata_t) {
     if !self_.is_null() {

@@ -23,6 +23,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::ffi::common::metrics::Interface;
+use crate::ffi::ffi_guard;
 use crate::ffi::producer::partitioner::{SharedPartitioner, kafka_producer_Partitioner_t, partitioner_view};
 use crate::producer::RoundRobinPartitioner;
 
@@ -43,6 +44,7 @@ unsafe fn inner<'a>(self_: *const kafka_producer_RoundRobinPartitioner_t) -> &'a
 
 /// `new RoundRobinPartitioner()`: owned, freed with
 /// [`kafka_producer_RoundRobinPartitioner_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_RoundRobinPartitioner_new() -> *mut kafka_producer_RoundRobinPartitioner_t {
     let imp: Arc<SharedPartitioner> = Arc::new(Mutex::new(RoundRobinPartitioner::new()));
@@ -59,6 +61,7 @@ pub extern "C" fn kafka_producer_RoundRobinPartitioner_new() -> *mut kafka_produ
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner__as_Partitioner(
     self_: *mut kafka_producer_RoundRobinPartitioner_t,
@@ -73,6 +76,7 @@ pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner__as_Partitioner(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner_destroy(
     self_: *mut kafka_producer_RoundRobinPartitioner_t,

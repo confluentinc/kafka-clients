@@ -44,6 +44,7 @@ use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
 use crate::ffi::consumer::{
     box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy, kafka_consumer_OffsetAndMetadata_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::producer::kafka_producer::ArcSerializer;
 use crate::ffi::producer::partitioner::{
     SharedPartitioner, SharedPartitionerAdapter, kafka_producer_Partitioner_t, take_partitioner,
@@ -146,6 +147,7 @@ fn box_mock(producer: MockProducer<GenericValue, GenericValue>) -> *mut kafka_pr
 
 /// `new MockProducer(boolean autoComplete, Serializer, Serializer)` without
 /// serializers: owned, freed with [`kafka_producer_MockProducer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducer_with_auto_complete(
     auto_complete: i8,
@@ -159,6 +161,7 @@ pub extern "C" fn kafka_producer_MockProducer_with_auto_complete(
 /// # Safety
 ///
 /// `cluster` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_with_cluster_auto_complete(
     cluster: *const kafka_common_Cluster_t,
@@ -176,6 +179,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_cluster_auto_complete(
 /// # Safety
 ///
 /// `options` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
     options: *const kafka_producer_MockProducerOptions_t,
@@ -191,6 +195,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
     self_: *const kafka_producer_MockProducer_t,
@@ -204,6 +209,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_destroy(self_: *mut kafka_producer_MockProducer_t) {
     if !self_.is_null() {
@@ -286,6 +292,7 @@ unsafe fn destroy_map(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_history(
     self_: *const kafka_producer_MockProducer_t,
@@ -299,6 +306,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
     self_: *const kafka_producer_MockProducer_t,
@@ -313,6 +321,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_history(
     self_: *const kafka_producer_MockProducer_t,
@@ -332,6 +341,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_hist
 ///
 /// `self_` and `topic_partition` must be live handles and `group` a
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
     self_: *const kafka_producer_MockProducer_t,
@@ -352,6 +362,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_offsets(
     self_: *const kafka_producer_MockProducer_t,
@@ -368,6 +379,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_offsets(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_clear(self_: *const kafka_producer_MockProducer_t) {
     unsafe { mock(self_) }.clear();
@@ -379,6 +391,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(self_: *const kafka_p
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(self_: *const kafka_producer_MockProducer_t) -> i8 {
     i8::from(unsafe { mock(self_) }.complete_next())
@@ -393,6 +406,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(self_: *const
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
     self_: *const kafka_producer_MockProducer_t,
@@ -410,6 +424,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
     self_: *const kafka_producer_MockProducer_t,
@@ -425,6 +440,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_initialized(
     self_: *const kafka_producer_MockProducer_t,
@@ -437,6 +453,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_initialized(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_in_flight(
     self_: *const kafka_producer_MockProducer_t,
@@ -449,6 +466,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_in_flight(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_committed(
     self_: *const kafka_producer_MockProducer_t,
@@ -461,6 +479,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_committed(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_aborted(
     self_: *const kafka_producer_MockProducer_t,
@@ -473,6 +492,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_aborted(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(self_: *const kafka_producer_MockProducer_t) -> i8 {
     i8::from(unsafe { mock(self_) }.sent_offsets())
@@ -483,6 +503,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_closed(self_: *const kafka_producer_MockProducer_t) -> i8 {
     i8::from(unsafe { mock(self_) }.closed())
@@ -493,6 +514,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_closed(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka_producer_MockProducer_t) -> i8 {
     i8::from(unsafe { mock(self_) }.flushed())
@@ -500,9 +522,12 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka
 
 /// `MockProducer.commitCount()`.
 ///
+/// A caught Rust panic returns -1, which no count is.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const kafka_producer_MockProducer_t) -> i64 {
     unsafe { mock(self_) }.commit_count()
@@ -515,6 +540,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const 
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -530,6 +556,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -545,6 +572,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -560,6 +588,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -575,6 +604,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -590,6 +620,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -605,6 +636,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -620,6 +652,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transac
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -635,6 +668,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_erro
 ///
 /// `self_` must be a live handle and `error` null or an error not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_abort_transaction_error(
     self_: *const kafka_producer_MockProducer_t,
@@ -649,6 +683,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_abort_transaction_error
 /// # Safety
 ///
 /// `self_`, `name` and `metric` must be live handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_mock_metrics(
     self_: *const kafka_producer_MockProducer_t,
@@ -670,6 +705,7 @@ unsafe fn builder<'a>(self_: *mut kafka_producer_MockProducerOptionsBuilder_t) -
 
 /// `MockProducerOptionsBuilder::new()`: owned, freed with
 /// [`kafka_producer_MockProducerOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducerOptionsBuilder_new() -> *mut kafka_producer_MockProducerOptionsBuilder_t {
     Box::into_raw(Box::new(BuilderInner::default())) as *mut kafka_producer_MockProducerOptionsBuilder_t
@@ -680,6 +716,7 @@ pub extern "C" fn kafka_producer_MockProducerOptionsBuilder_new() -> *mut kafka_
 /// # Safety
 ///
 /// `self_` and `cluster` must be live handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_cluster(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -693,6 +730,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_cluster(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_auto_complete(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -708,6 +746,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_auto_comp
 /// # Safety
 ///
 /// `self_` must be a live handle and `partitioner` null or a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partitioner(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -723,6 +762,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partition
 /// # Safety
 ///
 /// `self_` must be a live handle and `key_serializer` null or a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_serializer(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -738,6 +778,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_seria
 /// # Safety
 ///
 /// `self_` must be a live handle and `value_serializer` null or a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_serializer(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -755,6 +796,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_ser
 /// # Safety
 ///
 /// `self_` must be a live handle and `out_build` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -790,6 +832,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_destroy(
     self_: *mut kafka_producer_MockProducerOptionsBuilder_t,
@@ -804,6 +847,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_destroy(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptions_destroy(self_: *mut kafka_producer_MockProducerOptions_t) {
     if !self_.is_null() {

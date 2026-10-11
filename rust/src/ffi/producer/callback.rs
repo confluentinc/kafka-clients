@@ -38,6 +38,7 @@ use std::sync::Arc;
 use crate::common::Error;
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
 use crate::ffi::common::{box_error, kafka_common_Error_destroy, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::producer::record_metadata::{
     box_record_metadata, kafka_producer_RecordMetadata_destroy, kafka_producer_RecordMetadata_t,
 };
@@ -113,6 +114,7 @@ pub(crate) unsafe fn callback_registration(callback: *const kafka_producer_Callb
 /// keeps it alive until the callback fired; the handle is freed with
 /// [`kafka_producer_Callback_destroy`], at any time after the `send` that
 /// took it returned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_Callback_new(
     self_: *mut c_void,
@@ -129,6 +131,7 @@ pub extern "C" fn kafka_producer_Callback_new(
 ///
 /// `self_` must be a live handle; `metadata` and `error` null or live
 /// handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
     self_: *const kafka_producer_Callback_t,
@@ -143,6 +146,7 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_destroy(self_: *mut kafka_producer_Callback_t) {
     if !self_.is_null() {

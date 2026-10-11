@@ -42,6 +42,7 @@ use crate::ffi::common::serialization::serializer::{
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::consumer::kafka_consumer_ConsumerGroupMetadata_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::producer::callback::kafka_producer_Callback_t;
 use crate::ffi::producer::producer_config::{kafka_producer_ProducerConfig_t, producer_config_ref};
@@ -160,6 +161,7 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 ///
 /// `config` must be a live handle, each serializer null or a live handle,
 /// `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     config: *const kafka_producer_ProducerConfig_t,
@@ -189,6 +191,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer__as_Producer(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -202,6 +205,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer__as_Producer(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -214,6 +218,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -229,6 +234,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -242,6 +248,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
 /// # Safety
 ///
 /// `self_`, `offsets` and `group_metadata` must be live handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -256,6 +263,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 /// # Safety
 ///
 /// `self_`, `offsets` and `group_metadata` must be live handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -275,6 +283,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -287,6 +296,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -302,6 +312,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -314,6 +325,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -330,6 +342,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle, `out_send` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -347,6 +360,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -365,6 +379,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_destroy(self_: *mut kafka_producer_KafkaProducer_t) {
     if !self_.is_null() {

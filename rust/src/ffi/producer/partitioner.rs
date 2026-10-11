@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::common::Cluster;
 use crate::ffi::common::cluster::{box_cluster, kafka_common_Cluster_destroy, kafka_common_Cluster_t};
 use crate::ffi::common::metrics::Interface;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     GenericValue, box_string_map, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, map_strings,
     owned_c_string,
@@ -211,6 +212,7 @@ impl Partitioner<GenericValue, GenericValue> for CPartitioner {
 /// is consumed by the `*mut` parameter that receives it or freed with
 /// [`kafka_producer_Partitioner_destroy`]. `configure` and `close` may be
 /// `NULL` for the Java default (a no-op).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_Partitioner_new(
     self_: *mut c_void,
@@ -228,6 +230,7 @@ pub extern "C" fn kafka_producer_Partitioner_new(
 /// # Safety
 ///
 /// `self_` must be a live handle and `configs` a live map of C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
     self_: *mut kafka_producer_Partitioner_t,
@@ -248,6 +251,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
 ///
 /// `self_` and `cluster` must be live handles; `topic` a NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
     self_: *const kafka_producer_Partitioner_t,
@@ -280,6 +284,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Partitioner_close(self_: *const kafka_producer_Partitioner_t) {
     unsafe { partitioner_ref(self_) }
@@ -294,6 +299,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_close(self_: *const kafka_pr
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not consumed or destroyed before.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Partitioner_destroy(self_: *mut kafka_producer_Partitioner_t) {
     unsafe { Interface::<SharedPartitioner>::destroy(self_ as *mut Interface<SharedPartitioner>) };
