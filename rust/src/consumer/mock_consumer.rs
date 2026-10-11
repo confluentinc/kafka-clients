@@ -318,6 +318,17 @@ impl<K, V> MockConsumer<K, V> {
         self.poll_tasks.push_back(task);
     }
 
+    /// Schedule a task that does nothing to run on the next
+    /// [`Consumer::poll`] call: it takes that call's slot in the FIFO, so a
+    /// task scheduled after it runs one `poll` later.
+    ///
+    /// Translates Java's `scheduleNopPollTask()`, which schedules
+    /// `() -> { }` through `schedulePollTask`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask")]
+    pub fn schedule_nop_poll_task(&mut self) {
+        self.schedule_poll_task(Box::new(|_| {}));
+    }
+
     /// Return whether the consumer has been closed.
     ///
     /// Translates Java's `closed()`.
@@ -1168,6 +1179,24 @@ mod tests {
         c.closed = true;
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalState(_)));
+    }
+
+    /// Java's `scheduleNopPollTask()` queues `() -> { }` like any other poll
+    /// task (`MockConsumer.java:609-611`): it consumes one `poll`, so the
+    /// task scheduled after it runs on the next one.
+    #[tokio::test]
+    async fn schedule_nop_poll_task_takes_one_poll() {
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
+        c.schedule_nop_poll_task();
+        c.schedule_poll_task(Box::new(|c| c.reset_should_rebalance()));
+        c.should_rebalance = true;
+
+        c.poll(Duration::from_millis(0)).await.expect("poll");
+        assert!(c.should_rebalance(), "the first poll ran the no-op task");
+        c.poll(Duration::from_millis(0)).await.expect("poll");
+        assert!(!c.should_rebalance(), "the second poll ran the task scheduled after it");
+        assert!(c.poll_tasks.is_empty());
     }
 
     /// Java's `setPollException(null)` clears a pending poll exception

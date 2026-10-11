@@ -351,6 +351,18 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(self
     unsafe { with_mock_void(self_, "resetShouldRebalance", Mock::reset_should_rebalance) }
 }
 
+/// `scheduleNopPollTask()`: queues a task that does nothing, consuming the
+/// next `poll`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self_: *mut kafka_consumer_MockConsumer_t) {
+    // SAFETY: the caller passes a live mock handle (see `# Safety`).
+    unsafe { with_mock_void(self_, "scheduleNopPollTask", Mock::schedule_nop_poll_task) }
+}
+
 /// `lastPollTimeout()`: the last `poll` timeout in milliseconds, `-1` when
 /// `poll` never ran (and while an operation is in flight).
 ///
@@ -709,6 +721,35 @@ mod tests {
         unsafe {
             kafka_List_destroy(assignment);
             kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// `scheduleNopPollTask()` queues a real (empty) poll task: the first
+    /// `poll` consumes it, so a task scheduled after it runs on the second.
+    #[test]
+    fn schedule_nop_poll_task_consumes_one_poll() {
+        let (mock, consumer) = new_mock();
+        let ran = std::sync::Arc::new(AtomicI32::new(0));
+        let counter = std::sync::Arc::clone(&ran);
+        // SAFETY: `mock` and its `consumer` view stay live until the mock is
+        // destroyed last; each `records` is a fresh handle destroyed once.
+        unsafe {
+            kafka_consumer_MockConsumer_schedule_nop_poll_task(mock);
+            with_mock(mock, move |m| {
+                m.schedule_poll_task(Box::new(move |_| {
+                    counter.fetch_add(1, SeqCst);
+                }))
+            })
+            .expect("no other call in flight");
+
+            for expected in [0, 1] {
+                let mut records = ptr::null_mut();
+                assert!(kafka_consumer_Consumer_poll(consumer, 0, &mut records).is_null());
+                assert_eq!(kafka_consumer_ConsumerRecords_count(records), 0);
+                kafka_consumer_ConsumerRecords_destroy(records);
+                assert_eq!(ran.load(SeqCst), expected);
+            }
             kafka_consumer_MockConsumer_destroy(mock);
         }
     }

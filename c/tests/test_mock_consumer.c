@@ -1092,6 +1092,30 @@ static void test_mock_consumer_poll_error(void) {
 }
 
 // ---------------------------------------------------------------------------
+// scheduleNopPollTask queues a task that does nothing: each poll consumes one
+// and still returns the records, as Java's `() -> { }` does
+// ---------------------------------------------------------------------------
+
+static void test_mock_consumer_schedule_nop_poll_task(void) {
+    fixture_t f;
+    make_assigned_mock(&f, "test", 0);
+    kafka_consumer_MockConsumer_schedule_nop_poll_task(f.mock);
+    kafka_consumer_MockConsumer_schedule_nop_poll_task(f.mock);
+    add_record(f.mock, "test", 0, 0, NULL, &VALUE);
+
+    kafka_consumer_ConsumerRecords_t *records = poll_ok(f.consumer, 0);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
+    kafka_consumer_ConsumerRecords_destroy(records);
+
+    records = poll_ok(f.consumer, 0);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_ConsumerRecords_count(records));
+    kafka_consumer_ConsumerRecords_destroy(records);
+    TEST_ASSERT_EQUAL_INT64(0, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
+
+    fixture_destroy(&f);
+}
+
+// ---------------------------------------------------------------------------
 // setMaxPollRecords caps a poll; lastPollTimeout records what poll was given
 // ---------------------------------------------------------------------------
 
@@ -1335,6 +1359,7 @@ int main(void) {
     RUN_TEST(test_consumer_record_with_options);
     RUN_TEST(test_mock_consumer_poll_error);
     RUN_TEST(test_mock_consumer_max_poll_records_and_last_poll_timeout);
+    RUN_TEST(test_mock_consumer_schedule_nop_poll_task);
     RUN_TEST(test_mock_consumer_subscribe_cb);
     RUN_TEST(test_mock_consumer_callbacks_notify_once_per_transition);
     RUN_TEST(test_mock_consumer_destroy_runs_pending_completion_once);
