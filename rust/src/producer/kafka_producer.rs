@@ -697,8 +697,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///   [`KafkaProducerOptionsBuilder`]. [`KafkaProducerOptions`] is this
     ///   method's only parameter because the derived name would list ten
     ///   parameters, past CLAUDE.md §2's cap of three.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalArgument`] when `metrics.num.samples` is below 1, as
+    /// Java's `MetricConfig.samples` throws in the same constructor.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer")]
-    pub(crate) fn with_options(options: KafkaProducerOptions<'_, K, V>) -> Self {
+    pub(crate) fn with_options(options: KafkaProducerOptions<'_, K, V>) -> Result<Self, Error> {
         let KafkaProducerOptions {
             config,
             key_serializer,
@@ -715,8 +720,8 @@ impl<K, V> KafkaProducer<K, V> {
             partitioner,
         } = options;
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
-        let (metrics, producer_metrics) = Self::create_metrics(config);
-        Self {
+        let (metrics, producer_metrics) = Self::create_metrics(config)?;
+        Ok(Self {
             client_id: config.client_id.clone(),
             key_serializer,
             value_serializer,
@@ -739,7 +744,7 @@ impl<K, V> KafkaProducer<K, V> {
             metrics,
             producer_metrics,
             log_context,
-        }
+        })
     }
 
     /// Creates a `KafkaProducer` from configuration, serializers, and an optional
@@ -967,7 +972,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    the constructor (`KafkaProducer.java:357`), before the
         //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
         //    handed the same `Metrics` instance.
-        let (metrics, producer_metrics) = Self::create_metrics(&config);
+        let (metrics, producer_metrics) = Self::create_metrics(&config)?;
 
         // 9. Create the TransactionManager, before the accumulator and the Sender
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
@@ -1238,7 +1243,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
     /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
     /// registry is reporter-less but fully functional.
-    fn create_metrics(config: &ProducerConfig) -> (Arc<Metrics>, KafkaProducerMetrics) {
+    fn create_metrics(config: &ProducerConfig) -> Result<(Arc<Metrics>, KafkaProducerMetrics), Error> {
         const CLIENT_ID_METRIC_TAG: &str = "client-id";
 
         let mut tags = std::collections::BTreeMap::new();
@@ -1246,14 +1251,14 @@ impl<K, V> KafkaProducer<K, V> {
 
         let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
         let metric_config = MetricConfig::new()
-            .set_samples(config.metrics_num_samples)
+            .set_samples(config.metrics_num_samples)?
             .set_time_window_ms(config.metrics_sample_window_ms)
             .set_record_level(recording_level)
             .set_tags(tags);
 
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
-        (metrics, producer_metrics)
+        Ok((metrics, producer_metrics))
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -2752,6 +2757,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// A serializer that always fails with a caller-chosen error, so `do_send`'s
@@ -2781,6 +2787,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// Java's only catch around the serializer call is
@@ -3670,6 +3677,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// Translated from `KafkaProducerTest.testPartitionerClose` (`:667-686`).
@@ -4502,7 +4510,8 @@ mod tests {
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-        );
+        )
+        .unwrap();
 
         let mut headers = RecordHeaders::new();
         headers.add_with_key_value("trace", Some(b"abc")).unwrap();
@@ -4836,7 +4845,8 @@ mod tests {
                     .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
             let cluster = metadata.fetch();
 
             // Warm up: create the topic info, the deque and the batch.
@@ -4918,7 +4928,8 @@ mod tests {
                     .set_partitioner(partitioner)
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
             let cluster = metadata.fetch();
 
             // Warm up: create the topic info, the deque and the batch, and (for the
@@ -5153,7 +5164,8 @@ mod tests {
                     .set_pending_requests(pending_requests)
                     .build()
                     .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
-            );
+            )
+            .unwrap();
 
             Self { producer, sender, accumulator, metadata, transaction_manager, time }
         }
@@ -6783,6 +6795,7 @@ mod tests {
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
         )
+        .unwrap()
     }
 
     /// The body all three `testCloseIsForcedOn*` methods share: start

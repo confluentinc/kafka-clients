@@ -1215,7 +1215,7 @@ mod tests {
         let (name, group, description) = (c("n"), c("g"), c("d"));
         unsafe {
             let config = kafka_common_metrics_MetricConfig_new();
-            kafka_common_metrics_MetricConfig_set_samples(config, 7);
+            assert!(kafka_common_metrics_MetricConfig_set_samples(config, 7).is_null());
             let registry = kafka_common_metrics_Metrics_with_default_config(config);
             let shared = kafka_common_metrics_Metrics_config(registry);
             assert_eq!(kafka_common_metrics_MetricConfig_samples(shared), 7);

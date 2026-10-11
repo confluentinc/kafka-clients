@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::common::Error;
 use crate::common::metrics::TimeUnit;
 use crate::common::metrics::{Quota, RecordingLevel};
 
@@ -122,14 +123,20 @@ impl MetricConfig {
         self.samples
     }
 
-    /// Set the number of samples. Panics if `samples < 1`, mirroring Java's
-    /// `IllegalArgumentException` — this is a configuration-time programming
-    /// error rather than a recoverable runtime condition.
+    /// Set the number of samples.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LocalIllegalArgument`] with Java's message when `samples < 1`
+    /// (Java throws `IllegalArgumentException`); the config is consumed either
+    /// way.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
-    pub fn set_samples(mut self, samples: i32) -> Self {
-        assert!(samples >= 1, "The number of samples must be at least 1.");
+    pub fn set_samples(mut self, samples: i32) -> Result<Self, Error> {
+        if samples < 1 {
+            return Err(Error::local_illegal_argument("The number of samples must be at least 1."));
+        }
         self.samples = samples;
-        self
+        Ok(self)
     }
 
     /// The recording level.
@@ -162,8 +169,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "The number of samples must be at least 1.")]
-    fn samples_below_one_panics() {
-        let _ = MetricConfig::new().set_samples(0);
+    fn samples_below_one_is_rejected() {
+        for samples in [0, -1, i32::MIN] {
+            let error = MetricConfig::new().set_samples(samples).unwrap_err();
+            assert!(error.is_local_illegal_argument_error());
+            assert_eq!(error.message(), "The number of samples must be at least 1.");
+        }
+        assert_eq!(MetricConfig::new().set_samples(1).unwrap().samples(), 1);
+        assert_eq!(MetricConfig::new().set_samples(i32::MAX).unwrap().samples(), i32::MAX);
     }
 }

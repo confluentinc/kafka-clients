@@ -33,6 +33,7 @@ use crate::ffi::common::metrics::sensor::{
     kafka_common_metrics_Sensor_RecordingLevel_t, recording_level_of, recording_level_singleton,
 };
 use crate::ffi::common::metrics::time_unit::{kafka_common_metrics_TimeUnit_t, value_of as time_unit_of};
+use crate::ffi::common::{box_error, kafka_common_Error_t};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_map, kafka_Map_t, map_strings};
 
@@ -291,6 +292,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
 
 /// `samples(int samples)`: at least 1, as Java requires.
 ///
+/// Returns `NULL` on success. Below 1 it returns a
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT` error ("The number of
+/// samples must be at least 1.", Java's `IllegalArgumentException`) and leaves
+/// the config unchanged; the caller owns the error.
+///
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
@@ -299,8 +305,15 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
     self_: *mut kafka_common_metrics_MetricConfig_t,
     samples: i32,
-) {
-    unsafe { inner_mut(self_) }.update(|config| config.set_samples(samples));
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { inner_mut(self_) };
+    match inner.config().clone().set_samples(samples) {
+        Ok(updated) => {
+            inner.update(|_| updated);
+            ptr::null_mut()
+        },
+        Err(error) => box_error(error),
+    }
 }
 
 /// `recordLevel()`: the recording-level singleton.
@@ -358,6 +371,7 @@ mod tests {
         kafka_common_metrics_Sensor_RecordingLevel_debug, kafka_common_metrics_Sensor_RecordingLevel_info,
     };
     use crate::ffi::common::metrics::time_unit::kafka_common_metrics_TimeUnit_seconds;
+    use crate::ffi::common::take_error;
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_new, kafka_Map_put};
 
     #[test]
@@ -386,7 +400,7 @@ mod tests {
             kafka_common_metrics_Quota_destroy(quota);
             kafka_common_metrics_MetricConfig_set_event_window(handle, 7);
             kafka_common_metrics_MetricConfig_set_time_window(handle, 3, kafka_common_metrics_TimeUnit_seconds());
-            kafka_common_metrics_MetricConfig_set_samples(handle, 4);
+            assert!(kafka_common_metrics_MetricConfig_set_samples(handle, 4).is_null());
             kafka_common_metrics_MetricConfig_set_record_level(
                 handle,
                 kafka_common_metrics_Sensor_RecordingLevel_debug(),
@@ -426,8 +440,24 @@ mod tests {
     }
 
     #[test]
+    fn set_samples_below_one_returns_javas_error_and_keeps_the_config() {
+        let handle = box_metric_config(Arc::new(MetricConfig::new()));
+        unsafe {
+            assert!(kafka_common_metrics_MetricConfig_set_samples(handle, 5).is_null());
+            for samples in [0, -1, i32::MIN] {
+                let error = take_error(kafka_common_metrics_MetricConfig_set_samples(handle, samples))
+                    .expect("samples below 1 is an error");
+                assert!(error.is_local_illegal_argument_error());
+                assert_eq!(error.message(), "The number of samples must be at least 1.");
+                assert_eq!(kafka_common_metrics_MetricConfig_samples(handle), 5, "unchanged");
+            }
+            kafka_common_metrics_MetricConfig_destroy(handle);
+        }
+    }
+
+    #[test]
     fn a_borrowed_handle_reads_the_config_and_copies_it_into_an_arc() {
-        let config = MetricConfig::new().set_samples(9);
+        let config = MetricConfig::new().set_samples(9).unwrap();
         let borrowed = MetricConfigInner::borrowed(&config);
         unsafe {
             assert_eq!(kafka_common_metrics_MetricConfig_samples(borrowed.as_ptr()), 9);

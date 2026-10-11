@@ -1903,7 +1903,7 @@ where
         // the fetch path (FetchRequestManager / FetchCollector). The full
         // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
         // M7 over THIS same registry — no re-plumb.
-        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time))?;
 
         // M4: the consumer-level + heartbeat + offset-commit metrics managers
         // all register against the SAME `Arc<Metrics>` registry. Java
@@ -2653,11 +2653,13 @@ where
     /// list and the JMX context are deferred to Phase M7; for M3 the registry is
     /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
     /// (kept on the consumer for M7's public accessor) and the
-    /// `Arc<FetchMetricsManager>` shared into the fetch path.
+    /// `Arc<FetchMetricsManager>` shared into the fetch path, or
+    /// [`Error::LocalIllegalArgument`] when `metrics.num.samples` is below 1
+    /// (Java's `MetricConfig.samples` throws `IllegalArgumentException`).
     fn create_fetch_metrics_manager(
         config: &ConsumerConfig,
         time: Arc<dyn Time>,
-    ) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+    ) -> Result<(Arc<Metrics>, Arc<FetchMetricsManager>), Error> {
         const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
         const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
 
@@ -2666,7 +2668,7 @@ where
 
         let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
         let metric_config = MetricConfig::new()
-            .set_samples(config.metrics_num_samples)
+            .set_samples(config.metrics_num_samples)?
             .set_time_window_ms(config.metrics_sample_window_ms)
             .set_record_level(recording_level)
             .set_tags(tags);
@@ -2681,7 +2683,7 @@ where
         let registry = FetchMetricsRegistry::new(registry_tags, CONSUMER_METRIC_GROUP_PREFIX);
 
         let manager = Arc::new(FetchMetricsManager::new(Arc::clone(&metrics), registry));
-        (metrics, manager)
+        Ok((metrics, manager))
     }
 
     pub(crate) fn with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
@@ -6412,7 +6414,7 @@ mod tests {
         );
         let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
         let (metrics, fetch_metrics_manager) =
-            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config, Arc::clone(&time));
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config, Arc::clone(&time)).unwrap();
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
         let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
             Arc::clone(&metrics),
