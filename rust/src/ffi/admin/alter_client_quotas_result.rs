@@ -27,6 +27,7 @@ use crate::ffi::common::quota::client_quota_entity::{
     kafka_common_quota_ClientQuotaEntity_t, sorted_entries,
 };
 use crate::ffi::common::take_error;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
 };
@@ -119,6 +120,7 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// `futures` must be null or a valid map whose keys are client-quota-entity
 /// handles and whose values are future handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_new(
     futures: *const kafka_Map_t,
@@ -145,6 +147,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_new(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_values(
     self_: *const kafka_admin_AlterClientQuotasResult_t,
@@ -168,6 +171,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
     self_: *const kafka_admin_AlterClientQuotasResult_t,
@@ -182,6 +186,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
     self_: *mut kafka_admin_AlterClientQuotasResult_t,

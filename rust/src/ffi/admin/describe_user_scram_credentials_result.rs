@@ -26,6 +26,7 @@ use crate::ffi::admin::user_scram_credentials_description::{
 use crate::ffi::admin::{
     FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_map_element, destroy_result, result_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_string_keyed_map, box_string_list, c_str_to_string};
 
@@ -72,6 +73,7 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -88,6 +90,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -110,6 +113,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
 ///
 /// `self_` must be a live result handle and `user_name` a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_description(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -130,6 +134,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
     self_: *mut kafka_admin_DescribeUserScramCredentialsResult_t,

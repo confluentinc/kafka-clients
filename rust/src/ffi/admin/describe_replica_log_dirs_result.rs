@@ -30,6 +30,7 @@ use crate::ffi::common::topic_partition_replica::{
     kafka_common_TopicPartitionReplica_new, kafka_common_TopicPartitionReplica_partition,
     kafka_common_TopicPartitionReplica_t, kafka_common_TopicPartitionReplica_topic,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_map, into_c_string, kafka_Map_t, owned_c_string};
 
@@ -111,6 +112,7 @@ pub(crate) unsafe fn destroy_replica_log_dir_info_element(element: *mut c_void) 
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_log_dir(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -123,6 +125,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_offset_lag(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -136,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_log_dir(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -148,6 +152,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_offset_lag(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -160,6 +165,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_to_string(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -172,6 +178,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_destroy(
     self_: *mut kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
@@ -279,6 +286,7 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_values(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -311,6 +319,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -325,6 +334,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
     self_: *mut kafka_admin_DescribeReplicaLogDirsResult_t,

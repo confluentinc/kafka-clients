@@ -18,6 +18,7 @@
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::MemberToRemove;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, owned_c_string};
 
 /// Opaque handle to a [`MemberToRemove`].
@@ -74,6 +75,7 @@ pub(crate) unsafe fn destroy_member_to_remove_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `group_instance_id` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberToRemove_new(
     group_instance_id: *const c_char,
@@ -87,6 +89,7 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_new(
 /// # Safety
 ///
 /// `self_` must be a valid member-to-remove handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberToRemove_group_instance_id(
     self_: *const kafka_admin_MemberToRemove_t,
@@ -99,6 +102,7 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_group_instance_id(
 /// # Safety
 ///
 /// `self_` must be null or an owned member handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberToRemove_destroy(self_: *mut kafka_admin_MemberToRemove_t) {
     if !self_.is_null() {

@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::AlterConfigsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`AlterConfigsOptions`], owned by the caller and freed with
 /// [`kafka_admin_AlterConfigsOptions_destroy`].
@@ -54,6 +55,7 @@ fn boxed(options: AlterConfigsOptions) -> *mut kafka_admin_AlterConfigsOptions_t
 
 /// `new AlterConfigsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_AlterConfigsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigsOptions_new() -> *mut kafka_admin_AlterConfigsOptions_t {
     boxed(AlterConfigsOptions::new())
@@ -65,6 +67,7 @@ pub extern "C" fn kafka_admin_AlterConfigsOptions_new() -> *mut kafka_admin_Alte
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_timeout_ms(
     self_: *mut kafka_admin_AlterConfigsOptions_t,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_timeout_ms(
     self_: *const kafka_admin_AlterConfigsOptions_t,
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_validate_only(
     self_: *mut kafka_admin_AlterConfigsOptions_t,
@@ -106,6 +111,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_validate_only(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_should_validate_only(
     self_: *const kafka_admin_AlterConfigsOptions_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_should_validate_only(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_destroy(self_: *mut kafka_admin_AlterConfigsOptions_t) {
     if !self_.is_null() {

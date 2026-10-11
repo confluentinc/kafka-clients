@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::DescribeClusterOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`DescribeClusterOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeClusterOptions_destroy`].
@@ -54,6 +55,7 @@ fn boxed(options: DescribeClusterOptions) -> *mut kafka_admin_DescribeClusterOpt
 
 /// `new DescribeClusterOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_DescribeClusterOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeClusterOptions_new() -> *mut kafka_admin_DescribeClusterOptions_t {
     boxed(DescribeClusterOptions::new())
@@ -65,6 +67,7 @@ pub extern "C" fn kafka_admin_DescribeClusterOptions_new() -> *mut kafka_admin_D
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeClusterOptions_t,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_timeout_ms(
     self_: *const kafka_admin_DescribeClusterOptions_t,
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_include_authorized_operations(
     self_: *mut kafka_admin_DescribeClusterOptions_t,
@@ -106,6 +111,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_include_authoriz
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_include_authorized_operations(
     self_: *const kafka_admin_DescribeClusterOptions_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_include_authorized_o
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_include_fenced_brokers(
     self_: *mut kafka_admin_DescribeClusterOptions_t,
@@ -132,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_set_include_fenced_b
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_include_fenced_brokers(
     self_: *const kafka_admin_DescribeClusterOptions_t,
@@ -144,6 +152,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_include_fenced_broke
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterOptions_destroy(self_: *mut kafka_admin_DescribeClusterOptions_t) {
     if !self_.is_null() {

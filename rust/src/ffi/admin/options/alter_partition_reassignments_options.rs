@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::AlterPartitionReassignmentsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`AlterPartitionReassignmentsOptions`], owned by the caller and freed with
 /// [`kafka_admin_AlterPartitionReassignmentsOptions_destroy`].
@@ -56,6 +57,7 @@ fn boxed(options: AlterPartitionReassignmentsOptions) -> *mut kafka_admin_AlterP
 
 /// `new AlterPartitionReassignmentsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_AlterPartitionReassignmentsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_new()
 -> *mut kafka_admin_AlterPartitionReassignmentsOptions_t {
@@ -68,6 +70,7 @@ pub extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_new()
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_timeout_ms(
     self_: *mut kafka_admin_AlterPartitionReassignmentsOptions_t,
@@ -83,6 +86,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_time
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_timeout_ms(
     self_: *const kafka_admin_AlterPartitionReassignmentsOptions_t,
@@ -97,6 +101,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_timeout_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_allow_replication_factor_change(
     self_: *mut kafka_admin_AlterPartitionReassignmentsOptions_t,
@@ -111,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_allo
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_allow_replication_factor_change(
     self_: *const kafka_admin_AlterPartitionReassignmentsOptions_t,
@@ -123,6 +129,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_allow_re
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_destroy(
     self_: *mut kafka_admin_AlterPartitionReassignmentsOptions_t,

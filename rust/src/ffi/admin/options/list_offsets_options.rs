@@ -22,6 +22,7 @@
 
 use crate::admin::ListOffsetsOptions;
 use crate::ffi::common::isolation_level::{self as isolation_level_ffi, kafka_common_IsolationLevel_t};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`ListOffsetsOptions`], owned by the caller and freed
 /// with [`kafka_admin_ListOffsetsOptions_destroy`].
@@ -56,6 +57,7 @@ fn boxed(options: ListOffsetsOptions) -> *mut kafka_admin_ListOffsetsOptions_t {
 
 /// `new ListOffsetsOptions()`: `READ_UNCOMMITTED`, with the client's default
 /// API timeout. Owned, freed with [`kafka_admin_ListOffsetsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListOffsetsOptions_new() -> *mut kafka_admin_ListOffsetsOptions_t {
     boxed(ListOffsetsOptions::new())
@@ -68,6 +70,7 @@ pub extern "C" fn kafka_admin_ListOffsetsOptions_new() -> *mut kafka_admin_ListO
 /// # Safety
 ///
 /// `isolation_level` must be a `kafka_common_IsolationLevel_t` singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_with_isolation_level(
     isolation_level: *const kafka_common_IsolationLevel_t,
@@ -83,6 +86,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_with_isolation_level(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_set_timeout_ms(
     self_: *mut kafka_admin_ListOffsetsOptions_t,
@@ -98,6 +102,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_timeout_ms(
     self_: *const kafka_admin_ListOffsetsOptions_t,
@@ -111,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_isolation_level(
     self_: *const kafka_admin_ListOffsetsOptions_t,
@@ -123,6 +129,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_isolation_level(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_destroy(self_: *mut kafka_admin_ListOffsetsOptions_t) {
     if !self_.is_null() {

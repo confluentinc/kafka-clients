@@ -21,6 +21,7 @@ use crate::admin::AdminClient;
 use crate::ffi::admin::admin_client_config::{admin_client_config_ref, kafka_admin_AdminClientConfig_t};
 use crate::ffi::admin::{AdminClassHandle, kafka_admin_Admin_t, out_slot};
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 
 /// `AdminClient.create(AdminClientConfig)`: builds a `KafkaAdminClient` and
 /// delivers it as an owned `Admin_t`, freed with `kafka_admin_Admin_destroy`.
@@ -29,6 +30,7 @@ use crate::ffi::common::kafka_common_Error_t;
 /// # Safety
 ///
 /// `config` must be a live handle and `out_create` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create(
     config: *const kafka_admin_AdminClientConfig_t,

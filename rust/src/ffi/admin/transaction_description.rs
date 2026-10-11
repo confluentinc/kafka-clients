@@ -27,6 +27,7 @@ use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`TransactionDescription`].
@@ -77,6 +78,7 @@ pub(crate) unsafe fn destroy_transaction_description_element(element: *mut c_voi
 ///
 /// `state` must be a transaction-state singleton and `topic_partitions` null
 /// or a valid list of topic-partition handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
     coordinator_id: i32,
@@ -105,6 +107,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_coordinator_id(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -117,6 +120,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_coordinator_id(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_state(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -129,6 +133,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_state(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_id(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -141,6 +146,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_id(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_epoch(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -153,6 +159,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_timeout_ms(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -166,6 +173,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_timeout_
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_start_time_ms(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -181,6 +189,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_start_ti
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_topic_partitions(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -193,6 +202,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_topic_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_to_string(
     self_: *const kafka_admin_TransactionDescription_t,
@@ -205,6 +215,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_destroy(self_: *mut kafka_admin_TransactionDescription_t) {
     if !self_.is_null() {

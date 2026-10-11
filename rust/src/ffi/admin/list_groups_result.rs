@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::ffi::admin::group_listing::{box_group_listing, destroy_group_listing_element};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_result, result_ref};
 use crate::ffi::common::{box_error, kafka_common_Error_destroy, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::box_list;
 
@@ -61,6 +62,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListGroupsResult_t) -> &'a Result
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
     self_: *const kafka_admin_ListGroupsResult_t,
@@ -77,6 +79,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
     self_: *const kafka_admin_ListGroupsResult_t,
@@ -92,6 +95,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
     self_: *const kafka_admin_ListGroupsResult_t,
@@ -113,6 +117,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(self_: *mut kafka_admin_ListGroupsResult_t) {
     unsafe { destroy_result::<ListGroupsResult, _>(self_) }

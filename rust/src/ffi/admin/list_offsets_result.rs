@@ -29,6 +29,7 @@ use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
     topic_partition_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_map, into_c_string};
 
@@ -78,6 +79,7 @@ pub(crate) unsafe fn destroy_list_offsets_result_info_element(element: *mut c_vo
 /// `new ListOffsetsResultInfo(long offset, long timestamp, Optional<Integer>
 /// leaderEpoch)`: `leader_epoch` is `-1` for Java's empty `Optional`. Owned,
 /// freed with [`kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_new(
     offset: i64,
@@ -93,6 +95,7 @@ pub extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_new(
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_off
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_timestamp(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -117,6 +121,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_tim
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -129,6 +134,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_lea
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_to_string(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -141,6 +147,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_to_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_destroy(
     self_: *mut kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -214,6 +221,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListOffsetsResult_t) -> &'a Resul
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
 /// handle and `out_partition_result` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
     self_: *const kafka_admin_ListOffsetsResult_t,
@@ -242,6 +250,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
     self_: *const kafka_admin_ListOffsetsResult_t,
@@ -256,6 +265,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(self_: *mut kafka_admin_ListOffsetsResult_t) {
     unsafe { destroy_result::<ListOffsetsResult, _>(self_) }

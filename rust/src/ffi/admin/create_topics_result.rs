@@ -23,6 +23,7 @@ use crate::ffi::admin::config::{box_config, config_ref, destroy_config_element, 
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::common::{kafka_common_Error_t, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{c_str_to_string, kafka_Map_t};
 
@@ -64,6 +65,7 @@ pub(crate) unsafe fn topic_metadata_and_config_ref<'a>(
 ///
 /// `topic_id` must be a valid uuid handle and `config` a valid config
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_new(
     topic_id: *const kafka_common_Uuid_t,
@@ -88,6 +90,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
 /// # Safety
 ///
 /// `error` must be null or an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_with_error(
     error: *mut kafka_common_Error_t,
@@ -104,6 +107,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_w
 /// # Safety
 ///
 /// `self_` must be a valid handle and `out_topic_id` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_topic_id(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
@@ -118,6 +122,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t
 /// # Safety
 ///
 /// `self_` must be a valid handle and `out_num_partitions` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_num_partitions(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
@@ -134,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
 ///
 /// `self_` must be a valid handle and `out_replication_factor` a valid
 /// slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_replication_factor(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
@@ -155,6 +161,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_r
 /// # Safety
 ///
 /// `self_` must be a valid handle and `out_config` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_config(
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
@@ -168,6 +175,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_c
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy(
     self_: *mut kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
@@ -248,6 +256,7 @@ where
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -264,6 +273,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -282,6 +292,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -303,6 +314,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -324,6 +336,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -344,6 +357,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
     self_: *const kafka_admin_CreateTopicsResult_t,
@@ -360,6 +374,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(self_: *mut kafka_admin_CreateTopicsResult_t) {
     unsafe { destroy_result::<CreateTopicsResult, _>(self_) }

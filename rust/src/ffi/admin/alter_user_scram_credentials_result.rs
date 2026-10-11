@@ -22,6 +22,7 @@ use crate::admin::AlterUserScramCredentialsResult;
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
 use crate::ffi::common::take_error;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
 };
@@ -86,6 +87,7 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// `futures` must be null or a valid map whose keys are NUL-terminated
 /// strings and whose values are future handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
     futures: *const kafka_Map_t,
@@ -110,6 +112,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_values(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
@@ -125,6 +128,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
@@ -139,6 +143,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
     self_: *mut kafka_admin_AlterUserScramCredentialsResult_t,

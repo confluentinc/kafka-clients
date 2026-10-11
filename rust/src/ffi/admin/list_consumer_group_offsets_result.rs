@@ -32,6 +32,7 @@ use crate::ffi::common::topic_partition::{
 use crate::ffi::consumer::offset_and_metadata::{
     box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy, kafka_consumer_OffsetAndMetadata_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string};
 
@@ -116,6 +117,7 @@ unsafe fn handle<'a>(
 ///
 /// `self_` must be a live result handle and
 /// `out_partitions_to_offset_and_metadata` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -143,6 +145,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 /// `self_` must be a live result handle, `group_id` a valid NUL-terminated
 /// string and `out_partitions_to_offset_and_metadata_with_group_id` a valid
 /// slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -168,6 +171,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -182,6 +186,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsResult_t,

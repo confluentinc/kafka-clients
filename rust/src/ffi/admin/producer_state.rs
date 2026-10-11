@@ -20,6 +20,7 @@
 use std::ffi::{c_char, c_void};
 
 use crate::admin::ProducerState;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`ProducerState`].
@@ -57,6 +58,7 @@ pub(crate) unsafe fn destroy_producer_state_element(element: *mut c_void) {
 /// currentTransactionStartOffset)`; `coordinator_epoch` and
 /// `current_transaction_start_offset` are `-1` when empty. Owned, freed with
 /// [`kafka_admin_ProducerState_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ProducerState_new(
     producer_id: i64,
@@ -81,6 +83,7 @@ pub extern "C" fn kafka_admin_ProducerState_new(
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kafka_admin_ProducerState_t) -> i64 {
     unsafe { producer_state_ref(self_) }.producer_id()
@@ -91,6 +94,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kaf
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
     unsafe { producer_state_ref(self_) }.producer_epoch()
@@ -101,6 +105,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const kafka_admin_ProducerState_t) -> i32 {
     unsafe { producer_state_ref(self_) }.last_sequence()
@@ -111,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const kafka_admin_ProducerState_t) -> i64 {
     unsafe { producer_state_ref(self_) }.last_timestamp()
@@ -121,6 +127,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
     unsafe { producer_state_ref(self_) }.coordinator_epoch().unwrap_or(-1)
@@ -132,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *con
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_offset(
     self_: *const kafka_admin_ProducerState_t,
@@ -146,6 +154,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_off
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka_admin_ProducerState_t) -> *mut c_char {
     into_c_string(&unsafe { producer_state_ref(self_) }.to_string())
@@ -156,6 +165,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_destroy(self_: *mut kafka_admin_ProducerState_t) {
     if !self_.is_null() {

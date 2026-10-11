@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::NewTopic;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, box_map, box_string_map, c_str_to_string, destroy_boxed, into_c_string, kafka_List_destroy, kafka_List_t,
     kafka_Map_t, list_elements, map_entries, map_strings, owned_c_string,
@@ -108,6 +109,7 @@ unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_factor(
     name: *const c_char,
@@ -130,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 ///
 /// `name` must be a valid NUL-terminated string and `replicas_assignments`
 /// null or a valid map of that shape.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     name: *const c_char,
@@ -146,6 +149,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_NewTopic_t) -> *const c_char {
     unsafe { inner_ref(self_) }.name_c.as_ptr()
@@ -154,9 +158,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_New
 /// `numPartitions()`: `-1` (`CreateTopicsRequest.NO_NUM_PARTITIONS`) when
 /// the broker default applies.
 ///
+/// A caught Rust panic returns 0, which is no valid partition count: -1 is the broker default.
+///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard(fallback = 0)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka_admin_NewTopic_t) -> i32 {
     unsafe { new_topic_ref(self_) }.num_partitions()
@@ -165,9 +172,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka
 /// `replicationFactor()`: `-1` (`CreateTopicsRequest.NO_REPLICATION_FACTOR`)
 /// when the broker default applies.
 ///
+/// A caught Rust panic returns 0, which is no valid replication factor: -1 is the broker default.
+///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard(fallback = 0)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const kafka_admin_NewTopic_t) -> i16 {
     unsafe { new_topic_ref(self_) }.replication_factor()
@@ -182,6 +192,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
     self_: *const kafka_admin_NewTopic_t,
@@ -216,6 +227,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
 ///
 /// `self_` must be a valid new-topic handle and `configs` null or a valid
 /// map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     self_: *mut kafka_admin_NewTopic_t,
@@ -233,6 +245,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_NewTopic_t) -> *mut kafka_Map_t {
     unsafe { new_topic_ref(self_) }
@@ -245,6 +258,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admin_NewTopic_t) -> *mut c_char {
     into_c_string(&unsafe { new_topic_ref(self_) }.to_string())
@@ -255,6 +269,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admi
 /// # Safety
 ///
 /// `self_` must be null or an owned topic handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_destroy(self_: *mut kafka_admin_NewTopic_t) {
     if !self_.is_null() {

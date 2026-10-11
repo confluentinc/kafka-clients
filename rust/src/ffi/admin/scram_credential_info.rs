@@ -23,6 +23,7 @@ use crate::admin::ScramCredentialInfo;
 use crate::ffi::admin::scram_mechanism::{
     kafka_admin_ScramMechanism_t, scram_mechanism_singleton, scram_mechanism_value_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`ScramCredentialInfo`].
@@ -71,6 +72,7 @@ pub(crate) unsafe fn destroy_scram_credential_info_element(element: *mut c_void)
 /// # Safety
 ///
 /// `mechanism` must be a `kafka_admin_ScramMechanism_t` singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
     mechanism: *const kafka_admin_ScramMechanism_t,
@@ -87,6 +89,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
 /// # Safety
 ///
 /// `self_` must be a valid SCRAM-credential-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_mechanism(
     self_: *const kafka_admin_ScramCredentialInfo_t,
@@ -100,6 +103,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_mechanism(
 /// # Safety
 ///
 /// `self_` must be a valid SCRAM-credential-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_iterations(
     self_: *const kafka_admin_ScramCredentialInfo_t,
@@ -112,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_iterations(
 /// # Safety
 ///
 /// `self_` must be a valid SCRAM-credential-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_to_string(
     self_: *const kafka_admin_ScramCredentialInfo_t,
@@ -126,6 +131,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_destroy(self_: *mut kafka_admin_ScramCredentialInfo_t) {
     if !self_.is_null() {

@@ -21,6 +21,7 @@ use crate::admin::DescribeClusterResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_result, result_ref};
 use crate::ffi::common::acl::acl_operation::singleton as acl_operation_singleton;
 use crate::ffi::common::node::{box_node, kafka_common_Node_destroy, kafka_common_Node_t, node_list};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::box_list;
 
@@ -64,6 +65,7 @@ unsafe fn destroy_node_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
     self_: *const kafka_admin_DescribeClusterResult_t,
@@ -84,6 +86,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     self_: *const kafka_admin_DescribeClusterResult_t,
@@ -103,6 +106,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     self_: *const kafka_admin_DescribeClusterResult_t,
@@ -121,6 +125,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations(
     self_: *const kafka_admin_DescribeClusterResult_t,
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(self_: *mut kafka_admin_DescribeClusterResult_t) {
     unsafe { destroy_result::<DescribeClusterResult, _>(self_) }

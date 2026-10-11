@@ -31,6 +31,7 @@ use crate::ffi::admin::member_to_remove::{
 };
 use crate::ffi::admin::out_slot;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`RemoveMembersFromConsumerGroupOptions`], owned by
@@ -99,6 +100,7 @@ fn boxed(options: RemoveMembersFromConsumerGroupOptions) -> *mut kafka_admin_Rem
 /// `new RemoveMembersFromConsumerGroupOptions()`: options removing every
 /// member of the group (`remove_all()` is true). Owned, freed with
 /// [`kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 -> *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t {
@@ -118,6 +120,7 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 ///
 /// `members` must be `NULL` or a list of live member handles;
 /// `out_with_members` must be a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(
     members: *const kafka_List_t,
@@ -144,6 +147,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
 ///
 /// `self_` must be a live handle; `reason` must be `NULL` or a
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -162,6 +166,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_r
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_timeout_ms(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -177,6 +182,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_t
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_members(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -202,6 +208,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_membe
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -218,6 +225,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reaso
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -231,6 +239,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_remov
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_timeout_ms(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupOptions_t,
@@ -245,6 +254,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_timeo
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t,

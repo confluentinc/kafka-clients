@@ -27,6 +27,7 @@ use crate::common::{Error, KafkaFuture, Uuid};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
 use crate::ffi::common::take_error;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common_Uuid_t, uuid_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done, kafka_common_KafkaFuture_t,
 };
@@ -115,6 +116,7 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// `value` must be null or a valid map whose keys are uuid handles and
 /// whose values are future handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_id(
     value: *const kafka_Map_t,
@@ -144,6 +146,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_id(
 ///
 /// `value` must be null or a valid map whose keys are NUL-terminated
 /// strings and whose values are future handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_name(
     value: *const kafka_Map_t,
@@ -161,9 +164,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_by_topic_name(
 
 /// The variant of a result, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_DeleteTopicsResult_BY_TOPIC_ID`, the first enumerator:
+/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
+/// only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard(fallback = kafka_admin_DeleteTopicsResult_e::kafka_admin_DeleteTopicsResult_BY_TOPIC_ID)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult__enum(
     self_: *const kafka_admin_DeleteTopicsResult_t,
@@ -188,6 +196,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult__enum(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_id_values(
     self_: *const kafka_admin_DeleteTopicsResult_t,
@@ -218,6 +227,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_id_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_name_values(
     self_: *const kafka_admin_DeleteTopicsResult_t,
@@ -236,6 +246,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_name_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all(
     self_: *const kafka_admin_DeleteTopicsResult_t,
@@ -250,6 +261,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_destroy(self_: *mut kafka_admin_DeleteTopicsResult_t) {
     unsafe { destroy_result::<DeleteTopicsResult, _>(self_) }

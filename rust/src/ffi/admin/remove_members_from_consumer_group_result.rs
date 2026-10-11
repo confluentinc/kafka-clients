@@ -20,6 +20,7 @@ use crate::admin::RemoveMembersFromConsumerGroupResult;
 use crate::ffi::admin::member_to_remove::{kafka_admin_MemberToRemove_t, member_to_remove_ref};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 
 /// Opaque handle to a [`RemoveMembersFromConsumerGroupResult`], owned and
@@ -50,6 +51,7 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -69,6 +71,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
 ///
 /// `self_` must be a live result handle, `member` a valid member-to-remove
 /// handle and `out_member_result` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -86,6 +89,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(
     self_: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,

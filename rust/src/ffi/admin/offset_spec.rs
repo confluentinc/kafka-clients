@@ -24,6 +24,7 @@
 #![expect(non_camel_case_types)]
 
 use crate::admin::OffsetSpec;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to an [`OffsetSpec`]: a singleton for the kinds without
 /// data, an owned handle for a timestamp spec.
@@ -104,36 +105,42 @@ pub(crate) unsafe fn offset_spec_value_of(spec: *const kafka_admin_OffsetSpec_t)
 }
 
 /// `OffsetSpec.earliest()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST)
 }
 
 /// `OffsetSpec.latest()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST)
 }
 
 /// `OffsetSpec.maxTimestamp()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_max_timestamp() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_MAX_TIMESTAMP)
 }
 
 /// `OffsetSpec.earliestLocal()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_local() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_LOCAL)
 }
 
 /// `OffsetSpec.latestTiered()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest_tiered() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST_TIERED)
 }
 
 /// `OffsetSpec.earliestPendingUpload()`: a borrowed singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_pending_upload() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_PENDING_UPLOAD)
@@ -141,6 +148,7 @@ pub extern "C" fn kafka_admin_OffsetSpec_earliest_pending_upload() -> *const kaf
 
 /// `OffsetSpec.forTimestamp(long timestamp)`: an owned `TimestampSpec`
 /// handle, freed with [`kafka_admin_OffsetSpec_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut kafka_admin_OffsetSpec_t {
     box_offset_spec(OffsetSpec::for_timestamp(timestamp))
@@ -150,6 +158,7 @@ pub extern "C" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut k
 /// value carrying data is built by the Java static factory), the same as
 /// [`kafka_admin_OffsetSpec_for_timestamp`]: an owned handle freed with
 /// [`kafka_admin_OffsetSpec_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_admin_OffsetSpec_t {
     box_offset_spec(OffsetSpec::Timestamp(value))
@@ -157,10 +166,15 @@ pub extern "C" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_adm
 
 /// The C enumerator of a handle, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_OffsetSpec_EARLIEST`, the first enumerator: the enum
+/// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a handle returned by this module and, if owned, not yet
 /// destroyed.
+#[ffi_guard(fallback = kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
     self_: *const kafka_admin_OffsetSpec_t,
@@ -173,6 +187,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
 /// # Safety
 ///
 /// `self_` must be null, a singleton, or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetSpec_destroy(self_: *mut kafka_admin_OffsetSpec_t) {
     if !self_.is_null() && !is_singleton(self_) {

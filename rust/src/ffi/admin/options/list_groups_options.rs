@@ -29,6 +29,7 @@ use crate::admin::ListGroupsOptions;
 use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_state::{self as group_state_ffi, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self as group_type_ffi, kafka_common_GroupType_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_t, list_elements, list_string_set, sorted_string_list};
 
 /// Opaque handle to a [`ListGroupsOptions`], owned by the caller and freed
@@ -114,6 +115,7 @@ fn group_type_list(types: &HashSet<GroupType>) -> *mut kafka_List_t {
 
 /// `new ListGroupsOptions()`: no filter, with the client's default API
 /// timeout. Owned, freed with [`kafka_admin_ListGroupsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_new() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::new())
@@ -122,6 +124,7 @@ pub extern "C" fn kafka_admin_ListGroupsOptions_new() -> *mut kafka_admin_ListGr
 /// `ListGroupsOptions.forConsumerGroups()`: only consumer groups (the
 /// `CLASSIC` and `CONSUMER` types with the empty and `consumer` protocol
 /// types). Owned, freed with [`kafka_admin_ListGroupsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_consumer_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_consumer_groups())
@@ -129,6 +132,7 @@ pub extern "C" fn kafka_admin_ListGroupsOptions_for_consumer_groups() -> *mut ka
 
 /// `ListGroupsOptions.forShareGroups()`: only share groups. Owned, freed
 /// with [`kafka_admin_ListGroupsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_share_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_share_groups())
@@ -136,6 +140,7 @@ pub extern "C" fn kafka_admin_ListGroupsOptions_for_share_groups() -> *mut kafka
 
 /// `ListGroupsOptions.forStreamsGroups()`: only streams groups. Owned, freed
 /// with [`kafka_admin_ListGroupsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_streams_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_streams_groups())
@@ -149,6 +154,7 @@ pub extern "C" fn kafka_admin_ListGroupsOptions_for_streams_groups() -> *mut kaf
 ///
 /// `self_` must be a live handle; `group_states` must be `NULL` or a list of
 /// group-state singletons.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
     self_: *mut kafka_admin_ListGroupsOptions_t,
@@ -167,6 +173,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
 ///
 /// `self_` must be a live handle; `protocol_types` must be `NULL` or a list
 /// of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
     self_: *mut kafka_admin_ListGroupsOptions_t,
@@ -185,6 +192,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
 ///
 /// `self_` must be a live handle; `types` must be `NULL` or a list of
 /// group-type singletons.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
     self_: *mut kafka_admin_ListGroupsOptions_t,
@@ -201,6 +209,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_set_timeout_ms(
     self_: *mut kafka_admin_ListGroupsOptions_t,
@@ -217,6 +226,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_group_states(
     self_: *const kafka_admin_ListGroupsOptions_t,
@@ -230,6 +240,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_group_states(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_protocol_types(
     self_: *const kafka_admin_ListGroupsOptions_t,
@@ -244,6 +255,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_protocol_types(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_types(
     self_: *const kafka_admin_ListGroupsOptions_t,
@@ -257,6 +269,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_types(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_timeout_ms(
     self_: *const kafka_admin_ListGroupsOptions_t,
@@ -269,6 +282,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_destroy(self_: *mut kafka_admin_ListGroupsOptions_t) {
     if !self_.is_null() {

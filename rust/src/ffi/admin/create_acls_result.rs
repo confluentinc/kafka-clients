@@ -23,6 +23,7 @@ use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, res
 use crate::ffi::common::acl::acl_binding::{
     acl_binding_ref, box_acl_binding, kafka_common_acl_AclBinding_destroy, kafka_common_acl_AclBinding_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::kafka_Map_t;
 
@@ -77,6 +78,7 @@ unsafe fn acl_binding_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
     self_: *const kafka_admin_CreateAclsResult_t,
@@ -100,6 +102,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
     self_: *const kafka_admin_CreateAclsResult_t,
@@ -114,6 +117,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(self_: *mut kafka_admin_CreateAclsResult_t) {
     unsafe { destroy_result::<CreateAclsResult, _>(self_) }

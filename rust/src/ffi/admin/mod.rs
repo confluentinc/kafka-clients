@@ -76,6 +76,7 @@ use crate::admin::{Admin, MockAdminClient};
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
 use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t,
     map_future, map_future_handle, map_void_future,
@@ -572,6 +573,7 @@ pub type kafka_admin_Admin_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: 
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close(self_: *const kafka_admin_Admin_t) {
     let client = unsafe { client_ref(self_) };
@@ -583,6 +585,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close(self_: *const kafka_admin_Admin
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
     self_: *const kafka_admin_Admin_t,
@@ -601,6 +604,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout(self_: *const kafka_admin_Admin_t, timeout: i64) {
     let client = unsafe { client_ref(self_) };
@@ -613,6 +617,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout_cb(
     self_: *const kafka_admin_Admin_t,
@@ -642,6 +647,7 @@ fn close_timeout(timeout: i64) -> Duration {
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafka_admin_Admin_t) -> i32 {
     unsafe { client_ref(self_) }.queue.execute()
@@ -654,6 +660,7 @@ pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafk
 ///
 /// `self_` must be a live handle or view; `opaque` stays valid while the
 /// hook is installed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
     self_: *const kafka_admin_Admin_t,
@@ -675,6 +682,7 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_destroy(self_: *mut kafka_admin_Admin_t) {
     if !self_.is_null() {

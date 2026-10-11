@@ -18,6 +18,7 @@
 use std::ffi::{c_char, c_void};
 
 use crate::admin::ReplicaInfo;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`ReplicaInfo`].
@@ -52,6 +53,7 @@ pub(crate) unsafe fn destroy_replica_info_element(element: *mut c_void) {
 
 /// `new ReplicaInfo(long size, long offsetLag, boolean isFuture)`. Owned,
 /// freed with [`kafka_admin_ReplicaInfo_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ReplicaInfo_new(
     size: i64,
@@ -63,9 +65,12 @@ pub extern "C" fn kafka_admin_ReplicaInfo_new(
 
 /// `size()`: the total size of the log segments in this replica, in bytes.
 ///
+/// A caught Rust panic returns -1, which no replica size is.
+///
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
     unsafe { replica_info_ref(self_) }.size()
@@ -77,6 +82,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
     unsafe { replica_info_ref(self_) }.offset_lag()
@@ -88,6 +94,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_admin_ReplicaInfo_t) -> i8 {
     i8::from(unsafe { replica_info_ref(self_) }.is_future())
@@ -98,6 +105,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_a
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_admin_ReplicaInfo_t) -> *mut c_char {
     into_c_string(&unsafe { replica_info_ref(self_) }.to_string())
@@ -108,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_a
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_destroy(self_: *mut kafka_admin_ReplicaInfo_t) {
     if !self_.is_null() {

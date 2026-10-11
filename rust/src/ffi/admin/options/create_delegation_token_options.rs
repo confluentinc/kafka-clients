@@ -28,6 +28,7 @@ use crate::ffi::common::security::auth::kafka_principal::{
     KafkaPrincipalInner, box_kafka_principal, kafka_common_security_auth_KafkaPrincipal_destroy,
     kafka_common_security_auth_KafkaPrincipal_t, kafka_principal_ref, list_kafka_principals,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_t};
 
 /// Opaque handle to a [`CreateDelegationTokenOptions`], owned by the caller
@@ -100,6 +101,7 @@ unsafe fn destroy_kafka_principal_element(element: *mut c_void) {
 /// `new CreateDelegationTokenOptions()`: the server-default lifetime, no
 /// renewers, the request principal as owner, the client's default API
 /// timeout. Owned, freed with [`kafka_admin_CreateDelegationTokenOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_admin_CreateDelegationTokenOptions_t {
     boxed(CreateDelegationTokenOptions::new())
@@ -114,6 +116,7 @@ pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_a
 ///
 /// `self_` must be a live handle; `renewers` must be `NULL` or a list of
 /// live principal handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
@@ -130,6 +133,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
     self_: *const kafka_admin_CreateDelegationTokenOptions_t,
@@ -150,6 +154,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
 /// # Safety
 ///
 /// `self_` must be a live handle; `owner` must be a live principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
@@ -166,6 +171,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_owner(
     self_: *const kafka_admin_CreateDelegationTokenOptions_t,
@@ -183,6 +189,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_owner(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_max_lifetime_ms(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
@@ -197,6 +204,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_max_lifeti
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_max_lifetime_ms(
     self_: *const kafka_admin_CreateDelegationTokenOptions_t,
@@ -210,6 +218,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_max_lifetime_m
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_timeout_ms(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
@@ -224,6 +233,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_timeout_ms
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_timeout_ms(
     self_: *const kafka_admin_CreateDelegationTokenOptions_t,
@@ -236,6 +246,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_destroy(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,

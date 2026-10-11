@@ -21,6 +21,7 @@ use crate::admin::TransactionListing;
 use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TransactionListing`].
@@ -83,6 +84,7 @@ pub(crate) unsafe fn destroy_transaction_listing_element(element: *mut c_void) {
 ///
 /// `transactional_id` must be a valid NUL-terminated string and
 /// `transaction_state` a transaction-state singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
     transactional_id: *const c_char,
@@ -101,6 +103,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_transactional_id(
     self_: *const kafka_admin_TransactionListing_t,
@@ -113,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_transactional_id(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_producer_id(
     self_: *const kafka_admin_TransactionListing_t,
@@ -125,6 +129,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_producer_id(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_state(
     self_: *const kafka_admin_TransactionListing_t,
@@ -137,6 +142,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_state(
 /// # Safety
 ///
 /// `self_` must be a valid transaction-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_to_string(
     self_: *const kafka_admin_TransactionListing_t,
@@ -149,6 +155,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_destroy(self_: *mut kafka_admin_TransactionListing_t) {
     if !self_.is_null() {

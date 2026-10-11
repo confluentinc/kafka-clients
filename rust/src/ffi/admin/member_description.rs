@@ -27,6 +27,7 @@ use crate::admin::MemberDescription;
 use crate::ffi::admin::member_assignment::{
     kafka_admin_MemberAssignment_t, member_assignment_ptr, member_assignment_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`MemberDescription`].
@@ -106,6 +107,7 @@ fn optional_c_str(s: Option<&CString>) -> *const c_char {
 /// The strings must be null (where nullable) or valid NUL-terminated
 /// strings; `assignment` must be a valid member-assignment handle and
 /// `target_assignment` null or a valid one.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
     member_id: *const c_char,
@@ -141,6 +143,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     self_: *const kafka_admin_MemberDescription_t,
@@ -154,6 +157,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     self_: *const kafka_admin_MemberDescription_t,
@@ -166,6 +170,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     self_: *const kafka_admin_MemberDescription_t,
@@ -178,6 +183,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     self_: *const kafka_admin_MemberDescription_t,
@@ -190,6 +196,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     self_: *const kafka_admin_MemberDescription_t,
@@ -203,6 +210,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     self_: *const kafka_admin_MemberDescription_t,
@@ -217,6 +225,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
     self_: *const kafka_admin_MemberDescription_t,
@@ -231,6 +240,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
     self_: *const kafka_admin_MemberDescription_t,
@@ -244,6 +254,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(self_: *const kafka_admin_MemberDescription_t) -> i8 {
     unsafe { member_description_ref(self_) }.upgraded().map_or(-1, i8::from)
@@ -254,6 +265,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(self_: *const ka
 /// # Safety
 ///
 /// `self_` must be a valid member-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_to_string(
     self_: *const kafka_admin_MemberDescription_t,
@@ -266,6 +278,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_destroy(self_: *mut kafka_admin_MemberDescription_t) {
     if !self_.is_null() {

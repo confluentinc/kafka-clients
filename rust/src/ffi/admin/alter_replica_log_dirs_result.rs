@@ -24,6 +24,7 @@ use crate::ffi::common::topic_partition_replica::{
     kafka_common_TopicPartitionReplica_new, kafka_common_TopicPartitionReplica_partition,
     kafka_common_TopicPartitionReplica_t, kafka_common_TopicPartitionReplica_topic,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{kafka_Map_t, owned_c_string};
 
@@ -100,6 +101,7 @@ unsafe fn replica_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -125,6 +127,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -139,6 +142,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
     self_: *mut kafka_admin_AlterReplicaLogDirsResult_t,

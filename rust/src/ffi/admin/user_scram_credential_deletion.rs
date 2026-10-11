@@ -21,6 +21,7 @@ use crate::admin::UserScramCredentialDeletion;
 use crate::ffi::admin::scram_mechanism::{
     kafka_admin_ScramMechanism_t, scram_mechanism_singleton, scram_mechanism_value_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, owned_c_string};
 
 /// Opaque handle to a [`UserScramCredentialDeletion`].
@@ -77,6 +78,7 @@ pub(crate) unsafe fn user_scram_credential_deletion_ref<'a>(
 ///
 /// `user` must be a valid NUL-terminated string and `mechanism` a
 /// SCRAM-mechanism singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
     user: *const c_char,
@@ -92,6 +94,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
 /// # Safety
 ///
 /// `self_` must be a valid deletion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_user(
     self_: *const kafka_admin_UserScramCredentialDeletion_t,
@@ -104,6 +107,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_user(
 /// # Safety
 ///
 /// `self_` must be a valid deletion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_mechanism(
     self_: *const kafka_admin_UserScramCredentialDeletion_t,
@@ -116,6 +120,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_mechanism(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_destroy(
     self_: *mut kafka_admin_UserScramCredentialDeletion_t,

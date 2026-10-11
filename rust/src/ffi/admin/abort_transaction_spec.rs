@@ -21,6 +21,7 @@ use std::ffi::c_char;
 
 use crate::admin::AbortTransactionSpec;
 use crate::ffi::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t, topic_partition_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to an [`AbortTransactionSpec`].
@@ -72,6 +73,7 @@ pub(crate) fn box_abort_transaction_spec(spec: AbortTransactionSpec) -> *mut kaf
 /// # Safety
 ///
 /// `topic_partition` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
     topic_partition: *const kafka_common_TopicPartition_t,
@@ -93,6 +95,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
 /// # Safety
 ///
 /// `self_` must be a valid abort-transaction-spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
     self_: *const kafka_admin_AbortTransactionSpec_t,
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
 /// # Safety
 ///
 /// `self_` must be a valid abort-transaction-spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_id(
     self_: *const kafka_admin_AbortTransactionSpec_t,
@@ -117,6 +121,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_id(
 /// # Safety
 ///
 /// `self_` must be a valid abort-transaction-spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_epoch(
     self_: *const kafka_admin_AbortTransactionSpec_t,
@@ -129,6 +134,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid abort-transaction-spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_coordinator_epoch(
     self_: *const kafka_admin_AbortTransactionSpec_t,
@@ -141,6 +147,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_coordinator_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid abort-transaction-spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
     self_: *const kafka_admin_AbortTransactionSpec_t,
@@ -153,6 +160,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned spec handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_destroy(self_: *mut kafka_admin_AbortTransactionSpec_t) {
     if !self_.is_null() {

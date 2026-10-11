@@ -22,6 +22,7 @@ use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, res
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::kafka_Map_t;
 
@@ -70,6 +71,7 @@ unsafe fn destroy_topic_partition_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_values(
     self_: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -93,6 +95,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
     self_: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -107,6 +110,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
     self_: *mut kafka_admin_AlterPartitionReassignmentsResult_t,

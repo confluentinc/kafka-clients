@@ -22,6 +22,7 @@ use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_list_elemen
 use crate::ffi::common::acl::acl_binding::{
     box_acl_binding, kafka_common_acl_AclBinding_destroy, kafka_common_acl_AclBinding_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
 use crate::ffi::util::{box_list, kafka_List_t};
 
@@ -96,6 +97,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeAclsResult_t) -> &'a Resu
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
     self_: *const kafka_admin_DescribeAclsResult_t,
@@ -108,6 +110,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(self_: *mut kafka_admin_DescribeAclsResult_t) {
     unsafe { destroy_result::<DescribeAclsResultInner, _>(self_) }

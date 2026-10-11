@@ -30,6 +30,7 @@ use crate::ffi::admin::topic_description::{acl_operation_list, list_acl_operatio
 use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
@@ -129,6 +130,7 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 /// The strings must be valid NUL-terminated strings, the lists null or valid
 /// lists of the documented handles, the enums singletons of their types and
 /// `coordinator` null or a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
     group_id: *const c_char,
@@ -161,6 +163,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -173,6 +176,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -186,6 +190,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_members(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -198,6 +203,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_members(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -210,6 +216,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_type(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -222,6 +229,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_type(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -235,6 +243,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -249,6 +258,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operations(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -261,6 +271,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -273,6 +284,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -287,6 +299,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_destroy(
     self_: *mut kafka_admin_ConsumerGroupDescription_t,

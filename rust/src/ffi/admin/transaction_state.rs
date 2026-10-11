@@ -22,6 +22,7 @@
 use std::ffi::c_char;
 
 use crate::admin::TransactionState;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string};
 
 /// Opaque handle to a [`TransactionState`] singleton.
@@ -91,48 +92,56 @@ pub(crate) unsafe fn transaction_state_value_of(state: *const kafka_admin_Transa
 }
 
 /// `TransactionState.ONGOING`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_ongoing() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Ongoing)
 }
 
 /// `TransactionState.PREPARE_ABORT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_abort() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareAbort)
 }
 
 /// `TransactionState.PREPARE_COMMIT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_commit() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareCommit)
 }
 
 /// `TransactionState.COMPLETE_ABORT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_complete_abort() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::CompleteAbort)
 }
 
 /// `TransactionState.COMPLETE_COMMIT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_complete_commit() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::CompleteCommit)
 }
 
 /// `TransactionState.EMPTY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_empty() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Empty)
 }
 
 /// `TransactionState.PREPARE_EPOCH_FENCE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_epoch_fence() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareEpochFence)
 }
 
 /// `TransactionState.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_unknown() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Unknown)
@@ -140,9 +149,12 @@ pub extern "C" fn kafka_admin_TransactionState_unknown() -> *const kafka_admin_T
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_TransactionState_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_admin_TransactionState_e::kafka_admin_TransactionState_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
     self_: *const kafka_admin_TransactionState_t,
@@ -156,6 +168,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
     name: *const c_char,
@@ -169,6 +182,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState_to_string(
     self_: *const kafka_admin_TransactionState_t,

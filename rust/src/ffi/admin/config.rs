@@ -23,6 +23,7 @@ use crate::admin::Config;
 use crate::ffi::admin::config_entry::{
     ConfigEntryInner, box_config_entry, config_entry_ref, destroy_config_entry_element, kafka_admin_ConfigEntry_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`Config`].
@@ -84,6 +85,7 @@ pub(crate) unsafe fn destroy_config_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `entries` must be null or a valid list of config-entry handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) -> *mut kafka_admin_Config_t {
     let entries = unsafe { list_elements(entries) }
@@ -99,6 +101,7 @@ pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) ->
 /// # Safety
 ///
 /// `self_` must be a valid config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_entries(self_: *const kafka_admin_Config_t) -> *mut kafka_List_t {
     let mut entries: Vec<_> = unsafe { config_ref(self_) }.entries().collect();
@@ -118,6 +121,7 @@ pub unsafe extern "C" fn kafka_admin_Config_entries(self_: *const kafka_admin_Co
 ///
 /// `self_` must be a valid config handle and `name` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_get(
     self_: *const kafka_admin_Config_t,
@@ -135,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_Config_get(
 /// # Safety
 ///
 /// `self_` must be a valid config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_to_string(self_: *const kafka_admin_Config_t) -> *mut c_char {
     into_c_string(&unsafe { config_ref(self_) }.to_string())
@@ -145,6 +150,7 @@ pub unsafe extern "C" fn kafka_admin_Config_to_string(self_: *const kafka_admin_
 /// # Safety
 ///
 /// `self_` must be null or an owned config handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_destroy(self_: *mut kafka_admin_Config_t) {
     if !self_.is_null() {

@@ -28,6 +28,7 @@ use crate::ffi::admin::member_description::{
 use crate::ffi::admin::topic_description::{acl_operation_list, list_acl_operations};
 use crate::ffi::common::classic_group_state::{self, kafka_common_ClassicGroupState_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupDescription`].
@@ -115,6 +116,7 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescr
 /// The strings must be valid NUL-terminated strings, the lists null or valid
 /// lists of the documented handles, `state` a classic-group-state singleton
 /// and `coordinator` null or a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
     group_id: *const c_char,
@@ -141,6 +143,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -153,6 +156,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -165,6 +169,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -177,6 +182,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_group(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -190,6 +196,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_members(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -207,6 +214,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_members(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -220,6 +228,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -234,6 +243,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
 /// # Safety
 ///
 /// `self_` must be a valid classic-group-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operations(
     self_: *const kafka_admin_ClassicGroupDescription_t,
@@ -246,6 +256,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_destroy(
     self_: *mut kafka_admin_ClassicGroupDescription_t,

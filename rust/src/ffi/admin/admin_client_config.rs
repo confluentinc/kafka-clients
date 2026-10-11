@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use crate::admin::AdminClientConfig;
 use crate::common::Error;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_Map_t, map_strings};
 
 /// Opaque handle to a validated [`AdminClientConfig`].
@@ -68,6 +69,7 @@ pub(crate) unsafe fn admin_client_config_ref<'a>(
 /// # Safety
 ///
 /// `props` must be a live map of C strings and `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
     props: *const kafka_Map_t,
@@ -87,6 +89,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientConfig_destroy(self_: *mut kafka_admin_AdminClientConfig_t) {
     if !self_.is_null() {

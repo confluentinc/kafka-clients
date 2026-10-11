@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::AlterUserScramCredentialsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`AlterUserScramCredentialsOptions`], owned by the caller and freed with
 /// [`kafka_admin_AlterUserScramCredentialsOptions_destroy`].
@@ -56,6 +57,7 @@ fn boxed(options: AlterUserScramCredentialsOptions) -> *mut kafka_admin_AlterUse
 
 /// `new AlterUserScramCredentialsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_AlterUserScramCredentialsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_new()
 -> *mut kafka_admin_AlterUserScramCredentialsOptions_t {
@@ -68,6 +70,7 @@ pub extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_new()
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_set_timeout_ms(
     self_: *mut kafka_admin_AlterUserScramCredentialsOptions_t,
@@ -83,6 +86,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_set_timeou
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_timeout_ms(
     self_: *const kafka_admin_AlterUserScramCredentialsOptions_t,
@@ -97,6 +101,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_timeout_ms
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsOptions_destroy(
     self_: *mut kafka_admin_AlterUserScramCredentialsOptions_t,

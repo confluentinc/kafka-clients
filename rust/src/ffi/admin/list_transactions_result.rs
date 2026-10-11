@@ -25,6 +25,7 @@ use crate::ffi::admin::transaction_listing::{box_transaction_listing, destroy_tr
 use crate::ffi::admin::{
     FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_map_element, destroy_result, result_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_list, box_map, destroy_boxed};
 
@@ -103,6 +104,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListTransactionsResult_t) -> &'a 
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
     self_: *const kafka_admin_ListTransactionsResult_t,
@@ -123,6 +125,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
     self_: *const kafka_admin_ListTransactionsResult_t,
@@ -151,6 +154,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
     self_: *const kafka_admin_ListTransactionsResult_t,
@@ -166,6 +170,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(self_: *mut kafka_admin_ListTransactionsResult_t) {
     unsafe { destroy_result::<ListTransactionsResult, _>(self_) }

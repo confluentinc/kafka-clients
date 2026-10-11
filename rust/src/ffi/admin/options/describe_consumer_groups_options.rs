@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::DescribeConsumerGroupsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`DescribeConsumerGroupsOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeConsumerGroupsOptions_destroy`].
@@ -56,6 +57,7 @@ fn boxed(options: DescribeConsumerGroupsOptions) -> *mut kafka_admin_DescribeCon
 
 /// `new DescribeConsumerGroupsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_DescribeConsumerGroupsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_new() -> *mut kafka_admin_DescribeConsumerGroupsOptions_t {
     boxed(DescribeConsumerGroupsOptions::new())
@@ -67,6 +69,7 @@ pub extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_new() -> *mut kafka_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeConsumerGroupsOptions_t,
@@ -82,6 +85,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_set_timeout_m
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_timeout_ms(
     self_: *const kafka_admin_DescribeConsumerGroupsOptions_t,
@@ -96,6 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_set_include_authorized_operations(
     self_: *mut kafka_admin_DescribeConsumerGroupsOptions_t,
@@ -110,6 +115,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_set_include_a
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_include_authorized_operations(
     self_: *const kafka_admin_DescribeConsumerGroupsOptions_t,
@@ -122,6 +128,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_include_autho
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsOptions_destroy(
     self_: *mut kafka_admin_DescribeConsumerGroupsOptions_t,

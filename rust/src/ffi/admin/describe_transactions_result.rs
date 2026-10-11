@@ -26,6 +26,7 @@ use crate::ffi::admin::{
     FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, out_slot, result_ref,
 };
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_string_keyed_map, c_str_to_string};
 
@@ -72,6 +73,7 @@ unsafe fn handle<'a>(
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
 /// NUL-terminated string and `out_description` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
@@ -98,6 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
@@ -112,6 +115,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
     self_: *mut kafka_admin_DescribeTransactionsResult_t,

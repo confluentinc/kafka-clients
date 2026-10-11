@@ -32,6 +32,7 @@ use crate::ffi::admin::user_scram_credential_deletion::{
 use crate::ffi::admin::user_scram_credential_upsertion::{
     kafka_admin_UserScramCredentialUpsertion_t, user_scram_credential_upsertion_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::owned_c_string;
 
 /// Opaque handle to a [`UserScramCredentialAlteration`].
@@ -93,9 +94,14 @@ pub(crate) unsafe fn user_scram_credential_alteration_ref<'a>(
 
 /// Which subclass the alteration is, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_UserScramCredentialAlteration_UPSERTION`, the first
+/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
+/// value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+#[ffi_guard(fallback = kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
 /// # Safety
 ///
 /// `value` must be a valid upsertion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_upsertion(
     value: *const kafka_admin_UserScramCredentialUpsertion_t,
@@ -135,6 +142,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_upsertion(
 /// # Safety
 ///
 /// `value` must be a valid deletion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_deletion(
     value: *const kafka_admin_UserScramCredentialDeletion_t,
@@ -149,6 +157,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_deletion(
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_user(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
@@ -162,6 +171,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_user(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_destroy(
     self_: *mut kafka_admin_UserScramCredentialAlteration_t,

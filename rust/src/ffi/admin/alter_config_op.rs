@@ -77,24 +77,28 @@ pub(crate) unsafe fn op_type_value_of(op_type: *const kafka_admin_AlterConfigOp_
 }
 
 /// `OpType.SET`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_set() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Set)
 }
 
 /// `OpType.DELETE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_delete() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Delete)
 }
 
 /// `OpType.APPEND`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_append() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Append)
 }
 
 /// `OpType.SUBTRACT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Subtract)
@@ -102,9 +106,14 @@ pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_ad
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_AlterConfigOp_OpType_SET`, the first enumerator: the
+/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_SET)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     self_: *const kafka_admin_AlterConfigOp_OpType_t,
@@ -128,6 +137,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka
 
 /// `OpType.forId(byte id)`: the borrowed singleton with that wire byte, or
 /// `NULL` for an id Java does not know (Java returns null).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_for_id(id: i8) -> *const kafka_admin_AlterConfigOp_OpType_t {
     OpType::for_id(id).map_or(std::ptr::null(), op_type_singleton)
@@ -184,6 +194,7 @@ pub(crate) fn box_alter_config_op(op: AlterConfigOp) -> *mut kafka_admin_AlterCo
 ///
 /// `config_entry` must be a valid config-entry handle and `operation_type`
 /// an op-type singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     config_entry: *const kafka_admin_ConfigEntry_t,
@@ -200,6 +211,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
 /// # Safety
 ///
 /// `self_` must be a valid alter-config-op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
     self_: *const kafka_admin_AlterConfigOp_t,
@@ -212,6 +224,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
 /// # Safety
 ///
 /// `self_` must be a valid alter-config-op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
     self_: *const kafka_admin_AlterConfigOp_t,
@@ -224,6 +237,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 /// # Safety
 ///
 /// `self_` must be a valid alter-config-op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka_admin_AlterConfigOp_t) -> *mut c_char {
     into_c_string(&unsafe { alter_config_op_ref(self_) }.to_string())
@@ -234,6 +248,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka
 /// # Safety
 ///
 /// `self_` must be null or an owned operation handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_destroy(self_: *mut kafka_admin_AlterConfigOp_t) {
     if !self_.is_null() {

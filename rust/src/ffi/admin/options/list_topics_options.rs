@@ -22,6 +22,7 @@
 use std::ffi::c_char;
 
 use crate::admin::ListTopicsOptions;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`ListTopicsOptions`], owned by the caller and freed with
@@ -57,6 +58,7 @@ fn boxed(options: ListTopicsOptions) -> *mut kafka_admin_ListTopicsOptions_t {
 
 /// `new ListTopicsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_ListTopicsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListTopicsOptions_new() -> *mut kafka_admin_ListTopicsOptions_t {
     boxed(ListTopicsOptions::new())
@@ -68,6 +70,7 @@ pub extern "C" fn kafka_admin_ListTopicsOptions_new() -> *mut kafka_admin_ListTo
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_timeout_ms(
     self_: *mut kafka_admin_ListTopicsOptions_t,
@@ -83,6 +86,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_timeout_ms(
     self_: *const kafka_admin_ListTopicsOptions_t,
@@ -95,6 +99,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_list_internal(
     self_: *mut kafka_admin_ListTopicsOptions_t,
@@ -109,6 +114,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_list_internal(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_should_list_internal(
     self_: *const kafka_admin_ListTopicsOptions_t,
@@ -121,6 +127,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_should_list_internal(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_to_string(
     self_: *const kafka_admin_ListTopicsOptions_t,
@@ -133,6 +140,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_to_string(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_destroy(self_: *mut kafka_admin_ListTopicsOptions_t) {
     if !self_.is_null() {

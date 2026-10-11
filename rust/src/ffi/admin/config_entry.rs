@@ -31,6 +31,7 @@ use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
 use crate::admin::{ConfigEntry, ConfigEntryOptions, ConfigEntryOptionsBuilder};
 use crate::ffi::admin::out_slot;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, c_str_to_option, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string,
 };
@@ -121,6 +122,7 @@ pub(crate) unsafe fn config_source_value_of(source: *const kafka_admin_ConfigEnt
 }
 
 /// `ConfigSource.DYNAMIC_TOPIC_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_topic_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -128,6 +130,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_topic_config()
 }
 
 /// `ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_logger_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -135,6 +138,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_logger_con
 }
 
 /// `ConfigSource.DYNAMIC_BROKER_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -142,6 +146,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_config()
 }
 
 /// `ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_default_broker_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -149,6 +154,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_default_broker_co
 }
 
 /// `ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_client_metrics_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -156,6 +162,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_client_metrics_co
 }
 
 /// `ConfigSource.DYNAMIC_GROUP_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_group_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -163,6 +170,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_group_config()
 }
 
 /// `ConfigSource.STATIC_BROKER_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_static_broker_config()
 -> *const kafka_admin_ConfigEntry_ConfigSource_t {
@@ -170,6 +178,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_static_broker_config()
 }
 
 /// `ConfigSource.DEFAULT_CONFIG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_default_config() -> *const kafka_admin_ConfigEntry_ConfigSource_t
 {
@@ -177,6 +186,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_default_config() -> *cons
 }
 
 /// `ConfigSource.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_unknown() -> *const kafka_admin_ConfigEntry_ConfigSource_t {
     config_source_singleton(ConfigSource::Unknown)
@@ -184,9 +194,12 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_unknown() -> *const kafka
 
 /// The C enumerator of a source singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigSource_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigSource_t,
@@ -267,60 +280,70 @@ pub(crate) unsafe fn config_type_value_of(config_type: *const kafka_admin_Config
 }
 
 /// `ConfigType.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_unknown() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Unknown)
 }
 
 /// `ConfigType.BOOLEAN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_boolean() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Boolean)
 }
 
 /// `ConfigType.STRING`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_string() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::String)
 }
 
 /// `ConfigType.INT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_int() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Int)
 }
 
 /// `ConfigType.SHORT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_short() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Short)
 }
 
 /// `ConfigType.LONG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_long() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Long)
 }
 
 /// `ConfigType.DOUBLE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_double() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Double)
 }
 
 /// `ConfigType.LIST`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_list() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::List)
 }
 
 /// `ConfigType.CLASS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_class() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Class)
 }
 
 /// `ConfigType.PASSWORD`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_password() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Password)
@@ -328,9 +351,12 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_password() -> *const kafka_
 
 /// The C enumerator of a type singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigType_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigType_t,
@@ -412,6 +438,7 @@ unsafe fn list_config_synonyms(list: *const kafka_List_t) -> Vec<ConfigSynonym> 
 /// # Safety
 ///
 /// `self_` must be a valid config-synonym handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
@@ -426,6 +453,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
 /// # Safety
 ///
 /// `self_` must be a valid config-synonym handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
@@ -441,6 +469,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
 /// # Safety
 ///
 /// `self_` must be a valid config-synonym handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
@@ -454,6 +483,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
 /// # Safety
 ///
 /// `self_` must be a valid config-synonym handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
@@ -466,6 +496,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned synonym handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_destroy(
     self_: *mut kafka_admin_ConfigEntry_ConfigSynonym_t,
@@ -505,6 +536,7 @@ pub(crate) unsafe fn config_entry_options_ref<'a>(
 /// # Safety
 ///
 /// `self_` must be null or an owned options handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptions_destroy(self_: *mut kafka_admin_ConfigEntryOptions_t) {
     if !self_.is_null() {
@@ -578,6 +610,7 @@ unsafe fn builder_mut<'a>(
 /// parameter unset and every other parameter at the value Java's narrow
 /// constructor passes. Owned, freed with
 /// [`kafka_admin_ConfigEntryOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_new() -> *mut kafka_admin_ConfigEntryOptionsBuilder_t {
     Box::into_raw(Box::new(ConfigEntryOptionsBuilderInner::default())) as *mut kafka_admin_ConfigEntryOptionsBuilder_t
@@ -589,6 +622,7 @@ pub extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_new() -> *mut kafka_admi
 ///
 /// `self_` must be a valid builder handle and `name` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -604,6 +638,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
 ///
 /// `self_` must be a valid builder handle and `value` null or a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -617,6 +652,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `source` a source singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -630,6 +666,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -643,6 +680,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -659,6 +697,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
 ///
 /// `self_` must be a valid builder handle and `synonyms` null or a valid
 /// list of config-synonym handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -673,6 +712,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
 ///
 /// `self_` must be a valid builder handle and `config_type` a type
 /// singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -688,6 +728,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
 ///
 /// `self_` must be a valid builder handle and `documentation` null or a
 /// valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -704,6 +745,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `out_build` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -722,6 +764,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or an owned builder handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_destroy(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
@@ -801,6 +844,7 @@ pub(crate) unsafe fn destroy_config_entry_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `value` null or one.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
     name: *const c_char,
@@ -822,6 +866,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
 /// # Safety
 ///
 /// `options` must be a valid config-entry-options handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
     options: *const kafka_admin_ConfigEntryOptions_t,
@@ -835,6 +880,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { entry_inner_ref(self_) }.name_c.as_ptr()
@@ -846,6 +892,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { entry_inner_ref(self_) }
@@ -859,6 +906,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
     self_: *const kafka_admin_ConfigEntry_t,
@@ -871,6 +919,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
     i8::from(unsafe { config_entry_ref(self_) }.is_default())
@@ -881,6 +930,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
     i8::from(unsafe { config_entry_ref(self_) }.is_sensitive())
@@ -891,6 +941,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
     i8::from(unsafe { config_entry_ref(self_) }.is_read_only())
@@ -903,6 +954,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
     self_: *const kafka_admin_ConfigEntry_t,
@@ -920,6 +972,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
     self_: *const kafka_admin_ConfigEntry_t,
@@ -933,6 +986,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
     self_: *const kafka_admin_ConfigEntry_t,
@@ -949,6 +1003,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_admin_ConfigEntry_t) -> *mut c_char {
     into_c_string(&unsafe { config_entry_ref(self_) }.to_string())
@@ -959,6 +1014,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_a
 /// # Safety
 ///
 /// `self_` must be null or an owned entry handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_destroy(self_: *mut kafka_admin_ConfigEntry_t) {
     if !self_.is_null() {

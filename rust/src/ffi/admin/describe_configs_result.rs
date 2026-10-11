@@ -26,6 +26,7 @@ use crate::ffi::common::config::config_resource::{
     box_config_resource, config_resource_ref, kafka_common_config_ConfigResource_destroy,
     kafka_common_config_ConfigResource_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_map, kafka_Map_t};
 
@@ -102,6 +103,7 @@ fn box_configs(configs: HashMap<ConfigResource, Config>) -> *mut kafka_Map_t {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
     self_: *const kafka_admin_DescribeConfigsResult_t,
@@ -127,6 +129,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
     self_: *const kafka_admin_DescribeConfigsResult_t,
@@ -145,6 +148,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(self_: *mut kafka_admin_DescribeConfigsResult_t) {
     unsafe { destroy_result::<DescribeConfigsResult, _>(self_) }

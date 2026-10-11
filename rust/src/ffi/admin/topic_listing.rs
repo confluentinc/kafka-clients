@@ -19,6 +19,7 @@ use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::TopicListing;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TopicListing`].
@@ -77,6 +78,7 @@ pub(crate) unsafe fn destroy_topic_listing_element(element: *mut c_void) {
 ///
 /// `name` must be a valid NUL-terminated string and `topic_id` a valid uuid
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_new(
     name: *const c_char,
@@ -95,6 +97,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_new(
 /// # Safety
 ///
 /// `self_` must be a valid topic-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_name(self_: *const kafka_admin_TopicListing_t) -> *const c_char {
     unsafe { inner_ref(self_) }.name_c.as_ptr()
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(self_: *const kafka_admin
 /// # Safety
 ///
 /// `self_` must be a valid topic-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
     self_: *const kafka_admin_TopicListing_t,
@@ -117,6 +121,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 /// # Safety
 ///
 /// `self_` must be a valid topic-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(self_: *const kafka_admin_TopicListing_t) -> i8 {
     i8::from(unsafe { topic_listing_ref(self_) }.is_internal())
@@ -127,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a valid topic-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_to_string(self_: *const kafka_admin_TopicListing_t) -> *mut c_char {
     into_c_string(&unsafe { topic_listing_ref(self_) }.to_string())
@@ -137,6 +143,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_to_string(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_destroy(self_: *mut kafka_admin_TopicListing_t) {
     if !self_.is_null() {

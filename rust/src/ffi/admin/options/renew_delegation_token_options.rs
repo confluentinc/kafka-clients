@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::RenewDelegationTokenOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`RenewDelegationTokenOptions`], owned by the caller and freed with
 /// [`kafka_admin_RenewDelegationTokenOptions_destroy`].
@@ -56,6 +57,7 @@ fn boxed(options: RenewDelegationTokenOptions) -> *mut kafka_admin_RenewDelegati
 
 /// `new RenewDelegationTokenOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_RenewDelegationTokenOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RenewDelegationTokenOptions_new() -> *mut kafka_admin_RenewDelegationTokenOptions_t {
     boxed(RenewDelegationTokenOptions::new())
@@ -67,6 +69,7 @@ pub extern "C" fn kafka_admin_RenewDelegationTokenOptions_new() -> *mut kafka_ad
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_timeout_ms(
     self_: *mut kafka_admin_RenewDelegationTokenOptions_t,
@@ -82,6 +85,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_timeout_ms(
     self_: *const kafka_admin_RenewDelegationTokenOptions_t,
@@ -94,6 +98,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_renew_time_period_ms(
     self_: *mut kafka_admin_RenewDelegationTokenOptions_t,
@@ -108,6 +113,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_renew_time_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_renew_time_period_ms(
     self_: *const kafka_admin_RenewDelegationTokenOptions_t,
@@ -120,6 +126,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_renew_time_peri
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_destroy(
     self_: *mut kafka_admin_RenewDelegationTokenOptions_t,

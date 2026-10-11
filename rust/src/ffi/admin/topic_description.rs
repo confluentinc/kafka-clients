@@ -34,6 +34,7 @@ use crate::ffi::common::topic_partition_info::{
     topic_partition_info_ref,
 };
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`TopicDescription`].
@@ -148,6 +149,7 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t) -> Vec<TopicPart
 ///
 /// `name` must be a valid NUL-terminated string and `partitions` null or a
 /// valid list of topic-partition-info handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
     name: *const c_char,
@@ -169,6 +171,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
 ///
 /// As [`kafka_admin_TopicDescription_new`], plus `authorized_operations`
 /// null or a valid list of ACL-operation singletons.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations(
     name: *const c_char,
@@ -194,6 +197,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 ///
 /// As [`kafka_admin_TopicDescription_with_authorized_operations`], plus
 /// `topic_id` a valid uuid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations_topic_id(
     name: *const c_char,
@@ -216,6 +220,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     self_: *const kafka_admin_TopicDescription_t,
@@ -228,6 +233,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(self_: *const kafka_admin_TopicDescription_t) -> i8 {
     i8::from(unsafe { topic_description_ref(self_) }.is_internal())
@@ -238,6 +244,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     self_: *const kafka_admin_TopicDescription_t,
@@ -251,6 +258,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
     self_: *const kafka_admin_TopicDescription_t,
@@ -270,6 +278,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
     self_: *const kafka_admin_TopicDescription_t,
@@ -282,6 +291,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
 /// # Safety
 ///
 /// `self_` must be a valid topic-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
     self_: *const kafka_admin_TopicDescription_t,
@@ -294,6 +304,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_destroy(self_: *mut kafka_admin_TopicDescription_t) {
     if !self_.is_null() {

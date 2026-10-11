@@ -30,6 +30,7 @@ use crate::ffi::common::acl::acl_binding_filter::{
     kafka_common_acl_AclBindingFilter_t,
 };
 use crate::ffi::common::{ErrorInner, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_list, kafka_List_t, kafka_Map_t};
 
@@ -94,6 +95,7 @@ pub(crate) unsafe fn destroy_filter_result_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a valid filter-result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
     self_: *const kafka_admin_DeleteAclsResult_FilterResult_t,
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
 /// # Safety
 ///
 /// `self_` must be a valid filter-result handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
     self_: *const kafka_admin_DeleteAclsResult_FilterResult_t,
@@ -129,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_destroy(
     self_: *mut kafka_admin_DeleteAclsResult_FilterResult_t,
@@ -185,6 +189,7 @@ pub(crate) unsafe fn destroy_filter_results_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a valid filter-results handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_values(
     self_: *const kafka_admin_DeleteAclsResult_FilterResults_t,
@@ -202,6 +207,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_values(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_destroy(
     self_: *mut kafka_admin_DeleteAclsResult_FilterResults_t,
@@ -286,6 +292,7 @@ fn acl_binding_list(bindings: Vec<AclBinding>) -> *mut kafka_List_t {
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
     self_: *const kafka_admin_DeleteAclsResult_t,
@@ -316,6 +323,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
     self_: *const kafka_admin_DeleteAclsResult_t,
@@ -334,6 +342,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(self_: *mut kafka_admin_DeleteAclsResult_t) {
     unsafe { destroy_result::<DeleteAclsResult, _>(self_) }

@@ -27,6 +27,7 @@ use crate::ffi::common::quota::client_quota_entity::{
     kafka_common_quota_ClientQuotaEntity_t, sorted_entries,
 };
 use crate::ffi::common::take_error;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
     kafka_common_KafkaFuture_t,
@@ -178,6 +179,7 @@ unsafe fn handle<'a>(
 ///
 /// `entities` must be a valid future handle whose value, when it has one,
 /// is null or a map of the documented shape.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
     entities: *const kafka_common_KafkaFuture_t,
@@ -211,6 +213,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
     self_: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -223,6 +226,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
     self_: *mut kafka_admin_DescribeClientQuotasResult_t,

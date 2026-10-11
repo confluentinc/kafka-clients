@@ -21,6 +21,7 @@ use std::ffi::c_void;
 use crate::admin::NewPartitionReassignment;
 use crate::ffi::admin::out_slot;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, destroy_boxed, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`NewPartitionReassignment`].
@@ -64,6 +65,7 @@ pub(crate) fn box_new_partition_reassignment(
 ///
 /// `target_replicas` must be null or a valid list of `int32_t *` and
 /// `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     target_replicas: *const kafka_List_t,
@@ -88,6 +90,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
 /// # Safety
 ///
 /// `self_` must be a valid new-partition-reassignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
     self_: *const kafka_admin_NewPartitionReassignment_t,
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_destroy(
     self_: *mut kafka_admin_NewPartitionReassignment_t,

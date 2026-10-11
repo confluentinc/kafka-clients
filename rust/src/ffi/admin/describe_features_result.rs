@@ -20,6 +20,7 @@ use std::ffi::c_void;
 use crate::admin::DescribeFeaturesResult;
 use crate::ffi::admin::feature_metadata::{box_feature_metadata, destroy_feature_metadata_element};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 
 /// Opaque handle to a [`DescribeFeaturesResult`], owned and freed with
@@ -48,6 +49,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeFeaturesResult_t) -> &'a 
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
     self_: *const kafka_admin_DescribeFeaturesResult_t,
@@ -66,6 +68,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(self_: *mut kafka_admin_DescribeFeaturesResult_t) {
     unsafe { destroy_result::<DescribeFeaturesResult, _>(self_) }

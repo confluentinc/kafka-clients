@@ -23,6 +23,7 @@ use crate::ffi::admin::topic_listing::{box_topic_listing, destroy_topic_listing_
 use crate::ffi::admin::{
     FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_map_element, destroy_result, result_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_list, box_string_keyed_map, sorted_string_list};
 
@@ -69,6 +70,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListTopicsResult_t) -> &'a Result
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
@@ -85,6 +87,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
@@ -100,6 +103,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
     self_: *const kafka_admin_ListTopicsResult_t,
@@ -118,6 +122,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(self_: *mut kafka_admin_ListTopicsResult_t) {
     unsafe { destroy_result::<ListTopicsResult, _>(self_) }

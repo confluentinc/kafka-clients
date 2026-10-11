@@ -20,6 +20,7 @@
 use std::ffi::{c_char, c_void};
 
 use crate::admin::PartitionReassignment;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`PartitionReassignment`].
@@ -79,6 +80,7 @@ unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
 /// # Safety
 ///
 /// Each list must be null or a valid list whose elements point at `int32_t`s.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
     replicas: *const kafka_List_t,
@@ -98,6 +100,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
 /// # Safety
 ///
 /// `self_` must be a valid partition-reassignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replicas(
     self_: *const kafka_admin_PartitionReassignment_t,
@@ -111,6 +114,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replicas(
 /// # Safety
 ///
 /// `self_` must be a valid partition-reassignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replicas(
     self_: *const kafka_admin_PartitionReassignment_t,
@@ -124,6 +128,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replicas(
 /// # Safety
 ///
 /// `self_` must be a valid partition-reassignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replicas(
     self_: *const kafka_admin_PartitionReassignment_t,
@@ -136,6 +141,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replicas(
 /// # Safety
 ///
 /// `self_` must be a valid partition-reassignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_to_string(
     self_: *const kafka_admin_PartitionReassignment_t,
@@ -148,6 +154,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_destroy(self_: *mut kafka_admin_PartitionReassignment_t) {
     if !self_.is_null() {

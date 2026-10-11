@@ -20,6 +20,7 @@ use std::ffi::c_char;
 use crate::admin::FenceProducersResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{c_str_to_string, kafka_Map_t};
 
@@ -50,6 +51,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a Re
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
     self_: *const kafka_admin_FenceProducersResult_t,
@@ -69,6 +71,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
 /// NUL-terminated string and `out_producer_id` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
     self_: *const kafka_admin_FenceProducersResult_t,
@@ -94,6 +97,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
 /// NUL-terminated string and `out_epoch_id` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
     self_: *const kafka_admin_FenceProducersResult_t,
@@ -112,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
     self_: *const kafka_admin_FenceProducersResult_t,
@@ -126,6 +131,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(self_: *mut kafka_admin_FenceProducersResult_t) {
     unsafe { destroy_result::<FenceProducersResult, _>(self_) }

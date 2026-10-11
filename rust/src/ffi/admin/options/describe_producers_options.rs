@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::DescribeProducersOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`DescribeProducersOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeProducersOptions_destroy`].
@@ -54,6 +55,7 @@ fn boxed(options: DescribeProducersOptions) -> *mut kafka_admin_DescribeProducer
 
 /// `new DescribeProducersOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_DescribeProducersOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeProducersOptions_new() -> *mut kafka_admin_DescribeProducersOptions_t {
     boxed(DescribeProducersOptions::new())
@@ -65,6 +67,7 @@ pub extern "C" fn kafka_admin_DescribeProducersOptions_new() -> *mut kafka_admin
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeProducersOptions_t,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_timeout_ms(
     self_: *const kafka_admin_DescribeProducersOptions_t,
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_broker_id(
     self_: *mut kafka_admin_DescribeProducersOptions_t,
@@ -106,6 +111,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_broker_id(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_broker_id(
     self_: *const kafka_admin_DescribeProducersOptions_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_broker_id(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_destroy(
     self_: *mut kafka_admin_DescribeProducersOptions_t,

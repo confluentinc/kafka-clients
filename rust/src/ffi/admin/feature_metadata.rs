@@ -27,6 +27,7 @@ use crate::ffi::admin::finalized_version_range::{
 use crate::ffi::admin::supported_version_range::{
     box_supported_version_range, destroy_supported_version_range_element,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{ElementDestroy, box_string_keyed_map, into_c_string, kafka_Map_t};
 
 /// Opaque handle to a [`FeatureMetadata`].
@@ -83,6 +84,7 @@ fn sorted_feature_map<'a, V: 'a>(
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
     self_: *const kafka_admin_FeatureMetadata_t,
@@ -100,6 +102,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
     self_: *const kafka_admin_FeatureMetadata_t,
@@ -114,6 +117,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
     self_: *const kafka_admin_FeatureMetadata_t,
@@ -130,6 +134,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
     self_: *const kafka_admin_FeatureMetadata_t,
@@ -142,6 +147,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned metadata handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_destroy(self_: *mut kafka_admin_FeatureMetadata_t) {
     if !self_.is_null() {

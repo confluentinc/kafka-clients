@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::DescribeTopicsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`DescribeTopicsOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeTopicsOptions_destroy`].
@@ -54,6 +55,7 @@ fn boxed(options: DescribeTopicsOptions) -> *mut kafka_admin_DescribeTopicsOptio
 
 /// `new DescribeTopicsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_DescribeTopicsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeTopicsOptions_new() -> *mut kafka_admin_DescribeTopicsOptions_t {
     boxed(DescribeTopicsOptions::new())
@@ -65,6 +67,7 @@ pub extern "C" fn kafka_admin_DescribeTopicsOptions_new() -> *mut kafka_admin_De
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeTopicsOptions_t,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_timeout_ms(
     self_: *const kafka_admin_DescribeTopicsOptions_t,
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_include_authorized_operations(
     self_: *mut kafka_admin_DescribeTopicsOptions_t,
@@ -106,6 +111,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_include_authorize
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_include_authorized_operations(
     self_: *const kafka_admin_DescribeTopicsOptions_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_include_authorized_op
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_partition_size_limit_per_response(
     self_: *mut kafka_admin_DescribeTopicsOptions_t,
@@ -132,6 +139,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_partition_size_li
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_partition_size_limit_per_response(
     self_: *const kafka_admin_DescribeTopicsOptions_t,
@@ -144,6 +152,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_partition_size_limit_
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_destroy(self_: *mut kafka_admin_DescribeTopicsOptions_t) {
     if !self_.is_null() {

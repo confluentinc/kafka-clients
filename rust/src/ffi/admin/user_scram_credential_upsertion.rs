@@ -25,6 +25,7 @@ use crate::admin::UserScramCredentialUpsertion;
 use crate::ffi::admin::scram_credential_info::{
     kafka_admin_ScramCredentialInfo_t, scram_credential_info_ptr, scram_credential_info_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_Bytes_t, owned_c_string};
 
 /// Opaque handle to a [`UserScramCredentialUpsertion`].
@@ -89,6 +90,7 @@ unsafe fn bytes_to_vec(bytes: kafka_Bytes_t) -> Vec<u8> {
 ///
 /// `user` and `password` must be valid NUL-terminated strings and
 /// `credential_info` a valid SCRAM-credential-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
     user: *const c_char,
@@ -112,6 +114,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
 ///
 /// `user` must be a valid NUL-terminated string, `credential_info` a valid
 /// SCRAM-credential-info handle and `password` a view over readable bytes.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
     user: *const c_char,
@@ -134,6 +137,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
 ///
 /// As [`kafka_admin_UserScramCredentialUpsertion_with_bytes`], plus `salt` a
 /// view over readable bytes.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
     user: *const c_char,
@@ -154,6 +158,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
 /// # Safety
 ///
 /// `self_` must be a valid upsertion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
@@ -167,6 +172,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
 /// # Safety
 ///
 /// `self_` must be a valid upsertion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_info(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
@@ -180,6 +186,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_inf
 /// # Safety
 ///
 /// `self_` must be a valid upsertion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
@@ -193,6 +200,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
 /// # Safety
 ///
 /// `self_` must be a valid upsertion handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
     self_: *const kafka_admin_UserScramCredentialUpsertion_t,
@@ -205,6 +213,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_destroy(
     self_: *mut kafka_admin_UserScramCredentialUpsertion_t,

@@ -18,6 +18,7 @@ use crate::admin::DeleteConsumerGroupOffsetsResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, out_slot, result_ref};
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{kafka_common_TopicPartition_t, topic_partition_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 
 /// Opaque handle to a [`DeleteConsumerGroupOffsetsResult`], owned by the
@@ -59,6 +60,7 @@ unsafe fn handle<'a>(
 ///
 /// `self_` must be a live result handle, `partition` a valid
 /// topic-partition handle and `out_partition_result` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -77,6 +79,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -91,6 +94,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
     self_: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,

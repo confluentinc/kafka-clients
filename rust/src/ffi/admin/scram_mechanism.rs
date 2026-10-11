@@ -78,18 +78,21 @@ pub(crate) unsafe fn scram_mechanism_value_of(mechanism: *const kafka_admin_Scra
 }
 
 /// `ScramMechanism.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_unknown() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::Unknown)
 }
 
 /// `ScramMechanism.SCRAM_SHA_256`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_256() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha256)
 }
 
 /// `ScramMechanism.SCRAM_SHA_512`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha512)
@@ -97,9 +100,12 @@ pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_adm
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_admin_ScramMechanism_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     self_: *const kafka_admin_ScramMechanism_t,
@@ -109,6 +115,7 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
 
 /// `ScramMechanism.fromType(byte type)`: the borrowed singleton with that
 /// wire type, `UNKNOWN` for a type Java does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_from_type(r#type: i8) -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::from_type(r#type))
@@ -121,6 +128,7 @@ pub extern "C" fn kafka_admin_ScramMechanism_from_type(r#type: i8) -> *const kaf
 /// # Safety
 ///
 /// `mechanism_name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
     mechanism_name: *const c_char,
@@ -134,6 +142,7 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
     self_: *const kafka_admin_ScramMechanism_t,

@@ -31,6 +31,7 @@ use crate::ffi::admin::{AdminClassHandle, error_slot, kafka_admin_Admin_t, out_s
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::map_topic_partition_i64;
 use crate::ffi::common::topic_partition_info::topic_partition_info_ref;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     c_str_to_string, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries, map_strings,
 };
@@ -76,6 +77,7 @@ unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
 /// # Safety
 ///
 /// `out_create` must be a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
     num_brokers: i32,
@@ -95,6 +97,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_create(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -110,6 +113,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
 /// # Safety
 ///
 /// `self_` must be a live handle; the maps null or live.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -133,6 +137,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` null or a live map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` null or a live map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -161,6 +167,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` null or a live map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -176,6 +183,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 /// # Safety
 ///
 /// `self_` must be a live handle and `log_dirs` null or a live list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -197,6 +205,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_broker_log_dirs(
 ///
 /// `self_` must be a live handle, `name` a C string, `partitions` null or a
 /// live list and `configs` null or a live map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -228,6 +237,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
 /// # Safety
 ///
 /// `self_` must be a live handle and `name` a C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -243,6 +253,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     self_: *const kafka_admin_MockAdminClient_t,
@@ -258,6 +269,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_destroy(self_: *mut kafka_admin_MockAdminClient_t) {
     if !self_.is_null() {

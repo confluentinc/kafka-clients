@@ -32,6 +32,7 @@ use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
     topic_partition_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_list, box_map, into_c_string, kafka_List_t, list_elements};
 
@@ -86,6 +87,7 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
 /// # Safety
 ///
 /// `active_producers` must be null or a valid list of producer-state handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_new(
     active_producers: *const kafka_List_t,
@@ -104,6 +106,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 /// # Safety
 ///
 /// `self_` must be a live partition-producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_active_producers(
     self_: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
@@ -122,6 +125,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 /// # Safety
 ///
 /// `self_` must be a live partition-producer-state handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_to_string(
     self_: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
@@ -134,6 +138,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_destroy(
     self_: *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t,
@@ -207,6 +212,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeProducersResult_t) -> &'a
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
 /// handle and `out_partition_result` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
     self_: *const kafka_admin_DescribeProducersResult_t,
@@ -235,6 +241,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
     self_: *const kafka_admin_DescribeProducersResult_t,
@@ -249,6 +256,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
     self_: *mut kafka_admin_DescribeProducersResult_t,

@@ -20,6 +20,7 @@ use std::ffi::{c_char, c_void};
 use crate::admin::SupportedVersionRange;
 use crate::ffi::admin::out_slot;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`SupportedVersionRange`].
@@ -70,6 +71,7 @@ pub(crate) unsafe fn destroy_supported_version_range_element(element: *mut c_voi
 /// # Safety
 ///
 /// `out_new` must be a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
     min_version: i16,
@@ -90,6 +92,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
 /// # Safety
 ///
 /// `self_` must be a valid supported-version-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_min_version(
     self_: *const kafka_admin_SupportedVersionRange_t,
@@ -102,6 +105,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_min_version(
 /// # Safety
 ///
 /// `self_` must be a valid supported-version-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_max_version(
     self_: *const kafka_admin_SupportedVersionRange_t,
@@ -114,6 +118,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_max_version(
 /// # Safety
 ///
 /// `self_` must be a valid supported-version-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
     self_: *const kafka_admin_SupportedVersionRange_t,
@@ -126,6 +131,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned range handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_destroy(self_: *mut kafka_admin_SupportedVersionRange_t) {
     if !self_.is_null() {

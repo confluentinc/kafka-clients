@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back.
 
 use crate::admin::DescribeLogDirsOptions;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`DescribeLogDirsOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeLogDirsOptions_destroy`].
@@ -54,6 +55,7 @@ fn boxed(options: DescribeLogDirsOptions) -> *mut kafka_admin_DescribeLogDirsOpt
 
 /// `new DescribeLogDirsOptions()`: the defaults, with the client's default API timeout.
 /// Owned, freed with [`kafka_admin_DescribeLogDirsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeLogDirsOptions_new() -> *mut kafka_admin_DescribeLogDirsOptions_t {
     boxed(DescribeLogDirsOptions::new())
@@ -65,6 +67,7 @@ pub extern "C" fn kafka_admin_DescribeLogDirsOptions_new() -> *mut kafka_admin_D
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeLogDirsOptions_t,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsOptions_timeout_ms(
     self_: *const kafka_admin_DescribeLogDirsOptions_t,
@@ -92,6 +96,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsOptions_destroy(self_: *mut kafka_admin_DescribeLogDirsOptions_t) {
     if !self_.is_null() {

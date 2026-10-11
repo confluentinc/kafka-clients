@@ -18,6 +18,7 @@
 use std::ffi::c_char;
 
 use crate::admin::RecordsToDelete;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`RecordsToDelete`].
@@ -49,6 +50,7 @@ pub(crate) fn box_records_to_delete(records: RecordsToDelete) -> *mut kafka_admi
 /// `RecordsToDelete.beforeOffset(long offset)`, the static factory: delete
 /// every record before `offset`. Owned, freed with
 /// [`kafka_admin_RecordsToDelete_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RecordsToDelete_with_offset(offset: i64) -> *mut kafka_admin_RecordsToDelete_t {
     box_records_to_delete(RecordsToDelete::with_offset(offset))
@@ -59,6 +61,7 @@ pub extern "C" fn kafka_admin_RecordsToDelete_with_offset(offset: i64) -> *mut k
 /// # Safety
 ///
 /// `self_` must be a valid records-to-delete handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RecordsToDelete_before_offset(self_: *const kafka_admin_RecordsToDelete_t) -> i64 {
     unsafe { records_to_delete_ref(self_) }.before_offset()
@@ -69,6 +72,7 @@ pub unsafe extern "C" fn kafka_admin_RecordsToDelete_before_offset(self_: *const
 /// # Safety
 ///
 /// `self_` must be a valid records-to-delete handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RecordsToDelete_to_string(
     self_: *const kafka_admin_RecordsToDelete_t,
@@ -81,6 +85,7 @@ pub unsafe extern "C" fn kafka_admin_RecordsToDelete_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RecordsToDelete_destroy(self_: *mut kafka_admin_RecordsToDelete_t) {
     if !self_.is_null() {

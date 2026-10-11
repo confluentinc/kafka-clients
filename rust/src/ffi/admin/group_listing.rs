@@ -23,6 +23,7 @@ use crate::admin::GroupListing;
 use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupListing`].
@@ -84,6 +85,7 @@ pub(crate) unsafe fn destroy_group_listing_element(element: *mut c_void) {
 ///
 /// `group_id` and `protocol` must be valid NUL-terminated strings;
 /// `group_type` and `group_state` null or singletons of their types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_new(
     group_id: *const c_char,
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(self_: *const kafka_admin_GroupListing_t) -> *const c_char {
     unsafe { inner_ref(self_) }.group_id_c.as_ptr()
@@ -125,6 +128,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(self_: *const kafka_a
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_type(
     self_: *const kafka_admin_GroupListing_t,
@@ -139,6 +143,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_type(
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(self_: *const kafka_admin_GroupListing_t) -> *const c_char {
     unsafe { inner_ref(self_) }.protocol_c.as_ptr()
@@ -150,6 +155,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(self_: *const kafka_a
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
     self_: *const kafka_admin_GroupListing_t,
@@ -164,6 +170,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     self_: *const kafka_admin_GroupListing_t,
@@ -176,6 +183,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_to_string(self_: *const kafka_admin_GroupListing_t) -> *mut c_char {
     into_c_string(&unsafe { group_listing_ref(self_) }.to_string())
@@ -186,6 +194,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_to_string(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_destroy(self_: *mut kafka_admin_GroupListing_t) {
     if !self_.is_null() {

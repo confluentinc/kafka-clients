@@ -23,6 +23,7 @@ use std::ffi::c_char;
 use crate::admin::MemberAssignment;
 use crate::common::TopicPartition;
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`MemberAssignment`].
@@ -62,6 +63,7 @@ pub(crate) unsafe fn member_assignment_ref<'a>(
 ///
 /// `topic_partitions` must be null or a valid list of topic-partition
 /// handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
     topic_partitions: *const kafka_List_t,
@@ -76,6 +78,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
 /// # Safety
 ///
 /// `self_` must be a valid member-assignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
     self_: *const kafka_admin_MemberAssignment_t,
@@ -88,6 +91,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid member-assignment handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
     self_: *const kafka_admin_MemberAssignment_t,
@@ -101,6 +105,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_destroy(self_: *mut kafka_admin_MemberAssignment_t) {
     if !self_.is_null() {

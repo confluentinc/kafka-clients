@@ -23,6 +23,7 @@ use crate::ffi::admin::scram_credential_info::{
     box_scram_credential_info, destroy_scram_credential_info_element, kafka_admin_ScramCredentialInfo_t,
     scram_credential_info_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`UserScramCredentialsDescription`].
@@ -94,6 +95,7 @@ pub(crate) unsafe fn destroy_user_scram_credentials_description_element(element:
 ///
 /// `name` must be a valid NUL-terminated string and `credential_infos` null
 /// or a valid list of SCRAM-credential-info handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
     name: *const c_char,
@@ -116,6 +118,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
 /// # Safety
 ///
 /// `self_` must be a valid user-SCRAM-credentials-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
     self_: *const kafka_admin_UserScramCredentialsDescription_t,
@@ -129,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
 /// # Safety
 ///
 /// `self_` must be a valid user-SCRAM-credentials-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_infos(
     self_: *const kafka_admin_UserScramCredentialsDescription_t,
@@ -146,6 +150,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_
 /// # Safety
 ///
 /// `self_` must be a valid user-SCRAM-credentials-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_to_string(
     self_: *const kafka_admin_UserScramCredentialsDescription_t,
@@ -159,6 +164,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_destroy(
     self_: *mut kafka_admin_UserScramCredentialsDescription_t,

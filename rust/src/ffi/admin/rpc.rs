@@ -201,6 +201,7 @@ use crate::ffi::common::topic_collection::{kafka_common_TopicCollection_t, topic
 use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition_ref};
 use crate::ffi::common::topic_partition_replica::topic_partition_replica_ref;
 use crate::ffi::consumer::offset_and_metadata::map_offset_and_metadata;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     c_str_to_string, kafka_Bytes_t, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries,
 };
@@ -283,6 +284,7 @@ unsafe fn bytes_of(bytes: &kafka_Bytes_t) -> &[u8] {
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
     self_: *const kafka_admin_Admin_t,
@@ -303,6 +305,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -325,6 +328,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
     self_: *const kafka_admin_Admin_t,
@@ -345,6 +349,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -367,6 +372,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_topics(
     self_: *const kafka_admin_Admin_t,
@@ -385,6 +391,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_topics(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_topics_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -405,6 +412,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_topics_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
     self_: *const kafka_admin_Admin_t,
@@ -425,6 +433,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_options(
     self_: *const kafka_admin_Admin_t,
@@ -447,6 +456,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_opti
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics(
     self_: *const kafka_admin_Admin_t,
@@ -467,6 +477,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics_options(
     self_: *const kafka_admin_Admin_t,
@@ -489,6 +500,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
     self_: *const kafka_admin_Admin_t,
@@ -509,6 +521,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -531,6 +544,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
     self_: *const kafka_admin_Admin_t,
@@ -551,6 +565,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -573,6 +588,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
     self_: *const kafka_admin_Admin_t,
@@ -593,6 +609,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_producers_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -615,6 +632,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction(
     self_: *const kafka_admin_Admin_t,
@@ -635,6 +653,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -657,6 +676,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
     self_: *const kafka_admin_Admin_t,
@@ -677,6 +697,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -699,6 +720,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
     self_: *const kafka_admin_Admin_t,
@@ -719,6 +741,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -741,6 +764,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_transactions(
     self_: *const kafka_admin_Admin_t,
@@ -759,6 +783,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_transactions(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_transactions_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -779,6 +804,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_transactions_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction(
     self_: *const kafka_admin_Admin_t,
@@ -799,6 +825,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -821,6 +848,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction_with_opti
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster(
     self_: *const kafka_admin_Admin_t,
@@ -839,6 +867,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -859,6 +888,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
     self_: *const kafka_admin_Admin_t,
@@ -879,6 +909,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -901,6 +932,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
     self_: *const kafka_admin_Admin_t,
@@ -929,6 +961,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -959,6 +992,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs_with_option
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources(
     self_: *const kafka_admin_Admin_t,
@@ -977,6 +1011,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1001,6 +1036,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
     self_: *const kafka_admin_Admin_t,
@@ -1021,6 +1057,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1043,6 +1080,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
     self_: *const kafka_admin_Admin_t,
@@ -1067,6 +1105,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1093,6 +1132,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
     self_: *const kafka_admin_Admin_t,
@@ -1113,6 +1153,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1135,6 +1176,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs_with_option
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders(
     self_: *const kafka_admin_Admin_t,
@@ -1157,6 +1199,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1181,6 +1224,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
     self_: *const kafka_admin_Admin_t,
@@ -1203,6 +1247,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1227,6 +1272,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments_with_op
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments(
     self_: *const kafka_admin_Admin_t,
@@ -1245,6 +1291,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_partitions(
     self_: *const kafka_admin_Admin_t,
@@ -1265,6 +1312,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1285,6 +1333,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_opt
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_partitions_options(
     self_: *const kafka_admin_Admin_t,
@@ -1307,6 +1356,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
     self_: *const kafka_admin_Admin_t,
@@ -1328,6 +1378,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1351,6 +1402,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_groups(
     self_: *const kafka_admin_Admin_t,
@@ -1369,6 +1421,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_groups(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_groups_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1389,6 +1442,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_groups_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
     self_: *const kafka_admin_Admin_t,
@@ -1409,6 +1463,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1431,6 +1486,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
     self_: *const kafka_admin_Admin_t,
@@ -1451,6 +1507,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1473,6 +1530,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_id(
     self_: *const kafka_admin_Admin_t,
@@ -1493,6 +1551,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options(
     self_: *const kafka_admin_Admin_t,
@@ -1515,6 +1574,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_specs(
     self_: *const kafka_admin_Admin_t,
@@ -1537,6 +1597,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options(
     self_: *const kafka_admin_Admin_t,
@@ -1562,6 +1623,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
     self_: *const kafka_admin_Admin_t,
@@ -1584,6 +1646,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1608,6 +1671,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_opt
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
     self_: *const kafka_admin_Admin_t,
@@ -1630,6 +1694,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1655,6 +1720,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_op
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
     self_: *const kafka_admin_Admin_t,
@@ -1675,6 +1741,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1697,6 +1764,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1719,6 +1787,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_wi
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
     self_: *const kafka_admin_Admin_t,
@@ -1739,6 +1808,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_acls_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1761,6 +1831,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_acls(
     self_: *const kafka_admin_Admin_t,
@@ -1781,6 +1852,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_acls(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_acls_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1803,6 +1875,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_acls_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
     self_: *const kafka_admin_Admin_t,
@@ -1823,6 +1896,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_acls_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1845,6 +1919,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas(
     self_: *const kafka_admin_Admin_t,
@@ -1865,6 +1940,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1887,6 +1963,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
     self_: *const kafka_admin_Admin_t,
@@ -1907,6 +1984,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -1929,6 +2007,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials(
     self_: *const kafka_admin_Admin_t,
@@ -1947,6 +2026,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_users(
     self_: *const kafka_admin_Admin_t,
@@ -1967,6 +2047,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_users_options(
     self_: *const kafka_admin_Admin_t,
@@ -1989,6 +2070,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
     self_: *const kafka_admin_Admin_t,
@@ -2011,6 +2093,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2035,6 +2118,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials_with_opt
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token(
     self_: *const kafka_admin_Admin_t,
@@ -2053,6 +2137,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2073,6 +2158,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token(
     self_: *const kafka_admin_Admin_t,
@@ -2093,6 +2179,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2115,6 +2202,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token(
     self_: *const kafka_admin_Admin_t,
@@ -2135,6 +2223,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2157,6 +2246,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token(
     self_: *const kafka_admin_Admin_t,
@@ -2175,6 +2265,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2195,6 +2286,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token_with_option
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_features(
     self_: *const kafka_admin_Admin_t,
@@ -2213,6 +2305,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
     self_: *const kafka_admin_Admin_t,
@@ -2233,6 +2326,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     self_: *const kafka_admin_Admin_t,
@@ -2258,6 +2352,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
 ///
 /// `self_` must be a live handle or view; every other pointer null where
 /// the module docs allow it, or live for the duration of the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(
     self_: *const kafka_admin_Admin_t,

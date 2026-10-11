@@ -23,6 +23,7 @@ use crate::admin::{DescribeLogDirsResult, LogDirDescription};
 use crate::common::KafkaFuture;
 use crate::ffi::admin::log_dir_description::{box_log_dir_description, destroy_log_dir_description_element};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::{box_map, box_string_keyed_map, destroy_boxed, kafka_Map_t};
 
@@ -92,6 +93,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeLogDirsResult_t) -> &'a R
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
     self_: *const kafka_admin_DescribeLogDirsResult_t,
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
     self_: *const kafka_admin_DescribeLogDirsResult_t,
@@ -129,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(self_: *mut kafka_admin_DescribeLogDirsResult_t) {
     unsafe { destroy_result::<DescribeLogDirsResult, _>(self_) }

@@ -17,6 +17,7 @@
 
 use crate::admin::TerminateTransactionResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 
 /// Opaque handle to a [`TerminateTransactionResult`], owned and freed with
@@ -47,6 +48,7 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
     self_: *const kafka_admin_TerminateTransactionResult_t,
@@ -61,6 +63,7 @@ pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_destroy(
     self_: *mut kafka_admin_TerminateTransactionResult_t,

@@ -21,6 +21,7 @@ use std::ffi::c_char;
 
 use crate::admin::ListConsumerGroupOffsetsSpec;
 use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition_list};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`ListConsumerGroupOffsetsSpec`].
@@ -57,6 +58,7 @@ pub(crate) fn box_list_consumer_group_offsets_spec(
 /// `new ListConsumerGroupOffsetsSpec()`: no partitions set, so all of the
 /// group's partitions are listed. Owned, freed with
 /// [`kafka_admin_ListConsumerGroupOffsetsSpec_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_new() -> *mut kafka_admin_ListConsumerGroupOffsetsSpec_t {
     box_list_consumer_group_offsets_spec(ListConsumerGroupOffsetsSpec::new())
@@ -71,6 +73,7 @@ pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_new() -> *mut kafka_a
 ///
 /// `self_` must be a valid spec handle and `topic_partitions` null or a
 /// valid list of topic-partition handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_partitions(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsSpec_t,
@@ -89,6 +92,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_part
 /// # Safety
 ///
 /// `self_` must be a valid spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions(
     self_: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
@@ -103,6 +107,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitio
 /// # Safety
 ///
 /// `self_` must be a valid spec handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
     self_: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
@@ -115,6 +120,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned spec handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_destroy(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsSpec_t,

@@ -30,6 +30,7 @@ use crate::admin::{ListTransactionsOptions, TransactionState};
 use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_option, destroy_boxed, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ListTransactionsOptions`], owned by the caller and
@@ -88,6 +89,7 @@ fn boxed(options: ListTransactionsOptions) -> *mut kafka_admin_ListTransactionsO
 
 /// `new ListTransactionsOptions()`: no filter, with the client's default
 /// API timeout. Owned, freed with [`kafka_admin_ListTransactionsOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListTransactionsOptions_new() -> *mut kafka_admin_ListTransactionsOptions_t {
     boxed(ListTransactionsOptions::new())
@@ -99,6 +101,7 @@ pub extern "C" fn kafka_admin_ListTransactionsOptions_new() -> *mut kafka_admin_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_set_timeout_ms(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
@@ -113,6 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_set_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
     self_: *const kafka_admin_ListTransactionsOptions_t,
@@ -128,6 +132,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
 ///
 /// `self_` must be a live handle; `states` must be `NULL` or a list of
 /// transaction-state singletons.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
@@ -148,6 +153,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
 ///
 /// `self_` must be a live handle; `producer_ids` must be `NULL` or a list of
 /// pointers to `int64_t`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
@@ -167,6 +173,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_duration(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
@@ -183,6 +190,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_duration(
 ///
 /// `self_` must be a live handle; `pattern` must be `NULL` or a
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
@@ -200,6 +208,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_transacti
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
     self_: *const kafka_admin_ListTransactionsOptions_t,
@@ -226,6 +235,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_ids(
     self_: *const kafka_admin_ListTransactionsOptions_t,
@@ -251,6 +261,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_i
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_duration(
     self_: *const kafka_admin_ListTransactionsOptions_t,
@@ -265,6 +276,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_duration(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactional_id_pattern(
     self_: *const kafka_admin_ListTransactionsOptions_t,
@@ -280,6 +292,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactio
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_destroy(
     self_: *mut kafka_admin_ListTransactionsOptions_t,

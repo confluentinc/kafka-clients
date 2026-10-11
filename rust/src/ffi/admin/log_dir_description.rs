@@ -35,6 +35,7 @@ use crate::ffi::common::topic_partition::{
     topic_partition_ref,
 };
 use crate::ffi::common::{ErrorInner, kafka_common_Error_t, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
 
 /// Opaque handle to a [`LogDirDescription`].
@@ -115,6 +116,7 @@ unsafe fn map_replica_infos(map: *const kafka_Map_t) -> HashMap<TopicPartition, 
 /// `error` must be null or an owned error handle not yet destroyed;
 /// `replica_infos` null or a valid map of the documented key and value
 /// handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
     error: *mut kafka_common_Error_t,
@@ -133,6 +135,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
 /// # Safety
 ///
 /// As [`kafka_admin_LogDirDescription_new`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_bytes(
     error: *mut kafka_common_Error_t,
@@ -156,6 +159,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 /// # Safety
 ///
 /// As [`kafka_admin_LogDirDescription_new`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_bytes_is_cordoned(
     error: *mut kafka_common_Error_t,
@@ -180,6 +184,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -198,6 +203,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_infos(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -227,6 +233,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_infos(
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -240,6 +247,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -252,6 +260,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -264,6 +273,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
 /// # Safety
 ///
 /// `self_` must be a valid log-dir-description handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_to_string(
     self_: *const kafka_admin_LogDirDescription_t,
@@ -277,6 +287,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_destroy(self_: *mut kafka_admin_LogDirDescription_t) {
     if !self_.is_null() {

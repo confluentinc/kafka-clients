@@ -19,6 +19,7 @@
 
 use crate::admin::RenewDelegationTokenResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
 
 /// Opaque handle to a [`RenewDelegationTokenResult`], owned and freed with
@@ -61,6 +62,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_RenewDelegationTokenResult_t) -> 
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
     self_: *const kafka_admin_RenewDelegationTokenResult_t,
@@ -74,6 +76,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
     self_: *mut kafka_admin_RenewDelegationTokenResult_t,

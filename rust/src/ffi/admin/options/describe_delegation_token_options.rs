@@ -28,6 +28,7 @@ use crate::ffi::common::security::auth::kafka_principal::{
     box_kafka_principal, kafka_common_security_auth_KafkaPrincipal_destroy,
     kafka_common_security_auth_KafkaPrincipal_t, list_kafka_principals,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_t};
 
 /// Opaque handle to a [`DescribeDelegationTokenOptions`], owned by the
@@ -74,6 +75,7 @@ unsafe fn destroy_kafka_principal_element(element: *mut c_void) {
 /// `new DescribeDelegationTokenOptions()`: every authorized token, with the
 /// client's default API timeout. Owned, freed with
 /// [`kafka_admin_DescribeDelegationTokenOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeDelegationTokenOptions_new() -> *mut kafka_admin_DescribeDelegationTokenOptions_t
 {
@@ -90,6 +92,7 @@ pub extern "C" fn kafka_admin_DescribeDelegationTokenOptions_new() -> *mut kafka
 ///
 /// `self_` must be a live handle; `owners` must be `NULL` or a list of live
 /// principal handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_owners(
     self_: *mut kafka_admin_DescribeDelegationTokenOptions_t,
@@ -112,6 +115,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_owners(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_owners(
     self_: *const kafka_admin_DescribeDelegationTokenOptions_t,
@@ -134,6 +138,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_owners(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_timeout_ms(
     self_: *mut kafka_admin_DescribeDelegationTokenOptions_t,
@@ -149,6 +154,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_timeout_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_timeout_ms(
     self_: *const kafka_admin_DescribeDelegationTokenOptions_t,
@@ -163,6 +169,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be `NULL` or a handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_destroy(
     self_: *mut kafka_admin_DescribeDelegationTokenOptions_t,

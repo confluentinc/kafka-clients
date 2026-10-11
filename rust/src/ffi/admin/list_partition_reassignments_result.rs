@@ -26,6 +26,7 @@ use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::box_map;
 
@@ -87,6 +88,7 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_reassignments(
     self_: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -102,6 +104,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_reassignme
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
     self_: *mut kafka_admin_ListPartitionReassignmentsResult_t,

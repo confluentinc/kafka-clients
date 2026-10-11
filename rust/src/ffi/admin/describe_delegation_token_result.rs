@@ -25,6 +25,7 @@ use crate::ffi::common::security::token::delegation::delegation_token::{
     box_delegation_token, kafka_common_security_token_delegation_DelegationToken_destroy,
     kafka_common_security_token_delegation_DelegationToken_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
 use crate::ffi::util::box_list;
 
@@ -86,6 +87,7 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeDelegationTokenResult_t) 
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_tokens(
     self_: *const kafka_admin_DescribeDelegationTokenResult_t,
@@ -99,6 +101,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_to
 /// # Safety
 ///
 /// `self_` must be null or an owned result handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
     self_: *mut kafka_admin_DescribeDelegationTokenResult_t,
