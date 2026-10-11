@@ -22,6 +22,7 @@ use std::ffi::c_void;
 
 use crate::common::ElectionType;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_t};
 
 /// Opaque handle to an [`ElectionType`] singleton.
@@ -90,9 +91,13 @@ pub unsafe extern "C" fn kafka_common_ElectionType__enum(
 
 /// `value`: the wire-protocol byte.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `PREFERRED`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_common_ElectionType_t) -> i8 {
     unsafe { value_of(self_) }.value()

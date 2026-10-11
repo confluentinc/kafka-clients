@@ -21,6 +21,7 @@
 use std::ffi::c_char;
 
 use crate::common::acl::AclOperation;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string};
 
 /// Opaque handle to a [`AclOperation`] singleton.
@@ -238,9 +239,13 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
 
 /// `code()`: the wire-protocol byte.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
     unsafe { value_of(self_) }.code()

@@ -23,6 +23,7 @@ use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
 
 use crate::admin::ScramMechanism;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, owned_c_string};
 
 /// Opaque handle to a [`ScramMechanism`] singleton.
@@ -142,9 +143,13 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
 
 /// `type()`: the wire-protocol byte of the mechanism.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_type(self_: *const kafka_admin_ScramMechanism_t) -> i8 {
     unsafe { scram_mechanism_value_of(self_) }.r#type()

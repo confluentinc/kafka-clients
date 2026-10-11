@@ -59,9 +59,9 @@
 //! | return type | on panic |
 //! |---|---|
 //! | `()` | nothing to return; the panic is only logged |
-//! | `i8` | `0`: an `int8_t` boolean reads it as false |
+//! | `i8` | `0`, which an `int8_t` boolean reads as false. An `int8_t` that carries a Java `byte` code whose 0 is a valid constant (`IsolationLevel.READ_UNCOMMITTED`, `AlterConfigOp.OpType.SET`, `ElectionType.PREFERRED`, an `UNKNOWN`) declares `fallback = -1`, a value outside its domain |
 //! | `bool` | `false` |
-//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size` (a count or size is never negative: C feeds it to `malloc` and to a `for` bound) |
+//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size`, since C feeds a count or size to `malloc` and to a `for` bound. A size that already returns -1 for a null key or value (`serialized_key_size`) still returns `0` on a panic |
 //! | `f64` | `f64::NAN` |
 //! | `kafka_common_ErrorCode_e` | `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR` |
 //! | `kafka_Bytes_t` | `kafka_Bytes_t::NULL`, Java's `null` array |
@@ -585,6 +585,8 @@ mod tests {
         );
     }
 
+    /// The derived default only: a Java `byte` code whose 0 is valid declares
+    /// `fallback = -1` (`test_explicit_i8_fallback_overrides_the_zero_default`).
     #[test]
     fn test_i8_is_zero_whatever_the_name() {
         for name in ["kafka_x_X_is_closed", "kafka_x_X_topics_count", "kafka_x_X_byte"] {
@@ -595,6 +597,31 @@ mod tests {
                 "for {name}"
             );
         }
+    }
+
+    #[test]
+    fn test_explicit_i8_fallback_overrides_the_zero_default() {
+        // An `int8_t` carrying a Java `byte` code whose 0 is a valid constant
+        // (`IsolationLevel.READ_UNCOMMITTED`) declares a value outside its domain.
+        let expanded = expand_str(
+            quote!(fallback = -1),
+            quote!(
+                extern "C" fn kafka_common_IsolationLevel_id(self_: *const X) -> i8 {
+                    1
+                }
+            ),
+        )
+        .unwrap();
+        let expected = quote! {
+            extern "C" fn kafka_common_IsolationLevel_id(self_: *const X) -> i8 {
+                crate::ffi::common::ffi_guard_or(
+                    "kafka_common_IsolationLevel_id",
+                    move |_: crate::common::Error| -> i8 { -1 },
+                    move || { 1 }
+                )
+            }
+        };
+        assert_eq!(expanded, expected.to_string());
     }
 
     #[test]

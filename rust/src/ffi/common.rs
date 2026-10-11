@@ -2005,6 +2005,21 @@ mod tests {
         1
     }
 
+    /// An `int8_t` carrying a Java `byte` code whose 0 is valid, in the shape of
+    /// `kafka_common_IsolationLevel_id`.
+    ///
+    /// # Safety
+    ///
+    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
+    /// shape; the function takes no pointer, so the caller has nothing to uphold.
+    #[ffi_guard(fallback = -1)]
+    unsafe extern "C" fn guarded_byte_code(panic: bool) -> i8 {
+        if panic {
+            panic!("byte code boom");
+        }
+        0
+    }
+
     /// # Safety
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
@@ -2255,10 +2270,22 @@ mod tests {
         // inspected, never dereferenced.
         unsafe {
             assert_eq!(guarded_i8(true), 0, "an int8_t boolean reads as false");
-            assert_eq!(guarded_topics_size(true), 0, "a size is never negative");
+            assert_eq!(guarded_topics_size(true), 0, "a size reads as empty");
             let bytes = guarded_bytes(true);
             assert!(bytes.data.is_null(), "Java's null array");
             assert_eq!(bytes.len, 0);
+        }
+    }
+
+    #[test]
+    fn ffi_guard_byte_code_takes_its_declared_fallback() {
+        // SAFETY: Test code: `guarded_byte_code` is an `extern "C"` test function under
+        // `#[ffi_guard(fallback = -1)]` taking only a `bool`; the calls are `unsafe` solely
+        // because it is declared `unsafe extern "C"`, with no pointer arguments or
+        // preconditions to uphold.
+        unsafe {
+            assert_eq!(guarded_byte_code(false), 0, "0 is a valid code");
+            assert_eq!(guarded_byte_code(true), -1, "a panic is no code");
         }
     }
 

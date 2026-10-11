@@ -24,6 +24,7 @@ use std::ffi::c_char;
 use crate::admin::{FeatureUpdate, UpgradeType};
 use crate::ffi::admin::out_slot;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 // ---------------------------------------------------------------------------
@@ -126,9 +127,13 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
 
 /// `UpgradeType.code()`: the wire-protocol byte of the upgrade type.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_code(
     self_: *const kafka_admin_FeatureUpdate_UpgradeType_t,

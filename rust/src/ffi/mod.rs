@@ -181,6 +181,65 @@ mod tests {
         assert!(total >= 2306, "only {total} exported functions found");
     }
 
+    /// The `int8_t` exports carrying a Java `byte` code: each enum's domain
+    /// includes 0 (`IsolationLevel.READ_UNCOMMITTED`, `AlterConfigOp.OpType.SET`,
+    /// `ElectionType.PREFERRED`, or an `UNKNOWN`) and none includes -1, so a
+    /// caught panic must return -1 rather than the derived 0 the remaining
+    /// `int8_t` exports, all booleans, return. Pins the set in both directions:
+    /// a code guarded with the bare attribute, or a boolean given -1, fails.
+    #[test]
+    fn test_byte_code_exports_fall_back_to_minus_one() {
+        const BYTE_CODES: [&str; 10] = [
+            "kafka_admin_AlterConfigOp_OpType_id",
+            "kafka_admin_FeatureUpdate_UpgradeType_code",
+            "kafka_admin_ScramMechanism_type",
+            "kafka_common_ElectionType_value",
+            "kafka_common_IsolationLevel_id",
+            "kafka_common_acl_AclOperation_code",
+            "kafka_common_acl_AclPermissionType_code",
+            "kafka_common_config_ConfigResource_Type_id",
+            "kafka_common_resource_PatternType_code",
+            "kafka_common_resource_ResourceType_code",
+        ];
+        let mut minus_one = Vec::new();
+        let mut i8_exports = 0;
+        for (_, text) in sources() {
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[unsafe(no_mangle)]" {
+                    continue;
+                }
+                // The signature runs from the line below to the one opening the body.
+                let end = (index + 1..lines.len())
+                    .find(|&line| lines[line].trim_end().ends_with('{'))
+                    .expect("an exported fn has a body");
+                let signature = lines[index + 1..=end]
+                    .iter()
+                    .map(|line| line.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !signature.trim_end_matches('{').trim_end().ends_with("-> i8") {
+                    continue;
+                }
+                i8_exports += 1;
+                let name = signature
+                    .split("fn ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('(').next())
+                    .expect("an exported fn has a name")
+                    .to_string();
+                if index > 0 && lines[index - 1].trim() == "#[ffi_guard(fallback = -1)]" {
+                    minus_one.push(name);
+                }
+            }
+        }
+        minus_one.sort();
+        let mut expected: Vec<String> = BYTE_CODES.iter().map(|name| name.to_string()).collect();
+        expected.sort();
+        assert_eq!(minus_one, expected);
+        assert!(i8_exports >= 263, "only {i8_exports} int8_t exports found");
+    }
+
     /// The scanner itself: a guard directly above passes, including one whose
     /// attribute spans lines, with or without a `// SAFETY:` comment inside its
     /// closure; anything else between the guard and `#[unsafe(no_mangle)]`

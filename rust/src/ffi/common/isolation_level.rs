@@ -26,6 +26,7 @@ use std::ffi::c_char;
 
 use crate::common::IsolationLevel;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to an [`IsolationLevel`] singleton.
@@ -94,9 +95,13 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
 
 /// `id()`: the wire-protocol byte.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `READ_UNCOMMITTED`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_common_IsolationLevel_t) -> i8 {
     unsafe { value_of(self_) }.id() as i8

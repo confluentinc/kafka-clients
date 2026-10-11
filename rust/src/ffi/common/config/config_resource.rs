@@ -24,6 +24,7 @@ use std::ffi::{CString, c_char};
 
 use crate::common::config::ConfigResource;
 use crate::common::config::config_resource::Type;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 // ---------------------------------------------------------------------------
@@ -149,9 +150,13 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
 
 /// `id()`: the wire-protocol byte.
 ///
+/// A caught Rust panic returns -1, which is no code of this Java `byte`
+/// enum: its 0 is the valid `UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
     self_: *const kafka_common_config_ConfigResource_Type_t,
