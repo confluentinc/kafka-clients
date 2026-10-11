@@ -39,6 +39,7 @@ use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::{box_error, error_ref, kafka_common_Error_destroy, kafka_common_Error_t};
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::consumer::{Delivery, register_callback_result};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
 
 /// Opaque handle to an `OffsetCommitCallback` implementation registered
@@ -145,6 +146,7 @@ pub(crate) unsafe fn commit_callback_adapter(
 /// `self_` and keeps it alive until the handle is destroyed and, once passed
 /// to a `commit_async_*`, until `onComplete` fired (or the consumer was
 /// destroyed).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
     self_: *mut c_void,
@@ -163,6 +165,7 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 ///
 /// `self_` must be a live callback handle, `offsets` a valid map and
 /// `error` null or a live error.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
@@ -194,6 +197,7 @@ pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t = unsafe extern "C
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
@@ -215,6 +219,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
 /// # Safety
 ///
 /// `self_` must be null or a live handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_destroy(
     self_: *mut kafka_consumer_OffsetCommitCallback_t,

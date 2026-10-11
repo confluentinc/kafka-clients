@@ -36,6 +36,7 @@ use crate::ffi::common::serialization::deserializer::{
 };
 use crate::ffi::consumer::consumer_config::{consumer_config_ref, kafka_consumer_ConsumerConfig_t};
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t, out_slot};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
 
 /// The deserializer standing for a `NULL` one: the record's `void *` is an
@@ -139,6 +140,7 @@ unsafe fn deserializer_from(
 ///
 /// `config` must be a live handle, each deserializer null or a live handle
 /// not used afterwards, and `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     config: *const kafka_consumer_ConsumerConfig_t,

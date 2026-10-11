@@ -36,6 +36,7 @@ use crate::ffi::consumer::consumer_record::{
     ConsumerRecordInner, GenericRecord, consumer_record_ref, kafka_consumer_ConsumerRecord_t,
 };
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, kafka_Map_t, list_elements, map_entries};
 
 /// Opaque handle to a [`ConsumerRecords`].
@@ -109,6 +110,7 @@ unsafe fn inner_ref<'a>(records: *const kafka_consumer_ConsumerRecords_t) -> &'a
 }
 
 /// `ConsumerRecords.empty()`: an owned handle with no records.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_ConsumerRecords_t {
     box_consumer_records(ConsumerRecords::empty(), false, false)
@@ -125,6 +127,7 @@ pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_
 ///
 /// `records` and `next_offsets` must be null or valid maps of the documented
 /// element types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
     records: *const kafka_Map_t,
@@ -149,6 +152,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
     self_: *const kafka_consumer_ConsumerRecords_t,
@@ -162,6 +166,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_partitions(
     self_: *const kafka_consumer_ConsumerRecords_t,
@@ -177,6 +182,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_partitions(
 ///
 /// `self_` must be a valid handle and `partition` a valid topic-partition
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
     self_: *const kafka_consumer_ConsumerRecords_t,
@@ -200,6 +206,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
 /// # Safety
 ///
 /// `self_` must be a valid handle and `topic` a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
     self_: *const kafka_consumer_ConsumerRecords_t,
@@ -221,6 +228,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(self_: *const kafka_consumer_ConsumerRecords_t) -> i8 {
     i8::from(unsafe { inner_ref(self_) }.count() == 0)
@@ -231,6 +239,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(self_: *const kafka_consumer_ConsumerRecords_t) -> i32 {
     i32::try_from(unsafe { inner_ref(self_) }.count()).unwrap_or(i32::MAX)
@@ -242,6 +251,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(self_: *const kafk
 ///
 /// `self_` must be null or a valid handle not used afterwards, nor any
 /// record borrowed from it.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_destroy(self_: *mut kafka_consumer_ConsumerRecords_t) {
     if !self_.is_null() {

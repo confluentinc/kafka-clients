@@ -39,6 +39,7 @@ use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
 use crate::ffi::consumer::{Delivery, error_slot, register_callback_result};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a `ConsumerRebalanceListener` implementation registered
@@ -173,6 +174,7 @@ pub(crate) unsafe fn listener_adapter(
 /// `self_` and keeps it alive until the handle is destroyed and, once passed
 /// to a `subscribe_*`, until the next `subscribe_*`, `unsubscribe` or the
 /// consumer's destruction releases it.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
     self_: *mut c_void,
@@ -242,6 +244,7 @@ unsafe fn invoke_cb(
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -264,6 +267,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -281,6 +285,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -300,6 +305,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -318,6 +324,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -337,6 +344,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -354,6 +362,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// # Safety
 ///
 /// `self_` must be null or a live handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_destroy(
     self_: *mut kafka_consumer_ConsumerRebalanceListener_t,

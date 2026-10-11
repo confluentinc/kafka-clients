@@ -38,6 +38,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::consumer::ConsumerGroupMetadata;
 use crate::ffi::callback_queue::SendPtr;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::owned_c_string;
 
 /// Opaque handle to a [`ConsumerGroupMetadata`].
@@ -156,6 +157,7 @@ impl ConsumerGroupMetadata for CGroupMetadata {
 /// # Safety
 ///
 /// The function pointers must be valid for the lifetime of the handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     self_: *mut c_void,
@@ -178,6 +180,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
@@ -191,6 +194,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
@@ -203,6 +207,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
@@ -220,6 +225,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
@@ -238,6 +244,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_destroy(
     self_: *mut kafka_consumer_ConsumerGroupMetadata_t,

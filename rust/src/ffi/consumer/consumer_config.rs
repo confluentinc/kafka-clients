@@ -31,6 +31,7 @@ use std::sync::Mutex;
 
 use crate::consumer::ConsumerConfig;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_string_list, c_str_to_string, kafka_List_t, kafka_Map_t, list_strings, map_strings, owned_c_string,
 };
@@ -98,6 +99,7 @@ unsafe fn inner_mut<'a>(config: *mut kafka_consumer_ConsumerConfig_t) -> &'a mut
 ///
 /// `props` must be null or a valid map of `char *` keys and values;
 /// `out_new` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     props: *const kafka_Map_t,
@@ -119,6 +121,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_destroy(self_: *mut kafka_consumer_ConsumerConfig_t) {
     if !self_.is_null() {
@@ -135,6 +138,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_destroy(self_: *mut kafka
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_commit_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -147,6 +151,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_commit_interval_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_enable_auto_commit(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -159,6 +164,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_enable_auto_commit(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_heartbeat_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -171,6 +177,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_heartbeat_interval_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -183,6 +190,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_interval_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_records(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -195,6 +203,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_records(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_request_timeout_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -207,6 +216,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_request_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_max_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -219,6 +229,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_max_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -231,6 +242,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_session_timeout_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -243,6 +255,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_session_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_throw_on_fetch_stable_offset_unsupported(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -259,6 +272,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_throw_on_fetch_stable_off
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_offset_reset(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -273,6 +287,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_offset_reset(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_client_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -287,6 +302,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_client_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -301,6 +317,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_instance_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -315,6 +332,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_instance_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_protocol(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -329,6 +347,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_protocol(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_remote_assignor(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -343,6 +362,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_remote_assignor(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_metadata_recovery_strategy(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -357,6 +377,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_metadata_recovery_strateg
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_security_protocol(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -371,6 +392,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_security_protocol(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_bootstrap_servers(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -383,6 +405,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_bootstrap_servers(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_partition_assignment_strategy(
     self_: *const kafka_consumer_ConsumerConfig_t,
@@ -399,6 +422,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_partition_assignment_stra
 /// # Safety
 ///
 /// `self_` must be a valid handle and `value` a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_auto_offset_reset(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -414,6 +438,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_auto_offset_reset(
 ///
 /// `self_` must be a valid handle and `bootstrap_servers` null or a valid
 /// list of strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_bootstrap_servers(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -429,6 +454,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_bootstrap_servers(
 ///
 /// `self_` must be a valid handle and `client_id` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_client_id(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -443,6 +469,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_client_id(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_enable_auto_commit(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -457,6 +484,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_enable_auto_commit(
 ///
 /// `self_` must be a valid handle and `group_id` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_id(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -472,6 +500,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_id(
 ///
 /// `self_` must be a valid handle and `protocol` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_protocol(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -486,6 +515,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_protocol(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_request_timeout_ms(
     self_: *mut kafka_consumer_ConsumerConfig_t,
@@ -499,6 +529,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_request_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_retry_backoff_ms(
     self_: *mut kafka_consumer_ConsumerConfig_t,

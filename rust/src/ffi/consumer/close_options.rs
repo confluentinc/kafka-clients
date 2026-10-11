@@ -26,6 +26,7 @@
 use std::time::Duration;
 
 use crate::consumer::{CloseOptions, GroupMembershipOperation};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`CloseOptions`].
 #[repr(C)]
@@ -101,6 +102,7 @@ fn duration_ms(timeout: i64) -> Duration {
 }
 
 /// `GroupMembershipOperation.LEAVE_GROUP`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group()
 -> *const kafka_consumer_CloseOptions_GroupMembershipOperation_t {
@@ -108,6 +110,7 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_leave_gro
 }
 
 /// `GroupMembershipOperation.REMAIN_IN_GROUP`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group()
 -> *const kafka_consumer_CloseOptions_GroupMembershipOperation_t {
@@ -116,6 +119,7 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in
 
 /// `GroupMembershipOperation.DEFAULT`: static members remain in the group,
 /// dynamic members leave.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
 -> *const kafka_consumer_CloseOptions_GroupMembershipOperation_t {
@@ -124,9 +128,14 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP`,
+/// the first enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from
+/// that value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
     self_: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
@@ -137,6 +146,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__e
 /// `CloseOptions.timeout(Duration timeout)`, the static factory: an owned
 /// handle with `GroupMembershipOperation.DEFAULT`, freed with
 /// [`kafka_consumer_CloseOptions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> *mut kafka_consumer_CloseOptions_t {
     Box::into_raw(Box::new(CloseOptions::new_with_timeout(duration_ms(timeout)))) as *mut kafka_consumer_CloseOptions_t
@@ -149,6 +159,7 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 /// # Safety
 ///
 /// `operation` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
     operation: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
@@ -162,6 +173,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
     self_: *mut kafka_consumer_CloseOptions_t,
@@ -178,6 +190,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
 ///
 /// `self_` must be a valid handle and `operation` a singleton returned by
 /// this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_operation(
     self_: *mut kafka_consumer_CloseOptions_t,
@@ -192,6 +205,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka_consumer_CloseOptions_t) -> i64 {
     unsafe { close_options_ref(self_) }
@@ -204,6 +218,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_group_membership_operation(
     self_: *const kafka_consumer_CloseOptions_t,
@@ -216,6 +231,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_group_membership_operation(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_destroy(self_: *mut kafka_consumer_CloseOptions_t) {
     if !self_.is_null() {

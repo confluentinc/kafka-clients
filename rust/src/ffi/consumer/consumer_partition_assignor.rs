@@ -34,6 +34,7 @@ use crate::consumer::consumer_partition_assignor::{
 };
 use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition_list};
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_list, c_str_to_option, kafka_Bytes_t, kafka_List_t, list_strings, owned_c_string};
 
 /// Opaque handle to a [`Subscription`].
@@ -130,6 +131,7 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 /// # Safety
 ///
 /// `topics` must be null or a valid list of strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_new(
     topics: *const kafka_List_t,
@@ -143,6 +145,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_n
 ///
 /// `topics` must be null or a valid list of strings; `user_data` null or
 /// readable for its length.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data(
     topics: *const kafka_List_t,
@@ -161,6 +164,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 ///
 /// `topics` and `owned_partitions` must be null or valid lists of the
 /// documented element types; `user_data` null or readable for its length.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data_owned_partitions(
     topics: *const kafka_List_t,
@@ -180,6 +184,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// # Safety
 ///
 /// `options` must be a valid options handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_options(
     options: *const kafka_consumer_SubscriptionOptions_t,
@@ -194,6 +199,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_topics(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -206,6 +212,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_t
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_owned_partitions(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -218,6 +225,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_o
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_user_data(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -231,6 +239,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_u
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_group_instance_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -249,6 +258,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 ///
 /// `self_` must be a valid handle; `group_instance_id` null or a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_set_group_instance_id(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -265,6 +275,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_s
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_rack_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -280,6 +291,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -292,6 +304,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
@@ -313,6 +326,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new(
     partitions: *const kafka_List_t,
@@ -327,6 +341,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 ///
 /// `partitions` must be null or a valid list of topic-partition handles;
 /// `user_data` null or readable for its length.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_with_user_data(
     partitions: *const kafka_List_t,
@@ -343,6 +358,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_partitions(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
@@ -355,6 +371,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_par
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_user_data(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
@@ -367,6 +384,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_use
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy(
     self_: *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
@@ -394,6 +412,7 @@ unsafe fn with_builder(
 
 /// `SubscriptionOptionsBuilder::new()`: an owned handle freed with
 /// [`kafka_consumer_SubscriptionOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_consumer_SubscriptionOptionsBuilder_t {
     Box::into_raw(Box::new(Some(SubscriptionOptionsBuilder::new()))) as *mut kafka_consumer_SubscriptionOptionsBuilder_t
@@ -405,6 +424,7 @@ pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_
 ///
 /// `self_` must be a valid builder handle and `topics` null or a valid list
 /// of strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -420,6 +440,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
 ///
 /// `self_` must be a valid builder handle; `user_data` null or readable for
 /// its length.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -436,6 +457,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data
 ///
 /// `self_` must be a valid builder handle and `owned_partitions` null or a
 /// valid list of topic-partition handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_partitions(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -450,6 +472,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_par
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_generation_id(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -464,6 +487,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_generatio
 ///
 /// `self_` must be a valid builder handle; `rack_id` null or a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -480,6 +504,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `out_build` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -503,6 +528,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or a valid builder handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_destroy(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
@@ -517,6 +543,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_destroy(
 /// # Safety
 ///
 /// `self_` must be null or a valid options handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptions_destroy(self_: *mut kafka_consumer_SubscriptionOptions_t) {
     if !self_.is_null() {

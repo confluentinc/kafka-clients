@@ -19,6 +19,7 @@
 use std::ffi::{CString, c_char};
 
 use crate::consumer::SubscriptionPattern;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`SubscriptionPattern`].
@@ -50,6 +51,7 @@ pub(crate) unsafe fn subscription_pattern_ref<'a>(
 /// # Safety
 ///
 /// `pattern` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
     pattern: *const c_char,
@@ -67,6 +69,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
     self_: *const kafka_consumer_SubscriptionPattern_t,
@@ -79,6 +82,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(
     self_: *const kafka_consumer_SubscriptionPattern_t,
@@ -91,6 +95,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_destroy(self_: *mut kafka_consumer_SubscriptionPattern_t) {
     if !self_.is_null() {

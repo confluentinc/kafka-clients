@@ -44,6 +44,7 @@ use crate::ffi::consumer::{
     BusyGuard, ConsumerClassHandle, ConsumerKind, Owns, client_ref, deliver_void, error_slot,
     kafka_consumer_Consumer_t, out_slot,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`MockConsumer`] over `void *` key and value.
@@ -94,6 +95,7 @@ unsafe fn with_mock_void(self_: *mut kafka_consumer_MockConsumer_t, name: &str, 
 /// # Safety
 ///
 /// `offset_reset_strategy` must be a valid string and `out_new` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     offset_reset_strategy: *const c_char,
@@ -119,6 +121,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -132,6 +135,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
 /// # Safety
 ///
 /// `self_` must be null or a live handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_consumer_MockConsumer_t) {
     if !self_.is_null() {
@@ -146,6 +150,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_c
 /// # Safety
 ///
 /// `self_` must be a live handle and `record` a live record.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -161,6 +166,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` a valid map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -175,6 +181,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` a valid map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -189,6 +196,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` a valid map.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -205,6 +213,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
 ///
 /// `self_` must be a live handle, `topic` a valid string and `partitions`
 /// a valid list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -223,6 +232,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
 ///
 /// `self_` must be a live handle and `error` an owned error not used
 /// afterwards, or NULL to clear the pending error as Java's `null` does.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -239,6 +249,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 ///
 /// `self_` must be a live handle and `error` an owned error not used
 /// afterwards, or NULL to clear the pending error as Java's `null` does.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -253,6 +264,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -268,6 +280,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_assignment` a valid list.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -292,6 +305,7 @@ pub type kafka_consumer_MockConsumer_rebalance_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -324,6 +338,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_consumer_MockConsumer_t) -> i8 {
     unsafe { with_mock(self_, |mock| i8::from(mock.closed())) }.unwrap_or(-1)
@@ -334,6 +349,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
     self_: *const kafka_consumer_MockConsumer_t,
@@ -346,6 +362,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(self_: *mut kafka_consumer_MockConsumer_t) {
     unsafe { with_mock_void(self_, "resetShouldRebalance", Mock::reset_should_rebalance) }
@@ -357,6 +374,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_reset_should_rebalance(self
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self_: *mut kafka_consumer_MockConsumer_t) {
     // SAFETY: the caller passes a live mock handle (see `# Safety`).
@@ -369,6 +387,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     self_: *const kafka_consumer_MockConsumer_t,

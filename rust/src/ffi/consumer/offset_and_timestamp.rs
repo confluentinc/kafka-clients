@@ -23,6 +23,7 @@ use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndTimestamp;
 use crate::ffi::common::topic_partition::{TopicPartitionInner, box_topic_partition, topic_partition_key_eq};
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, destroy_boxed, into_c_string, kafka_Map_t};
 
 /// Opaque handle to an [`OffsetAndTimestamp`].
@@ -93,6 +94,7 @@ unsafe fn deliver(
 /// # Safety
 ///
 /// `out_new` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
     offset: i64,
@@ -108,6 +110,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
 /// # Safety
 ///
 /// `out_with_leader_epoch` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
     offset: i64,
@@ -129,6 +132,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
     self_: *const kafka_consumer_OffsetAndTimestamp_t,
@@ -141,6 +145,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
     self_: *const kafka_consumer_OffsetAndTimestamp_t,
@@ -153,6 +158,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
     self_: *const kafka_consumer_OffsetAndTimestamp_t,
@@ -165,6 +171,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
     self_: *const kafka_consumer_OffsetAndTimestamp_t,
@@ -177,6 +184,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_destroy(self_: *mut kafka_consumer_OffsetAndTimestamp_t) {
     if !self_.is_null() {

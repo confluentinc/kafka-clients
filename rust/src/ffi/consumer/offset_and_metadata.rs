@@ -27,6 +27,7 @@ use crate::ffi::common::topic_partition::{
     topic_partition_ref,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
 
 /// Opaque handle to an [`OffsetAndMetadata`].
@@ -132,6 +133,7 @@ unsafe fn deliver(
 /// # Safety
 ///
 /// `out_new` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
     offset: i64,
@@ -147,6 +149,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
 ///
 /// `metadata` must be null or a valid NUL-terminated string; `out_with_metadata`
 /// a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
     offset: i64,
@@ -164,6 +167,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
 ///
 /// `metadata` must be null or a valid NUL-terminated string;
 /// `out_with_leader_epoch_metadata` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
     offset: i64,
@@ -186,6 +190,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_meta
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
     self_: *const kafka_consumer_OffsetAndMetadata_t,
@@ -198,6 +203,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
     self_: *const kafka_consumer_OffsetAndMetadata_t,
@@ -211,6 +217,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
     self_: *const kafka_consumer_OffsetAndMetadata_t,
@@ -223,6 +230,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
     self_: *const kafka_consumer_OffsetAndMetadata_t,
@@ -235,6 +243,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
 /// # Safety
 ///
 /// `self_` must be null or a valid handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_destroy(self_: *mut kafka_consumer_OffsetAndMetadata_t) {
     if !self_.is_null() {

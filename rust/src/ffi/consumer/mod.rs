@@ -117,6 +117,7 @@ use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
 use crate::ffi::consumer::subscription_pattern::{kafka_consumer_SubscriptionPattern_t, subscription_pattern_ref};
+use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::block_on;
 use crate::ffi::util::{
     GenericValue, box_map, box_string_keyed_map, c_str_to_string, kafka_List_destroy, kafka_List_t, kafka_Map_t,
@@ -476,6 +477,7 @@ pub(crate) fn complete_callback_result(id: i64, result: Result<(), Error>) -> bo
 /// # Safety
 ///
 /// `result` must be null or a valid owned error not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__set_callback_result(
     self_: *const kafka_consumer_Consumer_t,
@@ -605,6 +607,7 @@ unsafe fn out_slot<T, P>(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     self_: *mut kafka_consumer_Consumer_t,
@@ -626,6 +629,7 @@ pub type kafka_consumer_Consumer_assign_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -657,6 +661,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
     self_: *mut kafka_consumer_Consumer_t,
@@ -678,6 +683,7 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -710,6 +716,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     self_: *mut kafka_consumer_Consumer_t,
@@ -738,6 +745,7 @@ pub type kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -771,6 +779,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern(
     self_: *mut kafka_consumer_Consumer_t,
@@ -792,6 +801,7 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -822,6 +832,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener(
     self_: *mut kafka_consumer_Consumer_t,
@@ -850,6 +861,7 @@ pub type kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -883,6 +895,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     self_: *mut kafka_consumer_Consumer_t,
@@ -902,6 +915,7 @@ pub type kafka_consumer_Consumer_unsubscribe_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -933,6 +947,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     self_: *mut kafka_consumer_Consumer_t,
@@ -960,6 +975,7 @@ pub type kafka_consumer_Consumer_poll_cb_t = unsafe extern "C" fn(
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -998,6 +1014,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1017,6 +1034,7 @@ pub type kafka_consumer_Consumer_commit_sync_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1044,6 +1062,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1068,6 +1087,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1098,6 +1118,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1123,6 +1144,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1152,6 +1174,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1178,6 +1201,7 @@ pub type kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1208,6 +1232,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1227,6 +1252,7 @@ pub type kafka_consumer_Consumer_commit_async_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1256,6 +1282,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1282,6 +1309,7 @@ pub type kafka_consumer_Consumer_commit_async_with_callback_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1312,6 +1340,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callback(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1340,6 +1369,7 @@ pub type kafka_consumer_Consumer_commit_async_with_offsets_callback_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callback_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1376,6 +1406,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1402,6 +1433,7 @@ pub type kafka_consumer_Consumer_seek_with_offset_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1432,6 +1464,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1459,6 +1492,7 @@ pub type kafka_consumer_Consumer_seek_with_offset_and_metadata_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1490,6 +1524,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1511,6 +1546,7 @@ pub type kafka_consumer_Consumer_seek_to_beginning_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1540,6 +1576,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1561,6 +1598,7 @@ pub type kafka_consumer_Consumer_seek_to_end_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1588,6 +1626,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1611,6 +1650,7 @@ pub type kafka_consumer_Consumer_position_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1638,6 +1678,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1666,6 +1707,7 @@ pub type kafka_consumer_Consumer_position_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1696,6 +1738,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1719,6 +1762,7 @@ pub type kafka_consumer_Consumer_committed_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1748,6 +1792,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1776,6 +1821,7 @@ pub type kafka_consumer_Consumer_committed_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1829,6 +1875,7 @@ unsafe fn destroy_list_element(element: *mut c_void) {
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1852,6 +1899,7 @@ pub type kafka_consumer_Consumer_partitions_for_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1879,6 +1927,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1907,6 +1956,7 @@ pub type kafka_consumer_Consumer_partitions_for_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1936,6 +1986,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1957,6 +2008,7 @@ pub type kafka_consumer_Consumer_list_topics_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -1982,6 +2034,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2008,6 +2061,7 @@ pub type kafka_consumer_Consumer_list_topics_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2037,6 +2091,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2064,6 +2119,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2093,6 +2149,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2125,6 +2182,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2158,6 +2216,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2181,6 +2240,7 @@ pub type kafka_consumer_Consumer_beginning_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2210,6 +2270,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2242,6 +2303,7 @@ pub type kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2273,6 +2335,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2296,6 +2359,7 @@ pub type kafka_consumer_Consumer_end_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2325,6 +2389,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 ///
 /// `self_` must be a live consumer handle, the other parameters valid
 /// for their documented types and the `out_` pointer valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2357,6 +2422,7 @@ pub type kafka_consumer_Consumer_end_offsets_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2393,6 +2459,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2414,6 +2481,7 @@ pub type kafka_consumer_Consumer_pause_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2443,6 +2511,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2464,6 +2533,7 @@ pub type kafka_consumer_Consumer_resume_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2493,6 +2563,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2512,6 +2583,7 @@ pub type kafka_consumer_Consumer_enforce_rebalance_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2539,6 +2611,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2564,6 +2637,7 @@ pub type kafka_consumer_Consumer_enforce_rebalance_with_reason_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2594,6 +2668,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_c
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2613,6 +2688,7 @@ pub type kafka_consumer_Consumer_close_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2640,6 +2716,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
 ///
 /// `self_` must be a live consumer handle and the other parameters
 /// valid for their documented types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2661,6 +2738,7 @@ pub type kafka_consumer_Consumer_close_with_options_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options_cb(
     self_: *mut kafka_consumer_Consumer_t,
@@ -2707,6 +2785,7 @@ unsafe fn read<T>(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     self_: *const kafka_consumer_Consumer_t,
@@ -2721,6 +2800,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     self_: *const kafka_consumer_Consumer_t,
@@ -2735,6 +2815,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_List_t {
     let paused = unsafe { read(self_, Default::default, |c| c.paused()) };
@@ -2746,6 +2827,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(self_: *const kafka_cons
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_consumer_Consumer_t) -> *const c_char {
     unsafe { client_ref(self_) }.client_id.as_ptr()
@@ -2757,6 +2839,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(self_: *const kafka_c
 /// # Safety
 ///
 /// `self_` must be a live handle and `topic_partition` a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     self_: *const kafka_consumer_Consumer_t,
@@ -2773,6 +2856,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_Map_t {
     let mut metrics: Vec<_> = unsafe { read(self_, Default::default, |c| c.metrics()) }.into_iter().collect();
@@ -2805,6 +2889,7 @@ unsafe fn destroy_kafka_metric(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     self_: *const kafka_consumer_Consumer_t,
@@ -2818,6 +2903,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_consumer_Consumer_t) {
     unsafe { client_ref(self_) }.handle.wakeup();
@@ -2831,6 +2917,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
     self_: *const kafka_consumer_Consumer_t,
@@ -2854,6 +2941,7 @@ pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 /// # Safety
 ///
 /// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 {
     unsafe { client_ref(self_) }.delivery.queue.execute()
@@ -2867,6 +2955,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *cons
 ///
 /// `self_` must be a live handle; `opaque` stays valid while the hook is
 /// installed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
     self_: *const kafka_consumer_Consumer_t,
@@ -2887,6 +2976,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 ///
 /// `self_` must be null or a live handle from `KafkaConsumer_new`, not
 /// used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(self_: *mut kafka_consumer_Consumer_t) {
     if !self_.is_null() {

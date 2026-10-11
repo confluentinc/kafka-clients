@@ -24,6 +24,7 @@ use std::sync::LazyLock;
 
 use crate::consumer::GroupProtocol;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupProtocol`] singleton.
@@ -70,12 +71,14 @@ pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t) -
 }
 
 /// `GroupProtocol.CLASSIC`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_GroupProtocol_classic() -> *const kafka_consumer_GroupProtocol_t {
     singleton(GroupProtocol::Classic)
 }
 
 /// `GroupProtocol.CONSUMER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consumer_GroupProtocol_t {
     singleton(GroupProtocol::Consumer)
@@ -83,9 +86,14 @@ pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consum
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_consumer_GroupProtocol_CLASSIC`, the first enumerator: the
+/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CLASSIC)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
     self_: *const kafka_consumer_GroupProtocol_t,
@@ -98,6 +106,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
     self_: *const kafka_consumer_GroupProtocol_t,
@@ -112,6 +121,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `out_of` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
     name: *const c_char,
@@ -132,6 +142,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_to_string(
     self_: *const kafka_consumer_GroupProtocol_t,

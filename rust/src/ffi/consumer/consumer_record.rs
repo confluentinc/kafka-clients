@@ -38,6 +38,7 @@ use crate::ffi::common::header::internals::record_headers::{
 };
 use crate::ffi::common::record::timestamp_type::{self, kafka_common_record_TimestampType_t};
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     GenericValue, c_str_to_string, into_c_string, kafka_Bytes_destroy, kafka_Bytes_t, owned_c_string,
 };
@@ -151,6 +152,7 @@ fn generic_ptr(value: Option<&GenericValue>) -> *mut c_void {
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
     topic: *const c_char,
@@ -174,6 +176,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
 /// # Safety
 ///
 /// `options` must be a valid options handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
     options: *const kafka_consumer_ConsumerRecordOptions_t,
@@ -187,6 +190,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -199,6 +203,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(self_: *const kafka_consumer_ConsumerRecord_t) -> i32 {
     unsafe { consumer_record_ref(self_) }.partition()
@@ -209,6 +214,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(self_: *const kafka_consumer_ConsumerRecord_t) -> i64 {
     unsafe { consumer_record_ref(self_) }.offset()
@@ -219,6 +225,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(self_: *const kafka_consumer_ConsumerRecord_t) -> i64 {
     unsafe { consumer_record_ref(self_) }.timestamp()
@@ -229,6 +236,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -241,6 +249,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -253,6 +262,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -266,6 +276,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -279,6 +290,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -291,6 +303,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -307,6 +320,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -319,6 +333,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -332,6 +347,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
     self_: *const kafka_consumer_ConsumerRecord_t,
@@ -346,6 +362,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
 ///
 /// `self_` must be null or a valid owned handle not used afterwards; a
 /// record borrowed from a records handle is never passed here.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_destroy(self_: *mut kafka_consumer_ConsumerRecord_t) {
     if !self_.is_null() {
@@ -384,6 +401,7 @@ unsafe fn with_builder(
 
 /// `ConsumerRecordOptionsBuilder::new()`: an owned handle freed with
 /// [`kafka_consumer_ConsumerRecordOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_new() -> *mut kafka_consumer_ConsumerRecordOptionsBuilder_t
 {
@@ -396,6 +414,7 @@ pub extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_new() -> *mut kafk
 ///
 /// `self_` must be a valid builder handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -410,6 +429,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_partition(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -423,6 +443,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_partiti
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -436,6 +457,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -450,6 +472,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
 ///
 /// `self_` must be a valid builder handle and `timestamp_type` a singleton
 /// of `kafka_common_record_TimestampType_t`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp_type(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -464,6 +487,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_key_size(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -477,6 +501,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_value_size(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -490,6 +515,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_key(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -503,6 +529,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_key(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_value(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -517,6 +544,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_value(
 ///
 /// `self_` must be a valid builder handle and `headers` a valid record-headers
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_headers(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -531,6 +559,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_headers
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -544,6 +573,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_delivery_count(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -560,6 +590,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_deliver
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `out_build` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -585,6 +616,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or a valid builder handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_destroy(
     self_: *mut kafka_consumer_ConsumerRecordOptionsBuilder_t,
@@ -599,6 +631,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_destroy(
 /// # Safety
 ///
 /// `self_` must be null or a valid options handle not used afterwards.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptions_destroy(
     self_: *mut kafka_consumer_ConsumerRecordOptions_t,
