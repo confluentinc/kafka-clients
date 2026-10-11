@@ -66,12 +66,14 @@ pub(crate) unsafe fn value_of(election_type: *const kafka_common_ElectionType_t)
 }
 
 /// `ElectionType.PREFERRED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_preferred() -> *const kafka_common_ElectionType_t {
     singleton(ElectionType::Preferred)
 }
 
 /// `ElectionType.UNCLEAN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_ElectionType_t {
     singleton(ElectionType::Unclean)
@@ -79,9 +81,14 @@ pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_Ele
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_ElectionType_PREFERRED`, the first enumerator: the
+/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_ElectionType_e::kafka_common_ElectionType_PREFERRED)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType__enum(
     self_: *const kafka_common_ElectionType_t,
@@ -110,6 +117,7 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_com
 /// # Safety
 ///
 /// `out_value_of` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
     value: i8,
@@ -127,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
 /// `ElectionType.values()`: an owned list of the borrowed singletons in
 /// declaration order, freed with `kafka_List_destroy` (the elements are
 /// never freed).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_values() -> *mut kafka_List_t {
     let elements = ElectionType::values().iter().map(|&t| singleton(t) as *mut c_void).collect();

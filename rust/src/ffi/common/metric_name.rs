@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::MetricName;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_map, c_str_to_string, into_c_string, kafka_Map_t, map_strings, owned_c_string};
 
 /// Opaque handle to a [`MetricName`].
@@ -85,6 +86,7 @@ unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t) -> &'a MetricNameIn
 ///
 /// The strings must be valid NUL-terminated strings and `tags` null or a
 /// valid map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_new(
     name: *const c_char,
@@ -106,6 +108,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_new(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_name(self_: *const kafka_common_MetricName_t) -> *const c_char {
     unsafe { inner(self_) }.name_c.as_ptr()
@@ -116,6 +119,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_name(self_: *const kafka_common
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_group(self_: *const kafka_common_MetricName_t) -> *const c_char {
     unsafe { inner(self_) }.group_c.as_ptr()
@@ -126,6 +130,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_group(self_: *const kafka_commo
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_description(self_: *const kafka_common_MetricName_t) -> *const c_char {
     unsafe { inner(self_) }.description_c.as_ptr()
@@ -137,6 +142,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_description(self_: *const kafka
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_tags(self_: *const kafka_common_MetricName_t) -> *mut kafka_Map_t {
     box_string_map(unsafe { metric_name_ref(self_) }.tags())
@@ -147,6 +153,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_tags(self_: *const kafka_common
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_to_string(self_: *const kafka_common_MetricName_t) -> *mut c_char {
     into_c_string(&unsafe { metric_name_ref(self_) }.to_string())
@@ -158,6 +165,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_to_string(self_: *const kafka_c
 /// # Safety
 ///
 /// `self_` must be null or an owned metric-name handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_destroy(self_: *mut kafka_common_MetricName_t) {
     if !self_.is_null() {

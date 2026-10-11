@@ -23,6 +23,7 @@ use crate::common::errors::RecordTooLargeError;
 use crate::ffi::common::errors::{Payload, PayloadClass, take_source};
 use crate::ffi::common::topic_partition::{map_topic_partition_i64, topic_partition_i64_map};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_Map_t};
 
 /// Opaque handle to a [`RecordTooLargeError`].
@@ -48,6 +49,7 @@ impl PayloadClass for RecordTooLargeError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large_error(
     error: *const kafka_common_Error_t,
@@ -65,6 +67,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large_error(
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_new(
     message: *const c_char,
@@ -73,6 +76,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_new(
 }
 
 /// `new RecordTooLargeException()` with Java's default message.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordTooLargeError_with_default_message() -> *mut kafka_common_RecordTooLargeError_t {
     Payload::boxed(RecordTooLargeError::with_default_message())
@@ -85,6 +89,7 @@ pub extern "C" fn kafka_common_RecordTooLargeError_with_default_message() -> *mu
 ///
 /// `message` must be a valid NUL-terminated string and `source` an owned
 /// error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_source(
     message: *const c_char,
@@ -104,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_source(
 ///
 /// `message` must be a valid NUL-terminated string and
 /// `record_too_large_partitions` null or a valid map of the stated types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_record_too_large_partitions(
     message: *const c_char,
@@ -123,6 +129,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_record_too_large_
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
     self_: *const kafka_common_RecordTooLargeError_t,
@@ -138,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_parti
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_message(
     self_: *const kafka_common_RecordTooLargeError_t,
@@ -150,6 +158,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_message(
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_source(
     self_: *const kafka_common_RecordTooLargeError_t,
@@ -162,6 +171,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_source(
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_to_string(
     self_: *const kafka_common_RecordTooLargeError_t,
@@ -175,6 +185,7 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_destroy(self_: *mut kafka_common_RecordTooLargeError_t) {
     unsafe { Payload::<RecordTooLargeError>::destroy(self_) }

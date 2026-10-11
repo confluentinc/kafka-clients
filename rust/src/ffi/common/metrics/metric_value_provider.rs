@@ -31,6 +31,7 @@ use crate::ffi::common::metric::{box_metric_value, kafka_common_MetricValue_t};
 use crate::ffi::common::metrics::gauge::{ArcGauge, kafka_common_metrics_Gauge_t, take_gauge};
 use crate::ffi::common::metrics::measurable::{ArcMeasurable, kafka_common_metrics_Measurable_t, take_measurable};
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_ref};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`MetricValueProvider`].
 #[repr(C)]
@@ -94,6 +95,7 @@ pub(crate) unsafe fn metric_value_provider_of(
 ///
 /// `value` must be a valid measurable handle, not used again by the caller
 /// when it was owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_measurable(
     value: *mut kafka_common_metrics_Measurable_t,
@@ -107,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_measurable(
 ///
 /// `value` must be a valid gauge handle, not used again by the caller when
 /// it was owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_gauge(
     value: *mut kafka_common_metrics_Gauge_t,
@@ -116,9 +119,14 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_gauge(
 
 /// The variant of a provider, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_metrics_MetricValueProvider_MEASURABLE`, the first
+/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
+/// value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a valid metric-value-provider handle.
+#[ffi_guard(fallback = kafka_common_metrics_MetricValueProvider_e::kafka_common_metrics_MetricValueProvider_MEASURABLE)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(
     self_: *const kafka_common_metrics_MetricValueProvider_t,
@@ -140,6 +148,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider__enum(
 ///
 /// `self_` must be a valid metric-value-provider handle and `config` a
 /// valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
     self_: *const kafka_common_metrics_MetricValueProvider_t,
@@ -159,6 +168,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_destroy(
     self_: *mut kafka_common_metrics_MetricValueProvider_t,

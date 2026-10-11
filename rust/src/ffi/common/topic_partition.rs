@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::TopicPartition;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, kafka_Map_t, list_elements,
     map_entries, owned_c_string,
@@ -167,6 +168,7 @@ pub(crate) unsafe fn map_topic_partition_i64(map: *const kafka_Map_t) -> HashMap
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_new(
     topic: *const c_char,
@@ -181,6 +183,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_new(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
     self_: *const kafka_common_TopicPartition_t,
@@ -193,6 +196,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_partition(self_: *const kafka_common_TopicPartition_t) -> i32 {
     unsafe { topic_partition_ref(self_) }.partition()
@@ -204,6 +208,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_partition(self_: *const kaf
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_to_string(
     self_: *const kafka_common_TopicPartition_t,
@@ -216,6 +221,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned topic-partition handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartition_destroy(self_: *mut kafka_common_TopicPartition_t) {
     if !self_.is_null() {

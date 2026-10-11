@@ -26,6 +26,7 @@
 use std::ffi::c_char;
 
 use crate::common::metrics::TimeUnit;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`TimeUnit`] singleton.
 // the Rust-only stand-in for `java.util.concurrent.TimeUnit`
@@ -88,42 +89,49 @@ pub(crate) unsafe fn value_of(unit: *const kafka_common_metrics_TimeUnit_t) -> T
 }
 
 /// `TimeUnit.NANOSECONDS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_nanoseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Nanoseconds)
 }
 
 /// `TimeUnit.MICROSECONDS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_microseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Microseconds)
 }
 
 /// `TimeUnit.MILLISECONDS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_milliseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Milliseconds)
 }
 
 /// `TimeUnit.SECONDS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_seconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Seconds)
 }
 
 /// `TimeUnit.MINUTES`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_minutes() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Minutes)
 }
 
 /// `TimeUnit.HOURS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_hours() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Hours)
 }
 
 /// `TimeUnit.DAYS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Days)
@@ -131,9 +139,14 @@ pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_me
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_metrics_TimeUnit_NANOSECONDS`, the first enumerator:
+/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
+/// only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_NANOSECONDS)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
     self_: *const kafka_common_metrics_TimeUnit_t,
@@ -146,6 +159,7 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
     self_: *const kafka_common_metrics_TimeUnit_t,
@@ -168,6 +182,7 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_to_millis(
     self_: *const kafka_common_metrics_TimeUnit_t,

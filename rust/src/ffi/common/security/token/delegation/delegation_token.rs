@@ -22,6 +22,7 @@ use crate::common::security::token::delegation::DelegationToken;
 use crate::ffi::common::security::token::delegation::token_information::{
     TokenInformationInner, kafka_common_security_token_delegation_TokenInformation_t, token_information_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_Bytes_t};
 
 /// Opaque handle to a [`DelegationToken`].
@@ -90,6 +91,7 @@ pub(crate) fn box_delegation_token(
 ///
 /// `token_information` must be a valid token-information handle and
 /// `hmac.data` null or valid for `hmac.len` bytes.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_new(
     token_information: *const kafka_common_security_token_delegation_TokenInformation_t,
@@ -106,6 +108,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// # Safety
 ///
 /// `self_` must be a valid delegation-token handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
     self_: *const kafka_common_security_token_delegation_DelegationToken_t,
@@ -121,6 +124,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// # Safety
 ///
 /// `self_` must be a valid delegation-token handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
     self_: *const kafka_common_security_token_delegation_DelegationToken_t,
@@ -135,6 +139,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// # Safety
 ///
 /// `self_` must be a valid delegation-token handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
     self_: *const kafka_common_security_token_delegation_DelegationToken_t,
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// # Safety
 ///
 /// `self_` must be a valid delegation-token handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_to_string(
     self_: *const kafka_common_security_token_delegation_DelegationToken_t,
@@ -161,6 +167,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 ///
 /// `self_` must be null or an owned delegation-token handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_destroy(
     self_: *mut kafka_common_security_token_delegation_DelegationToken_t,

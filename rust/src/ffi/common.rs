@@ -333,6 +333,7 @@ unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
 }
 
 /// `new KafkaException()`: the bare Kafka error with the default message.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
     box_error(Error::kafka())
@@ -343,6 +344,7 @@ pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::kafka_message(unsafe { c_str_to_string(message) }))
@@ -354,6 +356,7 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char
 /// # Safety
 ///
 /// `source` must be an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_source(
     source: *mut kafka_common_Error_t,
@@ -368,6 +371,7 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_source(
 ///
 /// `message` must be null or a valid NUL-terminated C string; `source` must
 /// be an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
     message: *const c_char,
@@ -385,6 +389,7 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
     topics: *const kafka_List_t,
@@ -400,6 +405,7 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings; `message`
 /// must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
     topics: *const kafka_List_t,
@@ -417,6 +423,7 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_List_t) -> *mut kafka_common_Error_t {
     box_error(Error::invalid_topics(unsafe { topic_set(topics) }))
@@ -430,6 +437,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings; `message`
 /// must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
     topics: *const kafka_List_t,
@@ -445,6 +453,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
 /// # Safety
 ///
 /// `group_id` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::group_authorization(unsafe { c_str_to_string(group_id) }))
@@ -456,6 +465,7 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const
 ///
 /// `group_id` and `message` must each be null or a valid NUL-terminated C
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
     group_id: *const c_char,
@@ -472,6 +482,7 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::invalid_group_id(unsafe { c_str_to_string(message) }))
@@ -482,6 +493,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_c
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
     throttle_time_ms: i32,
@@ -497,6 +509,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::buffer_exhausted(unsafe { c_str_to_string(message) }))
@@ -507,6 +520,7 @@ pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_c
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
     message: *const c_char,
@@ -519,6 +533,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::config_message(unsafe { c_str_to_string(message) }))
@@ -529,6 +544,7 @@ pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_cha
 /// # Safety
 ///
 /// `name` and `value` must each be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_name_value(
     name: *const c_char,
@@ -546,6 +562,7 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value(
 ///
 /// `name`, `value` and `message` must each be null or a valid NUL-terminated
 /// C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
     name: *const c_char,
@@ -564,6 +581,7 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::local_illegal_state(unsafe { c_str_to_string(message) }))
@@ -575,6 +593,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const 
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::timeout(unsafe { c_str_to_string(message) }))
@@ -585,6 +604,7 @@ pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::record_too_large(unsafe { c_str_to_string(message) }))
@@ -595,6 +615,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_c
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
     message: *const c_char,
@@ -613,6 +634,7 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::invalid_receive(unsafe { c_str_to_string(message) }))
@@ -623,6 +645,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_ch
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::schema(unsafe { c_str_to_string(message) }))
@@ -635,6 +658,7 @@ pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *m
 ///
 /// `message` must be null or a valid NUL-terminated C string; `source` must
 /// be an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_schema_source(
     message: *const c_char,
@@ -650,6 +674,7 @@ pub unsafe extern "C" fn kafka_common_Error_schema_source(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::serialization(unsafe { c_str_to_string(message) }))
@@ -660,6 +685,7 @@ pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::unsupported_version(unsafe { c_str_to_string(message) }))
@@ -670,6 +696,7 @@ pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const 
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::wakeup(unsafe { c_str_to_string(message) }))
@@ -680,6 +707,7 @@ pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *m
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
     message: *const c_char,
@@ -693,6 +721,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
     box_error(Error::local_timeout(unsafe { c_str_to_string(message) }))
@@ -712,6 +741,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char
 /// `message` must be null or a valid NUL-terminated C string.
 // a binding's foreign callback error, no Java class (DoD #7)
 #[doc(alias = "rust-only")]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_callback(
     message: *const c_char,
@@ -721,6 +751,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback(
 }
 
 /// `new TransactionAbortedException()`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_Error_t {
     box_error(Error::transaction_aborted())
@@ -731,6 +762,7 @@ pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
     message: *const c_char,
@@ -743,6 +775,7 @@ pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_batch_too_large(
     message: *const c_char,
@@ -1336,7 +1369,7 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard]
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *const kafka_common_Error_t {
     if error.is_null() {
@@ -1352,6 +1385,7 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka_common_Error_t) -> i32 {
     if error.is_null() {

@@ -26,6 +26,7 @@ use crate::common::metrics::QuotaViolationError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::metric_name::{MetricNameInner, kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`QuotaViolationError`].
 #[repr(C)]
@@ -54,6 +55,7 @@ fn metric_name_view(payload: &Payload<QuotaViolationError>) -> &MetricNameInner 
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_quota_violation(
     error: *const kafka_common_Error_t,
@@ -73,6 +75,7 @@ pub unsafe extern "C" fn kafka_common_Error_quota_violation(
 /// # Safety
 ///
 /// `metric_name` must be a valid metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
     metric_name: *const kafka_common_MetricName_t,
@@ -91,6 +94,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
     self_: *const kafka_common_QuotaViolationError_t,
@@ -103,6 +107,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
     self_: *const kafka_common_QuotaViolationError_t,
@@ -115,6 +120,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
     self_: *const kafka_common_QuotaViolationError_t,
@@ -127,6 +133,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
     self_: *const kafka_common_QuotaViolationError_t,
@@ -139,6 +146,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
     self_: *const kafka_common_QuotaViolationError_t,
@@ -152,6 +160,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_destroy(self_: *mut kafka_common_QuotaViolationError_t) {
     unsafe { Payload::<QuotaViolationError>::destroy(self_) }

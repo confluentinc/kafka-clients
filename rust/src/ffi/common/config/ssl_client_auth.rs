@@ -21,6 +21,7 @@
 use std::ffi::c_char;
 
 use crate::common::config::SslClientAuth;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, into_c_string};
 
 /// Opaque handle to a [`SslClientAuth`] singleton.
@@ -69,18 +70,21 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_config_SslClientAuth_t)
 }
 
 /// `SslClientAuth.REQUIRED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_required() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::Required)
 }
 
 /// `SslClientAuth.REQUESTED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_requested() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::Requested)
 }
 
 /// `SslClientAuth.NONE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_none() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::None)
@@ -88,9 +92,14 @@ pub extern "C" fn kafka_common_config_SslClientAuth_none() -> *const kafka_commo
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_config_SslClientAuth_REQUIRED`, the first enumerator:
+/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
+/// only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_config_SslClientAuth_e::kafka_common_config_SslClientAuth_REQUIRED)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
     self_: *const kafka_common_config_SslClientAuth_t,
@@ -105,6 +114,7 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
 /// # Safety
 ///
 /// `key` must be null or a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
     key: *const c_char,
@@ -119,6 +129,7 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_to_string(
     self_: *const kafka_common_config_SslClientAuth_t,

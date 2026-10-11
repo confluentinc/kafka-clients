@@ -33,6 +33,7 @@ use std::sync::OnceLock;
 
 use crate::common::{Metric, MetricValue};
 use crate::ffi::common::metric_name::{MetricNameInner, kafka_common_MetricName_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`Metric`] implementation.
@@ -142,6 +143,7 @@ unsafe impl Sync for MetricInner {}
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Metric_metric_name(
     self_: *const kafka_common_Metric_t,
@@ -159,6 +161,7 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_name(
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Metric_metric_value(
     self_: *const kafka_common_Metric_t,
@@ -168,9 +171,14 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
 
 /// Which variant `self_` holds.
 ///
+/// A caught Rust panic returns `kafka_common_MetricValue_DOUBLE`, the first enumerator: the enum
+/// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
+#[ffi_guard(fallback = kafka_common_MetricValue_e::kafka_common_MetricValue_DOUBLE)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     self_: *const kafka_common_MetricValue_t,
@@ -185,6 +193,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue__enum(
 
 /// `MetricValue::Double(value)`. Owned, freed with
 /// [`kafka_common_MetricValue_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Double(value))
@@ -195,18 +204,21 @@ pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_comm
 /// # Safety
 ///
 /// `value` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::String(unsafe { c_str_to_string(value) }))
 }
 
 /// `MetricValue::Long(value)`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_long(value: i64) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Long(value))
 }
 
 /// `MetricValue::Int(value)`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Int(value))
@@ -219,6 +231,7 @@ pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_common_MetricValue_t) -> f64 {
     unsafe { metric_value_ref(self_) }.value.as_double().unwrap_or(f64::NAN)
@@ -230,6 +243,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_common_MetricValue_t) -> *const c_char {
     unsafe { metric_value_ref(self_) }
@@ -245,6 +259,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_common_MetricValue_t) -> i64 {
     unsafe { metric_value_ref(self_) }.value.as_long().unwrap_or(-1)
@@ -257,6 +272,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_co
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_int(self_: *const kafka_common_MetricValue_t) -> i32 {
     unsafe { metric_value_ref(self_) }.value.as_int().unwrap_or(-1)
@@ -267,6 +283,7 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_int(self_: *const kafka_com
 /// # Safety
 ///
 /// `self_` must be null or an owned metric-value handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_destroy(self_: *mut kafka_common_MetricValue_t) {
     if !self_.is_null() {

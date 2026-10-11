@@ -31,6 +31,7 @@ use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::common::metrics::stats::sampled_stat::{kafka_common_metrics_stats_SampledStat_t, sampled_stat_ref};
 use crate::ffi::common::metrics::time_unit::{kafka_common_metrics_TimeUnit_t, value_of as time_unit_of};
+use crate::ffi::ffi_guard;
 use std::sync::Arc;
 
 /// Opaque handle to a [`Meter`].
@@ -54,6 +55,7 @@ fn boxed(meter: Meter) -> *mut kafka_common_metrics_stats_Meter_t {
 /// # Safety
 ///
 /// Both names must be valid metric-name handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_new(
     rate_metric_name: *const kafka_common_MetricName_t,
@@ -71,6 +73,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_new(
 ///
 /// `unit` must be a time-unit singleton and both names valid metric-name
 /// handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit(
     unit: *const kafka_common_metrics_TimeUnit_t,
@@ -91,6 +94,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit(
 ///
 /// `rate_stat` must be a valid sampled-stat handle and both names valid
 /// metric-name handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_rate_stat(
     rate_stat: *const kafka_common_metrics_stats_SampledStat_t,
@@ -111,6 +115,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_rate_stat(
 ///
 /// `unit` must be a time-unit singleton, `rate_stat` a valid sampled-stat
 /// handle and both names valid metric-name handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit_rate_stat(
     unit: *const kafka_common_metrics_TimeUnit_t,
@@ -132,6 +137,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit_rate_stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_Stat(
     self_: *const kafka_common_metrics_stats_Meter_t,
@@ -146,6 +152,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_Stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_CompoundStat(
     self_: *const kafka_common_metrics_stats_Meter_t,
@@ -159,6 +166,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_CompoundStat(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_destroy(self_: *mut kafka_common_metrics_stats_Meter_t) {
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<Meter>) }

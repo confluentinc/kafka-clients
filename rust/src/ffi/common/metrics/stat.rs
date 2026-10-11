@@ -22,6 +22,7 @@
 use crate::common::metrics::Stat;
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_ref};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`Stat`] implementation.
 #[repr(C)]
@@ -44,6 +45,7 @@ pub(crate) unsafe fn stat_ref<'a>(stat: *const kafka_common_metrics_Stat_t) -> &
 ///
 /// `self_` must be a valid stat handle and `config` a valid metric-config
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Stat_record(
     self_: *const kafka_common_metrics_Stat_t,

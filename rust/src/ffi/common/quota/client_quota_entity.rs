@@ -27,6 +27,7 @@ use std::ffi::{c_char, c_void};
 use std::ptr;
 
 use crate::common::quota::ClientQuotaEntity;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_option, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_t,
     map_entries,
@@ -83,6 +84,7 @@ pub(crate) fn sorted_entries(entity: &ClientQuotaEntity) -> Vec<(&str, Option<&s
 ///
 /// `entries` must be a valid map of NUL-terminated keys and NUL-terminated or
 /// `NULL` values.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
     entries: *const kafka_Map_t,
@@ -104,6 +106,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
 /// # Safety
 ///
 /// `entity_type` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_is_valid_entity_type(entity_type: *const c_char) -> i8 {
     i8::from(ClientQuotaEntity::is_valid_entity_type(&unsafe {
@@ -119,6 +122,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_is_valid_entity_ty
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-entity handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
     self_: *const kafka_common_quota_ClientQuotaEntity_t,
@@ -134,6 +138,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-entity handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_to_string(
     self_: *const kafka_common_quota_ClientQuotaEntity_t,
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned entity handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_destroy(
     self_: *mut kafka_common_quota_ClientQuotaEntity_t,

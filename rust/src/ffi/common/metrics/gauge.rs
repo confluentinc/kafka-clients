@@ -31,6 +31,7 @@ use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::metric_config::{
     MetricConfigInner, kafka_common_metrics_MetricConfig_t, metric_config_ref,
 };
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`Gauge`] implementation.
 #[repr(C)]
@@ -100,6 +101,7 @@ pub(crate) unsafe fn take_gauge(gauge: *mut kafka_common_metrics_Gauge_t) -> Arc
 /// keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_Gauge_destroy`] or, once a `*mut` parameter
 /// consumed it, until the registry it went into is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Gauge_new(
     self_: *mut c_void,
@@ -116,6 +118,7 @@ pub extern "C" fn kafka_common_metrics_Gauge_new(
 ///
 /// `self_` must be a valid gauge handle and `config` a valid metric-config
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Gauge_value(
     self_: *const kafka_common_metrics_Gauge_t,
@@ -130,6 +133,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Gauge_value(
 /// # Safety
 ///
 /// `self_` must be null or an owned gauge handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Gauge_destroy(self_: *mut kafka_common_metrics_Gauge_t) {
     unsafe { Interface::<dyn Gauge>::destroy(self_ as *mut Interface<dyn Gauge>) }

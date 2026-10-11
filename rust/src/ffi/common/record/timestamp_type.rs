@@ -24,6 +24,7 @@ use std::sync::LazyLock;
 
 use crate::common::record::TimestampType;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TimestampType`] singleton.
@@ -81,18 +82,21 @@ pub(crate) unsafe fn value_of(timestamp_type: *const kafka_common_record_Timesta
 }
 
 /// `TimestampType.NO_TIMESTAMP_TYPE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_no_timestamp_type() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::NoTimestampType)
 }
 
 /// `TimestampType.CREATE_TIME`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_create_time() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::CreateTime)
 }
 
 /// `TimestampType.LOG_APPEND_TIME`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::LogAppendTime)
@@ -100,9 +104,14 @@ pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const 
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE`, the first
+/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
+/// value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
     self_: *const kafka_common_record_TimestampType_t,
@@ -112,9 +121,12 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
 
 /// `id`: `-1`, `0` or `1`.
 ///
+/// A caught Rust panic returns -2, which is no id of this enum: its ids are -1, 0 and 1.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
     self_: *const kafka_common_record_TimestampType_t,
@@ -127,6 +139,7 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
     self_: *const kafka_common_record_TimestampType_t,
@@ -142,6 +155,7 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
 ///
 /// `name` must be a valid NUL-terminated string and `out_for_name` a valid
 /// pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     name: *const c_char,
@@ -162,6 +176,7 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_to_string(
     self_: *const kafka_common_record_TimestampType_t,

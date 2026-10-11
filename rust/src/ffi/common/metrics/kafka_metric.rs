@@ -33,6 +33,7 @@ use crate::ffi::common::metrics::metric_config::{
     box_metric_config, kafka_common_metrics_MetricConfig_t, metric_config_arc,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`KafkaMetric`], shared with its registry.
 #[repr(C)]
@@ -115,6 +116,7 @@ pub(crate) unsafe fn destroy_kafka_metric_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
     self_: *const kafka_common_metrics_KafkaMetric_t,
@@ -133,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
     self_: *const kafka_common_metrics_KafkaMetric_t,
@@ -147,6 +150,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
 ///
 /// `self_` must be a valid metric handle and `config` a valid metric-config
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
     self_: *const kafka_common_metrics_KafkaMetric_t,
@@ -160,6 +164,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
     self_: *const kafka_common_metrics_KafkaMetric_t,
@@ -176,6 +181,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
 ///
 /// `self_` must be a valid metric handle and `out_measurable` a valid
 /// pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     self_: *const kafka_common_metrics_KafkaMetric_t,
@@ -198,6 +204,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
 /// # Safety
 ///
 /// `self_` must be null or an owned metric handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_destroy(self_: *mut kafka_common_metrics_KafkaMetric_t) {
     if !self_.is_null() {

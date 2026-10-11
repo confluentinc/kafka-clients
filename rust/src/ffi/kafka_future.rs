@@ -53,6 +53,7 @@ use std::time::Duration;
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
 use crate::ffi::common::{box_error, kafka_common_Error_t, spawn_callback_task, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{destroy_boxed, kafka_List_t, list_elements};
 
 // ---------------------------------------------------------------------------
@@ -325,6 +326,7 @@ fn timeout_ms(timeout: i64) -> Duration {
 /// # Safety
 ///
 /// `result_error` must be null or an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
     result: *const c_void,
@@ -346,6 +348,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
 /// # Safety
 ///
 /// `self_` must be a valid future handle and `out_get` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
     self_: *const kafka_common_KafkaFuture_t,
@@ -368,6 +371,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
 /// untouched.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
     self_: *const kafka_common_KafkaFuture_t,
@@ -386,6 +390,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
 ///
 /// `self_` must be a valid future handle and `out_get_with_timeout` a valid
 /// pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
     self_: *const kafka_common_KafkaFuture_t,
@@ -408,6 +413,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
 /// untouched.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
     self_: *const kafka_common_KafkaFuture_t,
@@ -423,6 +429,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
 /// # Safety
 ///
 /// `self_` must be a valid future handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_common_KafkaFuture_t) -> i8 {
     i8::from(unsafe { future_ref(self_) }.future.is_done())
@@ -439,6 +446,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_co
 ///
 /// `futures` must be null or a valid list whose elements are valid future
 /// handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
     futures: *const kafka_List_t,
@@ -516,6 +524,7 @@ unsafe fn base_function_ref<'a>(function: *const kafka_common_KafkaFuture_BaseFu
 /// future keeps its own copy of the registration.
 ///
 /// Owned, freed with [`kafka_common_KafkaFuture_BaseFunction_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
     self_: *mut c_void,
@@ -531,6 +540,7 @@ pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
 /// # Safety
 ///
 /// `self_` must be a valid function handle and `out_apply` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
     self_: *const kafka_common_KafkaFuture_BaseFunction_t,
@@ -552,6 +562,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
 /// # Safety
 ///
 /// `self_` must be null or an owned function handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
     self_: *mut kafka_common_KafkaFuture_BaseFunction_t,
@@ -582,6 +593,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
 ///
 /// `self_` must be a valid future handle and `function` a valid function
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
     self_: *const kafka_common_KafkaFuture_t,
@@ -606,6 +618,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
 /// # Safety
 ///
 /// `self_` must be null or a valid future handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_destroy(self_: *mut kafka_common_KafkaFuture_t) {
     if !self_.is_null() {

@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::consumer::ConsumerRetriableCommitFailedError;
 use crate::ffi::common::errors::{Payload, PayloadClass, take_source};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`ConsumerRetriableCommitFailedError`].
@@ -46,6 +47,7 @@ impl PayloadClass for ConsumerRetriableCommitFailedError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_retriable_commit_failed(
     error: *const kafka_common_Error_t,
@@ -65,6 +67,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_retriable_commit_failed(
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_new(
     message: *const c_char,
@@ -73,6 +76,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_new(
 }
 
 /// `new RetriableCommitFailedException()` with Java's default message.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_with_default_message()
 -> *mut kafka_common_ConsumerRetriableCommitFailedError_t {
@@ -85,6 +89,7 @@ pub extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_with_default_m
 /// # Safety
 ///
 /// `source` must be an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_with_source(
     source: *mut kafka_common_Error_t,
@@ -97,6 +102,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_with_so
 /// # Safety
 ///
 /// `self_` must be a valid retriable-commit-failed handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_message(
     self_: *const kafka_common_ConsumerRetriableCommitFailedError_t,
@@ -109,6 +115,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_message
 /// # Safety
 ///
 /// `self_` must be a valid retriable-commit-failed handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_source(
     self_: *const kafka_common_ConsumerRetriableCommitFailedError_t,
@@ -121,6 +128,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_source(
 /// # Safety
 ///
 /// `self_` must be a valid retriable-commit-failed handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_to_string(
     self_: *const kafka_common_ConsumerRetriableCommitFailedError_t,
@@ -134,6 +142,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_to_stri
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerRetriableCommitFailedError_destroy(
     self_: *mut kafka_common_ConsumerRetriableCommitFailedError_t,

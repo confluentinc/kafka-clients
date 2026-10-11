@@ -21,6 +21,7 @@ use crate::ffi::common::metrics::measurable::kafka_common_metrics_Measurable_t;
 use crate::ffi::common::metrics::measurable_stat::kafka_common_metrics_MeasurableStat_t;
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`WindowedCount`].
 #[repr(C)]
@@ -33,6 +34,7 @@ unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_WindowedCount_t) -
 }
 
 /// `new WindowedCount()`. Owned, freed with [`kafka_common_metrics_stats_WindowedCount_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_WindowedCount_new() -> *mut kafka_common_metrics_stats_WindowedCount_t {
     StatHandle::boxed(WindowedCount::new()) as *mut kafka_common_metrics_stats_WindowedCount_t
@@ -44,6 +46,7 @@ pub extern "C" fn kafka_common_metrics_stats_WindowedCount_new() -> *mut kafka_c
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_Stat(
     self_: *const kafka_common_metrics_stats_WindowedCount_t,
@@ -57,6 +60,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_Stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_Measurable(
     self_: *const kafka_common_metrics_stats_WindowedCount_t,
@@ -72,6 +76,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_Measurable
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_WindowedCount_t,
@@ -85,6 +90,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount__as_Measurable
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_WindowedCount_destroy(
     self_: *mut kafka_common_metrics_stats_WindowedCount_t,

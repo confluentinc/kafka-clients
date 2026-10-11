@@ -23,6 +23,7 @@ use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
 
 use crate::common::ClassicGroupState;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupState`] singleton.
@@ -89,36 +90,42 @@ pub(crate) unsafe fn value_of(state: *const kafka_common_ClassicGroupState_t) ->
 }
 
 /// `ClassicGroupState.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_unknown() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Unknown)
 }
 
 /// `ClassicGroupState.PREPARING_REBALANCE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_preparing_rebalance() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::PreparingRebalance)
 }
 
 /// `ClassicGroupState.COMPLETING_REBALANCE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_completing_rebalance() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::CompletingRebalance)
 }
 
 /// `ClassicGroupState.STABLE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_stable() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Stable)
 }
 
 /// `ClassicGroupState.DEAD`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_dead() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Dead)
 }
 
 /// `ClassicGroupState.EMPTY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_empty() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Empty)
@@ -126,9 +133,12 @@ pub extern "C" fn kafka_common_ClassicGroupState_empty() -> *const kafka_common_
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_ClassicGroupState_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_ClassicGroupState_e::kafka_common_ClassicGroupState_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState__enum(
     self_: *const kafka_common_ClassicGroupState_t,
@@ -141,6 +151,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_name(
     self_: *const kafka_common_ClassicGroupState_t,
@@ -154,6 +165,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_name(
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
     name: *const c_char,
@@ -166,6 +178,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_to_string(
     self_: *const kafka_common_ClassicGroupState_t,

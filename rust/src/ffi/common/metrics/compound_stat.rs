@@ -35,6 +35,7 @@ use crate::ffi::common::metrics::measurable::{box_measurable, kafka_common_metri
 use crate::ffi::common::metrics::metric_config::{
     MetricConfigInner, kafka_common_metrics_MetricConfig_t, metric_config_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, destroy_boxed, kafka_List_destroy, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`CompoundStat`] implementation.
@@ -142,6 +143,7 @@ pub(crate) unsafe fn take_compound_stat(stat: *mut kafka_common_metrics_Compound
 /// [`kafka_common_metrics_CompoundStat_destroy`] or, once a `*mut` parameter
 /// consumed it, until the sensor it went into is destroyed with its
 /// registry.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_CompoundStat_new(
     self_: *mut c_void,
@@ -158,6 +160,7 @@ pub extern "C" fn kafka_common_metrics_CompoundStat_new(
 ///
 /// `self_` must be a valid compound-stat handle and `config` a valid
 /// metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_record(
     self_: *const kafka_common_metrics_CompoundStat_t,
@@ -175,6 +178,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_record(
 /// # Safety
 ///
 /// `self_` must be a valid compound-stat handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_stats(
     self_: *const kafka_common_metrics_CompoundStat_t,
@@ -193,6 +197,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_stats(
 /// # Safety
 ///
 /// `self_` must be null or an owned compound-stat handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_destroy(self_: *mut kafka_common_metrics_CompoundStat_t) {
     unsafe { Interface::<dyn CompoundStat>::destroy(self_ as *mut Interface<dyn CompoundStat>) }
@@ -230,6 +235,7 @@ unsafe fn named_inner<'a>(
 ///
 /// `name` must be a valid metric-name handle and `stat` a valid measurable
 /// handle, not used again by the caller when it was owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
     name: *const kafka_common_MetricName_t,
@@ -245,6 +251,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
 /// # Safety
 ///
 /// `self_` must be a valid named-measurable handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
     self_: *const kafka_common_metrics_CompoundStat_NamedMeasurable_t,
@@ -258,6 +265,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
 /// # Safety
 ///
 /// `self_` must be a valid named-measurable handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_stat(
     self_: *const kafka_common_metrics_CompoundStat_NamedMeasurable_t,
@@ -270,6 +278,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_stat(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_destroy(
     self_: *mut kafka_common_metrics_CompoundStat_NamedMeasurable_t,

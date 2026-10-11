@@ -57,16 +57,29 @@
 //!   returns -1 instead, as its documentation states;
 //! - another integer: -1, but 0 for a `*_count` or `*_size` accessor, a size
 //!   that returns -1 for a null key or value
-//!   (`kafka_consumer_ConsumerRecord_serialized_key_size`) included;
+//!   (`kafka_consumer_ConsumerRecord_serialized_key_size`) included. An
+//!   integer whose Java domain holds that value but leaves out another one
+//!   returns the other instead, as its documentation states
+//!   (`kafka_admin_NewTopic_replication_factor` returns 0);
 //! - a `double`: NaN;
 //! - a `kafka_Bytes_t`: a NULL one (Java's `null` array);
 //! - `kafka_common_ErrorCode_e` (`kafka_common_Error_code`):
 //!   `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR`; another C enum: the
-//!   enumerator its documentation names;
-//! - a borrowed `const kafka_common_Error_t *`: an error describing the panic,
-//!   which is never freed.
+//!   enumerator its documentation names, its `UNKNOWN` one when it has one;
+//! - a borrowed `const kafka_common_Error_t *` (`kafka_common_Error_source`):
+//!   NULL, as for no error.
 //!
 //! A function returning nothing only logs the panic.
+//!
+//! The failure value is not always distinct from a real answer: a nullable
+//! pointer or `kafka_Bytes_t`, a boolean, a `double` that may be NaN, a C enum
+//! without an `UNKNOWN` enumerator, and an integer whose -1 (or, for a count or
+//! size, 0) is itself a valid value return a value the function can also
+//! return without a panic. The integers include Java's sentinels: an absent
+//! leader epoch, `NO_TIMESTAMP`, an unknown offset or partition, the id of
+//! `Node.noNode()`, `kafka_admin_AbortTransactionSpec_producer_epoch`, an unset
+//! optional value. Such a panic shows only in the error-level log line every
+//! caught panic writes.
 //!
 //! A `_cb` function reports a caught panic the way it reports every other
 //! outcome: it queues its completion, carrying the error and the caller's
@@ -195,8 +208,11 @@ mod tests {
     /// includes 0 (`IsolationLevel.READ_UNCOMMITTED`, `AlterConfigOp.OpType.SET`,
     /// `ElectionType.PREFERRED`, or an `UNKNOWN`) and none includes -1, so a
     /// caught panic must return -1 rather than the derived 0 the remaining
-    /// `int8_t` exports, all booleans, return. Pins the set in both directions:
-    /// a code guarded with the bare attribute, or a boolean given -1, fails.
+    /// `int8_t` exports return. Those are booleans, and one tri-state
+    /// `Optional<Boolean>` (`kafka_admin_MemberDescription_upgraded`: 1, 0, or -1
+    /// for empty) whose every value, 0 included, is legal, so no fallback could
+    /// signal the panic. Pins the set in both directions: a code guarded with the
+    /// bare attribute, or a boolean given -1, fails.
     #[test]
     fn test_byte_code_exports_fall_back_to_minus_one() {
         const BYTE_CODES: [&str; 10] = [

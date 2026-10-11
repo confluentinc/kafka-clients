@@ -31,6 +31,7 @@ use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::common::metrics::stats::sampled_stat::{kafka_common_metrics_stats_SampledStat_t, sampled_stat_ref};
 use crate::ffi::common::metrics::time_unit::{kafka_common_metrics_TimeUnit_t, value_of as time_unit_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`Rate`].
@@ -49,6 +50,7 @@ fn boxed(rate: Rate) -> *mut kafka_common_metrics_stats_Rate_t {
 
 /// `new Rate()`: per second, over a `WindowedSum`. Owned, freed with
 /// [`kafka_common_metrics_stats_Rate_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_Rate_new() -> *mut kafka_common_metrics_stats_Rate_t {
     boxed(Rate::new())
@@ -59,6 +61,7 @@ pub extern "C" fn kafka_common_metrics_stats_Rate_new() -> *mut kafka_common_met
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
     unit: *const kafka_common_metrics_TimeUnit_t,
@@ -71,6 +74,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
 /// # Safety
 ///
 /// `stat` must be a valid sampled-stat handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_stat(
     stat: *const kafka_common_metrics_stats_SampledStat_t,
@@ -84,6 +88,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_stat(
 ///
 /// `unit` must be a time-unit singleton and `stat` a valid sampled-stat
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
     unit: *const kafka_common_metrics_TimeUnit_t,
@@ -101,6 +106,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
 ///
 /// `unit` must be a time-unit singleton and `stat` a valid sampled-stat
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
     unit: *const kafka_common_metrics_TimeUnit_t,
@@ -119,6 +125,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_unit_name(
     self_: *const kafka_common_metrics_stats_Rate_t,
@@ -129,10 +136,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_unit_name(
 /// `windowSize(MetricConfig config, long now)`: the elapsed window in
 /// milliseconds.
 ///
+/// A caught Rust panic returns -1, which no window size is.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class and `config` a valid
 /// metric-config handle.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_window_size(
     self_: *const kafka_common_metrics_stats_Rate_t,
@@ -150,6 +160,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_window_size(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
     self_: *const kafka_common_metrics_stats_Rate_t,
@@ -163,6 +174,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
     self_: *const kafka_common_metrics_stats_Rate_t,
@@ -176,6 +188,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_Rate_t,
@@ -189,6 +202,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_destroy(self_: *mut kafka_common_metrics_stats_Rate_t) {
     unsafe { StatHandle::destroy(self_ as *mut StatHandle<Rate>) }

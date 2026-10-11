@@ -23,6 +23,7 @@ use crate::common::quota::{ClientQuotaAlteration, Op};
 use crate::ffi::common::quota::client_quota_entity::{
     client_quota_entity_ptr, client_quota_entity_ref, kafka_common_quota_ClientQuotaEntity_t,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
 };
@@ -101,6 +102,7 @@ pub(crate) fn box_client_quota_alteration(
 /// # Safety
 ///
 /// `key` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_new(
     key: *const c_char,
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_new(
 /// # Safety
 ///
 /// `self_` must be a valid op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_key(
     self_: *const kafka_common_quota_ClientQuotaAlteration_Op_t,
@@ -126,6 +129,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_key(
 /// # Safety
 ///
 /// `self_` must be a valid op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_value(
     self_: *const kafka_common_quota_ClientQuotaAlteration_Op_t,
@@ -138,6 +142,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_value(
 /// # Safety
 ///
 /// `self_` must be a valid op handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_to_string(
     self_: *const kafka_common_quota_ClientQuotaAlteration_Op_t,
@@ -150,6 +155,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned op handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_destroy(
     self_: *mut kafka_common_quota_ClientQuotaAlteration_Op_t,
@@ -168,6 +174,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_destroy(
 ///
 /// `entity` must be a valid entity handle and `ops` null or a valid list of
 /// op handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
@@ -188,6 +195,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_entity(
     self_: *const kafka_common_quota_ClientQuotaAlteration_t,
@@ -203,6 +211,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_entity(
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_ops(
     self_: *const kafka_common_quota_ClientQuotaAlteration_t,
@@ -220,6 +229,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_ops(
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_to_string(
     self_: *const kafka_common_quota_ClientQuotaAlteration_t,
@@ -232,6 +242,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned alteration handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_destroy(
     self_: *mut kafka_common_quota_ClientQuotaAlteration_t,

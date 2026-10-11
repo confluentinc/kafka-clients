@@ -53,6 +53,7 @@ use crate::ffi::common::metrics::sensor::{
     recording_level_of,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ unsafe fn deliver<T>(result: Result<T, Error>, out: *mut T) -> *mut kafka_common
 
 /// `new Metrics()`: a registry with a default config and no reporters.
 /// Owned, freed with [`kafka_common_metrics_Metrics_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Metrics_new() -> *mut kafka_common_metrics_Metrics_t {
     boxed(Metrics::new())
@@ -102,6 +104,7 @@ pub extern "C" fn kafka_common_metrics_Metrics_new() -> *mut kafka_common_metric
 /// # Safety
 ///
 /// `default_config` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_with_default_config(
     default_config: *const kafka_common_metrics_MetricConfig_t,
@@ -115,6 +118,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_with_default_config(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle and the strings NUL-terminated.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -131,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle and the strings NUL-terminated.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_description(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -153,6 +158,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
 /// `tags` null or a valid map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -173,6 +179,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
 /// `tags` null or a valid map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_description_tags(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -198,6 +205,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// `self_` must be a valid registry handle, the strings NUL-terminated,
 /// `key_value` null or a valid list of NUL-terminated strings and
 /// `out_metric_name_with_description_key_value` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_description_key_value(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -226,6 +234,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// # Safety
 ///
 /// `self_` must be a valid registry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_config(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -239,6 +248,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_config(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle and `name` NUL-terminated.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_get_sensor(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -257,6 +267,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_get_sensor(
 ///
 /// `self_` must be a valid registry handle, `name` NUL-terminated and
 /// `out_sensor` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -276,6 +287,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor(
 /// `self_` must be a valid registry handle, `name` NUL-terminated,
 /// `recording_level` a recording-level singleton and
 /// `out_sensor_with_recording_level` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_level(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -300,6 +312,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
 /// `self_` must be a valid registry handle, `name` NUL-terminated, `parents`
 /// null or a valid list of sensor handles and `out_sensor_with_parents`
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_parents(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -319,6 +332,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_parents(
 ///
 /// As [`kafka_common_metrics_Metrics_sensor_with_parents`], with
 /// `recording_level` a recording-level singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_level_parents(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -344,6 +358,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
 ///
 /// As [`kafka_common_metrics_Metrics_sensor_with_parents`], with `config`
 /// null or a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_parents(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -368,6 +383,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_parents
 ///
 /// As [`kafka_common_metrics_Metrics_sensor_with_config_parents`], with
 /// `recording_level` a recording-level singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_recording_level_parents(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -393,6 +409,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_recordi
 /// # Safety
 ///
 /// As [`kafka_common_metrics_Metrics_sensor_with_config_parents`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_inactive_sensor_expiration_time_seconds_parents(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -421,6 +438,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_inactiv
 ///
 /// `self_` must be a valid registry handle, `options` a valid options handle
 /// and `out_sensor_with_options` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_options(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -440,6 +458,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_options(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle and `name` NUL-terminated.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_sensor(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -457,6 +476,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_sensor(
 ///
 /// `self_` must be a valid registry handle, `metric_name` a valid
 /// metric-name handle and `measurable` a valid measurable handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_measurable(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -479,6 +499,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_measurable
 ///
 /// `self_` must be a valid registry handle, `metric_name` a valid
 /// metric-name handle and `metric_value_provider` a valid provider handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_metric_value_provider(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -501,6 +522,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_metric_val
 ///
 /// As [`kafka_common_metrics_Metrics_add_metric_with_metric_value_provider`],
 /// with `config` null or a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_config_metric_value_provider(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -526,6 +548,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_config_met
 /// # Safety
 ///
 /// As [`kafka_common_metrics_Metrics_add_metric_with_config_metric_value_provider`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_if_absent(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -548,6 +571,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_if_absent(
 ///
 /// `self_` must be a valid registry handle and `metric_name` a valid
 /// metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_metric(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -567,6 +591,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_metric(
 ///
 /// `self_` must be a valid registry handle and `reporter` a valid reporter
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_reporter(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -583,6 +608,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_reporter(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metrics(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -621,6 +647,7 @@ unsafe fn metric_name_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 ///
 /// `self_` must be a valid registry handle and `metric_name` a valid
 /// metric-name handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -643,6 +670,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric(
 /// `self_` must be a valid registry handle, `template` a valid template
 /// handle, `key_value` null or a valid list of NUL-terminated strings and
 /// `out_metric_instance_with_key_value` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_value(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -666,6 +694,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_v
 /// `self_` must be a valid registry handle, `template` a valid template
 /// handle, `tags` null or a valid map of NUL-terminated strings and
 /// `out_metric_instance_with_tags` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_tags(
     self_: *const kafka_common_metrics_Metrics_t,
@@ -688,6 +717,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_tags(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_close(self_: *const kafka_common_metrics_Metrics_t) {
     unsafe { metrics_ref(self_) }.close()
@@ -699,6 +729,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_close(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_destroy(self_: *mut kafka_common_metrics_Metrics_t) {
     if !self_.is_null() {
@@ -748,6 +779,7 @@ impl SensorOptionsInner {
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptions_destroy(self_: *mut kafka_common_metrics_SensorOptions_t) {
     if !self_.is_null() {
@@ -785,6 +817,7 @@ unsafe fn builder_mut<'a>(
 
 /// `SensorOptionsBuilder::new()`: every parameter unset or at its default.
 /// Owned, freed with [`kafka_common_metrics_SensorOptionsBuilder_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_SensorOptionsBuilder_new() -> *mut kafka_common_metrics_SensorOptionsBuilder_t {
     Box::into_raw(Box::new(SensorOptionsBuilderInner {
@@ -801,6 +834,7 @@ pub extern "C" fn kafka_common_metrics_SensorOptionsBuilder_new() -> *mut kafka_
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `name` NUL-terminated.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_name(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -816,6 +850,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_name(
 ///
 /// `self_` must be a valid builder handle and `config` null or a valid
 /// metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_config(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -830,6 +865,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_config(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_inactive_sensor_expiration_time_seconds(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -844,6 +880,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_inactive_
 ///
 /// `self_` must be a valid builder handle and `recording_level` a
 /// recording-level singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_recording_level(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -860,6 +897,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_recording
 ///
 /// `self_` must be a valid builder handle and `parents` null or a valid
 /// list of sensor handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_parents(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -876,6 +914,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_parents(
 /// # Safety
 ///
 /// `self_` must be a valid builder handle and `out_build` writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_build(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
@@ -907,6 +946,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_build(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_destroy(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,

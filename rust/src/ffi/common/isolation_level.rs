@@ -70,12 +70,14 @@ pub(crate) unsafe fn value_of(level: *const kafka_common_IsolationLevel_t) -> Is
 }
 
 /// `IsolationLevel.READ_UNCOMMITTED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_IsolationLevel_read_uncommitted() -> *const kafka_common_IsolationLevel_t {
     singleton(IsolationLevel::ReadUncommitted)
 }
 
 /// `IsolationLevel.READ_COMMITTED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_IsolationLevel_read_committed() -> *const kafka_common_IsolationLevel_t {
     singleton(IsolationLevel::ReadCommitted)
@@ -83,9 +85,14 @@ pub extern "C" fn kafka_common_IsolationLevel_read_committed() -> *const kafka_c
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_IsolationLevel_READ_UNCOMMITTED`, the first
+/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
+/// value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
     self_: *const kafka_common_IsolationLevel_t,
@@ -114,6 +121,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_comm
 /// # Safety
 ///
 /// `out_for_id` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
     id: i8,
@@ -133,6 +141,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_to_string(
     self_: *const kafka_common_IsolationLevel_t,

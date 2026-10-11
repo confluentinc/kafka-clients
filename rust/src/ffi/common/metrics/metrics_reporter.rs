@@ -34,6 +34,7 @@ use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::kafka_metric::{
     KafkaMetricInner, kafka_common_metrics_KafkaMetric_t, kafka_metric_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`MetricsReporter`] implementation.
@@ -143,6 +144,7 @@ pub(crate) unsafe fn take_metrics_reporter(
 /// keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_MetricsReporter_destroy`] or, once
 /// `Metrics_add_reporter` consumed it, until that registry is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
     self_: *mut c_void,
@@ -163,6 +165,7 @@ pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
 ///
 /// `self_` must be a valid metrics-reporter handle and `metrics` null or a
 /// valid list of metric handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     self_: *const kafka_common_metrics_MetricsReporter_t,
@@ -181,6 +184,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
 ///
 /// `self_` must be a valid metrics-reporter handle and `metric` a valid
 /// metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_change(
     self_: *const kafka_common_metrics_MetricsReporter_t,
@@ -195,6 +199,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_change(
 ///
 /// `self_` must be a valid metrics-reporter handle and `metric` a valid
 /// metric handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_removal(
     self_: *const kafka_common_metrics_MetricsReporter_t,
@@ -208,6 +213,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_removal(
 /// # Safety
 ///
 /// `self_` must be a valid metrics-reporter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_close(
     self_: *const kafka_common_metrics_MetricsReporter_t,
@@ -221,6 +227,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_close(
 ///
 /// `self_` must be null or an owned metrics-reporter handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_destroy(
     self_: *mut kafka_common_metrics_MetricsReporter_t,

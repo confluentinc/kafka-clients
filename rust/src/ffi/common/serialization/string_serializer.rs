@@ -27,6 +27,7 @@ use crate::common::header::RecordHeaders;
 use crate::common::serialization::{Serializer, StringSerializer};
 use crate::ffi::common::serialization::SerializerHandle;
 use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::GenericValue;
 
 /// Opaque handle to a [`StringSerializer`].
@@ -84,6 +85,7 @@ unsafe fn handle<'a>(
 
 /// `new StringSerializer()`. Owned, freed with
 /// [`kafka_common_serialization_StringSerializer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafka_common_serialization_StringSerializer_t
 {
@@ -98,6 +100,7 @@ pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafk
 /// # Safety
 ///
 /// `self_` must be a valid string-serializer handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Serializer(
     self_: *const kafka_common_serialization_StringSerializer_t,
@@ -111,6 +114,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Seriali
 ///
 /// `self_` must be null or an owned string-serializer handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer_destroy(
     self_: *mut kafka_common_serialization_StringSerializer_t,

@@ -28,6 +28,7 @@ use std::sync::OnceLock;
 use crate::common::header::{Headers, RecordHeaders};
 use crate::ffi::common::header::internals::record_header::list_record_headers;
 use crate::ffi::common::header::{HeadersInner, kafka_common_header_Headers_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`RecordHeaders`]. Public although Java keeps the
@@ -99,6 +100,7 @@ pub(crate) unsafe fn record_headers_ref<'a>(
 
 /// `new RecordHeaders()`: empty, mutable. Owned, freed with
 /// [`kafka_common_header_internals_RecordHeaders_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafka_common_header_internals_RecordHeaders_t
 {
@@ -111,6 +113,7 @@ pub extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafk
 /// # Safety
 ///
 /// `headers` must be null or a valid list of record-header handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header_slice(
     headers: *const kafka_List_t,
@@ -124,6 +127,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
 /// # Safety
 ///
 /// `headers` must be null or a valid list of record-header handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header_iter(
     headers: *const kafka_List_t,
@@ -136,6 +140,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
 /// # Safety
 ///
 /// `other` must be a valid record-headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_record_headers(
     other: *const kafka_common_header_internals_RecordHeaders_t,
@@ -149,6 +154,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_record
 /// # Safety
 ///
 /// `self_` must be a valid record-headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_set_read_only(
     self_: *mut kafka_common_header_internals_RecordHeaders_t,
@@ -161,6 +167,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_set_read_on
 /// # Safety
 ///
 /// `self_` must be a valid record-headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_is_read_only(
     self_: *const kafka_common_header_internals_RecordHeaders_t,
@@ -173,6 +180,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_is_read_onl
 /// # Safety
 ///
 /// `self_` must be a valid record-headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
     self_: *const kafka_common_header_internals_RecordHeaders_t,
@@ -187,6 +195,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 /// # Safety
 ///
 /// `self_` must be a valid record-headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers(
     self_: *mut kafka_common_header_internals_RecordHeaders_t,
@@ -201,6 +210,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers
 /// # Safety
 ///
 /// `self_` must be null or an owned record-headers handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_destroy(
     self_: *mut kafka_common_header_internals_RecordHeaders_t,

@@ -25,6 +25,7 @@ use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, sorted_topic_partition_list, topic_partition_ref,
 };
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::kafka_List_t;
 
 /// Opaque handle to a [`ConsumerNoOffsetForPartitionError`].
@@ -49,6 +50,7 @@ impl PayloadClass for ConsumerNoOffsetForPartitionError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
     error: *const kafka_common_Error_t,
@@ -69,6 +71,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
 /// # Safety
 ///
 /// `partition` must be a valid topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
     partition: *const kafka_common_TopicPartition_t,
@@ -85,6 +88,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_partitions(
     partitions: *const kafka_List_t,
@@ -100,6 +104,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_par
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
@@ -116,6 +121,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitio
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
@@ -128,6 +134,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
@@ -140,6 +147,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_string(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
@@ -153,6 +161,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_strin
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_destroy(
     self_: *mut kafka_common_ConsumerNoOffsetForPartitionError_t,

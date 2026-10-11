@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::common::errors::InvalidTopicError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_string_set, sorted_string_list};
 
 /// Opaque handle to an [`InvalidTopicError`].
@@ -46,6 +47,7 @@ impl PayloadClass for InvalidTopicError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
     error: *const kafka_common_Error_t,
@@ -64,6 +66,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
 /// # Safety
 ///
 /// `invalid_topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
     invalid_topics: *const kafka_List_t,
@@ -72,6 +75,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
 }
 
 /// `new InvalidTopicException()` with Java's default message and no topics.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_InvalidTopicError_with_default_message() -> *mut kafka_common_InvalidTopicError_t {
     Payload::boxed(InvalidTopicError::with_default_message())
@@ -83,6 +87,7 @@ pub extern "C" fn kafka_common_InvalidTopicError_with_default_message() -> *mut 
 ///
 /// `invalid_topics` must be null or a valid list of NUL-terminated strings
 /// and `message` a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
     invalid_topics: *const kafka_List_t,
@@ -100,6 +105,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
 /// # Safety
 ///
 /// `self_` must be a valid invalid-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
     self_: *const kafka_common_InvalidTopicError_t,
@@ -116,6 +122,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
 /// # Safety
 ///
 /// `self_` must be a valid invalid-topic handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
     self_: *const kafka_common_InvalidTopicError_t,
@@ -128,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
 /// # Safety
 ///
 /// `self_` must be a valid invalid-topic handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
     self_: *const kafka_common_InvalidTopicError_t,
@@ -141,6 +149,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_destroy(self_: *mut kafka_common_InvalidTopicError_t) {
     unsafe { Payload::<InvalidTopicError>::destroy(self_) }

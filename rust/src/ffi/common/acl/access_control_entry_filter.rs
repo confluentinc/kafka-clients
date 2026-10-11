@@ -27,6 +27,7 @@ use crate::ffi::common::acl::acl_operation::{
 use crate::ffi::common::acl::acl_permission_type::{
     kafka_common_acl_AclPermissionType_t, singleton as permission_type_singleton, value_of as permission_type_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to an [`AccessControlEntryFilter`].
@@ -91,6 +92,7 @@ pub(crate) fn box_access_control_entry_filter(
 ///
 /// `principal` and `host` must be null or valid NUL-terminated strings,
 /// `operation` and `permission_type` singletons of their enums.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_new(
     principal: *const c_char,
@@ -108,6 +110,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_new(
 
 /// `AccessControlEntryFilter.ANY`: a filter matching every entry. Owned, as
 /// every handle of this type.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AccessControlEntryFilter_any() -> *mut kafka_common_acl_AccessControlEntryFilter_t {
     box_access_control_entry_filter(AccessControlEntryFilter::any())
@@ -118,6 +121,7 @@ pub extern "C" fn kafka_common_acl_AccessControlEntryFilter_any() -> *mut kafka_
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_principal(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -134,6 +138,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_principal(
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_host(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -146,6 +151,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_host(
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_operation(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -158,6 +164,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_operation(
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_permission_type(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -170,6 +177,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_permission_ty
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_is_unknown(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -183,6 +191,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_is_unknown(
 ///
 /// `self_` must be a valid access-control-entry-filter handle and `other` a
 /// valid access-control-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -197,6 +206,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches(
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches_at_most_one(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -211,6 +221,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches_at_mo
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_find_indefinite_field(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -225,6 +236,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_find_indefini
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_to_string(
     self_: *const kafka_common_acl_AccessControlEntryFilter_t,
@@ -238,6 +250,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned filter handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_destroy(
     self_: *mut kafka_common_acl_AccessControlEntryFilter_t,

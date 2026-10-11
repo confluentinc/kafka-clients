@@ -27,6 +27,7 @@
 
 use crate::common::TopicCollection;
 use crate::ffi::common::uuid::list_uuids;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_t, list_strings};
 
 /// Opaque handle to a [`TopicCollection`].
@@ -48,9 +49,14 @@ pub enum kafka_common_TopicCollection_e {
 
 /// Which variant `self_` holds.
 ///
+/// A caught Rust panic returns `kafka_common_TopicCollection_TOPIC_IDS`, the first enumerator: the
+/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
+/// logged.
+///
 /// # Safety
 ///
 /// `self_` must be a valid topic-collection handle.
+#[ffi_guard(fallback = kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
     self_: *const kafka_common_TopicCollection_t,
@@ -69,6 +75,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
 /// # Safety
 ///
 /// `value` must be null or a valid list of uuid handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_topic_ids(
     value: *const kafka_List_t,
@@ -83,6 +90,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_topic_ids(
 /// # Safety
 ///
 /// `value` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_topic_names(
     value: *const kafka_List_t,
@@ -110,6 +118,7 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 /// # Safety
 ///
 /// `topics` must be null or a valid list of uuid handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
     topics: *const kafka_List_t,
@@ -123,6 +132,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
     topics: *const kafka_List_t,
@@ -135,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_destroy(self_: *mut kafka_common_TopicCollection_t) {
     if !self_.is_null() {

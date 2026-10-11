@@ -21,6 +21,7 @@ use crate::common::resource::Resource;
 use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`Resource`].
@@ -69,6 +70,7 @@ pub(crate) fn box_resource(resource: Resource) -> *mut kafka_common_resource_Res
 ///
 /// `resource_type` must be a resource-type singleton and `name` a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_new(
     resource_type: *const kafka_common_resource_ResourceType_t,
@@ -81,6 +83,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
 
 /// `Resource.CLUSTER`: the single cluster resource. Owned, as every handle
 /// of this type.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_Resource_cluster() -> *mut kafka_common_resource_Resource_t {
     box_resource(Resource::cluster())
@@ -91,6 +94,7 @@ pub extern "C" fn kafka_common_resource_Resource_cluster() -> *mut kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
     self_: *const kafka_common_resource_Resource_t,
@@ -103,6 +107,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_name(
     self_: *const kafka_common_resource_Resource_t,
@@ -115,6 +120,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_name(
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
     self_: *const kafka_common_resource_Resource_t,
@@ -127,6 +133,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(
     self_: *const kafka_common_resource_Resource_t,
@@ -139,6 +146,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned resource handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_destroy(self_: *mut kafka_common_resource_Resource_t) {
     if !self_.is_null() {

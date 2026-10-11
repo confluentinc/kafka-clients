@@ -78,24 +78,28 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclPermissionType_t
 }
 
 /// `AclPermissionType.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_unknown() -> *const kafka_common_acl_AclPermissionType_t {
     singleton(AclPermissionType::Unknown)
 }
 
 /// `AclPermissionType.ANY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_any() -> *const kafka_common_acl_AclPermissionType_t {
     singleton(AclPermissionType::Any)
 }
 
 /// `AclPermissionType.DENY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_deny() -> *const kafka_common_acl_AclPermissionType_t {
     singleton(AclPermissionType::Deny)
 }
 
 /// `AclPermissionType.ALLOW`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_allow() -> *const kafka_common_acl_AclPermissionType_t {
     singleton(AclPermissionType::Allow)
@@ -103,9 +107,12 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_allow() -> *const kafka_com
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_acl_AclPermissionType_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType__enum(
     self_: *const kafka_common_acl_AclPermissionType_t,
@@ -131,6 +138,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_code(
 
 /// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
 /// for one this client does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_from_code(
     code: i8,
@@ -144,6 +152,7 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_from_code(
 /// # Safety
 ///
 /// `str` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_from_string(
     str: *const c_char,
@@ -156,6 +165,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_from_string(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_is_unknown(
     self_: *const kafka_common_acl_AclPermissionType_t,
@@ -169,6 +179,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_is_unknown(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_to_string(
     self_: *const kafka_common_acl_AclPermissionType_t,

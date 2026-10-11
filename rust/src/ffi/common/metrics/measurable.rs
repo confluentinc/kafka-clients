@@ -32,6 +32,7 @@ use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::metrics::metric_config::{
     MetricConfigInner, kafka_common_metrics_MetricConfig_t, metric_config_ref,
 };
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`Measurable`] implementation.
 #[repr(C)]
@@ -104,6 +105,7 @@ pub(crate) unsafe fn take_measurable(measurable: *mut kafka_common_metrics_Measu
 /// keeps it alive until the handle is destroyed with
 /// [`kafka_common_metrics_Measurable_destroy`] or, once a `*mut` parameter
 /// consumed it, until the registry or sensor it went into is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Measurable_new(
     self_: *mut c_void,
@@ -118,6 +120,7 @@ pub extern "C" fn kafka_common_metrics_Measurable_new(
 ///
 /// `self_` must be a valid measurable handle and `config` a valid
 /// metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(
     self_: *const kafka_common_metrics_Measurable_t,
@@ -133,6 +136,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(
 /// # Safety
 ///
 /// `self_` must be null or an owned measurable handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Measurable_destroy(self_: *mut kafka_common_metrics_Measurable_t) {
     unsafe { Interface::<dyn Measurable>::destroy(self_ as *mut Interface<dyn Measurable>) }

@@ -130,96 +130,112 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclOperation_t) -> 
 }
 
 /// `AclOperation.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_unknown() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Unknown)
 }
 
 /// `AclOperation.ANY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_any() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Any)
 }
 
 /// `AclOperation.ALL`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_all() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::All)
 }
 
 /// `AclOperation.READ`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_read() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Read)
 }
 
 /// `AclOperation.WRITE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_write() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Write)
 }
 
 /// `AclOperation.CREATE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_create() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Create)
 }
 
 /// `AclOperation.DELETE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_delete() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Delete)
 }
 
 /// `AclOperation.ALTER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_alter() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Alter)
 }
 
 /// `AclOperation.DESCRIBE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::Describe)
 }
 
 /// `AclOperation.CLUSTER_ACTION`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_cluster_action() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::ClusterAction)
 }
 
 /// `AclOperation.DESCRIBE_CONFIGS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe_configs() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::DescribeConfigs)
 }
 
 /// `AclOperation.ALTER_CONFIGS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_alter_configs() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::AlterConfigs)
 }
 
 /// `AclOperation.IDEMPOTENT_WRITE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_idempotent_write() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::IdempotentWrite)
 }
 
 /// `AclOperation.CREATE_TOKENS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_create_tokens() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::CreateTokens)
 }
 
 /// `AclOperation.DESCRIBE_TOKENS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe_tokens() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::DescribeTokens)
 }
 
 /// `AclOperation.TWO_PHASE_COMMIT`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_two_phase_commit() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::TwoPhaseCommit)
@@ -227,9 +243,12 @@ pub extern "C" fn kafka_common_acl_AclOperation_two_phase_commit() -> *const kaf
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_acl_AclOperation_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
     self_: *const kafka_common_acl_AclOperation_t,
@@ -253,6 +272,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_
 
 /// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
 /// for one this client does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_from_code(code: i8) -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::from_code(code))
@@ -264,6 +284,7 @@ pub extern "C" fn kafka_common_acl_AclOperation_from_code(code: i8) -> *const ka
 /// # Safety
 ///
 /// `str` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
     str: *const c_char,
@@ -276,6 +297,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
     i8::from(unsafe { value_of(self_) }.is_unknown())
@@ -287,6 +309,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_to_string(
     self_: *const kafka_common_acl_AclOperation_t,

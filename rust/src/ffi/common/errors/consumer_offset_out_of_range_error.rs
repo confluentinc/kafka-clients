@@ -25,6 +25,7 @@ use crate::ffi::common::topic_partition::{
     map_topic_partition_i64, sorted_topic_partition_list, topic_partition_i64_map,
 };
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerOffsetOutOfRangeError`].
@@ -49,6 +50,7 @@ impl PayloadClass for ConsumerOffsetOutOfRangeError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
     error: *const kafka_common_Error_t,
@@ -72,6 +74,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
 ///
 /// `offset_out_of_range_partitions` must be null or a valid map of the
 /// stated types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
     offset_out_of_range_partitions: *const kafka_Map_t,
@@ -88,6 +91,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
 ///
 /// `message` must be a valid NUL-terminated string and
 /// `offset_out_of_range_partitions` null or a valid map of the stated types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message(
     message: *const c_char,
@@ -105,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_partitions(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -123,6 +128,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -139,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_o
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -151,6 +158,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -163,6 +171,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_to_string(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -176,6 +185,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_destroy(
     self_: *mut kafka_common_ConsumerOffsetOutOfRangeError_t,

@@ -19,6 +19,7 @@ use std::ffi::{CString, c_char};
 use std::ptr;
 
 use crate::common::ClusterResource;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ClusterResource`].
@@ -57,6 +58,7 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_ClusterResource_t) -> &'a 
 /// # Safety
 ///
 /// `cluster_id` must be null or a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_new(
     cluster_id: *const c_char,
@@ -71,6 +73,7 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_new(
 /// # Safety
 ///
 /// `self_` must be a valid cluster-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
     self_: *const kafka_common_ClusterResource_t,
@@ -86,6 +89,7 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
 /// # Safety
 ///
 /// `self_` must be a valid cluster-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(
     self_: *const kafka_common_ClusterResource_t,
@@ -100,6 +104,7 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(
 ///
 /// `self_` must be null or an owned cluster-resource handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_destroy(self_: *mut kafka_common_ClusterResource_t) {
     if !self_.is_null() {

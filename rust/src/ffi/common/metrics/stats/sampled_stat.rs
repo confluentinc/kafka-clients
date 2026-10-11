@@ -43,6 +43,7 @@ use crate::ffi::common::metrics::metric_config::{
 };
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t, list_elements};
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,7 @@ pub(crate) unsafe fn sampled_stat_ref<'a>(
 /// # Safety
 ///
 /// `kind` must be a valid kind handle not destroyed afterwards when owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
     initial_value: f64,
@@ -94,6 +96,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
@@ -107,6 +110,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
@@ -120,6 +124,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_SampledStat_t,
@@ -133,6 +138,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableSt
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStat_t,
@@ -280,6 +286,7 @@ pub(crate) unsafe fn sampled_stat_kind_ref<'a>(
 /// methods may be null for the Java default (`false`). Owned, consumed by
 /// [`kafka_common_metrics_stats_SampledStat_new`] or freed with
 /// [`kafka_common_metrics_stats_SampledStatKind_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
     self_: *mut c_void,
@@ -300,6 +307,7 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
 ///
 /// `self_` must be a valid kind handle, `sample` a valid sample handle and
 /// `config` a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
@@ -324,6 +332,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
 ///
 /// `self_` must be a valid kind handle, `samples` null or a valid list of
 /// sample handles and `config` a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
@@ -343,6 +352,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
 /// # Safety
 ///
 /// `self_` must be a valid kind handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_count(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
@@ -355,6 +365,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_
 /// # Safety
 ///
 /// `self_` must be a valid kind handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_sum(
     self_: *const kafka_common_metrics_stats_SampledStatKind_t,
@@ -367,6 +378,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet consumed or destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStatKind_t,
@@ -394,6 +406,7 @@ unsafe fn sample_mut<'a>(self_: *mut kafka_common_metrics_stats_SampledStat_Samp
 
 /// `new Sample(double initialValue, long now)`. Owned, freed with
 /// [`kafka_common_metrics_stats_SampledStat_Sample_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_new(
     initial_value: f64,
@@ -403,6 +416,7 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_new(
 }
 
 /// `new Sample(double initialValue, long now, long timeWindowMs)`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_with_time_window_ms(
     initial_value: f64,
@@ -418,6 +432,7 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_with_time_window
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_reset(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -433,6 +448,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_reset(
 ///
 /// `self_` must be a valid sample handle and `config` a valid metric-config
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_is_complete(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -447,6 +463,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_is_comple
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_value(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -456,9 +473,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_v
 
 /// The number of events recorded into the sample.
 ///
+/// A caught Rust panic returns -1, which no count is.
+///
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_count(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -471,6 +491,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_cou
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_start_time_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -483,6 +504,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_start_tim
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_last_event_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -495,6 +517,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_last_even
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_value(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -507,6 +530,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_value(
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_time_window_ms(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -519,6 +543,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_time_wind
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_event_count(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -532,6 +557,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_event
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_last_event_ms(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -545,6 +571,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_last_
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_value(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
@@ -558,6 +585,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_value
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_destroy(
     self_: *mut kafka_common_metrics_stats_SampledStat_Sample_t,

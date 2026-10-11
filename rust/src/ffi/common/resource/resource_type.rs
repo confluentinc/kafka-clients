@@ -98,48 +98,56 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_resource_ResourceType_t
 }
 
 /// `ResourceType.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_unknown() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::Unknown)
 }
 
 /// `ResourceType.ANY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_any() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::Any)
 }
 
 /// `ResourceType.TOPIC`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_topic() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::Topic)
 }
 
 /// `ResourceType.GROUP`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_group() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::Group)
 }
 
 /// `ResourceType.CLUSTER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_cluster() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::Cluster)
 }
 
 /// `ResourceType.TRANSACTIONAL_ID`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_transactional_id() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::TransactionalId)
 }
 
 /// `ResourceType.DELEGATION_TOKEN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_delegation_token() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::DelegationToken)
 }
 
 /// `ResourceType.USER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_user() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::User)
@@ -147,9 +155,12 @@ pub extern "C" fn kafka_common_resource_ResourceType_user() -> *const kafka_comm
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_resource_ResourceType_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_resource_ResourceType_e::kafka_common_resource_ResourceType_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourceType__enum(
     self_: *const kafka_common_resource_ResourceType_t,
@@ -175,6 +186,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_code(
 
 /// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
 /// for one this client does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_from_code(
     code: i8,
@@ -188,6 +200,7 @@ pub extern "C" fn kafka_common_resource_ResourceType_from_code(
 /// # Safety
 ///
 /// `str` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourceType_from_string(
     str: *const c_char,
@@ -200,6 +213,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_from_string(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourceType_is_unknown(
     self_: *const kafka_common_resource_ResourceType_t,
@@ -213,6 +227,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_is_unknown(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourceType_to_string(
     self_: *const kafka_common_resource_ResourceType_t,

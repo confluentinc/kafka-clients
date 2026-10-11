@@ -27,6 +27,7 @@ use crate::common::header::RecordHeaders;
 use crate::common::serialization::{ByteArraySerializer, Serializer};
 use crate::ffi::common::serialization::SerializerHandle;
 use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, kafka_Bytes_t};
 
 /// Opaque handle to a [`ByteArraySerializer`].
@@ -79,6 +80,7 @@ unsafe fn handle<'a>(
 
 /// `new ByteArraySerializer()`. Owned, freed with
 /// [`kafka_common_serialization_ByteArraySerializer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
 -> *mut kafka_common_serialization_ByteArraySerializer_t {
@@ -93,6 +95,7 @@ pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Serializer(
     self_: *const kafka_common_serialization_ByteArraySerializer_t,
@@ -106,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Seri
 ///
 /// `self_` must be null or an owned byte-array-serializer handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer_destroy(
     self_: *mut kafka_common_serialization_ByteArraySerializer_t,

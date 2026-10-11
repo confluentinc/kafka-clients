@@ -39,6 +39,8 @@ use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 
+use crate::ffi::ffi_guard;
+
 // ---------------------------------------------------------------------------
 // Strings
 // ---------------------------------------------------------------------------
@@ -52,6 +54,7 @@ use std::ptr;
 /// # Safety
 ///
 /// `s` must be null or an owned string returned by this API and not yet freed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 // an owned-string destructor standing for `java.lang.String` (CLAUDE.md §4 rule 6)
 #[doc(alias = "rust-only")]
@@ -186,6 +189,7 @@ pub(crate) fn box_bytes(bytes: bytes::Bytes) -> *mut kafka_Bytes_t {
 /// # Safety
 ///
 /// `bytes` must be null or an owned array not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 // an owned-array destructor standing for `byte[]` (CLAUDE.md §4 rule 6)
 #[doc(alias = "rust-only")]
@@ -366,6 +370,7 @@ where
 /// The caller frees the elements it added and then the list, with
 /// [`kafka_List_destroy`]; functions taking the list copy what they need
 /// during the call.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_List_new() -> *mut kafka_List_t {
     box_list(Vec::new(), None)
@@ -376,6 +381,7 @@ pub extern "C" fn kafka_List_new() -> *mut kafka_List_t {
 /// # Safety
 ///
 /// `self_` must be a valid list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut c_void) {
     unsafe { &mut *(self_ as *mut ListInner) }.elements.push(element);
@@ -386,6 +392,7 @@ pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut 
 /// # Safety
 ///
 /// `self_` must be a valid list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_size(self_: *const kafka_List_t) -> i32 {
     i32::try_from(unsafe { list_ref(self_) }.elements.len()).unwrap_or(i32::MAX)
@@ -398,6 +405,7 @@ pub unsafe extern "C" fn kafka_List_size(self_: *const kafka_List_t) -> i32 {
 /// # Safety
 ///
 /// `self_` must be a valid list handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_get(self_: *const kafka_List_t, index: i32) -> *mut c_void {
     let inner = unsafe { list_ref(self_) };
@@ -413,6 +421,7 @@ pub unsafe extern "C" fn kafka_List_get(self_: *const kafka_List_t, index: i32) 
 /// # Safety
 ///
 /// `self_` must be null or a valid list handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_destroy(self_: *mut kafka_List_t) {
     if !self_.is_null() {
@@ -575,6 +584,7 @@ pub(crate) unsafe fn map_entries<'a>(map: *const kafka_Map_t) -> &'a [(*mut c_vo
 /// documents (two distinct `char *` with the same text are the same key to
 /// it). The caller frees what it put in and then the map, with
 /// [`kafka_Map_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
     box_map(Vec::new(), None, None, None)
@@ -586,6 +596,7 @@ pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
 /// # Safety
 ///
 /// `self_` must be a valid map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void, value: *mut c_void) {
     let inner = unsafe { &mut *(self_ as *mut MapInner) };
@@ -608,6 +619,7 @@ pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void
 /// # Safety
 ///
 /// `self_` must be a valid map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_size(self_: *const kafka_Map_t) -> i32 {
     i32::try_from(unsafe { map_ref(self_) }.entries.len()).unwrap_or(i32::MAX)
@@ -618,6 +630,7 @@ pub unsafe extern "C" fn kafka_Map_size(self_: *const kafka_Map_t) -> i32 {
 /// # Safety
 ///
 /// `self_` must be a valid map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_key(self_: *const kafka_Map_t, index: i32) -> *mut c_void {
     let inner = unsafe { map_ref(self_) };
@@ -632,6 +645,7 @@ pub unsafe extern "C" fn kafka_Map_key(self_: *const kafka_Map_t, index: i32) ->
 /// # Safety
 ///
 /// `self_` must be a valid map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) -> *mut c_void {
     let inner = unsafe { map_ref(self_) };
@@ -649,6 +663,7 @@ pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) 
 /// # Safety
 ///
 /// `self_` must be a valid map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_void) -> *mut c_void {
     let inner = unsafe { map_ref(self_) };
@@ -660,6 +675,7 @@ pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_vo
 /// # Safety
 ///
 /// `self_` must be null or a valid map handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_destroy(self_: *mut kafka_Map_t) {
     if !self_.is_null() {

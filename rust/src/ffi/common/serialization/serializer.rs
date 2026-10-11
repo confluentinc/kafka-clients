@@ -44,6 +44,7 @@ use crate::ffi::common::header::internals::record_headers::{
     RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_Bytes_t, owned_c_string};
 
 /// Opaque handle to a [`Serializer`] implementation over the `void *`
@@ -262,6 +263,7 @@ impl Serializer<GenericValue> for CSerializer {
 /// `self_` and keeps it alive until the handle is destroyed with
 /// [`kafka_common_serialization_Serializer_destroy`] or, once a client
 /// consumed it, until that client is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_Serializer_new(
     self_: *mut c_void,
@@ -310,6 +312,7 @@ fn generic(data: *const c_void) -> Option<GenericValue> {
 ///
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string and `out_serialize` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(
     self_: *const kafka_common_serialization_Serializer_t,
@@ -330,6 +333,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string, `headers` a valid record-headers handle and
 /// `out_serialize_with_headers` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_headers(
     self_: *const kafka_common_serialization_Serializer_t,
@@ -357,6 +361,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
 /// `self_` must be a valid serializer handle, `topic` a valid
 /// NUL-terminated string, `headers` a valid record-headers handle and
 /// `out_serialize_owned_with_headers` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_owned_with_headers(
     self_: *const kafka_common_serialization_Serializer_t,
@@ -381,6 +386,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_owned_w
 /// # Safety
 ///
 /// `self_` must be null or an owned serializer handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Serializer_destroy(
     self_: *mut kafka_common_serialization_Serializer_t,

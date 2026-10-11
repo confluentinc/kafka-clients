@@ -31,6 +31,7 @@ use crate::common::header::Headers;
 use crate::common::serialization::{BytesDeserializer, Deserializer};
 use crate::ffi::common::serialization::DeserializerHandle;
 use crate::ffi::common::serialization::deserializer::kafka_common_serialization_Deserializer_t;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{GenericValue, box_bytes};
 
 /// Opaque handle to a [`BytesDeserializer`].
@@ -94,6 +95,7 @@ unsafe fn handle<'a>(
 
 /// `new BytesDeserializer()`. Owned, freed with
 /// [`kafka_common_serialization_BytesDeserializer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_BytesDeserializer_new()
 -> *mut kafka_common_serialization_BytesDeserializer_t {
@@ -109,6 +111,7 @@ pub extern "C" fn kafka_common_serialization_BytesDeserializer_new()
 /// # Safety
 ///
 /// `self_` must be a valid bytes-deserializer handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_BytesDeserializer__as_Deserializer(
     self_: *mut kafka_common_serialization_BytesDeserializer_t,
@@ -122,6 +125,7 @@ pub unsafe extern "C" fn kafka_common_serialization_BytesDeserializer__as_Deseri
 ///
 /// `self_` must be null or an owned bytes-deserializer handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_BytesDeserializer_destroy(
     self_: *mut kafka_common_serialization_BytesDeserializer_t,

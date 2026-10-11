@@ -34,6 +34,7 @@ use crate::ffi::common::metrics::compound_stat::{kafka_common_metrics_CompoundSt
 use crate::ffi::common::metrics::measurable_stat::{kafka_common_metrics_MeasurableStat_t, take_measurable_stat};
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_option};
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_elements, owned_c_string};
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,7 @@ pub(crate) unsafe fn recording_level_of(level: *const kafka_common_metrics_Senso
 }
 
 /// `RecordingLevel.INFO`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_info()
 -> *const kafka_common_metrics_Sensor_RecordingLevel_t {
@@ -95,6 +97,7 @@ pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_info()
 }
 
 /// `RecordingLevel.DEBUG`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_debug()
 -> *const kafka_common_metrics_Sensor_RecordingLevel_t {
@@ -102,6 +105,7 @@ pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_debug()
 }
 
 /// `RecordingLevel.TRACE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_trace()
 -> *const kafka_common_metrics_Sensor_RecordingLevel_t {
@@ -110,9 +114,14 @@ pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_trace()
 
 /// The enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_metrics_Sensor_RecordingLevel_INFO`, the first
+/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
+/// value, and is only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_INFO)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
@@ -125,6 +134,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_id(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
@@ -137,6 +147,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_id(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_name(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
@@ -155,6 +166,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_name(
 /// # Safety
 ///
 /// `out_for_id` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_id(
     id: i16,
@@ -177,6 +189,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_id(
 ///
 /// `name` must be a NUL-terminated string and `out_for_name` a valid
 /// pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_name(
     name: *const c_char,
@@ -197,6 +210,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_name(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_should_record(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
@@ -260,6 +274,7 @@ pub(crate) unsafe fn list_sensors(sensors: *const kafka_List_t) -> Vec<Arc<Senso
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_name(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -272,6 +287,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_name(
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_should_record(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     i8::from(unsafe { sensor_ref(self_) }.should_record())
@@ -282,6 +298,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_should_record(self_: *const
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(self_: *const kafka_common_metrics_Sensor_t) {
     unsafe { sensor_ref(self_) }.record();
@@ -292,6 +309,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(self_: *const kafka_
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -305,6 +323,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value(
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -320,6 +339,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms(
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -335,6 +355,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas(
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas_with_time_ms(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -368,6 +389,7 @@ fn deliver_added(added: Result<bool, crate::common::Error>, out: *mut i8) -> *mu
 /// `self_` must be a valid sensor handle, `metric_name` a valid metric-name
 /// handle, `stat` a valid measurable-stat handle and
 /// `out_add_with_metric_name` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -390,6 +412,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name(
 ///
 /// As [`kafka_common_metrics_Sensor_add_with_metric_name`]; `config` must be
 /// null or a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name_config(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -416,6 +439,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name_config
 ///
 /// `self_` must be a valid sensor handle, `stat` a valid compound-stat
 /// handle and `out_add` a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_add(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -433,6 +457,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add(
 ///
 /// As [`kafka_common_metrics_Sensor_add`]; `config` must be null or a valid
 /// metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_config(
     self_: *const kafka_common_metrics_Sensor_t,
@@ -450,6 +475,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_config(
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_metrics(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     i8::from(unsafe { sensor_ref(self_) }.has_metrics())
@@ -460,6 +486,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_metrics(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_expired(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     i8::from(unsafe { sensor_ref(self_) }.has_expired())
@@ -470,6 +497,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_expired(self_: *const k
 /// # Safety
 ///
 /// `self_` must be null or an owned sensor handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_destroy(self_: *mut kafka_common_metrics_Sensor_t) {
     if !self_.is_null() {

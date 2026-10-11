@@ -30,6 +30,7 @@ use crate::ffi::common::{error_ref, kafka_common_Error_t};
 use crate::ffi::consumer::{
     OffsetAndMetadataInner, box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_t, offset_and_metadata_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, kafka_List_t, kafka_Map_t, map_entries};
 
 /// Opaque handle to a [`ConsumerLogTruncationError`].
@@ -100,6 +101,7 @@ pub(crate) unsafe fn map_topic_partition_offset_and_metadata(
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
     error: *const kafka_common_Error_t,
@@ -124,6 +126,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
 /// # Safety
 ///
 /// Each map must be null or a valid map of the stated types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
     offset_out_of_range_partitions: *const kafka_Map_t,
@@ -143,6 +146,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
 ///
 /// `message` must be a valid NUL-terminated string and each map null or a
 /// valid map of the stated types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
     message: *const c_char,
@@ -162,6 +166,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_partitions(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -180,6 +185,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -198,6 +204,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_r
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -214,6 +221,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offse
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_message(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -226,6 +234,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_message(
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_source(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -238,6 +247,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_source(
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_to_string(
     self_: *const kafka_common_ConsumerLogTruncationError_t,
@@ -251,6 +261,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_destroy(
     self_: *mut kafka_common_ConsumerLogTruncationError_t,

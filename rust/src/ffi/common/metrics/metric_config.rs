@@ -33,6 +33,7 @@ use crate::ffi::common::metrics::sensor::{
     kafka_common_metrics_Sensor_RecordingLevel_t, recording_level_of, recording_level_singleton,
 };
 use crate::ffi::common::metrics::time_unit::{kafka_common_metrics_TimeUnit_t, value_of as time_unit_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_map, kafka_Map_t, map_strings};
 
 /// Opaque handle to a [`MetricConfig`].
@@ -151,6 +152,7 @@ pub(crate) unsafe fn metric_config_option(
 
 /// `new MetricConfig()`: the defaults. Owned, freed with
 /// [`kafka_common_metrics_MetricConfig_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricConfig_new() -> *mut kafka_common_metrics_MetricConfig_t {
     box_metric_config(Arc::new(MetricConfig::new()))
@@ -162,6 +164,7 @@ pub extern "C" fn kafka_common_metrics_MetricConfig_new() -> *mut kafka_common_m
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -175,6 +178,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
 ///
 /// `self_` must be a valid metric-config handle and `quota` a valid quota
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -189,6 +193,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_event_window(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -201,6 +206,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_event_window(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_event_window(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -214,6 +220,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_event_window(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_time_window_ms(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -227,6 +234,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_time_window_ms(
 ///
 /// `self_` must be a valid metric-config handle and `unit` a time-unit
 /// singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -243,6 +251,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -257,6 +266,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
 ///
 /// `self_` must be a valid metric-config handle and `tags` null or a valid
 /// map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -271,6 +281,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -283,6 +294,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -296,6 +308,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_record_level(
     self_: *const kafka_common_metrics_MetricConfig_t,
@@ -309,6 +322,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_record_level(
 ///
 /// `self_` must be a valid metric-config handle and `recording_level` a
 /// recording-level singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_record_level(
     self_: *mut kafka_common_metrics_MetricConfig_t,
@@ -325,6 +339,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_record_level(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_destroy(self_: *mut kafka_common_metrics_MetricConfig_t) {
     if !self_.is_null() {

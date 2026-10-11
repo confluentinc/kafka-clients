@@ -45,6 +45,7 @@ use crate::common::serialization::Deserializer;
 use crate::ffi::common::header::{HeadersInner, headers_ref, kafka_common_header_Headers_t};
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     GenericValue, box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Bytes_t,
     kafka_Map_destroy, kafka_Map_t, map_entries, owned_c_string,
@@ -290,6 +291,7 @@ impl Deserializer<GenericValue> for CDeserializer {
 /// caller owns `self_` and keeps it alive until the handle is destroyed
 /// with [`kafka_common_serialization_Deserializer_destroy`] or, once a
 /// client consumed it, until that client is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_Deserializer_new(
     self_: *mut c_void,
@@ -370,6 +372,7 @@ unsafe fn shared(source: kafka_Bytes_t, data: kafka_Bytes_t) -> Result<(Bytes, R
 /// `self_` must be a valid deserializer handle, `topic` a valid
 /// NUL-terminated string, `data` null or a valid array and
 /// `out_deserialize` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
     self_: *const kafka_common_serialization_Deserializer_t,
@@ -392,6 +395,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
 /// `self_` must be a valid deserializer handle, `topic` a valid
 /// NUL-terminated string, `headers` a valid headers handle, `data` null or a
 /// valid array and `out_deserialize_with_headers` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_with_headers(
     self_: *const kafka_common_serialization_Deserializer_t,
@@ -423,6 +427,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 /// `self_` must be a valid deserializer handle, `topic` a valid
 /// NUL-terminated string, `source` and `data` null or valid arrays and
 /// `out_deserialize_from_shared` a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_from_shared(
     self_: *const kafka_common_serialization_Deserializer_t,
@@ -456,6 +461,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_fro
 /// NUL-terminated string, `headers` a valid headers handle, `source` and
 /// `data` null or valid arrays and `out_deserialize_from_shared_with_headers`
 /// a valid slot.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_from_shared_with_headers(
     self_: *const kafka_common_serialization_Deserializer_t,
@@ -489,6 +495,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_fro
 ///
 /// `self_` must be a valid deserializer handle and `configs` null or a
 /// valid map of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
     self_: *mut kafka_common_serialization_Deserializer_t,
@@ -514,6 +521,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
 /// # Safety
 ///
 /// `self_` must be a valid deserializer handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
     self_: *mut kafka_common_serialization_Deserializer_t,
@@ -530,6 +538,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
 /// # Safety
 ///
 /// `self_` must be null or an owned deserializer handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_destroy(
     self_: *mut kafka_common_serialization_Deserializer_t,

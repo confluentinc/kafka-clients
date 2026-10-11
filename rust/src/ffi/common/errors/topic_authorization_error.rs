@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::common::errors::TopicAuthorizationError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_string_set, sorted_string_list};
 
 /// Opaque handle to a [`TopicAuthorizationError`].
@@ -47,6 +48,7 @@ impl PayloadClass for TopicAuthorizationError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization_error(
     error: *const kafka_common_Error_t,
@@ -66,6 +68,7 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_error(
 ///
 /// `unauthorized_topics` must be null or a valid list of NUL-terminated
 /// strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_new(
     unauthorized_topics: *const kafka_List_t,
@@ -75,6 +78,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_new(
 
 /// `new TopicAuthorizationException(String message)` with Java's default
 /// message and no topics.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_TopicAuthorizationError_with_default_message()
 -> *mut kafka_common_TopicAuthorizationError_t {
@@ -88,6 +92,7 @@ pub extern "C" fn kafka_common_TopicAuthorizationError_with_default_message()
 ///
 /// `unauthorized_topics` must be null or a valid list of NUL-terminated
 /// strings and `message` a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_with_message(
     unauthorized_topics: *const kafka_List_t,
@@ -105,6 +110,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_with_message(
 /// # Safety
 ///
 /// `self_` must be a valid topic-authorization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
     self_: *const kafka_common_TopicAuthorizationError_t,
@@ -121,6 +127,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topic
 /// # Safety
 ///
 /// `self_` must be a valid topic-authorization handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_source(
     self_: *const kafka_common_TopicAuthorizationError_t,
@@ -133,6 +140,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_source(
 /// # Safety
 ///
 /// `self_` must be a valid topic-authorization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_to_string(
     self_: *const kafka_common_TopicAuthorizationError_t,
@@ -146,6 +154,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_destroy(
     self_: *mut kafka_common_TopicAuthorizationError_t,

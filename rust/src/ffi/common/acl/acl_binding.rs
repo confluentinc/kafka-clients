@@ -26,6 +26,7 @@ use crate::ffi::common::acl::acl_binding_filter::{box_acl_binding_filter, kafka_
 use crate::ffi::common::resource::resource_pattern::{
     ResourcePatternInner, kafka_common_resource_ResourcePattern_t, resource_pattern_ref,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to an [`AclBinding`].
@@ -85,6 +86,7 @@ pub(crate) fn box_acl_binding(binding: AclBinding) -> *mut kafka_common_acl_AclB
 ///
 /// `pattern` must be a valid resource-pattern handle and `entry` a valid
 /// access-control-entry handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
     pattern: *const kafka_common_resource_ResourcePattern_t,
@@ -102,6 +104,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const kafka_common_acl_AclBinding_t) -> i8 {
     i8::from(unsafe { acl_binding_ref(self_) }.is_unknown())
@@ -113,6 +116,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const ka
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
     self_: *const kafka_common_acl_AclBinding_t,
@@ -126,6 +130,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
     self_: *const kafka_common_acl_AclBinding_t,
@@ -139,6 +144,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
     self_: *const kafka_common_acl_AclBinding_t,
@@ -151,6 +157,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(
     self_: *const kafka_common_acl_AclBinding_t,
@@ -163,6 +170,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned binding handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_destroy(self_: *mut kafka_common_acl_AclBinding_t) {
     if !self_.is_null() {

@@ -49,6 +49,7 @@ use crate::ffi::common::header::internals::record_header::{
     RecordHeaderInner, kafka_common_header_internals_RecordHeader_t, record_header_ref,
 };
 use crate::ffi::common::{box_error, kafka_common_Error_t, take_error};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, c_str_to_string, kafka_Bytes_t, kafka_List_destroy, kafka_List_t, list_elements, owned_c_string,
 };
@@ -103,6 +104,7 @@ unsafe impl Sync for HeaderInner {}
 /// # Safety
 ///
 /// `self_` must be a valid header handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_common_header_Header_t) -> *const c_char {
     unsafe { &*(self_ as *const HeaderInner) }.key_c.as_ptr()
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_comm
 /// # Safety
 ///
 /// `self_` must be a valid header handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Header_value(self_: *const kafka_common_header_Header_t) -> kafka_Bytes_t {
     kafka_Bytes_t::from_option(unsafe { &*(self_ as *const HeaderInner) }.header().value())
@@ -244,6 +247,7 @@ unsafe fn headers_mut<'a>(self_: *mut kafka_common_header_Headers_t) -> &'a mut 
 ///
 /// `self_` must be a valid headers handle and `header` a valid
 /// record-header handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
     self_: *mut kafka_common_header_Headers_t,
@@ -261,6 +265,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
 ///
 /// `self_` must be a valid headers handle, `key` a valid NUL-terminated
 /// string and `value` null or a valid buffer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
     self_: *mut kafka_common_header_Headers_t,
@@ -279,6 +284,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
 ///
 /// `self_` must be a valid headers handle and `key` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     self_: *mut kafka_common_header_Headers_t,
@@ -295,6 +301,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
 ///
 /// `self_` must be a valid headers handle and `key` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
     self_: *const kafka_common_header_Headers_t,
@@ -317,6 +324,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
 ///
 /// `self_` must be a valid headers handle and `key` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_headers(
     self_: *const kafka_common_header_Headers_t,
@@ -338,6 +346,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_headers(
 /// # Safety
 ///
 /// `self_` must be a valid headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_to_array(
     self_: *const kafka_common_header_Headers_t,
@@ -351,6 +360,7 @@ pub unsafe extern "C" fn kafka_common_header_Headers_to_array(
 /// # Safety
 ///
 /// `self_` must be a valid headers handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_iter(
     self_: *const kafka_common_header_Headers_t,
@@ -496,6 +506,7 @@ impl Headers for CHeaders {
 /// return are borrowed from the C side and must stay valid until its next
 /// mutating call; the lists are built with `kafka_List_new` and freed by the
 /// Rust side.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_header_Headers_new(
     self_: *mut c_void,
@@ -527,6 +538,7 @@ pub extern "C" fn kafka_common_header_Headers_new(
 /// # Safety
 ///
 /// `self_` must be null or an owned headers handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_destroy(self_: *mut kafka_common_header_Headers_t) {
     if !self_.is_null() {

@@ -32,6 +32,7 @@ use std::ptr;
 use crate::common::{Error, LocalCallbackError};
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`LocalCallbackError`].
@@ -59,6 +60,7 @@ impl PayloadClass for LocalCallbackError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
     error: *const kafka_common_Error_t,
@@ -77,6 +79,7 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
 ///
 /// `message` must be null or a valid NUL-terminated string. `opaque` is never
 /// dereferenced.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
     message: *const c_char,
@@ -90,6 +93,7 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
 /// # Safety
 ///
 /// `self_` must be a valid foreign-callback-error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
     self_: *const kafka_common_LocalCallbackError_t,
@@ -102,6 +106,7 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
 /// # Safety
 ///
 /// `self_` must be a valid foreign-callback-error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
     self_: *const kafka_common_LocalCallbackError_t,
@@ -114,6 +119,7 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
 /// # Safety
 ///
 /// `self_` must be a valid foreign-callback-error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
     self_: *const kafka_common_LocalCallbackError_t,
@@ -128,6 +134,7 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_destroy(self_: *mut kafka_common_LocalCallbackError_t) {
     unsafe { Payload::<LocalCallbackError>::destroy(self_) }

@@ -21,6 +21,7 @@ use crate::common::quota::ClientQuotaFilter;
 use crate::ffi::common::quota::client_quota_filter_component::{
     ClientQuotaFilterComponentInner, box_client_quota_filter_component, list_client_quota_filter_components,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`ClientQuotaFilter`].
@@ -58,6 +59,7 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 /// # Safety
 ///
 /// `components` must be null or a valid list of filter-component handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
     components: *const kafka_List_t,
@@ -75,6 +77,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 /// # Safety
 ///
 /// `components` must be null or a valid list of filter-component handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
     components: *const kafka_List_t,
@@ -85,6 +88,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
 }
 
 /// `all()`: a filter matching every configured entity. Owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaFilter_all() -> *mut kafka_common_quota_ClientQuotaFilter_t {
     box_client_quota_filter(ClientQuotaFilter::all())
@@ -97,6 +101,7 @@ pub extern "C" fn kafka_common_quota_ClientQuotaFilter_all() -> *mut kafka_commo
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
@@ -114,6 +119,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
@@ -126,6 +132,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_to_string(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
@@ -138,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned filter handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_destroy(
     self_: *mut kafka_common_quota_ClientQuotaFilter_t,

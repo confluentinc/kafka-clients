@@ -37,6 +37,7 @@ use crate::ffi::common::partition_info::{
 };
 use crate::ffi::common::topic_partition::{kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_list, uuid_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     c_str_to_option, c_str_to_string, into_c_string, kafka_List_t, kafka_Map_t, list_string_set, list_strings,
     map_entries, owned_c_string, sorted_string_list,
@@ -118,6 +119,7 @@ pub(crate) unsafe fn cluster_ref<'a>(cluster: *const kafka_common_Cluster_t) -> 
 ///
 /// `cluster_id` must be null or a valid NUL-terminated string and each list
 /// null or a valid list of the stated element type.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_new(
     cluster_id: *const c_char,
@@ -143,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_new(
 ///
 /// As [`kafka_common_Cluster_new`], plus `controller` null or a valid node
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_with_controller(
     cluster_id: *const c_char,
@@ -170,6 +173,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_controller(
 ///
 /// As [`kafka_common_Cluster_with_controller`], plus `invalid_topics` null or
 /// a valid list of strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
     cluster_id: *const c_char,
@@ -201,6 +205,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
 ///
 /// As [`kafka_common_Cluster_with_invalid_topics_controller`], plus
 /// `topic_ids` null or a valid map of the stated key and value types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller_topic_ids(
     cluster_id: *const c_char,
@@ -233,6 +238,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller_top
 }
 
 /// `Cluster.empty()`: a cluster with no nodes and no topic-partitions.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Cluster_empty() -> *mut kafka_common_Cluster_t {
     box_cluster(Cluster::empty())
@@ -249,6 +255,7 @@ pub extern "C" fn kafka_common_Cluster_empty() -> *mut kafka_common_Cluster_t {
 /// # Safety
 ///
 /// `addresses` must be null or a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_bootstrap(addresses: *const kafka_List_t) -> *mut kafka_common_Cluster_t {
     let addresses: Vec<(String, SocketAddr)> = unsafe { list_strings(addresses) }
@@ -272,6 +279,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_bootstrap(addresses: *const kafka_
 ///
 /// `self_` must be a valid cluster handle and `partitions` null or a valid
 /// map of the stated key and value types.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
     self_: *const kafka_common_Cluster_t,
@@ -295,6 +303,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_nodes(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
     node_list(unsafe { inner_ref(self_) }.cluster.nodes())
@@ -305,6 +314,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_nodes(self_: *const kafka_common_C
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_node_by_id(
     self_: *const kafka_common_Cluster_t,
@@ -321,6 +331,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_node_by_id(
 ///
 /// `self_` must be a valid cluster handle and `partition` a valid
 /// topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_node_if_online(
     self_: *const kafka_common_Cluster_t,
@@ -341,6 +352,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_node_if_online(
 ///
 /// `self_` must be a valid cluster handle and `topic_partition` a valid
 /// topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_leader_for(
     self_: *const kafka_common_Cluster_t,
@@ -359,6 +371,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_leader_for(
 ///
 /// `self_` must be a valid cluster handle and `topic_partition` a valid
 /// topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partition(
     self_: *const kafka_common_Cluster_t,
@@ -377,6 +390,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition(
 ///
 /// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
     self_: *const kafka_common_Cluster_t,
@@ -396,6 +410,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
 ///
 /// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
     self_: *const kafka_common_Cluster_t,
@@ -414,6 +429,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
 ///
 /// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_available_partitions_for_topic(
     self_: *const kafka_common_Cluster_t,
@@ -432,6 +448,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_available_partitions_for_topic(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_node(
     self_: *const kafka_common_Cluster_t,
@@ -446,6 +463,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_node(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topics(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
     sorted_string_list(unsafe { inner_ref(self_) }.cluster.topics())
@@ -456,6 +474,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_topics(self_: *const kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_unauthorized_topics(
     self_: *const kafka_common_Cluster_t,
@@ -474,6 +493,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_unauthorized_topics(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_invalid_topics(
     self_: *const kafka_common_Cluster_t,
@@ -486,6 +506,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_invalid_topics(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_internal_topics(
     self_: *const kafka_common_Cluster_t,
@@ -498,6 +519,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_internal_topics(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_is_bootstrap_configured(self_: *const kafka_common_Cluster_t) -> i8 {
     unsafe { inner_ref(self_) }.cluster.is_bootstrap_configured() as i8
@@ -509,6 +531,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_is_bootstrap_configured(self_: *co
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_cluster_resource(
     self_: *const kafka_common_Cluster_t,
@@ -521,6 +544,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_cluster_resource(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_controller(
     self_: *const kafka_common_Cluster_t,
@@ -534,6 +558,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_controller(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topic_ids(self_: *const kafka_common_Cluster_t) -> *mut kafka_List_t {
     let mut ids: Vec<Uuid> = unsafe { inner_ref(self_) }.cluster.topic_ids().copied().collect();
@@ -548,6 +573,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_ids(self_: *const kafka_comm
 ///
 /// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
     self_: *const kafka_common_Cluster_t,
@@ -563,6 +589,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
 ///
 /// `self_` must be a valid cluster handle and `topic_id` a valid uuid
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topic_name(
     self_: *const kafka_common_Cluster_t,
@@ -579,6 +606,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_name(
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_to_string(self_: *const kafka_common_Cluster_t) -> *mut c_char {
     into_c_string(&unsafe { inner_ref(self_) }.cluster.to_string())
@@ -589,6 +617,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_to_string(self_: *const kafka_comm
 /// # Safety
 ///
 /// `self_` must be null or an owned cluster handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_destroy(self_: *mut kafka_common_Cluster_t) {
     if !self_.is_null() {

@@ -25,6 +25,7 @@ use std::ptr;
 use std::sync::LazyLock;
 
 use crate::common::Node;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, c_str_to_option, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements,
     owned_c_string,
@@ -124,6 +125,7 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t) -> Vec<Node> {
 /// # Safety
 ///
 /// `host` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, port: i32) -> *mut kafka_common_Node_t {
     box_node(Node::new(id, unsafe { c_str_to_string(host) }, port))
@@ -135,6 +137,7 @@ pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, por
 /// # Safety
 ///
 /// `host` must be a valid NUL-terminated string and `rack` null or one.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_with_rack(
     id: i32,
@@ -152,6 +155,7 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
 /// # Safety
 ///
 /// `host` must be a valid NUL-terminated string and `rack` null or one.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
     id: i32,
@@ -171,6 +175,7 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
 
 /// `Node.noNode()`: a borrowed handle on the shared "no node" instance,
 /// never destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Node_no_node() -> *const kafka_common_Node_t {
     NO_NODE.as_ptr()
@@ -181,6 +186,7 @@ pub extern "C" fn kafka_common_Node_no_node() -> *const kafka_common_Node_t {
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_is_empty(self_: *const kafka_common_Node_t) -> i8 {
     i8::from(unsafe { node_ref(self_) }.is_empty())
@@ -191,6 +197,7 @@ pub unsafe extern "C" fn kafka_common_Node_is_empty(self_: *const kafka_common_N
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_id(self_: *const kafka_common_Node_t) -> i32 {
     unsafe { node_ref(self_) }.id()
@@ -201,6 +208,7 @@ pub unsafe extern "C" fn kafka_common_Node_id(self_: *const kafka_common_Node_t)
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_Node_t) -> *const c_char {
     unsafe { &*(self_ as *const NodeInner) }.id_string_c.as_ptr()
@@ -212,6 +220,7 @@ pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_t) -> *const c_char {
     unsafe { &*(self_ as *const NodeInner) }.host_c.as_ptr()
@@ -222,6 +231,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_port(self_: *const kafka_common_Node_t) -> i32 {
     unsafe { node_ref(self_) }.port()
@@ -232,6 +242,7 @@ pub unsafe extern "C" fn kafka_common_Node_port(self_: *const kafka_common_Node_
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_has_rack(self_: *const kafka_common_Node_t) -> i8 {
     i8::from(unsafe { node_ref(self_) }.has_rack())
@@ -243,6 +254,7 @@ pub unsafe extern "C" fn kafka_common_Node_has_rack(self_: *const kafka_common_N
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_t) -> *const c_char {
     unsafe { &*(self_ as *const NodeInner) }
@@ -256,6 +268,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_is_fenced(self_: *const kafka_common_Node_t) -> i8 {
     i8::from(unsafe { node_ref(self_) }.is_fenced())
@@ -267,6 +280,7 @@ pub unsafe extern "C" fn kafka_common_Node_is_fenced(self_: *const kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_to_string(self_: *const kafka_common_Node_t) -> *mut c_char {
     into_c_string(&unsafe { node_ref(self_) }.to_string())
@@ -278,6 +292,7 @@ pub unsafe extern "C" fn kafka_common_Node_to_string(self_: *const kafka_common_
 /// # Safety
 ///
 /// `self_` must be null or an owned node handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_destroy(self_: *mut kafka_common_Node_t) {
     if !self_.is_null() {

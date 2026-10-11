@@ -18,6 +18,7 @@
 use std::ffi::{CString, c_char};
 
 use crate::common::security::auth::KafkaPrincipal;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`KafkaPrincipal`].
@@ -90,6 +91,7 @@ pub(crate) unsafe fn list_kafka_principals(list: *const kafka_List_t) -> Vec<Kaf
 /// # Safety
 ///
 /// `principal_type` and `name` must be valid NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
     principal_type: *const c_char,
@@ -106,6 +108,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
 /// # Safety
 ///
 /// `principal_type` and `name` must be valid NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_authenticated(
     principal_type: *const c_char,
@@ -120,6 +123,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_au
 }
 
 /// `KafkaPrincipal.ANONYMOUS`: the `User:ANONYMOUS` principal. Owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_KafkaPrincipal_anonymous()
 -> *mut kafka_common_security_auth_KafkaPrincipal_t {
@@ -131,6 +135,7 @@ pub extern "C" fn kafka_common_security_auth_KafkaPrincipal_anonymous()
 /// # Safety
 ///
 /// `self_` must be a valid principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
@@ -143,6 +148,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
 /// # Safety
 ///
 /// `self_` must be a valid principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
@@ -156,6 +162,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_typ
 /// # Safety
 ///
 /// `self_` must be a valid owned principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_authenticated(
     self_: *mut kafka_common_security_auth_KafkaPrincipal_t,
@@ -172,6 +179,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_aut
 /// # Safety
 ///
 /// `self_` must be a valid principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
@@ -185,6 +193,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authent
 /// # Safety
 ///
 /// `self_` must be a valid principal handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_to_string(
     self_: *const kafka_common_security_auth_KafkaPrincipal_t,
@@ -199,6 +208,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned principal handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_destroy(
     self_: *mut kafka_common_security_auth_KafkaPrincipal_t,

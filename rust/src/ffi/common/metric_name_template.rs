@@ -23,6 +23,7 @@ use std::ffi::{CString, c_char};
 use indexmap::IndexSet;
 
 use crate::common::MetricNameTemplate;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_string_list, c_str_to_string, into_c_string, kafka_List_t, list_strings, owned_c_string};
 
 /// Opaque handle to a [`MetricNameTemplate`].
@@ -73,6 +74,7 @@ pub(crate) unsafe fn metric_name_template_ref<'a>(
 ///
 /// The strings must be valid NUL-terminated strings and `tag_names` null or
 /// a valid list of NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
     name: *const c_char,
@@ -94,6 +96,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_name(
     self_: *const kafka_common_MetricNameTemplate_t,
@@ -106,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_name(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_group(
     self_: *const kafka_common_MetricNameTemplate_t,
@@ -118,6 +122,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_group(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_description(
     self_: *const kafka_common_MetricNameTemplate_t,
@@ -131,6 +136,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_description(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_tags(
     self_: *const kafka_common_MetricNameTemplate_t,
@@ -143,6 +149,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_tags(
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_to_string(
     self_: *const kafka_common_MetricNameTemplate_t,
@@ -155,6 +162,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_destroy(self_: *mut kafka_common_MetricNameTemplate_t) {
     if !self_.is_null() {

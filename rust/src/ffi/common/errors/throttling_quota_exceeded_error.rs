@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::common::errors::ThrottlingQuotaExceededError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`ThrottlingQuotaExceededError`].
@@ -48,6 +49,7 @@ impl PayloadClass for ThrottlingQuotaExceededError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded_error(
     error: *const kafka_common_Error_t,
@@ -68,6 +70,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded_error(
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_new(
     throttle_time_ms: i32,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_new(
 
 /// `new ThrottlingQuotaExceededException(String message)` with Java's
 /// default message and the given throttle time.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ThrottlingQuotaExceededError_with_default_message(
     throttle_time_ms: i32,
@@ -92,6 +96,7 @@ pub extern "C" fn kafka_common_ThrottlingQuotaExceededError_with_default_message
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(
     self_: *const kafka_common_ThrottlingQuotaExceededError_t,
@@ -106,6 +111,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_message(
     self_: *const kafka_common_ThrottlingQuotaExceededError_t,
@@ -118,6 +124,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_message(
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_source(
     self_: *const kafka_common_ThrottlingQuotaExceededError_t,
@@ -130,6 +137,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_source(
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_to_string(
     self_: *const kafka_common_ThrottlingQuotaExceededError_t,
@@ -143,6 +151,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_destroy(
     self_: *mut kafka_common_ThrottlingQuotaExceededError_t,

@@ -27,6 +27,7 @@ use crate::common::TopicPartitionInfo;
 use crate::ffi::common::node::{
     NodeInner, kafka_common_Node_t, list_nodes, node_list, optional_node, optional_node_ptr,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`TopicPartitionInfo`].
@@ -91,6 +92,7 @@ pub(crate) fn box_topic_partition_info(info: TopicPartitionInfo) -> *mut kafka_c
 ///
 /// `leader` must be null or a valid node handle and each list null or a
 /// valid list of node handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
     partition: i32,
@@ -115,6 +117,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
 ///
 /// As [`kafka_common_TopicPartitionInfo_new`], plus `elr` and
 /// `last_known_elr` null or valid lists of node handles.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr(
     partition: i32,
@@ -139,6 +142,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -151,6 +155,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -164,6 +169,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -176,6 +182,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -189,6 +196,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -202,6 +210,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -217,6 +226,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_to_string(
     self_: *const kafka_common_TopicPartitionInfo_t,
@@ -230,6 +240,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_destroy(self_: *mut kafka_common_TopicPartitionInfo_t) {
     if !self_.is_null() {

@@ -35,6 +35,7 @@ use crate::ffi::common::header::internals::record_headers::{
 use crate::ffi::common::record::timestamp_type::{self, kafka_common_record_TimestampType_t};
 use crate::ffi::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_Bytes_t};
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ pub(crate) unsafe fn origin_value_of(
 }
 
 /// `DeserializationExceptionOrigin.KEY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_key()
 -> *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t {
@@ -99,6 +101,7 @@ pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOr
 }
 
 /// `DeserializationExceptionOrigin.VALUE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_value()
 -> *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t {
@@ -107,9 +110,15 @@ pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOr
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns
+/// `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY`, the first enumerator:
+/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
+/// only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum(
     self_: *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t,
@@ -163,6 +172,7 @@ unsafe fn payload<'a>(
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     error: *const kafka_common_Error_t,
@@ -188,6 +198,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
 /// `origin` and `timestamp_type` must be singletons, `partition` a valid
 /// topic-partition handle, the buffers null or valid, `headers` null or a
 /// valid record-headers handle and `message` a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
     origin: *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t,
@@ -228,6 +239,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
 /// `self_` must be an owned handle not yet destroyed, never a view borrowed
 /// from a `kafka_common_Error_t`, and `source` null or an owned error handle
 /// not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_with_source(
     self_: *mut kafka_common_RecordDeserializationError_t,
@@ -243,6 +255,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_with_source(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -255,6 +268,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_topic_partition(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -267,6 +281,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_topic_partition
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -279,6 +294,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -291,6 +307,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -304,6 +321,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -317,6 +335,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -331,6 +350,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_headers(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -346,6 +366,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_headers(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -358,6 +379,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -370,6 +392,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_to_string(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -383,6 +406,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_destroy(
     self_: *mut kafka_common_RecordDeserializationError_t,

@@ -23,6 +23,7 @@ use crate::common::Error;
 use crate::consumer::ConsumerCommitFailedError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`ConsumerCommitFailedError`].
@@ -47,6 +48,7 @@ impl PayloadClass for ConsumerCommitFailedError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
     error: *const kafka_common_Error_t,
@@ -64,6 +66,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_new(
     message: *const c_char,
@@ -72,6 +75,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_new(
 }
 
 /// `new CommitFailedException()` with Java's default message.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ConsumerCommitFailedError_with_default_message()
 -> *mut kafka_common_ConsumerCommitFailedError_t {
@@ -83,6 +87,7 @@ pub extern "C" fn kafka_common_ConsumerCommitFailedError_with_default_message()
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
@@ -95,6 +100,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
@@ -107,6 +113,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
@@ -120,6 +127,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_destroy(
     self_: *mut kafka_common_ConsumerCommitFailedError_t,

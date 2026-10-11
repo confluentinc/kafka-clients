@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::common::errors::DuplicateResourceError;
 use crate::ffi::common::errors::{Payload, PayloadClass, take_source};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`DuplicateResourceError`].
@@ -50,6 +51,7 @@ impl PayloadClass for DuplicateResourceError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
     error: *const kafka_common_Error_t,
@@ -67,6 +69,7 @@ pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_new(
     message: *const c_char,
@@ -75,6 +78,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_new(
 }
 
 /// `new DuplicateResourceException()` with Java's default message.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_DuplicateResourceError_with_default_message()
 -> *mut kafka_common_DuplicateResourceError_t {
@@ -86,6 +90,7 @@ pub extern "C" fn kafka_common_DuplicateResourceError_with_default_message()
 /// # Safety
 ///
 /// `resource` and `message` must be valid NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource(
     resource: *const c_char,
@@ -105,6 +110,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource(
 ///
 /// `resource` and `message` must be valid NUL-terminated strings and
 /// `source` an owned error handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_source(
     resource: *const c_char,
@@ -124,6 +130,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_sourc
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
     self_: *const kafka_common_DuplicateResourceError_t,
@@ -136,6 +143,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
     self_: *const kafka_common_DuplicateResourceError_t,
@@ -148,6 +156,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
     self_: *const kafka_common_DuplicateResourceError_t,
@@ -160,6 +169,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
     self_: *const kafka_common_DuplicateResourceError_t,
@@ -173,6 +183,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_destroy(
     self_: *mut kafka_common_DuplicateResourceError_t,

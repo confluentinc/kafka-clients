@@ -18,6 +18,7 @@
 use std::ffi::{CString, c_char};
 
 use crate::common::TopicPartitionReplica;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TopicPartitionReplica`].
@@ -55,6 +56,7 @@ pub(crate) unsafe fn topic_partition_replica_ref<'a>(
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
     topic: *const c_char,
@@ -72,6 +74,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-replica handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_topic(
     self_: *const kafka_common_TopicPartitionReplica_t,
@@ -84,6 +87,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_topic(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-replica handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_partition(
     self_: *const kafka_common_TopicPartitionReplica_t,
@@ -96,6 +100,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_partition(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-replica handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_broker_id(
     self_: *const kafka_common_TopicPartitionReplica_t,
@@ -109,6 +114,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_broker_id(
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-replica handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_to_string(
     self_: *const kafka_common_TopicPartitionReplica_t,
@@ -121,6 +127,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_destroy(self_: *mut kafka_common_TopicPartitionReplica_t) {
     if !self_.is_null() {

@@ -82,30 +82,35 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_resource_PatternType_t)
 }
 
 /// `PatternType.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_unknown() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Unknown)
 }
 
 /// `PatternType.ANY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_any() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Any)
 }
 
 /// `PatternType.MATCH`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_match() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Match)
 }
 
 /// `PatternType.LITERAL`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_literal() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Literal)
 }
 
 /// `PatternType.PREFIXED`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_prefixed() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Prefixed)
@@ -113,9 +118,12 @@ pub extern "C" fn kafka_common_resource_PatternType_prefixed() -> *const kafka_c
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_resource_PatternType_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType__enum(
     self_: *const kafka_common_resource_PatternType_t,
@@ -144,6 +152,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_code(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_is_unknown(
     self_: *const kafka_common_resource_PatternType_t,
@@ -157,6 +166,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_unknown(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_is_specific(
     self_: *const kafka_common_resource_PatternType_t,
@@ -166,6 +176,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_specific(
 
 /// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
 /// for one this client does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_from_code(code: i8) -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::from_code(code))
@@ -177,6 +188,7 @@ pub extern "C" fn kafka_common_resource_PatternType_from_code(code: i8) -> *cons
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_from_string(
     name: *const c_char,
@@ -190,6 +202,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_from_string(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_to_string(
     self_: *const kafka_common_resource_PatternType_t,

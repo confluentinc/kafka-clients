@@ -29,6 +29,7 @@
 use std::ffi::c_char;
 
 use crate::common::quota::ClientQuotaMatch;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`ClientQuotaMatch`].
@@ -77,9 +78,14 @@ pub(crate) unsafe fn client_quota_match_ref<'a>(
 
 /// The C enumerator of the match behind `self_`.
 ///
+/// A caught Rust panic returns `kafka_common_quota_ClientQuotaMatch_DEFAULT`, the first enumerator:
+/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
+/// only logged.
+///
 /// # Safety
 ///
 /// `self_` must be a valid match handle.
+#[ffi_guard(fallback = kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
     self_: *const kafka_common_quota_ClientQuotaMatch_t,
@@ -93,6 +99,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
 
 /// `ClientQuotaMatch::Default`: matches the built-in default entity name
 /// (Java's `Optional.empty()`). A borrowed singleton, never freed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaMatch_default() -> *const kafka_common_quota_ClientQuotaMatch_t {
     client_quota_match_ptr(&DEFAULT)
@@ -100,6 +107,7 @@ pub extern "C" fn kafka_common_quota_ClientQuotaMatch_default() -> *const kafka_
 
 /// `ClientQuotaMatch::Any`: matches any specified name for the entity type
 /// (Java's `null`). A borrowed singleton, never freed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaMatch_any() -> *const kafka_common_quota_ClientQuotaMatch_t {
     client_quota_match_ptr(&ANY)
@@ -112,6 +120,7 @@ pub extern "C" fn kafka_common_quota_ClientQuotaMatch_any() -> *const kafka_comm
 /// # Safety
 ///
 /// `value` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
     value: *const c_char,
@@ -127,6 +136,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
 /// # Safety
 ///
 /// `self_` must be null or an owned match handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_destroy(
     self_: *mut kafka_common_quota_ClientQuotaMatch_t,

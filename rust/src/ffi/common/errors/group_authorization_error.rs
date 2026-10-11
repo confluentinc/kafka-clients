@@ -22,6 +22,7 @@ use crate::common::Error;
 use crate::common::errors::GroupAuthorizationError;
 use crate::ffi::common::errors::{Payload, PayloadClass};
 use crate::ffi::common::{error_ref, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`GroupAuthorizationError`].
@@ -51,6 +52,7 @@ impl PayloadClass for GroupAuthorizationError {
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
     error: *const kafka_common_Error_t,
@@ -69,6 +71,7 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
 /// # Safety
 ///
 /// `group_id` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_for_group_id(
     group_id: *const c_char,
@@ -81,6 +84,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_for_group_id(
 /// # Safety
 ///
 /// `group_id` and `message` must be valid NUL-terminated strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_new(
     group_id: *const c_char,
@@ -93,6 +97,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_new(
 
 /// `new GroupAuthorizationException(String message)` with Java's default
 /// message and no group id.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupAuthorizationError_with_default_message()
 -> *mut kafka_common_GroupAuthorizationError_t {
@@ -104,6 +109,7 @@ pub extern "C" fn kafka_common_GroupAuthorizationError_with_default_message()
 /// # Safety
 ///
 /// `self_` must be a valid group-authorization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     self_: *const kafka_common_GroupAuthorizationError_t,
@@ -116,6 +122,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
 /// # Safety
 ///
 /// `self_` must be a valid group-authorization handle.
+#[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
     self_: *const kafka_common_GroupAuthorizationError_t,
@@ -128,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
 /// # Safety
 ///
 /// `self_` must be a valid group-authorization handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
     self_: *const kafka_common_GroupAuthorizationError_t,
@@ -141,6 +149,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_destroy(
     self_: *mut kafka_common_GroupAuthorizationError_t,

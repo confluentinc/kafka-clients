@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 
 use crate::common::header::{Header, RecordHeader};
 use crate::ffi::common::header::{HeaderInner, kafka_common_header_Header_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, kafka_Bytes_t, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`RecordHeader`]. Public although Java keeps the
@@ -112,6 +113,7 @@ pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<Recor
 ///
 /// `key` must be a valid NUL-terminated string and `value` null or a valid
 /// buffer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
     key: *const c_char,
@@ -128,6 +130,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
 /// # Safety
 ///
 /// `self_` must be a valid record-header handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
     self_: *const kafka_common_header_internals_RecordHeader_t,
@@ -141,6 +144,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
 /// # Safety
 ///
 /// `self_` must be a valid record-header handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
     self_: *const kafka_common_header_internals_RecordHeader_t,
@@ -155,6 +159,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
 /// # Safety
 ///
 /// `self_` must be null or an owned record-header handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_destroy(
     self_: *mut kafka_common_header_internals_RecordHeader_t,

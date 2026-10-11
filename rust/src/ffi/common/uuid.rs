@@ -23,6 +23,7 @@ use std::ptr;
 
 use crate::common::Uuid;
 use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`Uuid`].
@@ -66,6 +67,7 @@ pub(crate) unsafe fn list_uuids(list: *const kafka_List_t) -> Vec<Uuid> {
 
 /// `new Uuid(long mostSigBits, long leastSigBits)`, as an owned handle freed
 /// with [`kafka_common_Uuid_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Uuid_new(most_sig_bits: i64, least_sig_bits: i64) -> *mut kafka_common_Uuid_t {
     box_uuid(Uuid::new(most_sig_bits as u64, least_sig_bits as u64))
@@ -73,6 +75,7 @@ pub extern "C" fn kafka_common_Uuid_new(most_sig_bits: i64, least_sig_bits: i64)
 
 /// `Uuid.randomUuid()`: a random uuid outside the reserved range, as an
 /// owned handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Uuid_random_uuid() -> *mut kafka_common_Uuid_t {
     box_uuid(Uuid::random_uuid())
@@ -86,6 +89,7 @@ pub extern "C" fn kafka_common_Uuid_random_uuid() -> *mut kafka_common_Uuid_t {
 ///
 /// `s` must be a valid NUL-terminated string and `out_from_string` a valid
 /// pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_from_string(
     s: *const c_char,
@@ -105,6 +109,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_from_string(
 /// # Safety
 ///
 /// `self_` must be a valid uuid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_most_significant_bits(self_: *const kafka_common_Uuid_t) -> i64 {
     unsafe { uuid_of(self_) }.most_significant_bits() as i64
@@ -115,6 +120,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_most_significant_bits(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid uuid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_least_significant_bits(self_: *const kafka_common_Uuid_t) -> i64 {
     unsafe { uuid_of(self_) }.least_significant_bits() as i64
@@ -126,6 +132,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_least_significant_bits(self_: *const 
 /// # Safety
 ///
 /// `self_` must be a valid uuid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_to_string(self_: *const kafka_common_Uuid_t) -> *mut c_char {
     into_c_string(&unsafe { uuid_of(self_) }.to_string())
@@ -136,6 +143,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_to_string(self_: *const kafka_common_
 /// # Safety
 ///
 /// `self_` must be null or an owned uuid handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_destroy(self_: *mut kafka_common_Uuid_t) {
     if !self_.is_null() {

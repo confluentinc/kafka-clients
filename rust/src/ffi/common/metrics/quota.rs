@@ -18,6 +18,7 @@
 use std::ffi::c_char;
 
 use crate::common::metrics::Quota;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`Quota`].
@@ -43,18 +44,21 @@ pub(crate) unsafe fn quota_of(quota: *const kafka_common_metrics_Quota_t) -> Quo
 
 /// `new Quota(double bound, boolean upper)`. Owned, freed with
 /// [`kafka_common_metrics_Quota_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_new(bound: f64, upper: i8) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::new(bound, upper != 0))
 }
 
 /// `Quota.upperBound(double upperBound)`. Owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_upper_bound(upper_bound: f64) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::upper_bound(upper_bound))
 }
 
 /// `Quota.lowerBound(double lowerBound)`. Owned.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_lower_bound(lower_bound: f64) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::lower_bound(lower_bound))
@@ -65,6 +69,7 @@ pub extern "C" fn kafka_common_metrics_Quota_lower_bound(lower_bound: f64) -> *m
 /// # Safety
 ///
 /// `self_` must be a valid quota handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_is_upper_bound(self_: *const kafka_common_metrics_Quota_t) -> i8 {
     unsafe { quota_of(self_) }.is_upper_bound() as i8
@@ -75,6 +80,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_is_upper_bound(self_: *const
 /// # Safety
 ///
 /// `self_` must be a valid quota handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_bound(self_: *const kafka_common_metrics_Quota_t) -> f64 {
     unsafe { quota_of(self_) }.bound()
@@ -85,6 +91,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_bound(self_: *const kafka_co
 /// # Safety
 ///
 /// `self_` must be a valid quota handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_acceptable(
     self_: *const kafka_common_metrics_Quota_t,
@@ -98,6 +105,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_acceptable(
 /// # Safety
 ///
 /// `self_` must be a valid quota handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_to_string(
     self_: *const kafka_common_metrics_Quota_t,
@@ -110,6 +118,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_destroy(self_: *mut kafka_common_metrics_Quota_t) {
     if !self_.is_null() {

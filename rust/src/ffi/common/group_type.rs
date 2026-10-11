@@ -22,6 +22,7 @@ use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
 
 use crate::common::GroupType;
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupType`] singleton.
@@ -80,30 +81,35 @@ pub(crate) unsafe fn value_of(group_type: *const kafka_common_GroupType_t) -> Gr
 }
 
 /// `GroupType.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_unknown() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Unknown)
 }
 
 /// `GroupType.CONSUMER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_consumer() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Consumer)
 }
 
 /// `GroupType.CLASSIC`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_classic() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Classic)
 }
 
 /// `GroupType.SHARE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_share() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Share)
 }
 
 /// `GroupType.STREAMS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_streams() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Streams)
@@ -111,9 +117,12 @@ pub extern "C" fn kafka_common_GroupType_streams() -> *const kafka_common_GroupT
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_GroupType_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_GroupType_e::kafka_common_GroupType_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType__enum(
     self_: *const kafka_common_GroupType_t,
@@ -126,6 +135,7 @@ pub unsafe extern "C" fn kafka_common_GroupType__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_GroupType_t) -> *const c_char {
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
@@ -137,6 +147,7 @@ pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *const kafka_common_GroupType_t {
     singleton(GroupType::parse(&unsafe { c_str_to_string(name) }))
@@ -147,6 +158,7 @@ pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *c
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_to_string(self_: *const kafka_common_GroupType_t) -> *mut c_char {
     into_c_string(&unsafe { value_of(self_) }.to_string())

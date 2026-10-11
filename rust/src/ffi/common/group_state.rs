@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 
 use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_type::{kafka_common_GroupType_t, value_of as group_type_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`GroupState`] singleton.
@@ -93,54 +94,63 @@ pub(crate) unsafe fn value_of(state: *const kafka_common_GroupState_t) -> GroupS
 }
 
 /// `GroupState.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_unknown() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Unknown)
 }
 
 /// `GroupState.PREPARING_REBALANCE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_preparing_rebalance() -> *const kafka_common_GroupState_t {
     singleton(GroupState::PreparingRebalance)
 }
 
 /// `GroupState.COMPLETING_REBALANCE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_completing_rebalance() -> *const kafka_common_GroupState_t {
     singleton(GroupState::CompletingRebalance)
 }
 
 /// `GroupState.STABLE`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_stable() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Stable)
 }
 
 /// `GroupState.DEAD`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_dead() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Dead)
 }
 
 /// `GroupState.EMPTY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_empty() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Empty)
 }
 
 /// `GroupState.ASSIGNING`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_assigning() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Assigning)
 }
 
 /// `GroupState.RECONCILING`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_reconciling() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Reconciling)
 }
 
 /// `GroupState.NOT_READY`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_not_ready() -> *const kafka_common_GroupState_t {
     singleton(GroupState::NotReady)
@@ -148,9 +158,12 @@ pub extern "C" fn kafka_common_GroupState_not_ready() -> *const kafka_common_Gro
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_GroupState_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_GroupState_e::kafka_common_GroupState_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState__enum(
     self_: *const kafka_common_GroupState_t,
@@ -163,6 +176,7 @@ pub unsafe extern "C" fn kafka_common_GroupState__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common_GroupState_t) -> *const c_char {
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
@@ -174,6 +188,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *const kafka_common_GroupState_t {
     singleton(GroupState::parse(&unsafe { c_str_to_string(name) }))
@@ -190,6 +205,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *
 /// # Safety
 ///
 /// `group_type` must be a `kafka_common_GroupType_t` singleton.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
     group_type: *const kafka_common_GroupType_t,
@@ -214,6 +230,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_to_string(self_: *const kafka_common_GroupState_t) -> *mut c_char {
     into_c_string(&unsafe { value_of(self_) }.to_string())

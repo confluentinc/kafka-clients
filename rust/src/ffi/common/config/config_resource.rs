@@ -98,12 +98,14 @@ pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Ty
 }
 
 /// `ConfigResource.Type.GROUP`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_group() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Group)
 }
 
 /// `ConfigResource.Type.CLIENT_METRICS`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_client_metrics()
 -> *const kafka_common_config_ConfigResource_Type_t {
@@ -111,6 +113,7 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_client_metrics()
 }
 
 /// `ConfigResource.Type.BROKER_LOGGER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_broker_logger()
 -> *const kafka_common_config_ConfigResource_Type_t {
@@ -118,18 +121,21 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_broker_logger()
 }
 
 /// `ConfigResource.Type.BROKER`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_broker() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Broker)
 }
 
 /// `ConfigResource.Type.TOPIC`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_topic() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Topic)
 }
 
 /// `ConfigResource.Type.UNKNOWN`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const kafka_common_config_ConfigResource_Type_t
 {
@@ -138,9 +144,12 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const ka
 
 /// The C enumerator of a singleton, for a `switch`.
 ///
+/// A caught Rust panic returns `kafka_common_config_ConfigResource_Type_UNKNOWN`.
+///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+#[ffi_guard(fallback = kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_UNKNOWN)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
     self_: *const kafka_common_config_ConfigResource_Type_t,
@@ -166,6 +175,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
 
 /// `forId(byte id)`: the singleton for a wire-protocol byte, `UNKNOWN` for
 /// one this client does not know.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_for_id(
     id: i8,
@@ -225,6 +235,7 @@ pub(crate) fn box_config_resource(resource: ConfigResource) -> *mut kafka_common
 ///
 /// `resource_type` must be a type singleton and `name` a valid
 /// NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     resource_type: *const kafka_common_config_ConfigResource_Type_t,
@@ -240,6 +251,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
 /// # Safety
 ///
 /// `self_` must be a valid config-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
     self_: *const kafka_common_config_ConfigResource_t,
@@ -252,6 +264,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
 /// # Safety
 ///
 /// `self_` must be a valid config-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
     self_: *const kafka_common_config_ConfigResource_t,
@@ -265,6 +278,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
 /// # Safety
 ///
 /// `self_` must be a valid config-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
     self_: *const kafka_common_config_ConfigResource_t,
@@ -277,6 +291,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
 /// # Safety
 ///
 /// `self_` must be a valid config-resource handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
     self_: *const kafka_common_config_ConfigResource_t,
@@ -290,6 +305,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
 ///
 /// `self_` must be null or an owned config-resource handle not yet
 /// destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_destroy(self_: *mut kafka_common_config_ConfigResource_t) {
     if !self_.is_null() {

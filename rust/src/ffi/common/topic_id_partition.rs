@@ -20,6 +20,7 @@ use std::ffi::c_char;
 use crate::common::TopicIdPartition;
 use crate::ffi::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, into_c_string};
 
 /// Opaque handle to a [`TopicIdPartition`].
@@ -59,6 +60,7 @@ fn boxed(tip: TopicIdPartition) -> *mut kafka_common_TopicIdPartition_t {
 ///
 /// `topic_id` must be a valid uuid handle and `topic_partition` a valid
 /// topic-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
     topic_id: *const kafka_common_Uuid_t,
@@ -76,6 +78,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
 ///
 /// `topic_id` must be a valid uuid handle and `topic` a valid NUL-terminated
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
     topic_id: *const kafka_common_Uuid_t,
@@ -94,6 +97,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
     self_: *const kafka_common_TopicIdPartition_t,
@@ -106,6 +110,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
     self_: *const kafka_common_TopicIdPartition_t,
@@ -118,6 +123,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const kafka_common_TopicIdPartition_t) -> i32 {
     unsafe { inner_ref(self_) }.tip.partition()
@@ -128,6 +134,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const k
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
     self_: *const kafka_common_TopicIdPartition_t,
@@ -141,6 +148,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(
     self_: *const kafka_common_TopicIdPartition_t,
@@ -153,6 +161,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_destroy(self_: *mut kafka_common_TopicIdPartition_t) {
     if !self_.is_null() {

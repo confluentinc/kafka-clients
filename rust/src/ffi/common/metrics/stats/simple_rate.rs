@@ -23,6 +23,7 @@ use crate::ffi::common::metrics::measurable_stat::kafka_common_metrics_Measurabl
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_ref};
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
+use crate::ffi::ffi_guard;
 
 /// Opaque handle to a [`SimpleRate`].
 #[repr(C)]
@@ -36,6 +37,7 @@ unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SimpleRate_t) -> &
 
 /// `new SimpleRate()`. Owned, freed with
 /// [`kafka_common_metrics_stats_SimpleRate_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SimpleRate_new() -> *mut kafka_common_metrics_stats_SimpleRate_t {
     StatHandle::boxed(SimpleRate::new()) as *mut kafka_common_metrics_stats_SimpleRate_t
@@ -44,10 +46,13 @@ pub extern "C" fn kafka_common_metrics_stats_SimpleRate_new() -> *mut kafka_comm
 /// `windowSize(MetricConfig config, long now)`: the elapsed window in
 /// milliseconds.
 ///
+/// A caught Rust panic returns -1, which no window size is.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class and `config` a valid
 /// metric-config handle.
+#[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
@@ -65,6 +70,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
@@ -78,6 +84,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
@@ -91,6 +98,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableStat(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
@@ -104,6 +112,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableSta
 /// # Safety
 ///
 /// `self_` must be null or an owned handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_destroy(
     self_: *mut kafka_common_metrics_stats_SimpleRate_t,

@@ -173,6 +173,7 @@ fn predicates_rust(predicates: &[Predicate]) -> anyhow::Result<String> {
 //! (CLAUDE.md §4), never as `bool`.
 
 use super::common::{error_ref, kafka_common_Error_t};
+use super::ffi_guard;
 "#,
     );
     for p in predicates {
@@ -193,6 +194,7 @@ use super::common::{error_ref, kafka_common_Error_t};
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Error_t) -> i8 {{
     if error.is_null() {{

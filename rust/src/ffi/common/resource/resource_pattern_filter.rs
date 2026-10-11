@@ -27,6 +27,7 @@ use crate::ffi::common::resource::resource_pattern::{kafka_common_resource_Resou
 use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
+use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ResourcePatternFilter`].
@@ -89,6 +90,7 @@ pub(crate) fn box_resource_pattern_filter(
 ///
 /// `resource_type` and `pattern_type` must be singletons of their enums and
 /// `name` null or a valid NUL-terminated string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
     resource_type: *const kafka_common_resource_ResourceType_t,
@@ -104,6 +106,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
 
 /// `ResourcePatternFilter.ANY`: a filter matching every pattern. Owned, as
 /// every handle of this type.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourcePatternFilter_any() -> *mut kafka_common_resource_ResourcePatternFilter_t
 {
@@ -116,6 +119,7 @@ pub extern "C" fn kafka_common_resource_ResourcePatternFilter_any() -> *mut kafk
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_is_unknown(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -128,6 +132,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_is_unknown(
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_type(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -140,6 +145,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_ty
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -152,6 +158,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_pattern_type(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -167,6 +174,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_pattern_typ
 ///
 /// `self_` must be a valid resource-pattern-filter handle and `pattern` a
 /// valid resource-pattern handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -180,6 +188,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches_at_most_one(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -194,6 +203,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches_at_
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefinite_field(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -208,6 +218,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefi
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_to_string(
     self_: *const kafka_common_resource_ResourcePatternFilter_t,
@@ -221,6 +232,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_to_string(
 /// # Safety
 ///
 /// `self_` must be null or an owned filter handle not yet destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_destroy(
     self_: *mut kafka_common_resource_ResourcePatternFilter_t,
