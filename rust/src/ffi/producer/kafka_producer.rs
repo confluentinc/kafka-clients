@@ -40,7 +40,7 @@ use crate::common::serialization::Serializer;
 use crate::ffi::common::serialization::serializer::{
     DynSerializer, kafka_common_serialization_Serializer_t, take_serializer,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::{box_error, deliver_panic, deliver_panic_value, kafka_common_Error_t};
 use crate::ffi::consumer::kafka_consumer_ConsumerGroupMetadata_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -48,12 +48,13 @@ use crate::ffi::producer::callback::kafka_producer_Callback_t;
 use crate::ffi::producer::producer_config::{kafka_producer_ProducerConfig_t, producer_config_ref};
 use crate::ffi::producer::producer_record::kafka_producer_ProducerRecord_t;
 use crate::ffi::producer::{
-    ProducerHandle, kafka_producer_Producer_abort_transaction, kafka_producer_Producer_abort_transaction_cb,
-    kafka_producer_Producer_begin_transaction, kafka_producer_Producer_commit_transaction,
-    kafka_producer_Producer_commit_transaction_cb, kafka_producer_Producer_init_transactions,
-    kafka_producer_Producer_init_transactions_cb, kafka_producer_Producer_send_offsets_to_transaction,
-    kafka_producer_Producer_send_offsets_to_transaction_cb, kafka_producer_Producer_send_with_callback,
-    kafka_producer_Producer_send_with_callback_cb, kafka_producer_Producer_t,
+    ProducerHandle, completion_sink, kafka_producer_Producer_abort_transaction,
+    kafka_producer_Producer_abort_transaction_cb, kafka_producer_Producer_begin_transaction,
+    kafka_producer_Producer_commit_transaction, kafka_producer_Producer_commit_transaction_cb,
+    kafka_producer_Producer_init_transactions, kafka_producer_Producer_init_transactions_cb,
+    kafka_producer_Producer_send_offsets_to_transaction, kafka_producer_Producer_send_offsets_to_transaction_cb,
+    kafka_producer_Producer_send_with_callback, kafka_producer_Producer_send_with_callback_cb,
+    kafka_producer_Producer_t,
 };
 use crate::ffi::util::{GenericValue, kafka_Bytes_t, kafka_Map_t};
 use crate::producer::KafkaProducer;
@@ -218,7 +219,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -263,7 +264,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 /// # Safety
 ///
 /// `self_`, `offsets` and `group_metadata` must be live handles.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -296,7 +297,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -325,7 +326,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
     self_: *const kafka_producer_KafkaProducer_t,
@@ -360,7 +361,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(producer(self_)), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
     self_: *const kafka_producer_KafkaProducer_t,

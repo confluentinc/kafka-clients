@@ -101,12 +101,15 @@ use tokio::task::JoinHandle;
 
 use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
-use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
+use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_destroy, metric_name_eq};
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_destroy};
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::topic_partition::topic_partition_ref;
-use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task};
+use crate::ffi::common::{
+    box_error, catch_task_panic, deliver_panic, deliver_panic_value, init_default_logger, kafka_common_Error_t,
+    spawn_callback_task,
+};
 use crate::ffi::consumer::{
     group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t, kafka_consumer_OffsetAndMetadata_t,
     offset_and_metadata_ref,
@@ -204,7 +207,9 @@ impl Client {
             return Ok(());
         }
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        let sent = match &*self.submit_tx.lock().unwrap() {
+        // A poisoned lock still holds a valid sender: its holders only read
+        // or take it.
+        let sent = match &*self.submit_tx.lock().unwrap_or_else(PoisonError::into_inner) {
             Some(tx) => tx.send(SubmitRequest::Barrier { ack: ack_tx }).is_ok(),
             None => false,
         };
@@ -282,7 +287,11 @@ async fn submission_loop(client: Arc<Client>, mut rx: UnboundedReceiver<SubmitRe
         // counter means "queued or in flight": a barrier has to wait for an
         // in-flight handover too, not merely for the queue to empty.
         let _depth = QueueDepthGuard(&client);
-        let result = client.producer.send_with_callback(record, callback).await;
+        let result = catch_task_panic(
+            "kafka_producer_Producer_send_with_callback_cb",
+            client.producer.send_with_callback(record, callback),
+        )
+        .await;
         deliver_send(&client, cb, opaque, result);
     }
 }
@@ -440,6 +449,17 @@ unsafe fn client_ref<'a>(producer: *const kafka_producer_Producer_t) -> &'a Arc<
     unsafe { &*(producer as *const Arc<Client>) }
 }
 
+/// Where the guard of a `_cb` entry point delivers a caught panic: the
+/// producer's callbacks vector (see [`deliver_panic`]).
+///
+/// # Safety
+///
+/// `producer` must be a live handle or view.
+pub(crate) unsafe fn completion_sink(producer: *const kafka_producer_Producer_t) -> impl FnOnce(CallbackJob) {
+    let client = Arc::clone(unsafe { client_ref(producer) });
+    move |job| client.queue.push(job)
+}
+
 fn error_slot(result: Result<(), Error>) -> *mut kafka_common_Error_t {
     result.err().map_or(std::ptr::null_mut(), box_error)
 }
@@ -463,8 +483,11 @@ where
 }
 
 /// The `_cb` form of [`with_txn_control`]: the drain and `op` run on a
-/// spawned task and the result is queued.
+/// spawned task and the result is queued; a panic on the task is queued as
+/// the [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the
+/// entry point.
 fn with_txn_control_cb<F, Fut>(
+    fn_name: &'static str,
     client: &Arc<Client>,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
@@ -473,6 +496,8 @@ fn with_txn_control_cb<F, Fut>(
     F: FnOnce(Arc<DynProducerGv>) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), Error>> + Send,
 {
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     let opaque = SendPtr(opaque);
     if let Err(error) = client.acquire_txn_control() {
         client.deliver(cb, opaque, Err(error));
@@ -482,10 +507,11 @@ fn with_txn_control_cb<F, Fut>(
     let task_client = Arc::clone(client);
     client.spawn(async move {
         let _guard = guard;
-        let result = match task_client.drain_submitted_sends().await {
-            Ok(()) => op(Arc::clone(&task_client.producer)).await,
-            Err(error) => Err(error),
-        };
+        let result = catch_task_panic(fn_name, async {
+            task_client.drain_submitted_sends().await?;
+            op(Arc::clone(&task_client.producer)).await
+        })
+        .await;
         task_client.deliver(cb, opaque, result);
     });
 }
@@ -504,8 +530,11 @@ where
     }))
 }
 
-/// The `_cb` form of [`with_drain`].
+/// The `_cb` form of [`with_drain`]; a panic on the task is queued as the
+/// [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the entry
+/// point.
 fn with_drain_cb<F, Fut>(
+    fn_name: &'static str,
     client: &Arc<Client>,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
@@ -514,13 +543,16 @@ fn with_drain_cb<F, Fut>(
     F: FnOnce(Arc<DynProducerGv>) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), Error>> + Send,
 {
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     let opaque = SendPtr(opaque);
     let task_client = Arc::clone(client);
     client.spawn(async move {
-        let result = match task_client.drain_submitted_sends().await {
-            Ok(()) => op(Arc::clone(&task_client.producer)).await,
-            Err(error) => Err(error),
-        };
+        let result = catch_task_panic(fn_name, async {
+            task_client.drain_submitted_sends().await?;
+            op(Arc::clone(&task_client.producer)).await
+        })
+        .await;
         task_client.deliver(cb, opaque, result);
     });
 }
@@ -619,16 +651,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
     self_: *const kafka_producer_Producer_t,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
 ) {
-    with_txn_control_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move {
-        p.init_transactions().await
-    });
+    with_txn_control_cb(
+        "kafka_producer_Producer_init_transactions_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.init_transactions().await },
+    );
 }
 
 /// `Producer.beginTransaction()`: synchronous in Java and Rust, still
@@ -672,7 +708,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
 /// # Safety
 ///
 /// `self_`, `offsets` and `group_metadata` must be live handles.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
     self_: *const kafka_producer_Producer_t,
@@ -683,9 +719,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
 ) {
     let offsets = unsafe { offsets_map(offsets) };
     let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata) });
-    with_txn_control_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move {
-        p.send_offsets_to_transaction(offsets, &*group_metadata).await
-    });
+    with_txn_control_cb(
+        "kafka_producer_Producer_send_offsets_to_transaction_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.send_offsets_to_transaction(offsets, &*group_metadata).await },
+    );
 }
 
 /// `Producer.commitTransaction()`, blocking.
@@ -706,16 +746,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
     self_: *const kafka_producer_Producer_t,
     cb: kafka_producer_Producer_commit_transaction_cb_t,
     opaque: *mut c_void,
 ) {
-    with_txn_control_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move {
-        p.commit_transaction().await
-    });
+    with_txn_control_cb(
+        "kafka_producer_Producer_commit_transaction_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.commit_transaction().await },
+    );
 }
 
 /// `Producer.abortTransaction()`, blocking.
@@ -736,16 +780,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
     self_: *const kafka_producer_Producer_t,
     cb: kafka_producer_Producer_abort_transaction_cb_t,
     opaque: *mut c_void,
 ) {
-    with_txn_control_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move {
-        p.abort_transaction().await
-    });
+    with_txn_control_cb(
+        "kafka_producer_Producer_abort_transaction_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.abort_transaction().await },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +826,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// # Safety
 ///
 /// `self_` and `record` must be live handles.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
     self_: *const kafka_producer_Producer_t,
@@ -836,7 +884,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     self_: *const kafka_producer_Producer_t,
@@ -849,8 +897,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     let record = unsafe { producer_record_ref(record) }.clone();
     let callback = unsafe { delivery_callback(client, callback) };
     let opaque = SendPtr(opaque);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     client.queued_sends.fetch_add(1, Ordering::AcqRel);
-    let sent = match &*client.submit_tx.lock().unwrap() {
+    // A poisoned lock still holds a valid sender (see `drain_submitted_sends`);
+    // panicking here would leave `queued_sends` incremented.
+    let sent = match &*client.submit_tx.lock().unwrap_or_else(PoisonError::into_inner) {
         Some(tx) => tx.send(SubmitRequest::Send { record, callback, cb, opaque }).is_ok(),
         None => false,
     };
@@ -894,14 +946,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
     self_: *const kafka_producer_Producer_t,
     cb: kafka_producer_Producer_flush_cb_t,
     opaque: *mut c_void,
 ) {
-    with_drain_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move { p.flush().await });
+    with_drain_cb(
+        "kafka_producer_Producer_flush_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.flush().await },
+    );
 }
 
 /// `Producer.partitionsFor(String)`, blocking: delivers an owned
@@ -935,7 +993,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 /// # Safety
 ///
 /// `self_` must be a live view and `topic` a NUL-terminated string.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     self_: *const kafka_producer_Producer_t,
@@ -947,8 +1005,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     let topic = unsafe { c_str_to_string(topic) };
     let opaque = SendPtr(opaque);
     let task_client = Arc::clone(client);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     client.spawn(async move {
-        let result = task_client.producer.partitions_for(&topic).await;
+        let result = catch_task_panic(
+            "kafka_producer_Producer_partitions_for_cb",
+            task_client.producer.partitions_for(&topic),
+        )
+        .await;
         let (value, error) = match result {
             Ok(infos) => (partition_info_list(infos), std::ptr::null_mut()),
             Err(error) => (std::ptr::null_mut(), box_error(error)),
@@ -1028,14 +1092,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
     self_: *const kafka_producer_Producer_t,
     cb: kafka_producer_Producer_close_cb_t,
     opaque: *mut c_void,
 ) {
-    with_drain_cb(unsafe { client_ref(self_) }, cb, opaque, |p| async move { p.close().await });
+    with_drain_cb(
+        "kafka_producer_Producer_close_cb",
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.close().await },
+    );
 }
 
 /// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds.
@@ -1070,7 +1140,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
 /// # Safety
 ///
 /// `self_` must be a live view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     self_: *const kafka_producer_Producer_t,
@@ -1082,7 +1152,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     let client = unsafe { client_ref(self_) };
     match close_timeout(client, timeout) {
         Ok(timeout) => {
-            with_drain_cb(client, cb, opaque, move |p| async move { p.close_with_timeout(timeout).await });
+            with_drain_cb(
+                "kafka_producer_Producer_close_with_timeout_cb",
+                client,
+                cb,
+                opaque,
+                move |p| async move { p.close_with_timeout(timeout).await },
+            );
         },
         Err(error) => client.deliver(cb, SendPtr(opaque), Err(error)),
     }
@@ -1141,6 +1217,8 @@ mod tests {
     use std::sync::atomic::AtomicI32;
 
     use super::*;
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_error, on_value};
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::kafka_future::{kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t};
     use crate::ffi::producer::mock_producer::{
@@ -1237,6 +1315,84 @@ mod tests {
             assert!(client.tasks.is_poisoned());
             assert!(client.submit_tx.is_poisoned());
 
+            kafka_producer_MockProducer_destroy(mock);
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// A `_cb` body that panics before handing its completion over delivers
+    /// the panic once, queued: nothing fires until `__execute_callbacks`, which
+    /// runs exactly one completion, of each callback shape the producer has.
+    #[test]
+    fn a_panicking_cb_body_queues_one_panic_completion() {
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+
+            let flush = Probe::default();
+            fail_point::arm();
+            kafka_producer_Producer_flush_cb(view, on_error, flush.as_opaque());
+            let commit = Probe::default();
+            fail_point::arm();
+            kafka_producer_Producer_commit_transaction_cb(view, on_error, commit.as_opaque());
+            let partitions = Probe::default();
+            fail_point::arm();
+            kafka_producer_Producer_partitions_for_cb(view, topic.as_ptr(), on_value, partitions.as_opaque());
+            let send = Probe::default();
+            fail_point::arm();
+            kafka_producer_Producer_send_cb(view, record, on_value, send.as_opaque());
+
+            for probe in [&flush, &commit, &partitions, &send] {
+                assert!(probe.fired().is_empty(), "queued, not fired");
+            }
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 4);
+            flush.assert_one_panic("kafka_producer_Producer_flush_cb", fail_point::MESSAGE);
+            commit.assert_one_panic("kafka_producer_Producer_commit_transaction_cb", fail_point::MESSAGE);
+            partitions.assert_one_panic("kafka_producer_Producer_partitions_for_cb", fail_point::MESSAGE);
+            send.assert_one_panic("kafka_producer_Producer_send_with_callback_cb", fail_point::MESSAGE);
+
+            // The send panicked before it was counted, so a flush does not
+            // wait for it, and the transaction-control flag was never taken.
+            assert!(kafka_producer_Producer_flush(view).is_null());
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0);
+            kafka_producer_MockProducer_destroy(mock);
+            for probe in [&flush, &commit, &partitions, &send] {
+                assert_eq!(probe.fired().len(), 1, "no second completion");
+            }
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// A send after a panic poisoned the submission lock is still submitted:
+    /// the lock guards only the sender, which a panic cannot leave invalid.
+    #[test]
+    fn send_cb_tolerates_a_poisoned_submission_lock() {
+        let sends = AtomicI32::new(0);
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: every handle is live until it is destroyed below.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let client = Arc::clone(client_ref(view));
+            let poisoner = std::thread::spawn(move || {
+                let _submit_tx = client.submit_tx.lock().unwrap();
+                panic!("poison the submission lock");
+            });
+            assert!(poisoner.join().is_err());
+            assert!(client_ref(view).submit_tx.is_poisoned());
+
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+            kafka_producer_Producer_send_cb(view, record, count_send, &sends as *const AtomicI32 as *mut c_void);
+            assert!(kafka_producer_Producer_flush(view).is_null());
+            while sends.load(Ordering::SeqCst) == 0 {
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::yield_now();
+            }
             kafka_producer_MockProducer_destroy(mock);
             assert_eq!(sends.load(Ordering::SeqCst), 1);
             kafka_producer_ProducerRecord_destroy(record);

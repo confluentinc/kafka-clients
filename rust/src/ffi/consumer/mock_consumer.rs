@@ -38,10 +38,10 @@ use crate::consumer::MockConsumer;
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::partition_info::list_partition_infos;
 use crate::ffi::common::topic_partition::{list_topic_partitions, map_topic_partition_i64};
-use crate::ffi::common::{kafka_common_Error_t, take_error};
+use crate::ffi::common::{catch_task_panic, deliver_panic, kafka_common_Error_t, take_error};
 use crate::ffi::consumer::consumer_record::{consumer_record_ref, kafka_consumer_ConsumerRecord_t};
 use crate::ffi::consumer::{
-    BusyGuard, ConsumerClassHandle, ConsumerKind, Owns, client_ref, deliver_void, error_slot,
+    BusyGuard, ConsumerClassHandle, ConsumerKind, Owns, client_ref, completion_sink, deliver_void, error_slot,
     kafka_consumer_Consumer_t, out_slot,
 };
 use crate::ffi::ffi_guard;
@@ -305,7 +305,7 @@ pub type kafka_consumer_MockConsumer_rebalance_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_ as *const kafka_consumer_Consumer_t), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     self_: *mut kafka_consumer_MockConsumer_t,
@@ -316,16 +316,21 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     let partitions = unsafe { list_topic_partitions(new_assignment) };
     let opaque = SendPtr(opaque);
     let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     match client.acquire() {
         Err(error) => deliver_void(client, cb, opaque, Err(error)),
         Ok(mut guard) => {
             let client = Arc::clone(client);
             let task_client = Arc::clone(&client);
             client.spawn(async move {
-                let result = match mock_of(&mut guard) {
-                    Ok(mock) => mock.rebalance(&partitions).await,
-                    Err(error) => Err(error),
-                };
+                let result = catch_task_panic("kafka_consumer_MockConsumer_rebalance_cb", async {
+                    match mock_of(&mut guard) {
+                        Ok(mock) => mock.rebalance(&partitions).await,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await;
                 deliver_void(&task_client, cb, opaque, result);
                 drop(guard);
             });
@@ -412,8 +417,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_error, on_i64, on_value};
     use crate::ffi::common::topic_partition::{
         kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_new, kafka_common_TopicPartition_t,
+    };
+    use crate::ffi::consumer::consumer_handle::{
+        kafka_consumer_ConsumerHandle_destroy, kafka_consumer_ConsumerHandle_pause_cb,
+        kafka_consumer_ConsumerHandle_position_cb,
     };
     use crate::ffi::consumer::consumer_rebalance_listener::{
         kafka_consumer_ConsumerRebalanceListener_destroy, kafka_consumer_ConsumerRebalanceListener_new,
@@ -429,7 +440,8 @@ mod tests {
     use crate::ffi::consumer::{
         kafka_consumer_Consumer__execute_callbacks, kafka_consumer_Consumer__set_callback_result,
         kafka_consumer_Consumer__set_callbacks_notify, kafka_consumer_Consumer_assign,
-        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_poll,
+        kafka_consumer_Consumer_commit_sync, kafka_consumer_Consumer_commit_sync_cb, kafka_consumer_Consumer_handle,
+        kafka_consumer_Consumer_poll, kafka_consumer_Consumer_poll_cb, kafka_consumer_Consumer_position_cb,
         kafka_consumer_Consumer_subscribe_with_topics_listener,
     };
     use crate::ffi::util::{
@@ -770,6 +782,125 @@ mod tests {
                 assert_eq!(ran.load(SeqCst), expected);
             }
             kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// Runs the consumer's queued callbacks until `probe` saw one completion,
+    /// then checks no second one arrives.
+    fn drain_one(consumer: *mut kafka_consumer_Consumer_t, probe: &Probe) {
+        wait_until("the completion", || {
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
+            !probe.fired().is_empty()
+        });
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) }, 0);
+    }
+
+    /// A `_cb` body that panics before handing its completion over delivers
+    /// the panic once, queued: nothing fires until `__execute_callbacks`, which
+    /// runs exactly one completion, of each callback shape the consumer has.
+    #[test]
+    fn a_panicking_cb_body_queues_one_panic_completion() {
+        let (mock, consumer) = new_mock();
+        let (partitions, tp) = partition_list(c"topic", 0);
+        // SAFETY: the handles stay live until destroyed at the end.
+        unsafe {
+            let void = Probe::default();
+            fail_point::arm();
+            kafka_consumer_Consumer_commit_sync_cb(consumer, on_error, void.as_opaque());
+            assert!(void.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
+            void.assert_one_panic("kafka_consumer_Consumer_commit_sync_cb", fail_point::MESSAGE);
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 0);
+
+            let int = Probe::default();
+            fail_point::arm();
+            kafka_consumer_Consumer_position_cb(consumer, tp, on_i64, int.as_opaque());
+            assert!(int.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
+            int.assert_one_panic("kafka_consumer_Consumer_position_cb", fail_point::MESSAGE);
+
+            let value = Probe::default();
+            fail_point::arm();
+            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, value.as_opaque());
+            assert!(value.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
+            value.assert_one_panic("kafka_consumer_Consumer_poll_cb", fail_point::MESSAGE);
+
+            let mock_void = Probe::default();
+            fail_point::arm();
+            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, on_error, mock_void.as_opaque());
+            assert!(mock_void.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
+            mock_void.assert_one_panic("kafka_consumer_MockConsumer_rebalance_cb", fail_point::MESSAGE);
+
+            // The panics came before the single-owner flag was taken, so the
+            // consumer is still free.
+            assert!(kafka_consumer_Consumer_commit_sync(consumer).is_null());
+            for probe in [&void, &int, &value, &mock_void] {
+                assert_eq!(probe.fired().len(), 1, "no second completion");
+            }
+
+            kafka_List_destroy(partitions);
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// A panic on the task a `_cb` entry point spawned, after the operation
+    /// took the single-owner flag, is delivered once through the completion,
+    /// queued, and the flag is released.
+    #[test]
+    fn a_panicking_cb_task_delivers_one_panic_completion() {
+        let (mock, consumer) = new_mock();
+        // SAFETY: the handles stay live until destroyed at the end.
+        unsafe {
+            with_mock(mock, |m| m.schedule_poll_task(Box::new(|_| panic!("poll task panicked"))))
+                .expect("no other call in flight");
+            let probe = Probe::default();
+            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, probe.as_opaque());
+            drain_one(consumer, &probe);
+            probe.assert_one_panic("kafka_consumer_Consumer_poll_cb", "poll task panicked");
+
+            let mut records = ptr::null_mut();
+            assert!(kafka_consumer_Consumer_poll(consumer, 0, &mut records).is_null(), "free again");
+            kafka_consumer_ConsumerRecords_destroy(records);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// The same for the reentrancy handle: queued on the consumer's callbacks
+    /// vector while the consumer lives, inline once it is destroyed, as the
+    /// handle delivers every completion.
+    #[test]
+    fn a_panicking_handle_cb_delivers_one_panic_completion() {
+        let (mock, consumer) = new_mock();
+        let (partitions, tp) = partition_list(c"topic", 0);
+        // SAFETY: the handles stay live until destroyed at the end; the
+        // reentrancy handle outlives the consumer by design.
+        unsafe {
+            let handle = kafka_consumer_Consumer_handle(consumer);
+            let queued = Probe::default();
+            fail_point::arm();
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, queued.as_opaque());
+            let int = Probe::default();
+            fail_point::arm();
+            kafka_consumer_ConsumerHandle_position_cb(handle, tp, on_i64, int.as_opaque());
+            assert!(queued.fired().is_empty() && int.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 2);
+            queued.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
+            int.assert_one_panic("kafka_consumer_ConsumerHandle_position_cb", fail_point::MESSAGE);
+            kafka_consumer_MockConsumer_destroy(mock);
+
+            let inline = Probe::default();
+            fail_point::arm();
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, inline.as_opaque());
+            inline.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
+            assert_eq!(queued.fired().len() + int.fired().len(), 2, "no second completion");
+
+            kafka_consumer_ConsumerHandle_destroy(handle);
+            kafka_List_destroy(partitions);
+            kafka_common_TopicPartition_destroy(tp);
         }
     }
 }

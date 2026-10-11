@@ -36,7 +36,9 @@ use async_trait::async_trait;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::{OffsetAndMetadata, OffsetCommitCallback};
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::common::{box_error, error_ref, kafka_common_Error_destroy, kafka_common_Error_t};
+use crate::ffi::common::{
+    box_error, deliver_panic_opaque, error_ref, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
+};
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::consumer::{Delivery, register_callback_result};
 use crate::ffi::ffi_guard;
@@ -80,9 +82,12 @@ impl CommitCallbackRegistration {
         error: Option<&Error>,
         sink: Box<dyn FnOnce(Result<(), Error>) + Send>,
     ) {
-        let callback_id = register_callback_result(sink);
+        // The id is registered last, right before the call, so a `_cb` entry
+        // point's guard that reports a panic before then is the only
+        // completion.
         let offsets = offset_and_metadata_map(offsets);
         let error = error.map_or(std::ptr::null_mut(), |e| box_error(e.clone()));
+        let callback_id = register_callback_result(sink);
         unsafe {
             (self.on_complete)(self.self_.get(), offsets, error, callback_id);
             kafka_Map_destroy(offsets);
@@ -197,7 +202,7 @@ pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t = unsafe extern "C
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_opaque(run_inline, cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
@@ -210,6 +215,8 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let error = (!error.is_null()).then(|| unsafe { error_ref(error) }.error.clone());
     let opaque = SendPtr(opaque);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     registration.fire(&offsets, error.as_ref(), Box::new(move |_| unsafe { cb(opaque.get()) }));
 }
 
@@ -234,7 +241,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::ffi::common::fail_point;
     use crate::ffi::common::kafka_common_Error_message;
+    use crate::ffi::common::panic_probe::{Probe, on_opaque};
     use crate::ffi::consumer::complete_callback_result;
     use crate::ffi::consumer::offset_and_metadata::kafka_consumer_OffsetAndMetadata_offset;
     use crate::ffi::util::{c_str_to_string, kafka_Map_size, kafka_Map_value};
@@ -296,5 +305,30 @@ mod tests {
         }
         assert_eq!(*fired.lock().unwrap(), 1);
         assert_eq!(log.0.lock().unwrap().len(), 3);
+    }
+
+    /// A standalone callback has no callbacks vector, so a panic before
+    /// `onComplete` fires `cb` once on the calling thread, before the call
+    /// returns, and the C method never runs.
+    #[test]
+    fn a_panicking_on_complete_cb_fires_cb_once_inline() {
+        let log = Log::default();
+        let handle = kafka_consumer_OffsetCommitCallback_new(&log as *const Log as *mut c_void, on_complete);
+        let c_offsets = offset_and_metadata_map(&HashMap::new());
+        let probe = Probe::default();
+        fail_point::arm();
+        unsafe {
+            kafka_consumer_OffsetCommitCallback_on_complete_cb(
+                handle,
+                c_offsets,
+                std::ptr::null(),
+                on_opaque,
+                probe.as_opaque(),
+            );
+            kafka_Map_destroy(c_offsets);
+            kafka_consumer_OffsetCommitCallback_destroy(handle);
+        }
+        assert_eq!(probe.fired(), ["<no error>"]);
+        assert!(log.0.lock().unwrap().is_empty(), "onComplete never ran");
     }
 }

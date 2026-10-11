@@ -74,8 +74,10 @@ use tokio::task::JoinHandle;
 
 use crate::admin::{Admin, MockAdminClient};
 use crate::common::{Error, KafkaFuture};
-use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::{box_error, init_default_logger, kafka_common_Error_t, spawn_callback_task};
+use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
+use crate::ffi::common::{
+    box_error, catch_task_panic, deliver_panic_opaque, init_default_logger, kafka_common_Error_t, spawn_callback_task,
+};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::{
     FfiFuture, FfiValue, block_on, box_future, kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_t,
@@ -239,16 +241,31 @@ impl Client {
     }
 
     /// Runs `op` on the runtime and queues `cb(opaque)` once it completes.
-    fn run_cb<F, Fut>(self: &Arc<Self>, cb: kafka_admin_Admin_close_cb_t, opaque: *mut c_void, op: F)
-    where
+    /// A panic in `op` is logged as the panic of `fn_name`, the entry point,
+    /// and `cb(opaque)` is still queued: the callback carries no error.
+    fn run_cb<F, Fut>(
+        self: &Arc<Self>,
+        fn_name: &'static str,
+        cb: kafka_admin_Admin_close_cb_t,
+        opaque: *mut c_void,
+        op: F,
+    ) where
         F: FnOnce(Arc<dyn Admin>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        #[cfg(test)]
+        crate::ffi::common::fail_point::hit();
         let opaque = SendPtr(opaque);
         let admin = Arc::clone(&self.admin);
         let queue = Arc::clone(&self.queue);
         self.spawn(async move {
-            op(admin).await;
+            // The error is already logged by `catch_task_panic`, and the
+            // callback has no error parameter to carry it.
+            let _ = catch_task_panic(fn_name, async {
+                op(admin).await;
+                Ok(())
+            })
+            .await;
             queue.push(Box::new(move || unsafe { cb(opaque.get()) }));
         });
     }
@@ -346,6 +363,17 @@ impl AdminClassHandle {
         }
         runtime.shutdown_timeout(Duration::from_secs(5));
     }
+}
+
+/// Where the guard of a `_cb` entry point delivers a caught panic: the
+/// client's callbacks vector (see [`deliver_panic_opaque`]).
+///
+/// # Safety
+///
+/// `admin` must be a live handle or view.
+unsafe fn completion_sink(admin: *const kafka_admin_Admin_t) -> impl FnOnce(CallbackJob) {
+    let client = Arc::clone(unsafe { client_ref(admin) });
+    move |job| client.queue.push(job)
 }
 
 /// The client behind an interface handle.
@@ -585,14 +613,16 @@ pub unsafe extern "C" fn kafka_admin_Admin_close(self_: *const kafka_admin_Admin
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_opaque(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
     self_: *const kafka_admin_Admin_t,
     cb: kafka_admin_Admin_close_cb_t,
     opaque: *mut c_void,
 ) {
-    unsafe { client_ref(self_) }.run_cb(cb, opaque, |admin| async move { admin.close().await });
+    unsafe { client_ref(self_) }.run_cb("kafka_admin_Admin_close_cb", cb, opaque, |admin| async move {
+        admin.close().await
+    });
 }
 
 /// `Admin.close(Duration timeout)`, blocking; `timeout` in milliseconds.
@@ -617,7 +647,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout(self_: *const kafk
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_opaque(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout_cb(
     self_: *const kafka_admin_Admin_t,
@@ -627,6 +657,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout_cb(
 ) {
     let timeout = close_timeout(timeout);
     unsafe { client_ref(self_) }.run_cb(
+        "kafka_admin_Admin_close_with_timeout_cb",
         cb,
         opaque,
         move |admin| async move { admin.close_with_timeout(timeout).await },
@@ -687,5 +718,44 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
 pub unsafe extern "C" fn kafka_admin_Admin_destroy(self_: *mut kafka_admin_Admin_t) {
     if !self_.is_null() {
         unsafe { Box::from_raw(self_ as *mut AdminClassHandle) }.destroy();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::admin::mock_admin_client::{
+        kafka_admin_MockAdminClient__as_Admin, kafka_admin_MockAdminClient_create, kafka_admin_MockAdminClient_destroy,
+    };
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_opaque};
+
+    /// A `close` `_cb` whose body panics before handing its completion over
+    /// still fires `cb` once, queued: the callback carries no error, so the
+    /// caller gets its `opaque` back and the panic is only logged.
+    #[test]
+    fn a_panicking_close_cb_queues_its_completion_once() {
+        // SAFETY: the mock is live until it is destroyed below.
+        unsafe {
+            let mut mock = std::ptr::null_mut();
+            assert!(kafka_admin_MockAdminClient_create(1, &mut mock).is_null());
+            let admin = kafka_admin_MockAdminClient__as_Admin(mock);
+
+            let close = Probe::default();
+            fail_point::arm();
+            kafka_admin_Admin_close_cb(admin, on_opaque, close.as_opaque());
+            let close_with_timeout = Probe::default();
+            fail_point::arm();
+            kafka_admin_Admin_close_with_timeout_cb(admin, 0, on_opaque, close_with_timeout.as_opaque());
+
+            assert!(close.fired().is_empty(), "queued, not fired");
+            assert!(close_with_timeout.fired().is_empty(), "queued, not fired");
+            assert_eq!(kafka_admin_Admin__execute_callbacks(admin), 2);
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(kafka_admin_Admin__execute_callbacks(admin), 0);
+            assert_eq!(close.fired(), ["<no error>"]);
+            assert_eq!(close_with_timeout.fired(), ["<no error>"]);
+            kafka_admin_MockAdminClient_destroy(mock);
+        }
     }
 }

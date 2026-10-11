@@ -75,12 +75,15 @@ pub(crate) mod uuid;
 
 use std::any::Any;
 use std::collections::HashSet;
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 
+use futures_util::FutureExt;
+
 use crate::common::Error;
 use crate::common::protocol::Errors;
+use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
 // The 163 enumerators are spelled out in full (see
@@ -131,17 +134,7 @@ pub(crate) fn init_default_logger() {
 pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error) -> R, body: impl FnOnce() -> R) -> R {
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,
-        Err(payload) => {
-            let error = panic_error(fn_name, &*payload);
-            // A payload's destructor is arbitrary code, and one that panicked
-            // would unwind out of this frame after all. Drop it under a second
-            // guard, and leak whatever that second panic carries.
-            if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-                std::mem::forget(nested);
-            }
-            log::error!("{}", error.message());
-            on_panic(error)
-        },
+        Err(payload) => on_panic(caught_panic_error(fn_name, payload)),
     }
 }
 
@@ -205,6 +198,246 @@ fn spawn_or_abort<J>(spawn: impl FnOnce() -> J) -> J {
             );
             std::process::abort()
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panic completions of the `_cb` entry points
+// ---------------------------------------------------------------------------
+
+/// The completion of a `_cb` entry point that reports only an error.
+pub(crate) type ErrorCompletion = unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The completion of a `_cb` entry point that reports an `int64_t` value or an
+/// error.
+pub(crate) type I64Completion = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// The completion of a `_cb` entry point that reports nothing but its `opaque`
+/// (a Java `void` method that cannot fail, such as `Admin.close`).
+pub(crate) type OpaqueCompletion = unsafe extern "C" fn(opaque: *mut c_void);
+
+/// Delivers the completion of a `_cb` entry point whose body panicked: `cb`
+/// receives the panic `error` and the caller's `opaque`.
+///
+/// `complete` is where the handle runs its completions: the client's
+/// [`CallbackQueue::push`](crate::ffi::callback_queue::CallbackQueue::push),
+/// so the completion fires from the client's `__execute_callbacks` like any
+/// other, or, for a handle with no callbacks vector (a future with no client,
+/// a standalone listener), a call on the calling thread. Each entry point's
+/// `#[ffi_guard(on_panic = ...)]` calls this, or the helper of its callback's
+/// shape, so the panic is reported exactly once: the guard fires only when
+/// the body did not return, and every body hands its completion over (to a
+/// task, the queue, the submission channel or the C method) as its last step,
+/// after which nothing can panic.
+///
+/// # Safety
+///
+/// `cb` and `opaque` must be the pair the C caller passed to the entry point,
+/// which has not fired `cb`.
+pub(crate) unsafe fn deliver_panic(
+    complete: impl FnOnce(CallbackJob),
+    cb: ErrorCompletion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || unsafe {
+        cb(error.get() as *mut kafka_common_Error_t, opaque.get())
+    }));
+}
+
+/// [`deliver_panic`] for a completion that also reports a pointer value: the
+/// value is NULL.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_value<P: 'static>(
+    complete: impl FnOnce(CallbackJob),
+    cb: unsafe extern "C" fn(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || unsafe {
+        cb(std::ptr::null_mut(), error.get() as *mut kafka_common_Error_t, opaque.get())
+    }));
+}
+
+/// [`deliver_panic`] for a completion that also reports an `int64_t` value:
+/// the value is -1, as for every failure of such a completion.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_i64(
+    complete: impl FnOnce(CallbackJob),
+    cb: I64Completion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    let error = SendPtr(box_error(error) as *mut c_void);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || unsafe {
+        cb(-1, error.get() as *mut kafka_common_Error_t, opaque.get())
+    }));
+}
+
+/// [`deliver_panic`] for a completion that reports only `opaque`: the callback
+/// still fires, so the caller gets `opaque` back to release, and the panic is
+/// known only from the error-level line [`ffi_guard_or`] already logged.
+///
+/// # Safety
+///
+/// As [`deliver_panic`].
+pub(crate) unsafe fn deliver_panic_opaque(
+    complete: impl FnOnce(CallbackJob),
+    cb: OpaqueCompletion,
+    opaque: *mut c_void,
+    error: Error,
+) {
+    drop(error);
+    let opaque = SendPtr(opaque);
+    complete(Box::new(move || unsafe { cb(opaque.get()) }));
+}
+
+/// The completion sink of a handle with no callbacks vector: runs the
+/// completion on the calling thread, as such a handle runs every completion
+/// (see [`deliver_panic`]).
+pub(crate) fn run_inline(job: CallbackJob) {
+    job();
+}
+
+/// Runs a `_cb` entry point's task body, turning a panic inside it into the
+/// task's `Err` result, which the task then delivers like any other failure.
+///
+/// The guard of the entry point does not cover the task: the body returned
+/// once the task was spawned. Without this a panicking task would end without
+/// its completion, so the C caller would never get `opaque` back; here the
+/// completion carries the [`panic_error`] of `fn_name`, the entry point that
+/// spawned the task, and the panic is logged as [`ffi_guard_or`] logs one.
+/// The state the task was working on may be inconsistent afterwards, as for
+/// any caught panic: the handle should be destroyed.
+pub(crate) async fn catch_task_panic<T, F>(fn_name: &'static str, task: F) -> Result<T, Error>
+where
+    F: std::future::Future<Output = Result<T, Error>>,
+{
+    match AssertUnwindSafe(task).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(caught_panic_error(fn_name, payload)),
+    }
+}
+
+/// The [`panic_error`] for a caught `payload`, logged at `error` level, with
+/// the payload dropped under a second guard: a payload's destructor is
+/// arbitrary code, and one that panicked would unwind out of the catching
+/// frame after all, so whatever that second panic carries is leaked.
+fn caught_panic_error(fn_name: &'static str, payload: Box<dyn Any + Send>) -> Error {
+    let error = panic_error(fn_name, &*payload);
+    if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(nested);
+    }
+    log::error!("{}", error.message());
+    error
+}
+
+/// Test-only fail point: makes the next delivery helper reached on this
+/// thread panic before it hands its completion over, so a test can drive a
+/// real `_cb` entry point down its guard's `on_panic` path.
+#[cfg(test)]
+pub(crate) mod fail_point {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The message [`hit`] panics with.
+    pub(crate) const MESSAGE: &str = "fail point before the completion hand-off";
+
+    /// Arms the fail point for the next [`hit`] on this thread.
+    pub(crate) fn arm() {
+        ARMED.with(|armed| armed.set(true));
+    }
+
+    /// Panics, once, when [`arm`] was called on this thread.
+    pub(crate) fn hit() {
+        if ARMED.with(|armed| armed.replace(false)) {
+            panic!("{MESSAGE}");
+        }
+    }
+}
+
+/// Test-only recorder for the completions a `_cb` entry point fires, one
+/// callback per completion shape, so the tests of every module can check that
+/// a caught panic is delivered exactly once, as the error of [`panic_error`].
+#[cfg(test)]
+pub(crate) mod panic_probe {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    use super::{kafka_common_Error_t, take_error};
+
+    /// What each completion fired with, in firing order: the error message,
+    /// or `"<no error>"` for a completion without one.
+    #[derive(Default)]
+    pub(crate) struct Probe {
+        fired: Mutex<Vec<String>>,
+    }
+
+    impl Probe {
+        pub(crate) fn as_opaque(&self) -> *mut c_void {
+            self as *const Self as *mut c_void
+        }
+
+        pub(crate) fn fired(&self) -> Vec<String> {
+            self.fired.lock().unwrap().clone()
+        }
+
+        /// Asserts exactly one completion fired, carrying the panic error of
+        /// `fn_name` with the panic message `panic`.
+        pub(crate) fn assert_one_panic(&self, fn_name: &str, panic: &str) {
+            assert_eq!(
+                self.fired(),
+                [format!("Rust panic caught at the FFI boundary in {fn_name}: {panic}")]
+            );
+        }
+
+        /// Records `error`, which must be the `LocalIllegalState` a panic is
+        /// reported as.
+        unsafe fn record(&self, error: *mut kafka_common_Error_t) {
+            let error = unsafe { take_error(error) }.expect("a panic completion carries an error");
+            assert!(error.is_local_illegal_state_error(), "{error:?}");
+            self.fired.lock().unwrap().push(error.message().to_string());
+        }
+    }
+
+    unsafe fn probe<'a>(opaque: *mut c_void) -> &'a Probe {
+        unsafe { &*(opaque as *const Probe) }
+    }
+
+    /// An `(error, opaque)` completion.
+    pub(crate) unsafe extern "C" fn on_error(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// A `(value *, error, opaque)` completion: a failure has a NULL value.
+    pub(crate) unsafe extern "C" fn on_value<P>(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert!(value.is_null());
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// An `(int64_t value, error, opaque)` completion: a failure has -1.
+    pub(crate) unsafe extern "C" fn on_i64(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        assert_eq!(value, -1);
+        unsafe { probe(opaque).record(error) }
+    }
+
+    /// An `(opaque)` completion, which carries no error.
+    pub(crate) unsafe extern "C" fn on_opaque(opaque: *mut c_void) {
+        unsafe { probe(opaque) }.fired.lock().unwrap().push("<no error>".to_string());
     }
 }
 
@@ -1591,6 +1824,44 @@ mod tests {
     /// This machine-checks the faithful half of [`kafka_common_ErrorCode_e`]
     /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
     /// or re-pointed at a different class in `Errors` fails here.
+    /// `catch_task_panic` passes a task's own result through and turns a
+    /// panic, of either string payload, into the entry point's panic error.
+    #[tokio::test]
+    async fn catch_task_panic_turns_a_task_panic_into_its_error() {
+        assert_eq!(catch_task_panic("f", async { Ok::<_, Error>(7) }).await.unwrap(), 7);
+        let own = catch_task_panic("f", async { Err::<(), _>(Error::local_illegal_argument("own")) })
+            .await
+            .unwrap_err();
+        assert!(own.is_local_illegal_argument_error());
+        assert_eq!(own.message(), "own");
+
+        let literal = catch_task_panic("kafka_x_cb", async {
+            panic!("literal");
+            #[allow(unreachable_code)]
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap_err();
+        assert!(literal.is_local_illegal_state_error());
+        assert_eq!(
+            literal.message(),
+            "Rust panic caught at the FFI boundary in kafka_x_cb: literal"
+        );
+
+        let formatted = catch_task_panic("kafka_y_cb", async {
+            let n = 2;
+            panic!("formatted {n}");
+            #[allow(unreachable_code)]
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            formatted.message(),
+            "Rust panic caught at the FFI boundary in kafka_y_cb: formatted 2"
+        );
+    }
+
     #[test]
     fn ffi_error_code_owned_codes_match_the_java_values() {
         let mut owned = 0;

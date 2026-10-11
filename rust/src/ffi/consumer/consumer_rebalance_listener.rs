@@ -36,8 +36,8 @@ use async_trait::async_trait;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_partition_list};
+use crate::ffi::common::{deliver_panic, kafka_common_Error_t, run_inline};
 use crate::ffi::consumer::{Delivery, error_slot, register_callback_result};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{kafka_List_destroy, kafka_List_t};
@@ -91,10 +91,12 @@ impl ListenerRegistration {
 
     /// Invokes `method` on the calling thread with `partitions` and a fresh
     /// callback id whose report reaches `sink`; the list is freed after the
-    /// method returned (C copies what it keeps).
+    /// method returned (C copies what it keeps). The id is registered only
+    /// once the list is built, right before the call, so a `_cb` entry
+    /// point's guard that reports a panic before then is the only completion.
     fn fire(self, method: Method, partitions: &[TopicPartition], sink: Box<dyn FnOnce(Result<(), Error>) + Send>) {
-        let callback_id = register_callback_result(sink);
         let list = sorted_topic_partition_list(partitions.iter());
+        let callback_id = register_callback_result(sink);
         unsafe {
             method(self.self_.get(), list, callback_id);
             kafka_List_destroy(list);
@@ -230,6 +232,8 @@ unsafe fn invoke_cb(
 ) {
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     registration.fire(
         method,
         &partitions,
@@ -267,7 +271,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -305,7 +309,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -344,7 +348,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -379,12 +383,14 @@ mod tests {
 
     use super::*;
     use crate::ffi::callback_queue::CallbackQueue;
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_error};
     use crate::ffi::common::topic_partition::{
         kafka_common_TopicPartition_partition, kafka_common_TopicPartition_topic,
     };
     use crate::ffi::common::{box_error, error_ref, kafka_common_Error_destroy};
     use crate::ffi::consumer::complete_callback_result;
-    use crate::ffi::util::{c_str_to_string, kafka_List_get, kafka_List_size};
+    use crate::ffi::util::{c_str_to_string, kafka_List_destroy, kafka_List_get, kafka_List_new, kafka_List_size};
 
     /// One logged call: the method name and the partitions it received.
     type LoggedCall = (&'static str, Vec<(String, i32)>);
@@ -521,5 +527,39 @@ mod tests {
         runtime.block_on(adapter.on_partitions_revoked(&partitions)).unwrap();
         assert_eq!(pump.join().unwrap(), 1, "invoked through the queue");
         assert_eq!(imp.calls.lock().unwrap().len(), 2);
+    }
+
+    /// A standalone listener has no callbacks vector, so a panic before the
+    /// method is invoked fires `cb` once on the calling thread, before the
+    /// call returns, and the C method never runs.
+    #[test]
+    fn a_panicking_cb_invoker_fires_cb_once_inline() {
+        let imp = Impl::default();
+        let listener = handle(&imp);
+        let partitions = kafka_List_new();
+        for (export, invoke) in [
+            (
+                "kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb",
+                kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb as unsafe extern "C" fn(_, _, _, _),
+            ),
+            (
+                "kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb",
+                kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb,
+            ),
+            (
+                "kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb",
+                kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb,
+            ),
+        ] {
+            let probe = Probe::default();
+            fail_point::arm();
+            unsafe { invoke(listener, partitions, on_error, probe.as_opaque()) };
+            probe.assert_one_panic(export, fail_point::MESSAGE);
+        }
+        assert!(imp.calls.lock().unwrap().is_empty(), "no method ran");
+        unsafe {
+            kafka_List_destroy(partitions);
+            kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+        }
     }
 }

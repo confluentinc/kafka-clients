@@ -46,10 +46,18 @@ header = """
  * caught panic writes.
  *
  * A _cb function reports a caught panic the way it reports every other
- * outcome: it queues its completion, carrying the error and the caller's
- * opaque, on the client's callback queue, exactly once, and the client's
- * __execute_callbacks runs it like any other completion. That completion is
- * where opaque comes back to be released; there is no other release hook.
+ * outcome, exactly once, whether the panic happens on the calling thread or
+ * later on the task running the operation: its completion carries the error
+ * (and a NULL pointer, or -1 for an int64_t, as its value) and the caller's
+ * opaque, queued on the client's callback queue for the client's
+ * __execute_callbacks to run like any other completion. A handle with no
+ * callback queue (a standalone listener or OffsetCommitCallback, a future of
+ * no client, a ConsumerHandle whose consumer is destroyed) runs it on the
+ * calling thread before returning, as it runs every completion. A completion
+ * with no error parameter (kafka_admin_Admin_close_cb,
+ * kafka_consumer_OffsetCommitCallback_on_complete_cb) fires with opaque
+ * alone, the panic showing only in the log. That completion is where opaque
+ * comes back to be released; there is no other release hook.
  *
  * A panic is a bug in this library and may leave the handle it happened on in
  * an inconsistent state: destroy that handle and create a new one. Later calls

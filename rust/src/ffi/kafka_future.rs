@@ -51,8 +51,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::common::{Error, KafkaFuture};
-use crate::ffi::callback_queue::{CallbackQueue, SendPtr};
-use crate::ffi::common::{box_error, kafka_common_Error_t, spawn_callback_task, take_error};
+use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
+use crate::ffi::common::{
+    box_error, catch_task_panic, deliver_panic_value, kafka_common_Error_t, spawn_callback_task, take_error,
+};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{destroy_boxed, kafka_List_t, list_elements};
 
@@ -286,8 +288,11 @@ fn deliver(cb: kafka_common_KafkaFuture_get_cb_t, result: Result<Arc<FfiValue>, 
 }
 
 /// Queues the delivery on the owning client's callbacks vector, or runs it
-/// inline when the future has no client.
+/// inline when the future has no client. A panic while resolving is
+/// delivered as the [`panic_error`](crate::ffi::common::panic_error) of
+/// `fn_name`, the entry point.
 fn get_cb(
+    fn_name: &'static str,
     future: *const kafka_common_KafkaFuture_t,
     timeout: Option<Duration>,
     cb: kafka_common_KafkaFuture_get_cb_t,
@@ -296,10 +301,12 @@ fn get_cb(
     // SAFETY: `future` is a valid handle (the caller's precondition).
     let inner = unsafe { future_arc(future) };
     let opaque = SendPtr(opaque);
+    #[cfg(test)]
+    crate::ffi::common::fail_point::hit();
     match (inner.runtime.clone(), inner.queue.clone()) {
         (Some(runtime), Some(queue)) => {
             spawn_callback_task(&runtime, async move {
-                let result = inner.resolve_async(timeout).await;
+                let result = catch_task_panic(fn_name, inner.resolve_async(timeout)).await;
                 // `inner` moves into the job so the value outlives a handle
                 // destroyed before the callback runs.
                 queue.push(Box::new(move || {
@@ -309,6 +316,22 @@ fn get_cb(
             });
         },
         _ => deliver(cb, inner.resolve(timeout), opaque),
+    }
+}
+
+/// Where the guard of a `_cb` entry point delivers a caught panic: the
+/// owning client's callbacks vector, or the calling thread for a future with
+/// no client, as [`get_cb`] delivers every completion (see
+/// [`deliver_panic_value`](crate::ffi::common::deliver_panic_value)).
+///
+/// # Safety
+///
+/// `future` must be a valid handle.
+unsafe fn completion_sink(future: *const kafka_common_KafkaFuture_t) -> impl FnOnce(CallbackJob) {
+    let inner = unsafe { future_arc(future) };
+    move |job| match (&inner.runtime, &inner.queue) {
+        (Some(_), Some(queue)) => queue.push(job),
+        _ => job(),
     }
 }
 
@@ -371,14 +394,14 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
 /// untouched.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
     self_: *const kafka_common_KafkaFuture_t,
     cb: kafka_common_KafkaFuture_get_cb_t,
     opaque: *mut c_void,
 ) {
-    get_cb(self_, None, cb, opaque);
+    get_cb("kafka_common_KafkaFuture_get_cb", self_, None, cb, opaque);
 }
 
 /// `KafkaFuture.get(timeout, MILLISECONDS)`: like
@@ -413,7 +436,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
 /// untouched.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
     self_: *const kafka_common_KafkaFuture_t,
@@ -421,7 +444,13 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
     cb: kafka_common_KafkaFuture_get_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
-    get_cb(self_, Some(timeout_ms(timeout)), cb, opaque);
+    get_cb(
+        "kafka_common_KafkaFuture_get_with_timeout_cb",
+        self_,
+        Some(timeout_ms(timeout)),
+        cb,
+        opaque,
+    );
 }
 
 /// `KafkaFuture.isDone()`: 1 when the future has resolved, 0 otherwise.
@@ -630,6 +659,8 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_destroy(self_: *mut kafka_comm
 mod tests {
     use super::*;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::ffi::common::fail_point;
+    use crate::ffi::common::panic_probe::{Probe, on_value};
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::error_predicates::kafka_common_Error_is_local_timeout_error;
     use crate::ffi::util::{kafka_List_add, kafka_List_destroy, kafka_List_new};
@@ -844,6 +875,49 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty(), "nothing runs until the client drains");
         assert_eq!(queue.execute(), 1);
         assert_eq!(seen.into_inner().unwrap(), vec![9]);
+    }
+
+    /// A panic before `get_cb` hands its completion over fires `cb` once with
+    /// the panic error: inline for a future with no client, queued on the
+    /// client's callbacks vector otherwise, so nothing fires until it drains.
+    #[test]
+    fn a_panicking_get_cb_delivers_one_panic_completion() {
+        let mut value = 1i32;
+        let f = unsafe {
+            kafka_common_KafkaFuture_completed_future(&mut value as *mut i32 as *const c_void, std::ptr::null_mut())
+        };
+        for (export, timeout) in [
+            ("kafka_common_KafkaFuture_get_cb", None),
+            ("kafka_common_KafkaFuture_get_with_timeout_cb", Some(100)),
+        ] {
+            let probe = Probe::default();
+            fail_point::arm();
+            match timeout {
+                None => unsafe { kafka_common_KafkaFuture_get_cb(f, on_value, probe.as_opaque()) },
+                Some(ms) => unsafe { kafka_common_KafkaFuture_get_with_timeout_cb(f, ms, on_value, probe.as_opaque()) },
+            }
+            probe.assert_one_panic(export, fail_point::MESSAGE);
+        }
+        unsafe { kafka_common_KafkaFuture_destroy(f) };
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let queue = Arc::new(CallbackQueue::new());
+        let typed = KafkaFuture::completed_future(Ok(9i64));
+        let f = box_future(map_future(&typed), Some(runtime.handle().clone()), Some(queue.clone()));
+        let probe = Probe::default();
+        fail_point::arm();
+        unsafe { kafka_common_KafkaFuture_get_cb(f, on_value, probe.as_opaque()) };
+        assert!(probe.fired().is_empty(), "queued, not fired");
+        assert_eq!(queue.execute(), 1);
+        probe.assert_one_panic("kafka_common_KafkaFuture_get_cb", fail_point::MESSAGE);
+        // The panic came before the task was spawned: no second completion.
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(queue.execute(), 0);
+        unsafe { kafka_common_KafkaFuture_destroy(f) };
     }
 
     /// A C `BaseFunction`: counts its calls on `self` and answers a pointer to

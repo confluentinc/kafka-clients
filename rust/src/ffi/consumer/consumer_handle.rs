@@ -44,12 +44,14 @@ use std::sync::{Arc, Weak};
 
 use crate::common::Error;
 use crate::consumer::ConsumerHandle;
-use crate::ffi::callback_queue::SendPtr;
+use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, map_topic_partition_i64, sorted_topic_partition_list,
     topic_partition_i64_map, topic_partition_ref,
 };
-use crate::ffi::common::{box_error, kafka_common_Error_t};
+use crate::ffi::common::{
+    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, kafka_common_Error_t,
+};
 use crate::ffi::consumer::offset_and_metadata::{
     kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, offset_and_metadata_map, offset_and_metadata_ref,
 };
@@ -112,24 +114,45 @@ impl HandleInner {
 
     /// Drives `future` as a tracked task of the consumer and hands its
     /// result to `deliver`, which queues the completion; `fallback` fires
-    /// the completion inline when the consumer is gone.
-    fn run_cb<T, F, D, B>(&self, future: F, deliver: D, fallback: B)
+    /// the completion inline when the consumer is gone. A panic inside
+    /// `future` is delivered as the
+    /// [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the
+    /// entry point.
+    fn run_cb<T, F, D, B>(&self, fn_name: &'static str, future: F, deliver: D, fallback: B)
     where
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
         D: FnOnce(&Client, Result<T, Error>) + Send + 'static,
         B: FnOnce(Error),
     {
+        #[cfg(test)]
+        crate::ffi::common::fail_point::hit();
         match self.client.upgrade() {
             Some(client) => {
                 let client2 = Arc::clone(&client);
                 client.spawn(async move {
-                    let result = future.await;
+                    let result = catch_task_panic(fn_name, future).await;
                     deliver(&client2, result);
                 });
             },
             None => fallback(destroyed()),
         }
+    }
+}
+
+/// Where the guard of a `_cb` entry point delivers a caught panic: the
+/// consumer's callbacks vector, or the calling thread once the consumer is
+/// destroyed, as [`HandleInner::run_cb`] delivers every completion (see
+/// [`deliver_panic`]).
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+unsafe fn completion_sink(self_: *const kafka_consumer_ConsumerHandle_t) -> impl FnOnce(CallbackJob) {
+    let client = unsafe { inner(self_) }.client.upgrade();
+    move |job| match client {
+        Some(client) => client.delivery.queue.push(job),
+        None => job(),
     }
 }
 
@@ -168,7 +191,7 @@ pub type kafka_consumer_ConsumerHandle_assign_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -181,6 +204,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_assign_cb",
         async move { h.assign(partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -220,7 +244,7 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -234,6 +258,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_seek_with_offset_cb",
         async move { h.seek_with_offset(partition, offset).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -274,7 +299,7 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -289,6 +314,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb",
         async move { h.seek_with_offset_and_metadata(partition, offset_and_metadata).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -327,7 +353,7 @@ pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -340,6 +366,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_seek_to_beginning_cb",
         async move { h.seek_to_beginning(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -378,7 +405,7 @@ pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -391,6 +418,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_seek_to_end_cb",
         async move { h.seek_to_end(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -429,7 +457,7 @@ pub type kafka_consumer_ConsumerHandle_pause_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -442,6 +470,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_pause_cb",
         async move { h.pause(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -480,7 +509,7 @@ pub type kafka_consumer_ConsumerHandle_resume_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -493,6 +522,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_resume_cb",
         async move { h.resume(&partitions).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -533,7 +563,7 @@ pub type kafka_consumer_ConsumerHandle_position_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -546,6 +576,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_position_cb",
         async move { h.position(&partition).await },
         move |client, result| deliver_i64(client, cb, opaque, result),
         |error| unsafe { cb(-1, box_error(error), opaque.get()) },
@@ -588,7 +619,7 @@ pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -602,6 +633,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_position_with_timeout_cb",
         async move { h.position_with_timeout(&partition, ms(timeout)?).await },
         move |client, result| deliver_i64(client, cb, opaque, result),
         |error| unsafe { cb(-1, box_error(error), opaque.get()) },
@@ -645,7 +677,7 @@ pub type kafka_consumer_ConsumerHandle_committed_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -658,6 +690,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_committed_cb",
         async move { h.committed(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
@@ -700,7 +733,7 @@ pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -713,6 +746,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_beginning_offsets_cb",
         async move { h.beginning_offsets(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| topic_partition_i64_map(&offsets)),
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
@@ -755,7 +789,7 @@ pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -768,6 +802,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_end_offsets_cb",
         async move { h.end_offsets(&partitions).await },
         move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| topic_partition_i64_map(&offsets)),
         |error| unsafe { cb(std::ptr::null_mut(), box_error(error), opaque.get()) },
@@ -812,7 +847,7 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic_value(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -825,6 +860,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_offsets_for_times_cb",
         async move { h.offsets_for_times(timestamps_to_search).await },
         move |client, result| {
             deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_timestamp_map(&offsets))
@@ -864,7 +900,7 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -875,6 +911,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_sync_cb",
         async move { h.commit_sync().await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -915,7 +952,7 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -928,6 +965,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb",
         async move { h.commit_sync_with_offsets(offsets).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -964,7 +1002,7 @@ pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -975,6 +1013,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_async_cb",
         async move { h.commit_async().await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
@@ -1013,7 +1052,7 @@ pub type kafka_consumer_ConsumerHandle_commit_async_offsets_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard]
+#[ffi_guard(on_panic = |err| unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
     self_: *const kafka_consumer_ConsumerHandle_t,
@@ -1026,6 +1065,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets_cb(
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
+        "kafka_consumer_ConsumerHandle_commit_async_offsets_cb",
         async move { h.commit_async_offsets(offsets).await },
         move |client, result| deliver_void(client, cb, opaque, result),
         |error| unsafe { cb(box_error(error), opaque.get()) },
