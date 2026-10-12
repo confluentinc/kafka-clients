@@ -33,6 +33,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka.common import KafkaError
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_serializer
 from confluent_kafka.producer import (
@@ -55,8 +56,14 @@ def _configs(broker: Any) -> dict[str, Any]:
 
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
     # TransactionManager.maybeAddPartition's IllegalStateException
-    # (TransactionManager.java:443), rethrown by doSend's catch (Exception e):
-    # send() raises it, the callback does not run.
+    # (TransactionManager.java:462), rethrown by doSend's catch (Exception e)
+    # (KafkaProducer.java:1070-1073): send() raises it, and the callback does
+    # not run then. doSend appends the record before maybeAddPartition
+    # (KafkaProducer.java:1029-1038), so the record stays in its batch, which
+    # the sender does not drain until the partition is in a transaction
+    # (RecordAccumulator.java:815-818). The forced close aborts the batch with
+    # "Producer is closed forcefully." (Sender.java:287-295,
+    # RecordAccumulator.java:1146), and the callback runs once, then.
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -70,14 +77,22 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
                                   "completing a call to initTransactions")
         else:
             raise AssertionError("send() did not raise")
+        assert calls == []
     finally:
         producer.close(timeout=0)
-    assert calls == []
+    assert len(calls) == 1
+    assert type(calls[0]) is KafkaError
+    assert str(calls[0]) == "Producer is closed forcefully."
 
 
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
-    # manager is READY (TransactionManager.java:446, with Java's double space).
+    # manager is READY (TransactionManager.java:465, with Java's double space).
+    # As doSend appends before maybeAddPartition (KafkaProducer.java:1029-1038),
+    # the refused record stays in its batch. The next send to the partition,
+    # inside a transaction, adds the partition to it, and the batch is
+    # committed with both records: the second record's offset is 1 and both
+    # callbacks run, each once.
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -94,18 +109,20 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
             raise AssertionError("send() did not raise")
         assert calls == []
 
-        # Inside a transaction the same send goes through, and its callback runs.
+        # Inside a transaction the same send goes through; the refused record
+        # is in the same batch, ahead of it.
         producer.begin_transaction()
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="value"),
                                callback=lambda metadata, exception: calls.append(exception))
         producer.commit_transaction()
-        assert future.result(timeout=30).offset() >= 0
-        assert calls == [None]
+        assert future.result(timeout=30).offset() == 1
+        assert calls == [None, None]
     finally:
         producer.close(timeout=0)
 
 
 def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
+    # The async peer of the test above: the same batch, offsets and callbacks.
     topic = _topic(kafka_broker)
 
     async def main() -> None:
@@ -131,8 +148,8 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
                 record=ProducerRecord(topic=topic, key="key", value="value"),
                 callback=lambda metadata, exception: calls.append(exception))
             await producer.commit_transaction()
-            assert (await asyncio.wait_for(future, 30)).offset() >= 0
-            assert calls == [None]
+            assert (await asyncio.wait_for(future, 30)).offset() == 1
+            assert calls == [None, None]
         finally:
             await producer.close(timeout=0)
 
