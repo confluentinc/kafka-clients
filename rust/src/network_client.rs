@@ -64,26 +64,56 @@ use crate::common::errors::AuthenticationError;
 use crate::common::utils::LogContext;
 use crate::common::utils::{SystemTime, Time};
 
-/// Renders an in-flight request the way Java's `{}` placeholder renders the
-/// nullable `InFlightRequest.request` field in the cancelled-request DEBUG line
-/// (`NetworkClient.java:405-409`): through its `toString()`, whose translation
-/// is the request's [`Display`](std::fmt::Display) — the rendering that redacts
-/// secrets such as SCRAM salts, config values and delegation-token HMACs.
+/// Builds the DEBUG message Java logs for every in-flight request cancelled by
+/// a disconnect or a timeout (`NetworkClient.java:405-409`): every field of
+/// Java's line, in Java's order.
 ///
-/// A missing request renders as `null`, as SLF4J renders a null argument. The
-/// field is `None` only where Java's is null: `InFlightRequestsTest.addRequest`
+/// Rust-only: Java formats the message inline in `cancelInFlightRequests`. It is
+/// a function here so that the unit tests can assert on the exact message,
+/// since they cannot capture the log line.
+///
+/// The request renders through its [`Display`](std::fmt::Display), the
+/// translation of the `toString()` that Java's `{}` placeholder calls, which
+/// redacts secrets such as SCRAM salts, config values and delegation-token
+/// HMACs. A missing request renders as `null`, as SLF4J renders a null argument.
+/// The field is `None` only where Java's is null: `InFlightRequestsTest.addRequest`
 /// builds its in-flight requests with a null request
 /// (`InFlightRequestsTest.java:123-124`); every request the client sends has one.
 ///
-/// `deny(dead_code)` overrides this module's blanket `allow(dead_code)`: the unit
-/// tests assert on this helper rather than on the captured log line, so the lint
-/// is what fails the build if the log line stops calling it.
+/// The message is formatted lazily, when the log line writes it, and allocates
+/// nothing. The caller calls this only inside its `log_enabled!(Debug)` branch,
+/// so nothing is built unless DEBUG is on.
+///
+/// This module is `#![cfg_attr(not(test), expect(dead_code))]`, which would let
+/// this function become unused in a non-test build without a word, and the
+/// tests, which still call it, would keep passing. The item-level
+/// `deny(dead_code)` overrides that expectation here, so a log line that stops
+/// calling this function fails the build.
 #[deny(dead_code)]
-fn loggable_request(request: Option<&AbstractRequest>) -> &dyn std::fmt::Display {
-    match request {
-        Some(request) => request,
-        None => &"null",
-    }
+fn cancelled_in_flight_request_debug_message<'a>(
+    request: &'a InFlightRequest,
+    node_id: &'a str,
+    now: i64,
+) -> impl std::fmt::Display + 'a {
+    std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
+             (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
+             throttle time: {}ms, request timeout: {}ms): ",
+            request.header.api_key(),
+            request.header.correlation_id(),
+            node_id,
+            request.time_elapsed_since_create_ms(now),
+            request.time_elapsed_since_send_ms(now),
+            request.throttle_time_ms(),
+            request.request_timeout_ms,
+        )?;
+        match &request.request {
+            Some(request) => write!(f, "{request}"),
+            None => f.write_str("null"),
+        }
+    })
 }
 
 /// Internal state enum for the client lifecycle.
@@ -1203,17 +1233,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             if log::log_enabled!(log::Level::Debug) {
                 kafka_debug!(
                     self.log_context,
-                    "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
-                     (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
-                     throttle time: {}ms, request timeout: {}ms): {}",
-                    request.header.api_key(),
-                    request.header.correlation_id(),
-                    node_id,
-                    request.time_elapsed_since_create_ms(now),
-                    request.time_elapsed_since_send_ms(now),
-                    request.throttle_time_ms(),
-                    request.request_timeout_ms,
-                    loggable_request(request.request.as_ref()),
+                    "{}",
+                    cancelled_in_flight_request_debug_message(request, node_id, now)
                 );
             } else {
                 kafka_info!(
@@ -2778,26 +2799,26 @@ mod tests {
         assert!(responses[0].was_disconnected());
     }
 
-    /// New test, no Java original: the DEBUG line logged for every request
-    /// cancelled by a disconnect or timeout (`NetworkClient.java:405-409`)
-    /// renders the request through its redacting `Display`, as Java renders it
-    /// through `toString()`, so a SCRAM upsertion's salt and salted password
-    /// never reach the log.
+    /// New test, no Java original: the DEBUG message logged for every request
+    /// cancelled by a disconnect or a timeout (`NetworkClient.java:405-409`)
+    /// carries every field of Java's line and renders the request through its
+    /// redacting `Display`, as Java renders it through `toString()`, so a SCRAM
+    /// upsertion's salt and salted password never reach the log.
     ///
     /// The log line itself is not captured: the `log` crate's logger is
     /// process-wide and can be installed only once, the `ffi` tests install
     /// `env_logger` into this same test binary, and raising the global level to
     /// DEBUG would change what every concurrently running test logs. So the
-    /// request is put in flight through the mock selector and then cancelled by
-    /// a disconnect, and the test asserts on `loggable_request` for that very
-    /// in-flight request — the expression the log line formats. The helper's
-    /// `#[deny(dead_code)]` fails the non-test build if the log line stops
-    /// calling it.
+    /// request is put in flight through the mock selector, the test asserts on
+    /// the exact output of `cancelled_in_flight_request_debug_message` for that
+    /// very in-flight request (the function the log line writes), and a
+    /// disconnect then cancels the request on the path that logs it. The
+    /// function's `#[deny(dead_code)]` fails the non-test build if the log line
+    /// stops calling it.
     #[tokio::test]
-    async fn test_cancelled_in_flight_request_log_renders_redacted_request() {
+    async fn test_cancelled_in_flight_request_debug_message_redacts_request() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
-        let now = 0_i64;
 
         await_ready(&mut client, &node).await;
 
@@ -2813,10 +2834,14 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_upsertions(vec![upsertion]);
         let builder = alter_user_scram_credentials_request::Builder::new(data);
-        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
-        client.send(request, now);
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
+        // A distinct value for every number in the message pins each one to its
+        // place: correlation id 7 for node 0, created at 100, sent at 250, 40ms
+        // of throttle time, a 30000ms request timeout, and cancelled at 1000.
+        let request = ClientRequest::new(node.id_string(), Box::new(builder), 7, "mock", 100, true, 30_000, None);
+        client.send(request, 250);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, 250).await;
         assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
+        client.in_flight_requests.increment_throttle_time(node.id_string(), 40);
 
         let in_flight = client.in_flight_requests.last_sent(node.id_string());
         let Some(AbstractRequest::AlterUserScramCredentials(sent)) = in_flight.request.as_ref() else {
@@ -2825,32 +2850,58 @@ mod tests {
         // The in-flight request still carries both secrets; only the rendering hides them.
         assert_eq!(sent.data().upsertions[0].salt, salt);
         assert_eq!(sent.data().upsertions[0].salted_password, salted_password);
-        let rendered = loggable_request(in_flight.request.as_ref()).to_string();
-        assert_eq!(rendered, sent.to_string());
-        assert!(rendered.starts_with("AlterUserScramCredentialsRequest("), "{rendered}");
-        assert!(!rendered.starts_with("Some("), "{rendered}");
+        let message = cancelled_in_flight_request_debug_message(in_flight, node.id_string(), 1000).to_string();
+        assert_eq!(
+            message,
+            "Cancelled in-flight ALTER_USER_SCRAM_CREDENTIALS request with correlation id 7 due to node 0 \
+             being disconnected (elapsed time since creation: 900ms, elapsed time since send: 750ms, \
+             throttle time: 40ms, request timeout: 30000ms): AlterUserScramCredentialsRequest(version=0, \
+             data=AlterUserScramCredentialsRequestData { deletions: [], upsertions: [ScramCredentialUpsertion \
+             { name: \"alice\", mechanism: 1, iterations: 8192, salt: [], salted_password: [], \
+             unknown_tagged_fields: [] }], unknown_tagged_fields: [] })"
+        );
         for secret in [&salt[..], &salted_password[..]] {
-            assert!(!rendered.contains(&format!("{secret:?}")), "secret leaked: {rendered}");
+            assert!(!message.contains(&format!("{secret:?}")), "secret leaked: {message}");
             assert!(
-                !rendered.contains(std::str::from_utf8(secret).unwrap()),
-                "secret leaked: {rendered}"
+                !message.contains(std::str::from_utf8(secret).unwrap()),
+                "secret leaked: {message}"
             );
         }
 
         // The disconnect cancels that request on the path that logs it.
         client.disconnect(node.id_string()).await;
-        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
+        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, 1000).await;
         assert_eq!(1, responses.len());
         assert!(responses[0].was_disconnected());
         assert_eq!(0, client.in_flight_request_count_for_node(node.id_string()));
     }
 
-    /// New test, no Java original: an in-flight request with no request renders
-    /// as `null`, as SLF4J renders the null `request.request` argument of the
-    /// cancelled-request DEBUG line (`NetworkClient.java:405-409`).
+    /// New test, no Java original: the cancelled-request DEBUG message
+    /// (`NetworkClient.java:405-409`) of an in-flight request with no request
+    /// ends in `null`, as SLF4J renders the null `request.request` argument.
+    /// The in-flight request is built like `InFlightRequestsTest.addRequest`'s
+    /// (`InFlightRequestsTest.java:122-124`), the only ones with no request; a
+    /// placeholder stands in for Java's null send, which Rust cannot express.
     #[test]
-    fn test_loggable_request_renders_missing_request_as_null() {
-        assert_eq!(loggable_request(None).to_string(), "null");
+    fn test_cancelled_in_flight_request_debug_message_renders_missing_request_as_null() {
+        let in_flight = InFlightRequest::new(
+            metadata_request_header(7),
+            30_000,
+            100,
+            "0",
+            None,
+            false,
+            false,
+            None,
+            NetworkSend::new("0", Box::new(crate::common::network::ByteBufferSend::new(Vec::new()))),
+            250,
+        );
+        assert_eq!(
+            cancelled_in_flight_request_debug_message(&in_flight, "0", 1000).to_string(),
+            "Cancelled in-flight METADATA request with correlation id 7 due to node 0 being disconnected \
+             (elapsed time since creation: 900ms, elapsed time since send: 750ms, \
+             throttle time: 0ms, request timeout: 30000ms): null"
+        );
     }
 
     /// Translated from `NetworkClientTest.testDisconnectWithMultipleInFlights`.
