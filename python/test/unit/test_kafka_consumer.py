@@ -1331,7 +1331,7 @@ def test_cancelling_an_async_poll_wakes_the_consumer_and_lets_it_end() -> None:
 
 def test_an_async_result_its_closing_loop_refuses_is_freed(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
-        capfd: pytest.CaptureFixture[str]) -> None:
+        capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     # The awaiting call's task waits on a loop that stopped; the loop is open
     # when the call's result (position()'s error for a partition not assigned)
     # checks it, then closes before call_soon_threadsafe. The result is freed
@@ -1344,7 +1344,7 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     # to the closed loop), so the test makes that call.
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
-    stopped_loop.start(consumer.position(partition=TP0))
+    _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
     assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
@@ -1364,7 +1364,8 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
 
 
 def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
-        hold_completion: Any, freed_errors: list[int], stopped_loop: Any) -> None:
+        hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
+        monkeypatch: pytest.MonkeyPatch) -> None:
     # The result is left for its loop while the loop is stopped, and the loop
     # then closes, so it can never be delivered there: the consumer's next
     # awaiting call, from another loop, frees it. (On the branch C API that call
@@ -1372,7 +1373,7 @@ def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     # nothing.)
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
     held = hold_completion("Consumer_position_cb")
-    stopped_loop.start(consumer.position(partition=TP0))
+    _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
     held.release.set()
     stopped_loop.loop.close()
     _await_queued_completion(consumer)
@@ -1388,7 +1389,7 @@ def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
 @pytest.mark.parametrize("same_thread", [True, False], ids=["same thread", "another thread"])
 def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
         same_thread: bool, hold_completion: Any, freed_errors: list[int],
-        stopped_loop: Any) -> None:
+        stopped_loop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # An awaiting call holds a use of the consumer until it ends. Its task is
     # left pending on a loop that stops, with its result queued there, and the
     # loop closes: the call can never resume. close() from a fresh loop, on the
@@ -1401,7 +1402,7 @@ def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
     held = hold_completion("Consumer_position_cb")
 
     def leave_a_call() -> None:
-        stopped_loop.start(consumer.position(partition=TP0))
+        _start_without_draining(monkeypatch, stopped_loop, consumer.position(partition=TP0))
         held.release.set()
         stopped_loop.loop.close()
         _await_queued_completion(consumer)
@@ -1418,6 +1419,23 @@ def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
     assert held.delivered.is_set()
     ((_, error),) = held.payloads
     assert freed_errors == [error]
+
+
+def _start_without_draining(monkeypatch: pytest.MonkeyPatch, stopped_loop: Any,
+                            call: Any) -> None:
+    """``stopped_loop.start(call)`` with the consumer's drain gated off, so the
+    stopped loop drains nothing, as these tests assume: the call's completion
+    stays in the consumer's callbacks vector whether the core queues it before
+    the loop stops or after. Without the gate, a core answering within the
+    loop's one iteration had the loop drain it there, running the held
+    completion on the loop thread, which then waited for a release only that
+    thread sets."""
+    execute = _lib.Consumer__execute_callbacks
+    monkeypatch.setattr(_lib, "Consumer__execute_callbacks", lambda h: 0)
+    try:
+        stopped_loop.start(call)
+    finally:
+        monkeypatch.setattr(_lib, "Consumer__execute_callbacks", execute)
 
 
 def _await_queued_completion(consumer: AsyncKafkaConsumer[Any, Any]) -> None:
