@@ -69,10 +69,15 @@ pub(crate) fn client_quota_match_ptr(value: &ClientQuotaMatch) -> *const kafka_c
 ///
 /// # Safety
 ///
-/// `value` must be a valid match handle.
+/// `value` must be a valid match handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_match_ref<'a>(
     value: *const kafka_common_quota_ClientQuotaMatch_t,
 ) -> &'a ClientQuotaMatch {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid match handle alive for `'a`, so it
+    // points at a live `ClientQuotaMatch`: the `DEFAULT` or `ANY` static, the `Box::into_raw` of
+    // `kafka_common_quota_ClientQuotaMatch_exact`, or a match a filter component owns and hands out
+    // through `client_quota_match_ptr`, which lives as long as that component. Nothing mutates a
+    // `ClientQuotaMatch` while a handle to it exists, so the shared reference is sound for `'a`.
     unsafe { &*(value as *const ClientQuotaMatch) }
 }
 
@@ -90,6 +95,8 @@ pub(crate) unsafe fn client_quota_match_ref<'a>(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
     self_: *const kafka_common_quota_ClientQuotaMatch_t,
 ) -> kafka_common_quota_ClientQuotaMatch_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid match handle, as
+    // `client_quota_match_ref` requires; the reference is used only within this call.
     match unsafe { client_quota_match_ref(self_) } {
         ClientQuotaMatch::Default => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT,
         ClientQuotaMatch::Any => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_ANY,
@@ -125,6 +132,9 @@ pub extern "C" fn kafka_common_quota_ClientQuotaMatch_any() -> *const kafka_comm
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
     value: *const c_char,
 ) -> *mut kafka_common_quota_ClientQuotaMatch_t {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     Box::into_raw(Box::new(ClientQuotaMatch::Exact(unsafe { c_str_to_string(value) })))
         as *mut kafka_common_quota_ClientQuotaMatch_t
 }
@@ -142,6 +152,10 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_destroy(
     self_: *mut kafka_common_quota_ClientQuotaMatch_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // match handle not yet destroyed, i.e. the `Box::into_raw` of a `ClientQuotaMatch` in
+        // `kafka_common_quota_ClientQuotaMatch_exact` (the singletons and a match borrowed from a
+        // component are never passed here), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ClientQuotaMatch) });
     }
 }
@@ -155,6 +169,8 @@ mod tests {
 
     #[test]
     fn singletons_compare_equal_and_switch_on_their_enumerator() {
+        // SAFETY: Test code: every handle passed is a static singleton from
+        // `kafka_common_quota_ClientQuotaMatch_default` / `_any`, never freed.
         unsafe {
             assert_eq!(
                 kafka_common_quota_ClientQuotaMatch_default(),
@@ -183,6 +199,8 @@ mod tests {
     #[test]
     fn exact_is_owned_and_carries_its_name() {
         let name = CString::new("alice").unwrap();
+        // SAFETY: Test code: `exact` comes from `kafka_common_quota_ClientQuotaMatch_exact` and is
+        // destroyed once; `name` is a `CString` that outlives the constructor copying it.
         unsafe {
             let exact = kafka_common_quota_ClientQuotaMatch_exact(name.as_ptr());
             assert_eq!(

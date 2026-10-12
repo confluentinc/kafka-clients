@@ -37,10 +37,14 @@ pub struct kafka_common_quota_ClientQuotaFilter_t {
 ///
 /// # Safety
 ///
-/// `filter` must be a valid client-quota-filter handle.
+/// `filter` must be a valid client-quota-filter handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_filter_ref<'a>(
     filter: *const kafka_common_quota_ClientQuotaFilter_t,
 ) -> &'a ClientQuotaFilter {
+    // SAFETY: Per this function's `# Safety`, `filter` is a valid client-quota-filter handle alive
+    // for `'a`, so it points at a live `ClientQuotaFilter`, an owned one (no view of this type is
+    // handed out). Nothing mutates a `ClientQuotaFilter` while a handle to it exists, so the shared
+    // reference is sound for `'a`.
     unsafe { &*(filter as *const ClientQuotaFilter) }
 }
 
@@ -64,6 +68,9 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
+    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // filter-component handles, as `list_client_quota_filter_components` requires; the components
+    // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains(unsafe {
         list_client_quota_filter_components(components)
     }))
@@ -82,6 +89,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
+    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // filter-component handles, as `list_client_quota_filter_components` requires; the components
+    // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains_only(unsafe {
         list_client_quota_filter_components(components)
     }))
@@ -106,6 +116,9 @@ pub extern "C" fn kafka_common_quota_ClientQuotaFilter_all() -> *mut kafka_commo
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
+    // `client_quota_filter_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     let elements = unsafe { client_quota_filter_ref(self_) }
         .components()
         .iter()
@@ -124,6 +137,8 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
+    // `client_quota_filter_ref` requires; the reference is used only within this call.
     i8::from(unsafe { client_quota_filter_ref(self_) }.strict())
 }
 
@@ -137,6 +152,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_to_string(
     self_: *const kafka_common_quota_ClientQuotaFilter_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
+    // `client_quota_filter_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     into_c_string(&unsafe { client_quota_filter_ref(self_) }.to_string())
 }
 
@@ -151,6 +169,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_destroy(
     self_: *mut kafka_common_quota_ClientQuotaFilter_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // filter handle not yet destroyed, i.e. the `Box::into_raw` of a `ClientQuotaFilter` in
+        // `box_client_quota_filter`, so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ClientQuotaFilter) });
     }
 }
@@ -178,6 +199,11 @@ mod tests {
             ClientQuotaFilterComponent::of_entity("user", "alice"),
             ClientQuotaFilterComponent::of_default_entity("client-id"),
         ];
+        // SAFETY: Test code: the components come from this file's component constructors and the
+        // input list from `kafka_List_new` borrows them; the list is destroyed before them, after
+        // both filters copy them; the components list returned is read below its size; every owned
+        // handle (the inputs, the filters, the list, the string) is destroyed once, and the
+        // `CString`s outlive the calls reading them.
         unsafe {
             let c0 = kafka_common_quota_ClientQuotaFilterComponent_of_entity(user.as_ptr(), alice.as_ptr());
             let c1 = kafka_common_quota_ClientQuotaFilterComponent_of_default_entity(client_id.as_ptr());
@@ -226,6 +252,8 @@ mod tests {
 
     #[test]
     fn all_matches_every_entity() {
+        // SAFETY: Test code: the filter and its components list are owned handles, each destroyed
+        // once.
         unsafe {
             let all = kafka_common_quota_ClientQuotaFilter_all();
             assert_eq!(*client_quota_filter_ref(all), ClientQuotaFilter::all());

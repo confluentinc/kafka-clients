@@ -46,10 +46,16 @@ pub struct kafka_common_quota_ClientQuotaEntity_t {
 ///
 /// # Safety
 ///
-/// `entity` must be a valid client-quota-entity handle.
+/// `entity` must be a valid client-quota-entity handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_entity_ref<'a>(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> &'a ClientQuotaEntity {
+    // SAFETY: Per this function's `# Safety`, `entity` is a valid client-quota-entity handle alive
+    // for `'a`, so it points at a live `ClientQuotaEntity`: the `Box::into_raw` of
+    // `box_client_quota_entity`, or an entity a parent (an alteration or an admin result) owns and
+    // hands out through `client_quota_entity_ptr`, which lives as long as that parent. Nothing
+    // mutates a `ClientQuotaEntity` while a handle to it exists, so the shared reference is sound
+    // for `'a`.
     unsafe { &*(entity as *const ClientQuotaEntity) }
 }
 
@@ -89,9 +95,16 @@ pub(crate) fn sorted_entries(entity: &ClientQuotaEntity) -> Vec<(&str, Option<&s
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
     entries: *const kafka_Map_t,
 ) -> *mut kafka_common_quota_ClientQuotaEntity_t {
+    // SAFETY: Per this function's `# Safety`, `entries` is a valid map, which the caller keeps
+    // alive and does not mutate for this call, as `map_entries` requires; the borrow of its entries
+    // ends when they are collected.
     let entries = unsafe { map_entries(entries) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, every key of `entries` is a valid
+            // NUL-terminated string, as `c_str_to_string` requires, and every value is null or one,
+            // as `c_str_to_option` requires; both are copied into owned values, so nothing borrows
+            // the map after this call.
             (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
                 c_str_to_option(v as *const c_char)
             })
@@ -109,6 +122,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_is_valid_entity_type(entity_type: *const c_char) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `entity_type` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     i8::from(ClientQuotaEntity::is_valid_entity_type(&unsafe {
         c_str_to_string(entity_type)
     }))
@@ -127,6 +143,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_is_valid_entity_ty
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
     self_: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-entity handle, as
+    // `client_quota_entity_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     let entries = sorted_entries(unsafe { client_quota_entity_ref(self_) })
         .into_iter()
         .map(|(t, n)| (t, n.map_or(ptr::null_mut(), |n| into_c_string(n) as *mut c_void)));
@@ -143,6 +162,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_to_string(
     self_: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-entity handle, as
+    // `client_quota_entity_ref` requires; the result is copied into an owned value before return,
+    // so the borrow lasts for this call only.
     into_c_string(&unsafe { client_quota_entity_ref(self_) }.to_string())
 }
 
@@ -158,6 +180,10 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_destroy(
     self_: *mut kafka_common_quota_ClientQuotaEntity_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // entity handle not yet destroyed, i.e. the `Box::into_raw` of a `ClientQuotaEntity` in
+        // `box_client_quota_entity` (an entity borrowed from a result or an alteration is never
+        // passed here), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ClientQuotaEntity) });
     }
 }
@@ -178,8 +204,16 @@ mod tests {
     }
 
     unsafe fn entry_at(map: *const kafka_Map_t, index: i32) -> (String, Option<String>) {
+        // SAFETY: Test code: callers pass a live map from
+        // `kafka_common_quota_ClientQuotaEntity_entries` and an index below its size, and its keys
+        // are NUL-terminated strings the map owns, read before it is destroyed.
         let key = unsafe { CStr::from_ptr(kafka_Map_key(map, index) as *const c_char) };
+        // SAFETY: Test code: callers pass a live map from
+        // `kafka_common_quota_ClientQuotaEntity_entries` and an index below its size.
         let value = unsafe { kafka_Map_value(map, index) } as *const c_char;
+        // SAFETY: Test code: a non-null value of a map from
+        // `kafka_common_quota_ClientQuotaEntity_entries` is a NUL-terminated string the map owns,
+        // read before it is destroyed.
         let value = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_str().unwrap().to_string());
         (key.to_str().unwrap().to_string(), value)
     }
@@ -187,6 +221,9 @@ mod tests {
     #[test]
     fn entries_distinguish_the_default_entity_from_the_empty_name() {
         let entity = quota_entity(&[("user", None), ("client-id", Some("")), ("ip", Some("10.0.0.1"))]);
+        // SAFETY: Test code: `client_quota_entity_ptr` borrows `entity`, which outlives the call;
+        // the returned map is read through `entry_at` with indices below its size and destroyed
+        // once.
         unsafe {
             let map = kafka_common_quota_ClientQuotaEntity_entries(client_quota_entity_ptr(&entity));
             assert_eq!(kafka_Map_size(map), 3);
@@ -204,6 +241,9 @@ mod tests {
         let user = CString::new("user").unwrap();
         let alice = CString::new("alice").unwrap();
         let client_id = CString::new("client-id").unwrap();
+        // SAFETY: Test code: the input map from `kafka_Map_new` borrows the `CString`s, which
+        // outlive it, and is destroyed after the constructor copies it; the entity and the string
+        // are destroyed once.
         unsafe {
             let map = kafka_Map_new();
             kafka_Map_put(map, user.as_ptr() as *mut c_void, alice.as_ptr() as *mut c_void);
@@ -231,6 +271,7 @@ mod tests {
         for (name, valid) in [("user", 1), ("client-id", 1), ("ip", 1), ("group", 0), ("", 0)] {
             let c = CString::new(name).unwrap();
             assert_eq!(
+                // SAFETY: Test code: `c` is a `CString` that outlives the call reading it.
                 unsafe { kafka_common_quota_ClientQuotaEntity_is_valid_entity_type(c.as_ptr()) },
                 valid,
                 "{name}"
