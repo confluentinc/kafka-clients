@@ -53,6 +53,12 @@ impl PayloadClass for ConsumerCommitFailedError {
 pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_ConsumerCommitFailedError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a
+    // `Payload<ConsumerCommitFailedError>` cloned from the variant's payload into the
+    // `ErrorInner`'s payload slot, so it lives as long as the error handle: until the error, or the
+    // owner it is borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::ConsumerCommitFailed(e) => inner.payload_view(e) as *const kafka_common_ConsumerCommitFailedError_t,
@@ -71,6 +77,9 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_new(
     message: *const c_char,
 ) -> *mut kafka_common_ConsumerCommitFailedError_t {
+    // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     Payload::boxed(ConsumerCommitFailedError::new(unsafe { c_str_to_string(message) }))
 }
 
@@ -92,6 +101,10 @@ pub extern "C" fn kafka_common_ConsumerCommitFailedError_with_default_message()
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid commit-failed handle: a view whose
+    // error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires (no call
+    // mutates a payload of this class). `message_ptr` points at the payload's own C string, so the
+    // string lives as long as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.message_ptr()
 }
 
@@ -105,6 +118,11 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid commit-failed handle: a view whose
+    // error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires (no call
+    // mutates a payload of this class). `source_ptr` returns the cause handle the payload's
+    // `source` slot owns, so it lives as long as the handle; that is the rustdoc's "borrowed from
+    // the handle".
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.source_ptr()
 }
 
@@ -118,6 +136,10 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
     self_: *const kafka_common_ConsumerCommitFailedError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid commit-failed handle: a view whose
+    // error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires (no call
+    // mutates a payload of this class). The borrow lasts for this call only: `to_c_string` copies
+    // the text into an owned string.
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -132,6 +154,10 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_destroy(
     self_: *mut kafka_common_ConsumerCommitFailedError_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_ConsumerCommitFailedError_t` handles come
+    // only from this class's constructors, which box a `Payload<ConsumerCommitFailedError>`, and a
+    // view is never passed here.
     unsafe { Payload::<ConsumerCommitFailedError>::destroy(self_) }
 }
 
@@ -146,6 +172,10 @@ mod tests {
     fn message_is_borrowed_from_the_handle() {
         let error = box_error(Error::ConsumerCommitFailed(ConsumerCommitFailedError::new("m")));
         let message = CString::new("failed").unwrap();
+        // SAFETY: Test code: `box_error` and this module's constructors and getters make every
+        // handle used. Each owned handle (the errors, the payloads, the string) is destroyed once,
+        // the view is used only while its error is alive, and `message` outlives the call that
+        // reads it.
         unsafe {
             let view = kafka_common_Error_consumer_commit_failed(error);
             assert!(!view.is_null());

@@ -60,6 +60,12 @@ fn metric_name_view(payload: &Payload<QuotaViolationError>) -> &MetricNameInner 
 pub unsafe extern "C" fn kafka_common_Error_quota_violation(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_QuotaViolationError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a
+    // `Payload<QuotaViolationError>` cloned from the variant's payload into the `ErrorInner`'s
+    // payload slot, so it lives as long as the error handle: until the error, or the owner it is
+    // borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::QuotaViolation(e) => inner.payload_view(&**e) as *const kafka_common_QuotaViolationError_t,
@@ -83,6 +89,8 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
     bound: f64,
 ) -> *mut kafka_common_QuotaViolationError_t {
     Payload::boxed(QuotaViolationError::new(
+        // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
+        // `metric_name_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { metric_name_ref(metric_name) }.clone(),
         value,
         bound,
@@ -99,6 +107,11 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
     self_: *const kafka_common_QuotaViolationError_t,
 ) -> *const kafka_common_MetricName_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid quota-violation handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `metric_name_view` builds the metric-name handle
+    // once and caches it in the payload's `views` slot, so it lives as long as the handle, as the
+    // rustdoc states.
     metric_name_view(unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }).as_ptr()
 }
 
@@ -112,6 +125,10 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
     self_: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid quota-violation handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). The borrow lasts for this call only: the scalar is
+    // copied out.
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.value().value()
 }
 
@@ -125,6 +142,10 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
     self_: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid quota-violation handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). The borrow lasts for this call only: the scalar is
+    // copied out.
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.value().bound()
 }
 
@@ -138,6 +159,11 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
     self_: *const kafka_common_QuotaViolationError_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid quota-violation handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `source_ptr` returns the cause handle the
+    // payload's `source` slot owns, so it lives as long as the handle; that is the rustdoc's
+    // "borrowed from the handle".
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.source_ptr()
 }
 
@@ -151,6 +177,10 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
     self_: *const kafka_common_QuotaViolationError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid quota-violation handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). The borrow lasts for this call only: `to_c_string`
+    // copies the text into an owned string.
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -163,6 +193,10 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_destroy(self_: *mut kafka_common_QuotaViolationError_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_QuotaViolationError_t` handles come only
+    // from this class's constructors, which box a `Payload<QuotaViolationError>`, and a view is
+    // never passed here.
     unsafe { Payload::<QuotaViolationError>::destroy(self_) }
 }
 
@@ -186,6 +220,10 @@ mod tests {
     #[test]
     fn view_is_borrowed_and_constructor_is_owned() {
         let error = box_error(Error::QuotaViolation(Box::new(quota_violation())));
+        // SAFETY: Test code: `box_error`, `box_metric_name` and this module's constructor and
+        // getters make every handle used. Each owned handle (the errors, the metric name, the
+        // payload, the string) is destroyed once, and the view and the name handle it borrows out
+        // are used only while the error is alive.
         unsafe {
             let view = kafka_common_Error_quota_violation(error);
             assert!(!view.is_null());

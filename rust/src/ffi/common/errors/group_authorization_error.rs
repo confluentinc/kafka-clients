@@ -57,6 +57,12 @@ impl PayloadClass for GroupAuthorizationError {
 pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_GroupAuthorizationError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a
+    // `Payload<GroupAuthorizationError>` cloned from the variant's payload into the `ErrorInner`'s
+    // payload slot, so it lives as long as the error handle: until the error, or the owner it is
+    // borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::GroupAuthorization(e) => inner.payload_view(e) as *const kafka_common_GroupAuthorizationError_t,
@@ -76,6 +82,9 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_for_group_id(
     group_id: *const c_char,
 ) -> *mut kafka_common_GroupAuthorizationError_t {
+    // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     Payload::boxed(GroupAuthorizationError::for_group_id(unsafe { c_str_to_string(group_id) }))
 }
 
@@ -90,6 +99,9 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_new(
     group_id: *const c_char,
     message: *const c_char,
 ) -> *mut kafka_common_GroupAuthorizationError_t {
+    // SAFETY: Per this function's `# Safety`, `group_id` and `message` are each a valid
+    // NUL-terminated string, as `c_str_to_string` requires; both are copied into owned `String`s,
+    // so nothing borrows them after this call.
     Payload::boxed(GroupAuthorizationError::new(unsafe { c_str_to_string(group_id) }, unsafe {
         c_str_to_string(message)
     }))
@@ -114,6 +126,10 @@ pub extern "C" fn kafka_common_GroupAuthorizationError_with_default_message()
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     self_: *const kafka_common_GroupAuthorizationError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid group-authorization handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `text_ptr` points at the payload's own C string,
+    // so the string lives as long as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.text_ptr()
 }
 
@@ -127,6 +143,11 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
     self_: *const kafka_common_GroupAuthorizationError_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid group-authorization handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `source_ptr` returns the cause handle the
+    // payload's `source` slot owns, so it lives as long as the handle; that is the rustdoc's
+    // "borrowed from the handle".
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.source_ptr()
 }
 
@@ -140,6 +161,10 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
     self_: *const kafka_common_GroupAuthorizationError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid group-authorization handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). The borrow lasts for this call only: `to_c_string`
+    // copies the text into an owned string.
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -154,6 +179,10 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_destroy(
     self_: *mut kafka_common_GroupAuthorizationError_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_GroupAuthorizationError_t` handles come
+    // only from this class's constructors, which box a `Payload<GroupAuthorizationError>`, and a
+    // view is never passed here.
     unsafe { Payload::<GroupAuthorizationError>::destroy(self_) }
 }
 
@@ -169,6 +198,10 @@ mod tests {
         let error = box_error(Error::GroupAuthorization(GroupAuthorizationError::for_group_id("g1")));
         let g2 = CString::new("g2").unwrap();
         let message = CString::new("m").unwrap();
+        // SAFETY: Test code: `box_error` and this module's constructors and getters make every
+        // handle used. Each owned handle (the error, the payloads, the string) is destroyed once,
+        // the view is used only while its error is alive, and the `CString`s outlive the calls that
+        // read them.
         unsafe {
             let view = kafka_common_Error_group_authorization_error(error);
             assert!(!view.is_null());

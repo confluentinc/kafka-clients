@@ -65,6 +65,11 @@ impl PayloadClass for LocalCallbackError {
 pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_LocalCallbackError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a `Payload<LocalCallbackError>`
+    // cloned from the variant's payload into the `ErrorInner`'s payload slot, so it lives as long
+    // as the error handle: until the error, or the owner it is borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::LocalCallback(e) => inner.payload_view(e) as *const kafka_common_LocalCallbackError_t,
@@ -85,6 +90,9 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
     message: *const c_char,
     opaque: *mut c_void,
 ) -> *mut kafka_common_LocalCallbackError_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated string,
+    // as `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+    // after this call.
     Payload::boxed(LocalCallbackError::new(unsafe { c_str_to_string(message) }, opaque))
 }
 
@@ -98,6 +106,10 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
     self_: *const kafka_common_LocalCallbackError_t,
 ) -> *mut c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid foreign-callback-error handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). The borrow lasts for this call only: the
+    // opaque pointer is copied out unchanged and never dereferenced here.
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.value().opaque()
 }
 
@@ -111,6 +123,11 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
     self_: *const kafka_common_LocalCallbackError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid foreign-callback-error handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). `message_ptr` points at the payload's own
+    // C string, so the string lives as long as the handle; that is the rustdoc's "borrowed from the
+    // handle".
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.message_ptr()
 }
 
@@ -124,6 +141,10 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
     self_: *const kafka_common_LocalCallbackError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid foreign-callback-error handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). The borrow lasts for this call only:
+    // `to_c_string` copies the text into an owned string.
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -137,6 +158,10 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_destroy(self_: *mut kafka_common_LocalCallbackError_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_LocalCallbackError_t` handles come only
+    // from this class's constructors, which box a `Payload<LocalCallbackError>`, and a view is
+    // never passed here.
     unsafe { Payload::<LocalCallbackError>::destroy(self_) }
 }
 
@@ -156,6 +181,10 @@ mod tests {
         let mut target = 42u8;
         let opaque = (&mut target as *mut u8).cast::<c_void>();
         let message = CString::new("ValueError: bad").unwrap();
+        // SAFETY: Test code: the error comes from `kafka_common_Error_local_callback` and is
+        // destroyed once, after its last use; the view and the string are used only while it is
+        // alive (the string is destroyed once), `message` outlives the calls that read it, and
+        // `opaque` is only compared, never dereferenced.
         unsafe {
             let error = kafka_common_Error_local_callback(message.as_ptr(), opaque);
             assert_eq!(kafka_common_Error_is_local_callback_error(error), 1);
@@ -191,6 +220,9 @@ mod tests {
             "User rebalance callback throws an error",
         );
         let error = box_error(wrapped);
+        // SAFETY: Test code: `box_error` makes the error, destroyed once after its last use; the
+        // borrowed cause and the view are used only while it is alive, and `opaque` is only
+        // compared, never dereferenced.
         unsafe {
             assert!(kafka_common_Error_local_callback_error(error).is_null());
             let source = kafka_common_Error_source(error);
@@ -205,6 +237,9 @@ mod tests {
     #[test]
     fn owned_handle_and_other_classes() {
         let message = CString::new("owned").unwrap();
+        // SAFETY: Test code: `kafka_common_LocalCallbackError_new` and `box_error` make the owned
+        // handles, each destroyed once after its last use; `message` outlives the calls that read
+        // it, and the null opaque pointer is never dereferenced.
         unsafe {
             let owned = kafka_common_LocalCallbackError_new(message.as_ptr(), ptr::null_mut());
             assert!(kafka_common_LocalCallbackError_opaque(owned).is_null());

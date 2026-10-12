@@ -113,8 +113,17 @@ impl<T: PayloadClass> Payload<T> {
     ///
     /// # Safety
     ///
-    /// `handle` must be a view or owned handle of this payload class.
+    /// `handle` must be a view or owned handle of this payload class, alive
+    /// for `'a`: an owned handle not destroyed, or a view whose error is not
+    /// destroyed. No reference obtained through [`Payload::from_ptr_mut`] on
+    /// it may be live during `'a`.
     pub(crate) unsafe fn from_ptr<'a, P>(handle: *const P) -> &'a Self {
+        // SAFETY: Per this function's `# Safety`, `handle` is a view or owned handle of this
+        // payload class, so it points at a live `Payload<T>`: a view at the one an
+        // `ErrorInner`'s payload slot holds (`ErrorInner::payload_view`), an owned handle at
+        // the `Box::into_raw` of `Payload::boxed`. It stays alive for `'a`, and nothing
+        // mutates it then: no `from_ptr_mut` reference is live, and its lazy slots are
+        // `OnceLock`s.
         unsafe { &*(handle as *const Self) }
     }
 
@@ -126,6 +135,10 @@ impl<T: PayloadClass> Payload<T> {
     /// borrowed from a `kafka_common_Error_t`, and no reference obtained
     /// through [`Payload::from_ptr`] on it may be live.
     pub(crate) unsafe fn from_ptr_mut<'a, P>(handle: *mut P) -> &'a mut Self {
+        // SAFETY: Per this function's `# Safety`, `handle` is an owned handle not yet
+        // destroyed, i.e. the `Box::into_raw` of `Payload::boxed`, which the C caller owns
+        // and never a view inside an `ErrorInner`, and no `from_ptr` reference on it is live,
+        // so the `&mut` is the only reference for `'a`.
         unsafe { &mut *(handle as *mut Self) }
     }
 
@@ -148,10 +161,15 @@ impl<T: PayloadClass> Payload<T> {
     ///
     /// # Safety
     ///
-    /// `handle` must be null or an owned handle not yet destroyed, never a
-    /// view borrowed from a `kafka_common_Error_t`.
+    /// `handle` must be null or an owned handle of this payload class not yet
+    /// destroyed, never a view borrowed from a `kafka_common_Error_t`.
     pub(crate) unsafe fn destroy<P>(handle: *mut P) {
         if !handle.is_null() {
+            // SAFETY: `handle` is non-null (checked above) and, per this function's
+            // `# Safety`, an owned handle of this payload class not yet destroyed, i.e. the
+            // `Box::into_raw` of a `Payload<T>` in `Payload::boxed` (a view, which points into
+            // an `ErrorInner`, is never passed here), so `from_raw` reclaims that allocation,
+            // once.
             drop(unsafe { Box::from_raw(handle as *mut Self) });
         }
     }
@@ -197,5 +215,8 @@ impl<T: PayloadClass> Payload<T> {
 ///
 /// `source` must be null or an owned error handle not yet destroyed.
 pub(crate) unsafe fn take_source(source: *mut kafka_common_Error_t) -> Error {
+    // SAFETY: Per this function's `# Safety`, `source` is null or an owned error handle not
+    // yet destroyed, as `take_error` requires; the caller hands it over, so consuming it here
+    // is its final use.
     unsafe { take_error(source) }.unwrap_or_else(|| Error::kafka_message(""))
 }

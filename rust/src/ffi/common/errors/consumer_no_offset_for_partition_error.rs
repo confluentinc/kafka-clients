@@ -55,6 +55,12 @@ impl PayloadClass for ConsumerNoOffsetForPartitionError {
 pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_ConsumerNoOffsetForPartitionError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a
+    // `Payload<ConsumerNoOffsetForPartitionError>` cloned from the variant's payload into the
+    // `ErrorInner`'s payload slot, so it lives as long as the error handle: until the error, or the
+    // owner it is borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::ConsumerNoOffsetForPartition(e) => {
@@ -77,6 +83,9 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
     partition: *const kafka_common_TopicPartition_t,
 ) -> *mut kafka_common_ConsumerNoOffsetForPartitionError_t {
     Payload::boxed(ConsumerNoOffsetForPartitionError::new(
+        // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+        // `topic_partition_ref` requires; the value is cloned, so the borrow lasts for this call
+        // only.
         unsafe { topic_partition_ref(partition) }.clone(),
     ))
 }
@@ -93,6 +102,9 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_partitions(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_ConsumerNoOffsetForPartitionError_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // topic-partition handles, as `list_topic_partitions` requires; they are cloned into owned
+    // values, so nothing borrows the list after this call.
     Payload::boxed(ConsumerNoOffsetForPartitionError::with_partitions(unsafe {
         list_topic_partitions(partitions)
     }))
@@ -110,6 +122,10 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitio
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *mut kafka_List_t {
     sorted_topic_partition_list(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid no-offset-for-partition
+        // handle: a view whose error is alive or an owned handle not yet destroyed, as
+        // `Payload::from_ptr` requires (no call mutates a payload of this class). The borrow lasts
+        // for this call only: the field is copied into the owned container returned.
         unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }
             .value()
             .partitions(),
@@ -126,6 +142,11 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitio
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid no-offset-for-partition handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). `message_ptr` points at the payload's own
+    // C string, so the string lives as long as the handle; that is the rustdoc's "borrowed from the
+    // handle".
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.message_ptr()
 }
 
@@ -139,6 +160,11 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid no-offset-for-partition handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). `source_ptr` returns the cause handle the
+    // payload's `source` slot owns, so it lives as long as the handle; that is the rustdoc's
+    // "borrowed from the handle".
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.source_ptr()
 }
 
@@ -152,6 +178,10 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_string(
     self_: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid no-offset-for-partition handle: a
+    // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
+    // requires (no call mutates a payload of this class). The borrow lasts for this call only:
+    // `to_c_string` copies the text into an owned string.
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -166,6 +196,10 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_strin
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_destroy(
     self_: *mut kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_ConsumerNoOffsetForPartitionError_t`
+    // handles come only from this class's constructors, which box a
+    // `Payload<ConsumerNoOffsetForPartitionError>`, and a view is never passed here.
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::destroy(self_) }
 }
 
@@ -189,6 +223,10 @@ mod tests {
                 TopicPartition::new("t", 1),
             ]),
         ));
+        // SAFETY: Test code: `box_error`, `box_topic_partition` and this module's constructors and
+        // getters make every handle used. Each owned handle (the error, the payloads, the lists,
+        // the topic-partition, the string) is destroyed once and the view is used only while its
+        // error is alive.
         unsafe {
             let view = kafka_common_Error_consumer_no_offset_for_partition(error);
             assert!(!view.is_null());

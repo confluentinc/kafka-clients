@@ -56,6 +56,12 @@ impl PayloadClass for DuplicateResourceError {
 pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_DuplicateResourceError_t {
+    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
+    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
+    // reference is used only within this call. The view returned is a
+    // `Payload<DuplicateResourceError>` cloned from the variant's payload into the `ErrorInner`'s
+    // payload slot, so it lives as long as the error handle: until the error, or the owner it is
+    // borrowed from, is destroyed.
     let inner = unsafe { error_ref(error) };
     match &inner.error {
         Error::DuplicateResource(e) => inner.payload_view(e) as *const kafka_common_DuplicateResourceError_t,
@@ -74,6 +80,9 @@ pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_new(
     message: *const c_char,
 ) -> *mut kafka_common_DuplicateResourceError_t {
+    // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     Payload::boxed(DuplicateResourceError::new(unsafe { c_str_to_string(message) }))
 }
 
@@ -97,7 +106,13 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource(
     message: *const c_char,
 ) -> *mut kafka_common_DuplicateResourceError_t {
     Payload::boxed(DuplicateResourceError::with_resource(
+        // SAFETY: Per this function's `# Safety`, `resource` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(resource) },
+        // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(message) },
     ))
 }
@@ -118,8 +133,17 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_sourc
     source: *mut kafka_common_Error_t,
 ) -> *mut kafka_common_DuplicateResourceError_t {
     Payload::boxed(DuplicateResourceError::with_resource_source(
+        // SAFETY: Per this function's `# Safety`, `resource` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(resource) },
+        // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(message) },
+        // SAFETY: Per this function's `# Safety`, `source` is null or an owned error handle not yet
+        // destroyed, as `take_source` requires; the constructor consumes it, so the caller does not
+        // use it again.
         unsafe { take_source(source) },
     ))
 }
@@ -135,6 +159,10 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_sourc
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
     self_: *const kafka_common_DuplicateResourceError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid duplicate-resource handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `text_ptr` points at the payload's own C string,
+    // so the string lives as long as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.text_ptr()
 }
 
@@ -148,6 +176,11 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
     self_: *const kafka_common_DuplicateResourceError_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid duplicate-resource handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `message_ptr` points at the payload's own C
+    // string, so the string lives as long as the handle; that is the rustdoc's "borrowed from the
+    // handle".
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.message_ptr()
 }
 
@@ -161,6 +194,11 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
     self_: *const kafka_common_DuplicateResourceError_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid duplicate-resource handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). `source_ptr` returns the cause handle the
+    // payload's `source` slot owns, so it lives as long as the handle; that is the rustdoc's
+    // "borrowed from the handle".
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.source_ptr()
 }
 
@@ -174,6 +212,10 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
     self_: *const kafka_common_DuplicateResourceError_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid duplicate-resource handle: a view
+    // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
+    // (no call mutates a payload of this class). The borrow lasts for this call only: `to_c_string`
+    // copies the text into an owned string.
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.to_c_string()
 }
 
@@ -188,6 +230,10 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_destroy(
     self_: *mut kafka_common_DuplicateResourceError_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned handle not yet destroyed,
+    // as `Payload::destroy` requires. Owned `kafka_common_DuplicateResourceError_t` handles come
+    // only from this class's constructors, which box a `Payload<DuplicateResourceError>`, and a
+    // view is never passed here.
     unsafe { Payload::<DuplicateResourceError>::destroy(self_) }
 }
 
@@ -203,6 +249,11 @@ mod tests {
         let error = box_error(Error::DuplicateResource(DuplicateResourceError::with_resource("res1", "m")));
         let res = CString::new("res2").unwrap();
         let message = CString::new("dup").unwrap();
+        // SAFETY: Test code: `box_error` and this module's constructors and getters make every
+        // handle used. Each owned handle (the errors, the payloads, the string) is destroyed once,
+        // `cause` is consumed by the constructor it is passed to, each view and the borrowed cause
+        // are used only while their owner is alive, and the `CString`s outlive the calls that read
+        // them.
         unsafe {
             let view = kafka_common_Error_duplicate_resource(error);
             assert!(!view.is_null());
