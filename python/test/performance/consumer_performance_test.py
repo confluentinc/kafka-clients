@@ -778,7 +778,9 @@ def _summarize(cfg, latency_hist, measured_messages, measured_duration,
     }
     # CPU/RSS averages over the measured interval, from the shared Metrics
     # sampler (psutil, per-interval buckets already written to metrics.jsonl).
-    # Same keys as the other perf tests' results.json.
+    # Same keys and units (rss_avg_mb, MB) as the other consumer harnesses'
+    # summaries (rust/consumer-perf, librdkafka_e2e.c, JavaE2E.java); the
+    # producer harnesses' results.json use rss_avg_kib instead.
     cpu_avg = rss_avg_mb = None
     if metrics is not None and metrics.total_external_metrics > 0:
         n = metrics.total_external_metrics

@@ -616,21 +616,30 @@ def main(v2=False):
         # stamps the latency at the broker ack, so a slow reader can never
         # inflate it (matches the native rust/C perf apps).
         nonlocal max_latency_ms, total_latency_ms, completed_messages
-        if exception is not None:
-            print(f"Produce call resulted in exception: {exception}")
-        else:
-            try:
-                verification_function(metadata)
-            except Exception as e:
-                print(f"Produce call resulted in exception: {e}")
-        completed_messages += 1
-        current_latency = int(time.time() * 1000) - start_time
-        metrics.latency.add_measurement(current_latency)
-        record_latency(current_latency)
-        metrics.messages.add_measurement(1)
-        metrics.bytes.add_measurement(message_size)
-        max_latency_ms = max(max_latency_ms, current_latency)
-        total_latency_ms += current_latency
+        # completed_messages is bumped in `finally` so every delivery counts
+        # exactly once even if the accounting below raises: an exception
+        # escaping this callback would otherwise kill the v2 poll thread (or be
+        # swallowed by the v3 bridge) and leave the drain waiting out its 30s
+        # deadline.
+        try:
+            if exception is not None:
+                print(f"Produce call resulted in exception: {exception}")
+            else:
+                try:
+                    verification_function(metadata)
+                except Exception as e:
+                    print(f"Produce call resulted in exception: {e}")
+            current_latency = int(time.time() * 1000) - start_time
+            metrics.latency.add_measurement(current_latency)
+            record_latency(current_latency)
+            metrics.messages.add_measurement(1)
+            metrics.bytes.add_measurement(message_size)
+            max_latency_ms = max(max_latency_ms, current_latency)
+            total_latency_ms += current_latency
+        except Exception as e:  # noqa: BLE001
+            print(f"Delivery accounting failed: {e!r}")
+        finally:
+            completed_messages += 1
 
     try:
         with producer:
@@ -810,21 +819,27 @@ async def async_main():
         # record_delivery. This also makes the drain converge — every message
         # bumps exactly one of completed_messages / queue_full — so a stray
         # error no longer leaves the drain waiting out its full 30s deadline.
-        if exc is not None:
-            print(f"Produce call resulted in exception: {exc}")
-        elif not fut.cancelled():
-            try:
-                verification_function(fut.result())
-            except Exception as e:
-                print(f"Produce call resulted in exception: {e}")
-        completed_messages += 1
-        current_latency = int(time.time() * 1000) - start_time
-        metrics.latency.add_measurement(current_latency)
-        record_latency(current_latency)
-        metrics.messages.add_measurement(1)
-        metrics.bytes.add_measurement(message_size)
-        max_latency_ms = max(max_latency_ms, current_latency)
-        total_latency_ms += current_latency
+        # Same `finally` guard as the sync record_delivery: count the delivery
+        # even if the accounting raises.
+        try:
+            if exc is not None:
+                print(f"Produce call resulted in exception: {exc}")
+            elif not fut.cancelled():
+                try:
+                    verification_function(fut.result())
+                except Exception as e:
+                    print(f"Produce call resulted in exception: {e}")
+            current_latency = int(time.time() * 1000) - start_time
+            metrics.latency.add_measurement(current_latency)
+            record_latency(current_latency)
+            metrics.messages.add_measurement(1)
+            metrics.bytes.add_measurement(message_size)
+            max_latency_ms = max(max_latency_ms, current_latency)
+            total_latency_ms += current_latency
+        except Exception as e:  # noqa: BLE001
+            print(f"Delivery accounting failed: {e!r}")
+        finally:
+            completed_messages += 1
 
     try:
         async with producer:
