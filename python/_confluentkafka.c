@@ -5030,8 +5030,6 @@ typedef struct AdminJob {
     int n, cap;
     kafka_Map_t** maps;                  // owned maps (own their futures) destroyed at job end
     int n_maps, maps_cap;
-    kafka_List_t** lists;                // owned lists destroyed at job end
-    int n_lists, lists_cap;
     void* result;
     void (*result_destroy)(void*);
     admin_assemble_fn assemble;
@@ -5062,8 +5060,6 @@ static void job_free(AdminJob* job) {
     PyMem_Free(job->slots);
     for (int i = 0; i < job->n_maps; i++) kafka_Map_destroy(job->maps[i]);
     PyMem_Free(job->maps);
-    for (int i = 0; i < job->n_lists; i++) kafka_List_destroy(job->lists[i]);
-    PyMem_Free(job->lists);
     if (job->result && job->result_destroy) job->result_destroy(job->result);
     if (job->ctx && job->ctx_free) job->ctx_free(job->ctx);
     Py_XDECREF(job->callback);
@@ -5122,18 +5118,6 @@ static int job_own_map(AdminJob* job, kafka_Map_t* map) {
         job->maps = grown; job->maps_cap = cap;
     }
     job->maps[job->n_maps++] = map;
-    return 0;
-}
-
-static int job_own_list(AdminJob* job, kafka_List_t* list) {
-    if (list == NULL) return 0;
-    if (job->n_lists == job->lists_cap) {
-        int cap = job->lists_cap ? job->lists_cap * 2 : 4;
-        kafka_List_t** grown = (kafka_List_t**)PyMem_Realloc(job->lists, (size_t)cap * sizeof(*grown));
-        if (grown == NULL) { kafka_List_destroy(list); PyErr_NoMemory(); return -1; }
-        job->lists = grown; job->lists_cap = cap;
-    }
-    job->lists[job->n_lists++] = list;
     return 0;
 }
 
@@ -6725,22 +6709,7 @@ static int32_t* box_i32(int32_t v) {
     return p;
 }
 
-static int16_t* box_i16(int16_t v) {
-    int16_t* p = (int16_t*)PyMem_Malloc(sizeof(*p));
-    if (p == NULL) { PyErr_NoMemory(); return NULL; }
-    *p = v;
-    return p;
-}
-
-static int64_t* box_i64(int64_t v) {
-    int64_t* p = (int64_t*)PyMem_Malloc(sizeof(*p));
-    if (p == NULL) { PyErr_NoMemory(); return NULL; }
-    *p = v;
-    return p;
-}
-
 static void pymem_free(void* p) { PyMem_Free(p); }
-static void destroy_list(void* l) { kafka_List_destroy((kafka_List_t*)l); }
 
 // list[int] -> an owned kafka_List_t of boxed int32_t*, as the nested broker
 // lists of NewTopic / NewPartitions / NewPartitionReassignment need. NULL
