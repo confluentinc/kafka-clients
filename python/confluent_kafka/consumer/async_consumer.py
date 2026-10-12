@@ -16,7 +16,7 @@
 Binding Conventions, Class family).
 
 The same methods, in the same order. A method is ``async def`` iff the entry
-point it calls has an ``_async`` completion form in the FFI header:
+point it calls has a ``_cb`` completion form in the FFI header:
 ``subscribe``, ``assign``, ``unsubscribe``, ``poll``, ``commit``, ``seek``,
 ``seek_to_beginning`` / ``seek_to_end``, ``position``, ``committed``,
 ``partitions_for``, ``list_topics``, ``pause`` / ``resume``,
@@ -24,7 +24,8 @@ point it calls has an ``_async`` completion form in the FFI header:
 every other method is a plain ``def`` (``assignment()``, ``subscription()``,
 ``commit_nowait()``, ``metrics()``, ``paused()``, ``current_lag()``,
 ``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
-``_async`` form; the listener runs on the event loop and may be ``async def``.
+``_cb`` form, running the queued callbacks on the event loop; the listener runs
+there and may be ``async def``.
 A coroutine listener method that ``commit_nowait()`` delivers is awaited in a
 task that holds the consumer until it ends: meanwhile ``metrics()`` /
 ``group_metadata()`` raise ``ConcurrentModificationError`` (see
@@ -37,8 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
@@ -47,9 +47,7 @@ from confluent_kafka._args import UNSET, java_forms
 from confluent_kafka._async import await_to_end
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
-from ._base import (
-    _ConsumerState, _Forward, _ListenerErrors, blank_null_topics, close_args, poll_timeout_ms,
-)
+from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
 from ._conversions import offsets_to_spec, tp_to_spec
 from .close_options import CloseOptions
 from .consumer import COMMIT_NOWAIT_FORMS, SEEK_FORMS, SUBSCRIBE_FORMS
@@ -117,8 +115,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``async def``; they are awaited on the event loop. A call a listener
         makes back into the consumer (``await consumer.commit()``, ``seek()``,
         ``position()``, …) runs synchronously through the core's
-        ``ConsumerHandle``, which has no ``_async`` forms, so it blocks the
-        event loop for its duration."""
+        ``ConsumerHandle``'s plain entry points, inside the call delivering the
+        listener, so it blocks the event loop for its duration."""
         if topics is not None:
             await self._a_subscribe_topics(topics, callback)
         else:
@@ -242,7 +240,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     def current_lag(self, *, topic_partition: TopicPartition) -> int | None:
         """See :meth:`Consumer.current_lag`. Its entry point,
-        ``kafka_consumer_Consumer_current_lag``, has no ``_async`` form, so it
+        ``kafka_consumer_Consumer_current_lag``, has no ``_cb`` form, so it
         is a plain ``def``."""
         return self._c_current_lag(topic_partition)
 
@@ -275,7 +273,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, callback
         try:
-            await self._run_async(*self._subscribe_topics_spec(topic_list, callback is not None))
+            await self._run_async(*self._subscribe_topics_spec(topic_list, callback))
         except BaseException:
             self._listener = previous
             raise
@@ -285,8 +283,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         assert pattern is not None
         previous, self._listener = self._listener, callback
         try:
-            await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(),
-                                                                callback is not None))
+            await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(), callback))
         except BaseException:
             self._listener = previous
             raise
@@ -300,11 +297,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._run_async(*self._void_spec(fn, tp_to_spec(partition_list)))
 
     async def _a_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._tp_op("assign", _lib.Consumer_assign_async,
+        await self._tp_op("assign", _lib.Consumer_assign_cb,
                           self._assign_partitions(partitions))
 
     async def _a_unsubscribe(self) -> None:
-        await self._run_async(*self._void_spec(_lib.Consumer_unsubscribe_async))
+        await self._run_async(*self._void_spec(_lib.Consumer_unsubscribe_cb))
 
     async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         # The closed check first, then Java's Timer check (Order).
@@ -334,10 +331,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         await self._run_async(*self._seek_spec(partition, offset, offset_and_metadata))
 
     async def _a_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_async, partitions)
+        await self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_cb, partitions)
 
     async def _a_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_async, partitions)
+        await self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
     async def _a_position(self, partition: TopicPartition) -> int:
         if self._in_callback():
@@ -361,10 +358,10 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._run_async(*self._list_topics_spec())
 
     async def _a_pause(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._tp_op("pause", _lib.Consumer_pause_async, partitions)
+        await self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
 
     async def _a_resume(self, partitions: Iterable[TopicPartition]) -> None:
-        await self._tp_op("resume", _lib.Consumer_resume_async, partitions)
+        await self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
@@ -388,11 +385,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def _a_beginning_offsets(self, partitions: Iterable[TopicPartition]
                                    ) -> dict[TopicPartition, int]:
         return await self._long_offsets("beginning_offsets",
-                                        _lib.Consumer_beginning_offsets_async, partitions)
+                                        _lib.Consumer_beginning_offsets_cb, partitions)
 
     async def _a_end_offsets(self, partitions: Iterable[TopicPartition]
                              ) -> dict[TopicPartition, int]:
-        return await self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async,
+        return await self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb,
                                         partitions)
 
     async def _a_close(self, option: CloseOptions | None) -> None:
@@ -423,118 +420,136 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         if deferred is not None:
             raise deferred
 
+    # ---- coroutine listener methods ----------------------------------------
+    def _defer_listener(self, awaitable: Awaitable[object], callback_id: int) -> bool:
+        """Await a coroutine listener method in a task on the running loop, then
+        report its result to the core
+        (``kafka_consumer_Consumer__set_callback_result``); the call delivering
+        it waits for the task before going on (``_wait_on_loop``), so the
+        listener still runs inside that call and the rebalance does not advance
+        before it returns (``consumer-threading.md`` §31). The task is created
+        inside the callback window, so a consumer operation the listener issues
+        goes through the ConsumerHandle."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        async def run() -> None:
+            error: BaseException | None = None
+            try:
+                await awaitable
+            except BaseException as exc:  # noqa: BLE001 - reported to the core
+                error = exc
+                self._keep_callback_error(exc)
+            # Under the lifecycle lock: close() clears the handle under it
+            # before it frees the handle, so a live handle is not freed meanwhile.
+            with self._lifecycle:
+                if self._h:
+                    _lib.Consumer__set_callback_result(self._h, callback_id, error)
+
+        task = loop.create_task(run())
+        self._listener_tasks.add(task)
+        task.add_done_callback(self._listener_tasks.discard)
+        return True
+
     # ---- commit_nowait (Java's commitAsync) on the event loop ----------------
     def _c_commit_nowait(self, offsets: Any, callback: OffsetCommitCallback | None) -> None:
         """``commit_nowait()`` on the loop's thread (see ``commit_nowait``).
 
-        Without a listener, or inside a callback, it is ``Consumer``'s. With a
-        listener, the synchronous FFI call runs on the helper thread while this
-        call waits and runs the queued callbacks (``_commit_nowait_on_loop``).
-        While a previous ``commit_nowait()`` still finishes in a task, this one
-        follows it in another (``_follow_commit_nowait``)."""
-        if self._in_callback() or (self._listener is None and not self._commit_in_flight()):
+        Inside a callback, it is ``Consumer``'s. Otherwise it submits the
+        ``_cb`` form and waits on this thread, running the queued callbacks
+        (``_commit_nowait_on_loop``); a coroutine listener method they deliver
+        hands the rest of the commit to a task on the loop. While a previous
+        ``commit_nowait()`` still finishes in a task, this one follows it in
+        another (``_follow_commit_nowait``)."""
+        if self._in_callback():
             _ConsumerState._c_commit_nowait(self, offsets, callback)
             return
         with self._use():
             spec = None if offsets is None else offsets_to_spec(offsets)
-        adapter = self._wrap_commit_callback(
-            callback, empty_offsets=offsets is not None and not offsets)
+            adapter = self._wrap_commit_callback(
+                callback, empty_offsets=offsets is not None and not offsets)
         if self._commit_in_flight():
             self._follow_commit_nowait(spec, adapter)
             return
         self._commit_nowait_on_loop(spec, adapter)
 
     def _commit_nowait_on_loop(self, spec: Any, adapter: Any) -> None:
-        """Wait on this thread for the helper's FFI call, running the queued
-        callbacks; a coroutine listener hands the rest to a task on the loop
+        """Wait on this thread for the commit's completion, running the queued
+        callbacks, in 100 ms slices so a ``KeyboardInterrupt`` is delivered; a
+        coroutine listener method they deliver (a task ``_defer_listener``
+        created) hands the rest to a task on the loop
         (``_continue_commit_nowait``), which then holds the use."""
-        try:
-            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        forward = _Forward(self._on_pending_notify)
-        submit, resolve, free = self._commit_on_helper_spec(spec, adapter, forward)
-        box: dict[str, tuple[Any, ...]] = {}
-        done = threading.Event()
-        errors: _ListenerErrors = []
+        submit, resolve, free = self._commit_nowait_spec(spec, adapter)
+        box: list[tuple[Any, ...]] = []
+        event = self._pending_event
 
         def cb(*payload: Any) -> None:
-            box["payload"] = payload
-            done.set()
-            self._on_pending_notify()
+            box.append(payload)
+            event.set()
 
         use = self._use()
         h = use.__enter__()
         handed_off = False
         interrupted: KeyboardInterrupt | None = None
         try:
-            self._pending_event.clear()
+            event.clear()
+            self._drain(h)
             submit(h, cb)
             while True:
-                finished = done.is_set()
                 try:
-                    handoff = self._drain_pending(h, errors, handoff=loop is not None,
-                                                  forward=forward)
-                    if handoff is not None and loop is not None:
+                    if self._listener_tasks and interrupted is None:
+                        loop = asyncio.get_running_loop()  # it created the tasks
                         self._commit_continuation = loop.create_task(
-                            self._continue_commit_nowait(use, h, handoff, done, box, resolve,
-                                                         errors, forward))
+                            self._continue_commit_nowait(use, h, box, resolve, free))
                         handed_off = True
                         return
-                    if finished:
+                    if box:
                         break
-                    # Short slices keep KeyboardInterrupt deliverable.
-                    self._pending_event.wait(0.1)
-                    self._pending_event.clear()
+                    event.wait(0.1)
+                    event.clear()
+                    self._drain(h)
                 except KeyboardInterrupt as exc:
                     if interrupted is None:
                         interrupted = exc
                         _lib.Consumer_wakeup(h)
         finally:
             if not handed_off:
-                use.__exit__(None, None, None)
-        payload = box["payload"]
+                use.release()
+        payload = box[0]
         if interrupted is not None:
             free(payload)
+            self._take_callback_errors()
             raise interrupted
-        self._resolve_reporting(resolve, payload, errors)
+        resolve(payload)
 
-    async def _continue_commit_nowait(self, use: Any, h: int, handoff: tuple[int, Any],
-                                      done: threading.Event, box: dict[str, tuple[Any, ...]],
-                                      resolve: Any, errors: _ListenerErrors,
-                                      forward: _Forward) -> None:
+    async def _continue_commit_nowait(self, use: Any, h: int, box: list[tuple[Any, ...]],
+                                      resolve: Any, free: Any) -> None:
         """The rest of a ``commit_nowait()`` whose coroutine listener is awaited
-        on this loop: await it, ack it, wait for the helper's FFI call (draining
-        on the loop), and keep the commit's failure for the next awaited call.
-        Cancelled, it finishes synchronously (a coroutine listener then fails
-        with ``TypeError``), so the use is not released while the FFI call runs."""
+        on this loop: wait for the commit's completion on the loop
+        (``_wait_on_loop``, which awaits the listener first), and keep the
+        commit's failure for the next awaited call. Cancelled, it wakes the
+        consumer and still waits for the completion, so the use is not released
+        while the FFI call runs."""
         loop = asyncio.get_running_loop()
         pending = asyncio.Event()
         waiter = (loop, pending)
         self._async_waiters[waiter] = use
         try:
+            cancelled = await self._wait_on_loop(h, lambda: bool(box), pending)
+            payload = box[0]
+            if cancelled is not None:
+                free(payload)
+                self._take_callback_errors()
+                raise cancelled
             try:
-                await self._await_listener(*handoff, errors)
-                while not done.is_set():
-                    await pending.wait()
-                    pending.clear()
-                    await self._drain_pending_async(h, errors, forward)
-                await self._drain_pending_async(h, errors, forward)
-            except asyncio.CancelledError:
-                while True:
-                    finished = done.is_set()
-                    self._drain_pending(h, errors, forward=forward)
-                    if finished:
-                        break
-                    done.wait(0.1)
-                raise
-            try:
-                self._resolve_reporting(resolve, box["payload"], errors)
+                resolve(payload)
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
                 self._deferred_error = exc
         finally:
             self._async_waiters.pop(waiter, None)
-            use.__exit__(None, None, None)
+            use.release()
 
     def _follow_commit_nowait(self, spec: Any, adapter: Any) -> None:
         """A ``commit_nowait()`` while the previous one still finishes in a task:
@@ -551,10 +566,9 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         async def follow() -> None:
             if previous is not None:
                 await asyncio.wait({previous})
-            forward = _Forward(self._on_pending_notify)
             try:
-                await self._run_async(*self._commit_on_helper_spec(spec, adapter, forward),
-                                      after_commit_nowait=False, forward=forward)
+                await self._run_async(*self._commit_nowait_spec(spec, adapter),
+                                      after_commit_nowait=False)
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
                 if self._deferred_error is None:
                     self._deferred_error = exc

@@ -419,7 +419,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, callback
         try:
-            self._run_sync(*self._subscribe_topics_spec(topic_list, callback is not None))
+            self._run_sync(*self._subscribe_topics_spec(topic_list, callback))
         except BaseException:
             self._listener = previous
             raise
@@ -429,7 +429,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         assert pattern is not None
         previous, self._listener = self._listener, callback
         try:
-            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), callback is not None))
+            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), callback))
         except BaseException:
             self._listener = previous
             raise
@@ -443,11 +443,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._void_spec(fn, tp_to_spec(partition_list)))
 
     def _c_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("assign", _lib.Consumer_assign_async,
+        self._tp_op("assign", _lib.Consumer_assign_cb,
                     self._assign_partitions(partitions))
 
     def _c_unsubscribe(self) -> None:
-        self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_async))
+        self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_cb))
 
     def _c_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         # The closed check first, then Java's Timer check (Order).
@@ -477,10 +477,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._seek_spec(partition, offset, offset_and_metadata))
 
     def _c_seek_to_beginning(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_async, partitions)
+        self._tp_op("seek_to_beginning", _lib.Consumer_seek_to_beginning_cb, partitions)
 
     def _c_seek_to_end(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_async, partitions)
+        self._tp_op("seek_to_end", _lib.Consumer_seek_to_end_cb, partitions)
 
     def _c_position(self, partition: TopicPartition) -> int:
         if self._in_callback():
@@ -505,10 +505,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._list_topics_spec())
 
     def _c_pause(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("pause", _lib.Consumer_pause_async, partitions)
+        self._tp_op("pause", _lib.Consumer_pause_cb, partitions)
 
     def _c_resume(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("resume", _lib.Consumer_resume_async, partitions)
+        self._tp_op("resume", _lib.Consumer_resume_cb, partitions)
 
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int]
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
@@ -531,11 +531,11 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _c_beginning_offsets(self, partitions: Iterable[TopicPartition]
                              ) -> dict[TopicPartition, int]:
-        return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_async,
+        return self._long_offsets("beginning_offsets", _lib.Consumer_beginning_offsets_cb,
                                   partitions)
 
     def _c_end_offsets(self, partitions: Iterable[TopicPartition]) -> dict[TopicPartition, int]:
-        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_async, partitions)
+        return self._long_offsets("end_offsets", _lib.Consumer_end_offsets_cb, partitions)
 
     def _c_close(self, option: CloseOptions | None) -> None:
         if self._is_closed():
