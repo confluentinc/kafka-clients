@@ -318,35 +318,25 @@ trait.
     and dedicated per-class test files (`NewTopicTest`, `TopicCollectionTest`,
     `*ResultTest`) translated alongside the `KafkaAdminClientTest` slices.
 
-## 11. Bindings (C FFI / Python): the Python admin binding is paused
+## 11. Bindings (C FFI / Python)
 
-The Admin client has a C FFI, `rust/src/ffi/admin.rs`, with sync and `*_async`
-forms over the shared dispatcher in `rust/src/ffi/common.rs` (`CompletionJob`,
-`spawn_dispatcher`, `enqueue_or_run_inline`). Its Python binding is
-`python/admin.py`: `AdminClient`, `MockAdminClient` and their
-asyncio peers, all driving the async C bindings.
+The Admin client has a C FFI, `rust/src/ffi/admin.rs`, with sync and `*_async` forms over the shared
+dispatcher in `rust/src/ffi/common.rs` (`CompletionJob`, `spawn_dispatcher`,
+`enqueue_or_run_inline`).
 
-`admin.py` is **paused**. It predates CLAUDE.md's
-`## Python Binding Conventions`, which do not cover the Admin client, and it is
-not part of the `confluent_kafka` package. It keeps its flat `KafkaError`
-(`code()` / `is_retriable()`) and positional value types through the private
-`confluent_kafka/_legacy_compat.py`.
-
-**Why:** the conventions replaced the flat error and the positional value types
-for the producer and consumer. Porting admin is separate work; until then its
-callers (the gRPC admin translation, `test/unit/test_admin.py`) rely on its
-current surface.
+Its Python binding is generated from CLAUDE.md's `## Python Binding Conventions`, like the producer
+and consumer: the package `confluent_kafka.admin`: `Admin`, `KafkaAdminClient` and their asyncio peers, built on
+the async C bindings; `MockAdminClient`, its asyncio peer and the Options, Result and value classes,
+pure-Python translations of their Java sources. The conventions cover the admin client's specifics (the entry-point list for the
+admin FFI's names, `KafkaFuture` as Python's futures, the keyword constructors of the Options
+classes, the pure-Python `MockAdminClient`).
 
 **How to apply:**
 
-  - Do not change `admin.py`'s public surface until it is ported to the
-    conventions as a whole; `_legacy_compat.py` is deleted with that port.
-  - Nothing in the `confluent_kafka` public surface may import
-    `_legacy_compat.py`.
+  - Generate and change the binding only through the conventions; do not hand-edit generated code.
+  - The old binding `python/admin.py` and its private shim `confluent_kafka/_legacy_compat.py` are
+    removed; the gRPC admin translation, the soak client and the admin tests use `confluent_kafka.admin`.
 
-(This section used to record a branch-state caveat: on
-`dev/admin-client-implementation` the only FFI was a fully synchronous
-`rust/src/ffi/producer.rs` and the only Python binding `producer.py`, so the admin
-bindings were to mirror that. The admin bindings were since built on the async
-C API, and `producer.py` was replaced by the `confluent_kafka` package, so the
-caveat no longer applies.)
+(This section used to record the Python admin binding as paused: `admin.py` predated the
+conventions and kept a flat `KafkaError` and positional value types through `_legacy_compat.py`.
+The admin-client generation ports it to the conventions.)
