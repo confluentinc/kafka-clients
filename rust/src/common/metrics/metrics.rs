@@ -524,7 +524,7 @@ impl Metrics {
     /// [`SensorOptions`] — see the note above this overload group.
     pub fn sensor_options(&self, options: SensorOptions<'_>) -> Result<Arc<Sensor>, Error> {
         let SensorOptions { name, config, inactive_sensor_expiration_time_seconds, recording_level, parents } = options;
-        // Java's double-checked locking (`Metrics.java:416-431`): a lock-free
+        // Java's double-checked locking (`Metrics.java:410-429`): a lock-free
         // (here: briefly locked) fast path, then ONE critical section that
         // re-checks, creates, inserts and registers the children, so two
         // concurrent callers for the same name always get the same sensor and
@@ -1695,7 +1695,7 @@ mod tests {
     }
 
     /// Rust-only regression for the double-checked locking in
-    /// `Metrics.sensor(...)` (`Metrics.java:416-431`): concurrent creators of
+    /// `Metrics.sensor(...)` (`Metrics.java:410-429`): concurrent creators of
     /// the same sensor name through one shared `Metrics` must all get the SAME
     /// sensor, the registry must hold it, and the parent's children list must
     /// hold it exactly once. Before the fix the create-and-insert ran unlocked,

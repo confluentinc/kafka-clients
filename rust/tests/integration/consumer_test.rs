@@ -44,7 +44,8 @@
 //! 1 isolated controller), stopping the partition leader with
 //! `KafkaCluster::shutdown_broker`.
 //!
-//! `ConsumerIntegrationTest.testRackAwareAssignment` (line 263, added in 4.4)
+//! `ConsumerIntegrationTest.testRackAwareAssignment` (line 263; added in 4.1.0 by
+//! `949617b0b2`, changed in 4.4 by `90a4c93979`)
 //! is NOT translated: it configures the broker with
 //! `group.consumer.assignors=org.apache.kafka.clients.consumer.RackAwareTestAssignor`,
 //! a Java test class on the Java test cluster's classpath that the Docker

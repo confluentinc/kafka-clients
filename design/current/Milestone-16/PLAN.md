@@ -2881,6 +2881,11 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 - **Classifications the phases changed** (the planning column is kept as it was):
   - `b69c07c816`: Broker/O → Consumer/P, partial (Phase 10; Phase 1 review, COMMENTS.91 Q2). Master's
     `a4b3311e` had already closed the stream-sizing OOM.
+  - `c3a830f8d2` (KAFKA-20585): Share/O → Consumer/P. The commit also moves
+    `AbstractFetch.handleFetchSuccess`'s `recordLatency` before both early returns (review fix round,
+    COMMENTS.114 C1).
+  - `282eef9d05`: N → P. The Rust `Metrics::sensor_options` lacked Java's double-checked critical
+    section, a pre-existing race (review fix round, COMMENTS.114 C2).
   - `28de22de34` (KAFKA-20253): planned for Phase 9, ported in Phase 3, which needed it for KAFKA-21010.
     `01f50af8b8` is a different KAFKA-20253 commit, the classic heartbeat thread, and stays out of scope.
   - `d1c0bd82c0` (KAFKA-14648 2/2) touches only `ShareConsumerImpl`: Share, out of scope (Phase 2
@@ -3109,12 +3114,12 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 
 | Disposition | Count | Notes |
 |---|---|---|
-| Ported | 58 | 55 planned P, minus `123ee9e45d` (N/A), plus the four D2 moves; `b69c07c816` partial |
+| Ported | 60 | 57 planned P (including the review fix round's `c3a830f8d2` and `282eef9d05` reclassifications), minus `123ee9e45d` (N/A), plus the four D2 moves; `b69c07c816` partial |
 | Test-only ported | 9 | 13 planned T, minus four CLASSIC / KIP-714-only rows |
 | Reviewed, not applicable | 5 | `123ee9e45d` (telemetry); `159d696005`, `16e976ac8e`, `c75e10d229`, `1a46339e90` |
 | Doc/log | 21 | 9 synced in P13 (`d0fc40c2`), 4 already applied in P0 / P4 / P6 / P10, 8 skipped with a reason |
-| No-op | 35 | 37 planned N, minus the four D2 moves, plus the two testFixtures-only commits |
-| Out of scope | 55 | Streams 24, Broker 11, Share 11, Classic 5, Common 2, Admin 1, Security 1 (`b69c07c816`'s broker half is a skip inside its Ported row) |
+| No-op | 34 | 36 planned N, minus the four D2 moves, plus the two testFixtures-only commits |
+| Out of scope | 54 | Streams 24, Broker 11, Share 10, Classic 5, Common 2, Admin 1, Security 1 (`b69c07c816`'s broker half is a skip inside its Ported row) |
 | Reverted in range | 6 | KAFKA-20385 / KAFKA-20684 (5); the 4.4 cherry-pick of the 2PC revert M13 had already applied (1) |
 | Already in 4.3.1 | 2 | KAFKA-20426, KAFKA-20428 (M13); plus `6be48c6e54` outside the 191 |
 | **Total** | **191** | **Gaps: none.** Plus `6be48c6e54`, D3 and the two master merges. |
