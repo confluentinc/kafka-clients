@@ -45,10 +45,14 @@ pub(crate) fn box_describe_classic_groups_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeClassicGroupsResult_t,
 ) -> &'a ResultHandle<DescribeClassicGroupsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeClassicGroupsResult_t` is built by
+    // `box_result::<DescribeClassicGroupsResult, _>` (in `box_describe_classic_groups_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -78,6 +82,8 @@ fn box_descriptions(descriptions: HashMap<String, ClassicGroupDescription>) -> *
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_described_groups(
     self_: *const kafka_admin_DescribeClassicGroupsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let groups = h.result.described_groups();
     h.ctx.string_keyed_future_map(groups.iter(), |ctx, future| {
@@ -109,6 +115,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_described_group
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
     self_: *const kafka_admin_DescribeClassicGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `box_descriptions` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
@@ -127,11 +135,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
     self_: *mut kafka_admin_DescribeClassicGroupsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeClassicGroupsResult_t` is built by
+    // `box_result::<DescribeClassicGroupsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DescribeClassicGroupsResult, _>(self_) }
 }

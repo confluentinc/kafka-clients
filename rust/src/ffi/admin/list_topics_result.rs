@@ -58,7 +58,15 @@ pub(crate) fn box_list_topics_result(result: ListTopicsResult, ctx: &FutureCtx) 
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_ListTopicsResult_t) -> &'a ResultHandle<ListTopicsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_ListTopicsResult_t` is built by `box_result::<ListTopicsResult, _>`
+    // (in `box_list_topics_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -75,6 +83,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListTopicsResult_t) -> &'a Result
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `listings_map` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
@@ -97,6 +107,8 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
     // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
@@ -116,6 +128,8 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `sorted_string_list` makes through
     // `box_string_list`, and the handle holds only owned data and no thread-bound state, so it may
@@ -134,9 +148,14 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(self_: *mut kafka_admin_ListTopicsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_ListTopicsResult_t` is built by `box_result::<ListTopicsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<ListTopicsResult, _>(self_) }
 }

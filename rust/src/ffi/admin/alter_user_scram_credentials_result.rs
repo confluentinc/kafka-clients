@@ -47,10 +47,14 @@ pub(crate) fn box_alter_user_scram_credentials_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> &'a ResultHandle<AlterUserScramCredentialsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_AlterUserScramCredentialsResult_t` is built by
+    // `box_result::<AlterUserScramCredentialsResult, _>` (in
+    // `box_alter_user_scram_credentials_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -63,13 +67,19 @@ unsafe fn handle<'a>(
 ///
 /// `future` must be a valid future handle.
 unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> KafkaFuture<()> {
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, as
+    // `kafka_common_KafkaFuture_is_done` requires; the borrow lasts for this call.
     if unsafe { kafka_common_KafkaFuture_is_done(future) } == 0 {
         return KafkaFuture::completed_future(Err(Error::local_illegal_argument(
             "The futures passed to AlterUserScramCredentialsResult must already be complete",
         )));
     }
     let mut value: *mut c_void = ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut value`
+    // points at a local, so it is a valid pointer, as `kafka_common_KafkaFuture_get` requires.
     let error = unsafe { kafka_common_KafkaFuture_get(future, &mut value) };
+    // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
+    // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
     KafkaFuture::completed_future(unsafe { take_error(error) }.map_or(Ok(()), Err))
 }
 
@@ -85,16 +95,23 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid map whose keys are NUL-terminated
-/// strings and whose values are future handles.
+/// `futures` must be null or a valid map whose keys are valid
+/// NUL-terminated strings and whose values are valid future handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
     futures: *const kafka_Map_t,
 ) -> *mut kafka_admin_AlterUserScramCredentialsResult_t {
+    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
+    // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
+    // the same time. That is what `map_entries` requires.
     let futures: HashMap<String, KafkaFuture<()>> = unsafe { map_entries(futures) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, the key `k` is a NUL-terminated string, as
+            // `c_str_to_string` requires, and the value `v` a valid future handle, as
+            // `resolved_void_future` requires; the caller keeps both alive for this call.
             (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
                 resolved_void_future(v as *const kafka_common_KafkaFuture_t)
             })
@@ -117,6 +134,8 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_values(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.string_keyed_future_map(h.result.values().iter(), FutureCtx::void_future)
 }
@@ -133,6 +152,8 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_values(
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -142,11 +163,16 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
     self_: *mut kafka_admin_AlterUserScramCredentialsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_AlterUserScramCredentialsResult_t` is built by
+    // `box_result::<AlterUserScramCredentialsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<AlterUserScramCredentialsResult, _>(self_) }
 }

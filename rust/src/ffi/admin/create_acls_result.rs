@@ -43,8 +43,11 @@ pub(crate) fn box_create_acls_result(result: CreateAclsResult, ctx: &FutureCtx) 
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_CreateAclsResult_t) -> &'a ResultHandle<CreateAclsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_CreateAclsResult_t` is built by `box_result::<CreateAclsResult, _>`
+    // (in `box_create_acls_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -52,8 +55,10 @@ unsafe fn handle<'a>(self_: *const kafka_admin_CreateAclsResult_t) -> &'a Result
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_acl_AclBinding_t *`.
+/// `element` must be an owned binding handle not yet destroyed.
 unsafe fn destroy_acl_binding_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned binding handle not yet
+    // destroyed, as `kafka_common_acl_AclBinding_destroy` requires.
     unsafe { kafka_common_acl_AclBinding_destroy(element as *mut kafka_common_acl_AclBinding_t) }
 }
 
@@ -61,8 +66,10 @@ unsafe fn destroy_acl_binding_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must be valid `kafka_common_acl_AclBinding_t *`.
+/// `a` and `b` must be valid ACL-binding handles, alive for this call.
 unsafe fn acl_binding_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid ACL-binding handles, alive for
+    // this call, as `acl_binding_ref` requires; both borrows end with the comparison.
     unsafe {
         acl_binding_ref(a as *const kafka_common_acl_AclBinding_t)
             == acl_binding_ref(b as *const kafka_common_acl_AclBinding_t)
@@ -83,6 +90,8 @@ unsafe fn acl_binding_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
     self_: *const kafka_admin_CreateAclsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let mut entries: Vec<(&AclBinding, &KafkaFuture<()>)> = h.result.values().iter().collect();
     entries.sort_by_cached_key(|(binding, _)| binding.to_string());
@@ -107,6 +116,8 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
     self_: *const kafka_admin_CreateAclsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -116,9 +127,14 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(self_: *mut kafka_admin_CreateAclsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_CreateAclsResult_t` is built by `box_result::<CreateAclsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<CreateAclsResult, _>(self_) }
 }

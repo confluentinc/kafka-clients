@@ -47,10 +47,14 @@ pub(crate) fn box_alter_replica_log_dirs_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> &'a ResultHandle<AlterReplicaLogDirsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_AlterReplicaLogDirsResult_t` is built by
+    // `box_result::<AlterReplicaLogDirsResult, _>` (in `box_alter_replica_log_dirs_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -69,8 +73,11 @@ fn box_replica_key(replica: &TopicPartitionReplica) -> *mut c_void {
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_TopicPartitionReplica_t *`.
+/// `element` must be an owned topic-partition-replica handle not yet
+/// destroyed.
 unsafe fn destroy_replica_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition-replica handle
+    // not yet destroyed, as `kafka_common_TopicPartitionReplica_destroy` requires.
     unsafe { kafka_common_TopicPartitionReplica_destroy(element as *mut kafka_common_TopicPartitionReplica_t) }
 }
 
@@ -79,10 +86,16 @@ unsafe fn destroy_replica_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must be valid `kafka_common_TopicPartitionReplica_t *`.
+/// `a` and `b` must be valid topic-partition-replica handles, alive for this
+/// call.
 unsafe fn replica_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     let a = a as *const kafka_common_TopicPartitionReplica_t;
     let b = b as *const kafka_common_TopicPartitionReplica_t;
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid topic-partition-replica
+    // handles, alive for this call, as the three getters require.
+    // `kafka_common_TopicPartitionReplica_topic` returns the handle's NUL-terminated topic, valid
+    // until the handle is destroyed, so both `CStr` borrows, which end with the comparison, are
+    // valid.
     unsafe {
         kafka_common_TopicPartitionReplica_partition(a) == kafka_common_TopicPartitionReplica_partition(b)
             && kafka_common_TopicPartitionReplica_broker_id(a) == kafka_common_TopicPartitionReplica_broker_id(b)
@@ -106,6 +119,8 @@ unsafe fn replica_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let mut entries: Vec<(&TopicPartitionReplica, &KafkaFuture<()>)> = h.result.values().iter().collect();
     entries.sort_by(|a, b| {
@@ -132,6 +147,8 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -141,11 +158,16 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
     self_: *mut kafka_admin_AlterReplicaLogDirsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_AlterReplicaLogDirsResult_t` is built by
+    // `box_result::<AlterReplicaLogDirsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<AlterReplicaLogDirsResult, _>(self_) }
 }

@@ -49,8 +49,12 @@ pub(crate) fn box_describe_configs_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeConfigsResult_t) -> &'a ResultHandle<DescribeConfigsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeConfigsResult_t` is built by
+    // `box_result::<DescribeConfigsResult, _>` (in `box_describe_configs_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -58,8 +62,10 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeConfigsResult_t) -> &'a R
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_config_ConfigResource_t *`.
+/// `element` must be an owned config-resource handle not yet destroyed.
 unsafe fn destroy_config_resource_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned config-resource handle not yet
+    // destroyed, as `kafka_common_config_ConfigResource_destroy` requires.
     unsafe { kafka_common_config_ConfigResource_destroy(element as *mut kafka_common_config_ConfigResource_t) }
 }
 
@@ -67,8 +73,10 @@ unsafe fn destroy_config_resource_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must be valid `kafka_common_config_ConfigResource_t *`.
+/// `a` and `b` must be valid config-resource handles, alive for this call.
 unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid config-resource handles, alive
+    // for this call, as `config_resource_ref` requires; both borrows end with the comparison.
     unsafe {
         config_resource_ref(a as *const kafka_common_config_ConfigResource_t)
             == config_resource_ref(b as *const kafka_common_config_ConfigResource_t)
@@ -108,6 +116,8 @@ fn box_configs(configs: HashMap<ConfigResource, Config>) -> *mut kafka_Map_t {
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
     self_: *const kafka_admin_DescribeConfigsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let mut entries: Vec<(&ConfigResource, &KafkaFuture<Config>)> = h.result.values().iter().collect();
     entries.sort_by_cached_key(|(resource, _)| resource.to_string());
@@ -139,6 +149,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
     self_: *const kafka_admin_DescribeConfigsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `box_configs` makes through `box_map`,
     // and the handle holds only owned data and no thread-bound state, so it may be freed from any
@@ -157,9 +169,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(self_: *mut kafka_admin_DescribeConfigsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeConfigsResult_t` is built by `box_result::<DescribeConfigsResult, _>`,
+    // as `destroy_result` requires.
     unsafe { destroy_result::<DescribeConfigsResult, _>(self_) }
 }

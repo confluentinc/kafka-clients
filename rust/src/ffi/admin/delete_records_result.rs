@@ -46,8 +46,12 @@ pub(crate) fn box_delete_records_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DeleteRecordsResult_t) -> &'a ResultHandle<DeleteRecordsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DeleteRecordsResult_t` is built by
+    // `box_result::<DeleteRecordsResult, _>` (in `box_delete_records_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -55,8 +59,10 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DeleteRecordsResult_t) -> &'a Res
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_TopicPartition_t *`.
+/// `element` must be an owned topic-partition handle not yet destroyed.
 unsafe fn destroy_topic_partition_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition handle not yet
+    // destroyed, as `kafka_common_TopicPartition_destroy` requires.
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
@@ -75,6 +81,8 @@ unsafe fn destroy_topic_partition_element(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
     self_: *const kafka_admin_DeleteRecordsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let mut entries: Vec<(&TopicPartition, &KafkaFuture<DeletedRecords>)> = h.result.low_watermarks().iter().collect();
     entries.sort_by(|a, b| (a.0.topic(), a.0.partition()).cmp(&(b.0.topic(), b.0.partition())));
@@ -111,6 +119,8 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
     self_: *const kafka_admin_DeleteRecordsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -120,9 +130,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(self_: *mut kafka_admin_DeleteRecordsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DeleteRecordsResult_t` is built by `box_result::<DeleteRecordsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<DeleteRecordsResult, _>(self_) }
 }

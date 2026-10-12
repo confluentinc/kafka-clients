@@ -39,7 +39,16 @@ pub(crate) fn box_fence_producers_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a ResultHandle<FenceProducersResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_FenceProducersResult_t` is built by
+    // `box_result::<FenceProducersResult, _>` (in `box_fence_producers_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -56,6 +65,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a Re
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
     self_: *const kafka_admin_FenceProducersResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let fenced = h.result.fenced_producers();
     h.ctx.string_keyed_future_map(fenced.iter(), |ctx, f| ctx.void_future(f))
@@ -78,8 +89,14 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
     transactional_id: *const c_char,
     out_producer_id: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
+    // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // SAFETY: Per this function's `# Safety`, `out_producer_id` is a valid slot, as `out_slot`
+    // requires.
     unsafe {
         out_slot(h.result.producer_id(&transactional_id), out_producer_id, |f| {
             h.ctx.value_future(&f)
@@ -104,8 +121,14 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
     transactional_id: *const c_char,
     out_epoch_id: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
+    // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // SAFETY: Per this function's `# Safety`, `out_epoch_id` is a valid slot, as `out_slot`
+    // requires.
     unsafe { out_slot(h.result.epoch_id(&transactional_id), out_epoch_id, |f| h.ctx.value_future(&f)) }
 }
 
@@ -121,6 +144,8 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
     self_: *const kafka_admin_FenceProducersResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -130,9 +155,14 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(self_: *mut kafka_admin_FenceProducersResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_FenceProducersResult_t` is built by `box_result::<FenceProducersResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<FenceProducersResult, _>(self_) }
 }

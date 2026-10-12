@@ -44,13 +44,23 @@ struct Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
+        // SAFETY: `delegation_tokens` is the owned future handle
+        // `box_describe_delegation_token_result` built with `handle_future`. The accessor only
+        // lends it out, and `Held` is dropped once, with the result, so the handle is not yet
+        // destroyed, as `kafka_common_KafkaFuture_destroy` requires, and is destroyed exactly here.
         unsafe { kafka_common_KafkaFuture_destroy(self.delegation_tokens) }
     }
 }
 
 /// Frees a `kafka_common_security_token_delegation_DelegationToken_t *`
 /// element of an owned list.
+///
+/// # Safety
+///
+/// `element` must be an owned delegation-token handle not yet destroyed.
 unsafe fn destroy_delegation_token_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned delegation-token handle not yet
+    // destroyed, as `kafka_common_security_token_delegation_DelegationToken_destroy` requires.
     unsafe {
         kafka_common_security_token_delegation_DelegationToken_destroy(
             element as *mut kafka_common_security_token_delegation_DelegationToken_t,
@@ -79,7 +89,15 @@ pub(crate) fn box_describe_delegation_token_result(
     box_result(Held { delegation_tokens }, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeDelegationTokenResult_t) -> &'a ResultHandle<Held> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeDelegationTokenResult_t` is built by `box_result::<Held, _>`,
+    // as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -97,6 +115,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeDelegationTokenResult_t) 
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_tokens(
     self_: *const kafka_admin_DescribeDelegationTokenResult_t,
 ) -> *const kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     unsafe { handle(self_) }.result.delegation_tokens
 }
 
@@ -105,11 +125,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_to
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
     self_: *mut kafka_admin_DescribeDelegationTokenResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeDelegationTokenResult_t` is built by `box_result::<Held, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<Held, _>(self_) }
 }

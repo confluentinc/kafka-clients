@@ -63,8 +63,10 @@ impl Drop for DescribeClientQuotasResultInner {
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_quota_ClientQuotaEntity_t *`.
+/// `element` must be an owned entity handle not yet destroyed.
 unsafe fn destroy_client_quota_entity_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned entity handle not yet
+    // destroyed, as `kafka_common_quota_ClientQuotaEntity_destroy` requires.
     unsafe { kafka_common_quota_ClientQuotaEntity_destroy(element as *mut kafka_common_quota_ClientQuotaEntity_t) }
 }
 
@@ -72,8 +74,12 @@ unsafe fn destroy_client_quota_entity_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must be valid `kafka_common_quota_ClientQuotaEntity_t *`.
+/// `a` and `b` must be valid client-quota-entity handles, alive for this
+/// call.
 unsafe fn client_quota_entity_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid client-quota-entity handles,
+    // alive for this call, as `client_quota_entity_ref` requires; both borrows end with the
+    // comparison.
     unsafe {
         client_quota_entity_ref(a as *const kafka_common_quota_ClientQuotaEntity_t)
             == client_quota_entity_ref(b as *const kafka_common_quota_ClientQuotaEntity_t)
@@ -121,16 +127,29 @@ fn box_entities(entities: Entities) -> *mut kafka_Map_t {
 ///
 /// # Safety
 ///
-/// `map` must be null or a map of client-quota-entity handles to maps of
-/// NUL-terminated strings to `double *`.
+/// `map` must be null or a valid map handle, alive and not mutated for this
+/// call, whose keys are valid client-quota-entity handles and whose values
+/// are null or valid map handles, likewise alive and not mutated, of valid
+/// NUL-terminated strings to pointers to readable, aligned `double`s.
 unsafe fn entities_of(map: *const kafka_Map_t) -> Entities {
+    // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and not
+    // mutated for this call, as `map_entries` requires; the borrow of its entries ends with the
+    // call.
     unsafe { map_entries(map) }
         .iter()
         .map(|&(entity, quotas)| {
+            // SAFETY: Per this function's `# Safety`, the key `entity` is a valid
+            // client-quota-entity handle, alive for this call, as `client_quota_entity_ref`
+            // requires; the borrow ends with the `clone` below.
             let entity = unsafe { client_quota_entity_ref(entity as *const kafka_common_quota_ClientQuotaEntity_t) };
+            // SAFETY: Per this function's `# Safety`, the value `quotas` is null or a valid map
+            // handle, alive and not mutated for this call, as `map_entries` requires.
             let quotas = unsafe { map_entries(quotas as *const kafka_Map_t) }
                 .iter()
                 .map(|&(name, value)| {
+                    // SAFETY: Per this function's `# Safety`, the inner key `name` is a valid
+                    // NUL-terminated string, as `c_str_to_string` requires, and the inner value
+                    // `value` points at a readable, aligned `double`, which the read copies.
                     (unsafe { c_str_to_string(name as *const c_char) }, unsafe {
                         *(value as *const f64)
                     })
@@ -163,10 +182,13 @@ pub(crate) fn box_describe_client_quotas_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> &'a ResultHandle<DescribeClientQuotasResultInner> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeClientQuotasResult_t` is built by
+    // `box_result::<DescribeClientQuotasResultInner, _>`, as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -183,21 +205,34 @@ unsafe fn handle<'a>(
 /// # Safety
 ///
 /// `entities` must be a valid future handle whose value, when it has one,
-/// is null or a map of the documented shape.
+/// is null or a valid map of the documented shape: valid
+/// client-quota-entity handles to null or valid maps of valid NUL-terminated
+/// strings to pointers to readable, aligned `double`s.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
     entities: *const kafka_common_KafkaFuture_t,
 ) -> *mut kafka_admin_DescribeClientQuotasResult_t {
+    // SAFETY: Per this function's `# Safety`, `entities` is a valid future handle, as
+    // `kafka_common_KafkaFuture_is_done` requires; the borrow lasts for this call.
     let result: Result<Entities, Error> = if unsafe { kafka_common_KafkaFuture_is_done(entities) } == 0 {
         Err(Error::local_illegal_argument(
             "The future passed to DescribeClientQuotasResult must already be complete",
         ))
     } else {
         let mut value: *mut c_void = ptr::null_mut();
+        // SAFETY: Per this function's `# Safety`, `entities` is a valid future handle, and
+        // `&mut value` points at a local, so it is a valid pointer, as
+        // `kafka_common_KafkaFuture_get` requires.
         let error = unsafe { kafka_common_KafkaFuture_get(entities, &mut value) };
+        // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
+        // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
         match unsafe { take_error(error) } {
             Some(error) => Err(error),
+            // SAFETY: `get` succeeded, so `value` is the future's value, borrowed from the future,
+            // which the caller keeps alive for this call. Per this function's `# Safety` it is null
+            // or a valid map of the documented shape, and nothing mutates it during the call, which
+            // is what `entities_of` requires.
             None => Ok(unsafe { entities_of(value as *const kafka_Map_t) }),
         }
     };
@@ -223,6 +258,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
     self_: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> *const kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     unsafe { handle(self_) }.result.entities
 }
 
@@ -230,11 +267,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
     self_: *mut kafka_admin_DescribeClientQuotasResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeClientQuotasResult_t` is built by
+    // `box_result::<DescribeClientQuotasResultInner, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DescribeClientQuotasResultInner, _>(self_) }
 }

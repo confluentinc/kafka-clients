@@ -58,10 +58,17 @@ pub(crate) fn box_partition_producer_state(
 ///
 /// # Safety
 ///
-/// `state` must be a live partition-producer-state handle.
+/// `state` must be a live partition-producer-state handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn partition_producer_state_ref<'a>(
     state: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
 ) -> &'a PartitionProducerState {
+    // SAFETY: Per this function's `# Safety`, `state` is a live partition-producer-state handle
+    // kept alive for `'a`. Every `kafka_admin_DescribeProducersResult_PartitionProducerState_t` is
+    // the `Box::into_raw` of a `Box<PartitionProducerState>` (`box_partition_producer_state`, the
+    // only place one is made, for an owned handle or a value a map or future owns), so it points at
+    // a live `PartitionProducerState`. Nothing takes a `&mut` to it: only the destroy takes the box
+    // back, and its `# Safety` excludes any other use at the same time or afterwards.
     unsafe { &*(state as *const PartitionProducerState) }
 }
 
@@ -70,8 +77,13 @@ pub(crate) unsafe fn partition_producer_state_ref<'a>(
 ///
 /// # Safety
 ///
-/// `element` must be an owned partition-producer-state handle.
+/// `element` must be an owned partition-producer-state handle not yet
+/// destroyed, that no other call uses at the same time; it is not used
+/// afterwards.
 pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned partition-producer-state handle
+    // not yet destroyed, that no other call uses at the same time and that is not used afterwards,
+    // as `kafka_admin_DescribeProducersResult_PartitionProducerState_destroy` requires.
     unsafe {
         kafka_admin_DescribeProducersResult_PartitionProducerState_destroy(
             element as *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t,
@@ -86,14 +98,20 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
 ///
 /// # Safety
 ///
-/// `active_producers` must be null or a valid list of producer-state handles.
+/// `active_producers` must be null or a valid list handle, not mutated
+/// during the call, whose elements are live producer-state handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_new(
     active_producers: *const kafka_List_t,
 ) -> *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t {
+    // SAFETY: Per this function's `# Safety`, `active_producers` is null or a valid list handle,
+    // which the caller keeps alive for this call and nothing mutates meanwhile, as `list_elements`
+    // requires; the borrow ends with the call.
     let active_producers = unsafe { list_elements(active_producers) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, every element `p` is a live producer-state
+        // handle, as `producer_state_ref` requires; the borrow ends with the `clone`.
         .map(|&p| unsafe { producer_state_ref(p as *const kafka_admin_ProducerState_t) }.clone())
         .collect();
     box_partition_producer_state(PartitionProducerState::new(active_producers))
@@ -111,6 +129,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_active_producers(
     self_: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live partition-producer-state handle,
+    // kept alive for this call, as `partition_producer_state_ref` requires; the borrow ends once
+    // the copies are made.
     let state = unsafe { partition_producer_state_ref(self_) };
     let elements = state
         .active_producers()
@@ -130,6 +151,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_to_string(
     self_: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live partition-producer-state handle,
+    // kept alive for this call, as `partition_producer_state_ref` requires; the borrow ends with
+    // `to_string`.
     into_c_string(&unsafe { partition_producer_state_ref(self_) }.to_string())
 }
 
@@ -137,13 +161,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_destroy(
     self_: *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every such handle is the `Box::into_raw` of a `Box<PartitionProducerState>`
+        // (`box_partition_producer_state`), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut PartitionProducerState) });
     }
 }
@@ -160,7 +189,13 @@ pub struct kafka_admin_DescribeProducersResult_t {
 }
 
 /// Frees a `kafka_common_TopicPartition_t *` key of an owned map.
+///
+/// # Safety
+///
+/// `element` must be an owned topic-partition handle not yet destroyed.
 unsafe fn destroy_topic_partition_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition handle not yet
+    // destroyed, as `kafka_common_TopicPartition_destroy` requires.
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
@@ -196,7 +231,16 @@ pub(crate) fn box_describe_producers_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeProducersResult_t) -> &'a ResultHandle<DescribeProducersResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeProducersResult_t` is built by
+    // `box_result::<DescribeProducersResult, _>` (in `box_describe_producers_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -219,7 +263,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
     partition: *const kafka_common_TopicPartition_t,
     out_partition_result: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; the caller keeps it alive for this call, which the borrow
+    // does not outlive.
     let partition = unsafe { topic_partition_ref(partition) };
     // SAFETY: Per this function's `# Safety`, `out_partition_result` is a valid slot, as `out_slot`
     // requires. For `handle_future`, `destroy_partition_producer_state_element` frees exactly the
@@ -251,6 +300,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
     self_: *const kafka_admin_DescribeProducersResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `states_map` makes through `box_map`, and
     // the handle holds only owned data and no thread-bound state, so it may be freed from any
@@ -263,11 +314,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
     self_: *mut kafka_admin_DescribeProducersResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeProducersResult_t` is built by
+    // `box_result::<DescribeProducersResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DescribeProducersResult, _>(self_) }
 }

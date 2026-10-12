@@ -44,8 +44,12 @@ pub(crate) fn box_describe_cluster_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeClusterResult_t) -> &'a ResultHandle<DescribeClusterResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeClusterResult_t` is built by
+    // `box_result::<DescribeClusterResult, _>` (in `box_describe_cluster_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -53,8 +57,10 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeClusterResult_t) -> &'a R
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_Node_t *`.
+/// `element` must be an owned node handle not yet destroyed.
 unsafe fn destroy_node_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned node handle not yet destroyed,
+    // as `kafka_common_Node_destroy` requires.
     unsafe { kafka_common_Node_destroy(element as *mut kafka_common_Node_t) }
 }
 
@@ -70,6 +76,8 @@ unsafe fn destroy_node_element(element: *mut c_void) {
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `node_list` makes through `box_list`,
     // and the handle holds only owned data and no thread-bound state, so it may be freed from any
@@ -96,6 +104,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_node_element` frees exactly the handle `box_node` makes, and the handle
     // holds only owned data and no thread-bound state, so it may be freed from any thread and read
@@ -121,6 +131,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.string_future(&h.result.cluster_id())
 }
@@ -140,6 +152,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes (a view list: its
     // elements are static singletons it does not free), and the handle holds only owned data and no
@@ -167,9 +181,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(self_: *mut kafka_admin_DescribeClusterResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeClusterResult_t` is built by `box_result::<DescribeClusterResult, _>`,
+    // as `destroy_result` requires.
     unsafe { destroy_result::<DescribeClusterResult, _>(self_) }
 }

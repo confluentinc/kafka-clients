@@ -34,7 +34,13 @@ pub struct kafka_admin_ListConfigResourcesResult_t {
 }
 
 /// Frees a `kafka_common_config_ConfigResource_t *` element of an owned list.
+///
+/// # Safety
+///
+/// `element` must be an owned config-resource handle not yet destroyed.
 unsafe fn destroy_config_resource_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned config-resource handle not yet
+    // destroyed, as `kafka_common_config_ConfigResource_destroy` requires.
     unsafe { kafka_common_config_ConfigResource_destroy(element as *mut kafka_common_config_ConfigResource_t) }
 }
 
@@ -46,9 +52,18 @@ pub(crate) fn box_list_config_resources_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_ListConfigResourcesResult_t,
 ) -> &'a ResultHandle<ListConfigResourcesResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_ListConfigResourcesResult_t` is built by
+    // `box_result::<ListConfigResourcesResult, _>` (in `box_list_config_resources_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -65,6 +80,8 @@ unsafe fn handle<'a>(
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_all(
     self_: *const kafka_admin_ListConfigResourcesResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes, and the handle holds
     // only owned data and no thread-bound state, so it may be freed from any thread and read from
@@ -86,11 +103,16 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
     self_: *mut kafka_admin_ListConfigResourcesResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_ListConfigResourcesResult_t` is built by
+    // `box_result::<ListConfigResourcesResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<ListConfigResourcesResult, _>(self_) }
 }

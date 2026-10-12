@@ -34,7 +34,14 @@ pub struct kafka_admin_ListGroupsResult_t {
 }
 
 /// Frees a `kafka_common_Error_t *` element of an owned list.
+///
+/// # Safety
+///
+/// `element` must be an owned error handle built by `box_error` and not yet
+/// destroyed.
 unsafe fn destroy_error_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned error handle `box_error` built
+    // and not yet destroyed, as `kafka_common_Error_destroy` requires.
     unsafe { kafka_common_Error_destroy(element as *mut kafka_common_Error_t) }
 }
 
@@ -50,7 +57,15 @@ pub(crate) fn box_list_groups_result(result: ListGroupsResult, ctx: &FutureCtx) 
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_ListGroupsResult_t) -> &'a ResultHandle<ListGroupsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_ListGroupsResult_t` is built by `box_result::<ListGroupsResult, _>`
+    // (in `box_list_groups_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -67,6 +82,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListGroupsResult_t) -> &'a Result
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
     // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
@@ -87,6 +104,8 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
     // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
@@ -106,6 +125,8 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes, and the handle holds
     // only owned data and no thread-bound state, so it may be freed from any thread and read from
@@ -127,9 +148,14 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(self_: *mut kafka_admin_ListGroupsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_ListGroupsResult_t` is built by `box_result::<ListGroupsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<ListGroupsResult, _>(self_) }
 }

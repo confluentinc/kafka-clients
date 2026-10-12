@@ -38,7 +38,16 @@ pub(crate) fn box_describe_features_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeFeaturesResult_t) -> &'a ResultHandle<DescribeFeaturesResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeFeaturesResult_t` is built by
+    // `box_result::<DescribeFeaturesResult, _>` (in `box_describe_features_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -54,6 +63,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeFeaturesResult_t) -> &'a 
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
     self_: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_feature_metadata_element` frees exactly the handle `box_feature_metadata`
     // makes, and the handle holds only owned data and no thread-bound state, so it may be freed
@@ -72,9 +83,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(self_: *mut kafka_admin_DescribeFeaturesResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeFeaturesResult_t` is built by `box_result::<DescribeFeaturesResult, _>`,
+    // as `destroy_result` requires.
     unsafe { destroy_result::<DescribeFeaturesResult, _>(self_) }
 }

@@ -38,8 +38,12 @@ pub(crate) fn box_abort_transaction_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_AbortTransactionResult_t) -> &'a ResultHandle<AbortTransactionResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_AbortTransactionResult_t` is built by
+    // `box_result::<AbortTransactionResult, _>` (in `box_abort_transaction_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -55,6 +59,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_AbortTransactionResult_t) -> &'a 
 pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_all(
     self_: *const kafka_admin_AbortTransactionResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -64,9 +70,14 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_destroy(self_: *mut kafka_admin_AbortTransactionResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_AbortTransactionResult_t` is built by `box_result::<AbortTransactionResult, _>`,
+    // as `destroy_result` requires.
     unsafe { destroy_result::<AbortTransactionResult, _>(self_) }
 }

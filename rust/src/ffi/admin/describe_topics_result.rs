@@ -68,10 +68,17 @@ fn enum_of(result: &DescribeTopicsResult) -> kafka_admin_DescribeTopicsResult_e 
 }
 
 /// Compares two `kafka_common_Uuid_t *` keys by value, for `kafka_Map_get`.
+///
+/// # Safety
+///
+/// `a` and `b` must each be null or a valid uuid handle, alive for this
+/// call.
 unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
         return a == b;
     }
+    // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, valid
+    // uuid handles, alive for this call, as `uuid_of` requires.
     unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
 }
 
@@ -129,11 +136,24 @@ fn ids_map(map: HashMap<Uuid, TopicDescription>) -> *mut c_void {
 /// as a completed Rust future: `get` is called on it, so a future that is
 /// still pending blocks until it resolves, and a failed one becomes a
 /// future failed with the same error.
+///
+/// # Safety
+///
+/// `future` must be a valid future handle whose value, when it succeeds, is
+/// a live topic-description handle.
 unsafe fn resolved_description(future: *const kafka_common_KafkaFuture_t) -> KafkaFuture<TopicDescription> {
     let mut value: *mut c_void = std::ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`, `future` is a valid future handle, and `&mut value`
+    // points at a local, so it is a valid pointer, as `kafka_common_KafkaFuture_get` requires.
     let error = unsafe { kafka_common_KafkaFuture_get(future, &mut value) };
+    // SAFETY: `error` is null or the owned error handle `kafka_common_KafkaFuture_get` just
+    // returned, not yet destroyed, as `take_error` requires; nothing uses it afterwards.
     match unsafe { take_error(error) } {
         Some(error) => KafkaFuture::completed_future(Err(error)),
+        // SAFETY: `get` succeeded, so `value` is the future's value, borrowed from the future,
+        // which the caller keeps alive for this call. Per this function's `# Safety` it is a live
+        // topic-description handle, as `topic_description_ref` requires; the borrow ends with the
+        // `clone`.
         None => KafkaFuture::completed_future(Ok(unsafe {
             topic_description_ref(value as *const kafka_admin_TopicDescription_t)
         }
@@ -149,7 +169,16 @@ pub(crate) fn box_describe_topics_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeTopicsResult_t) -> &'a ResultHandle<DescribeTopicsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeTopicsResult_t` is built by
+    // `box_result::<DescribeTopicsResult, _>` (in `box_describe_topics_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -166,16 +195,25 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeTopicsResult_t) -> &'a Re
 ///
 /// # Safety
 ///
-/// `value` must be null or a valid map whose keys are uuid handles and whose
-/// values are future handles delivering topic-description handles.
+/// `value` must be null or a valid map whose keys are valid uuid handles and
+/// whose values are valid future handles delivering live topic-description
+/// handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_id(
     value: *const kafka_Map_t,
 ) -> *mut kafka_admin_DescribeTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
+    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
+    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
+    // same time. That is what `map_entries` requires.
     let futures: HashMap<Uuid, KafkaFuture<TopicDescription>> = unsafe { map_entries(value) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, the key `k` is a valid uuid handle, as
+            // `uuid_of` requires, and the value `v` a valid future handle delivering a
+            // topic-description handle, as `resolved_description` requires; the caller keeps both
+            // alive for this call.
             (unsafe { uuid_of(k as *const kafka_common_Uuid_t) }, unsafe {
                 resolved_description(v as *const kafka_common_KafkaFuture_t)
             })
@@ -192,16 +230,25 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_id(
 ///
 /// # Safety
 ///
-/// `value` must be null or a valid map whose keys are NUL-terminated strings
-/// and whose values are future handles delivering topic-description handles.
+/// `value` must be null or a valid map whose keys are valid NUL-terminated
+/// strings and whose values are valid future handles delivering live
+/// topic-description handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_name(
     value: *const kafka_Map_t,
 ) -> *mut kafka_admin_DescribeTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `value` is null or a valid map handle. The borrow of
+    // its entries ends with this call, while the caller keeps the map alive, and nothing mutates it
+    // meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at the
+    // same time. That is what `map_entries` requires.
     let futures: HashMap<String, KafkaFuture<TopicDescription>> = unsafe { map_entries(value) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, the key `k` is a valid NUL-terminated string,
+            // as `c_str_to_string` requires, and the value `v` a valid future handle delivering a
+            // topic-description handle, as `resolved_description` requires; the caller keeps both
+            // alive for this call.
             (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
                 resolved_description(v as *const kafka_common_KafkaFuture_t)
             })
@@ -224,6 +271,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_by_topic_name(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult__enum(
     self_: *const kafka_admin_DescribeTopicsResult_t,
 ) -> kafka_admin_DescribeTopicsResult_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     enum_of(&unsafe { handle(self_) }.result)
 }
 
@@ -242,6 +291,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult__enum(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
     self_: *const kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     match h.result.topic_id_values() {
         Some(map) => {
@@ -268,6 +319,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
     self_: *const kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     match h.result.topic_name_values() {
         Some(map) => h.ctx.string_keyed_future_map(map.iter(), description_future),
@@ -288,6 +341,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
     self_: *const kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     match h.result.all_topic_names() {
         // SAFETY: `destroy_map_element` frees exactly the map `names_map` makes through
@@ -313,6 +368,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
     self_: *const kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     match h.result.all_topic_ids() {
         // SAFETY: `destroy_map_element` frees exactly the map `ids_map` makes through `box_map`,
@@ -328,9 +385,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(self_: *mut kafka_admin_DescribeTopicsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeTopicsResult_t` is built by `box_result::<DescribeTopicsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<DescribeTopicsResult, _>(self_) }
 }

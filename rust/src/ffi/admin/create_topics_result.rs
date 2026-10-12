@@ -50,10 +50,17 @@ pub(crate) fn box_topic_metadata_and_config(
 ///
 /// # Safety
 ///
-/// `value` must be a valid topic-metadata-and-config handle.
+/// `value` must be a valid topic-metadata-and-config handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn topic_metadata_and_config_ref<'a>(
     value: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
 ) -> &'a TopicMetadataAndConfig {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid handle kept alive for `'a`. Every
+    // `kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t` is the `Box::into_raw` of a
+    // `Box<TopicMetadataAndConfig>` (`box_topic_metadata_and_config`, the only place one is made),
+    // so it points at a live `TopicMetadataAndConfig`. Nothing takes a `&mut` to it: only the
+    // destroy takes the box back, and its `# Safety` excludes any other use at the same time or
+    // afterwards.
     unsafe { &*(value as *const TopicMetadataAndConfig) }
 }
 
@@ -74,9 +81,13 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     config: *const kafka_admin_Config_t,
 ) -> *mut kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t {
     box_topic_metadata_and_config(TopicMetadataAndConfig::new(
+        // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
+        // requires; the uuid is copied out.
         unsafe { uuid_of(topic_id) },
         num_partitions,
         replication_factor,
+        // SAFETY: Per this function's `# Safety`, `config` is a valid config handle, as
+        // `config_ref` requires; the borrow ends with the `clone`.
         unsafe { config_ref(config) }.clone(),
     ))
 }
@@ -95,6 +106,9 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_with_error(
     error: *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t {
+    // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle not yet
+    // destroyed, as `take_error` requires; this call consumes it, and the doc tells the caller not
+    // to destroy it.
     let error = unsafe { take_error(error) }
         .unwrap_or_else(|| Error::local_illegal_argument("TopicMetadataAndConfig requires the error it stands for"));
     box_topic_metadata_and_config(TopicMetadataAndConfig::with_error(error))
@@ -113,6 +127,9 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
     out_topic_id: *mut *mut kafka_common_Uuid_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
+    // as `topic_metadata_and_config_ref` requires, and `out_topic_id` a valid slot, as `out_slot`
+    // requires.
     unsafe { out_slot(topic_metadata_and_config_ref(self_).topic_id(), out_topic_id, box_uuid) }
 }
 
@@ -128,6 +145,9 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
     out_num_partitions: *mut i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
+    // as `topic_metadata_and_config_ref` requires, and `out_num_partitions` a valid slot, as
+    // `out_slot` requires.
     unsafe { out_slot(topic_metadata_and_config_ref(self_).num_partitions(), out_num_partitions, |n| n) }
 }
 
@@ -145,6 +165,9 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_r
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
     out_replication_factor: *mut i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
+    // as `topic_metadata_and_config_ref` requires, and `out_replication_factor` a valid slot, as
+    // `out_slot` requires.
     unsafe {
         out_slot(
             topic_metadata_and_config_ref(self_).replication_factor(),
@@ -167,6 +190,9 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_c
     self_: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
     out_config: *mut *mut kafka_admin_Config_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
+    // as `topic_metadata_and_config_ref` requires, and `out_config` a valid slot, as `out_slot`
+    // requires.
     unsafe { out_slot(topic_metadata_and_config_ref(self_).config(), out_config, box_config) }
 }
 
@@ -174,13 +200,18 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_c
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy(
     self_: *mut kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards. Every such handle is the `Box::into_raw` of a `Box<TopicMetadataAndConfig>`
+        // (`box_topic_metadata_and_config`), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut TopicMetadataAndConfig) });
     }
 }
@@ -208,8 +239,12 @@ pub(crate) fn box_create_topics_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_CreateTopicsResult_t) -> &'a ResultHandle<CreateTopicsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_CreateTopicsResult_t` is built by
+    // `box_result::<CreateTopicsResult, _>` (in `box_create_topics_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -217,8 +252,10 @@ unsafe fn handle<'a>(self_: *const kafka_admin_CreateTopicsResult_t) -> &'a Resu
 ///
 /// # Safety
 ///
-/// `element` must be an owned `kafka_common_Uuid_t *`.
+/// `element` must be an owned uuid handle not yet destroyed.
 unsafe fn destroy_uuid_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned uuid handle not yet destroyed,
+    // as `kafka_common_Uuid_destroy` requires.
     unsafe { kafka_common_Uuid_destroy(element as *mut kafka_common_Uuid_t) }
 }
 
@@ -238,6 +275,8 @@ unsafe fn topic_future<T>(
 where
     T: Clone + Send + Sync + 'static,
 {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into a `String`.
     let topic = unsafe { c_str_to_string(topic) };
     if h.result.values().contains_key(&topic) {
         get(&h.result, &topic)
@@ -261,6 +300,8 @@ where
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
     self_: *const kafka_admin_CreateTopicsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let values = h.result.values();
     h.ctx.string_keyed_future_map(values.iter(), FutureCtx::void_future)
@@ -278,6 +319,8 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
     self_: *const kafka_admin_CreateTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -298,7 +341,11 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
     self_: *const kafka_admin_CreateTopicsResult_t,
     topic: *const c_char,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
+    // borrows the live result handle `self_`, as `topic_future` requires.
     let future = unsafe { topic_future(h, topic, CreateTopicsResult::config) };
     // SAFETY: `destroy_config_element` frees exactly the handle `box_config` makes, and the handle
     // holds only owned data and no thread-bound state, so it may be freed from any thread and read
@@ -325,7 +372,11 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
     self_: *const kafka_admin_CreateTopicsResult_t,
     topic: *const c_char,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
+    // borrows the live result handle `self_`, as `topic_future` requires.
     let future: KafkaFuture<Uuid> = unsafe { topic_future(h, topic, CreateTopicsResult::topic_id) };
     // SAFETY: `destroy_uuid_element` frees exactly the handle `box_uuid` makes, and the handle
     // holds only owned data and no thread-bound state, so it may be freed from any thread and read
@@ -352,8 +403,12 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
     self_: *const kafka_admin_CreateTopicsResult_t,
     topic: *const c_char,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx
+        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
+        // borrows the live result handle `self_`, as `topic_future` requires.
         .value_future(&unsafe { topic_future(h, topic, CreateTopicsResult::num_partitions) })
 }
 
@@ -373,8 +428,12 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
     self_: *const kafka_admin_CreateTopicsResult_t,
     topic: *const c_char,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx
+        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
+        // borrows the live result handle `self_`, as `topic_future` requires.
         .value_future(&unsafe { topic_future(h, topic, CreateTopicsResult::replication_factor) })
 }
 
@@ -383,9 +442,14 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(self_: *mut kafka_admin_CreateTopicsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_CreateTopicsResult_t` is built by `box_result::<CreateTopicsResult, _>`, as
+    // `destroy_result` requires.
     unsafe { destroy_result::<CreateTopicsResult, _>(self_) }
 }

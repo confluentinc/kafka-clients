@@ -57,9 +57,18 @@ pub(crate) fn box_describe_transactions_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
 ) -> &'a ResultHandle<DescribeTransactionsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeTransactionsResult_t` is built by
+    // `box_result::<DescribeTransactionsResult, _>` (in `box_describe_transactions_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -80,7 +89,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     transactional_id: *const c_char,
     out_description: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
+    // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
     // SAFETY: Per this function's `# Safety`, `out_description` is a valid slot, as `out_slot`
     // requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
@@ -110,6 +123,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `descriptions_map` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
@@ -122,11 +137,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
     self_: *mut kafka_admin_DescribeTransactionsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeTransactionsResult_t` is built by
+    // `box_result::<DescribeTransactionsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DescribeTransactionsResult, _>(self_) }
 }

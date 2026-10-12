@@ -35,9 +35,18 @@ pub(crate) fn box_terminate_transaction_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_TerminateTransactionResult_t,
 ) -> &'a ResultHandle<TerminateTransactionResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_TerminateTransactionResult_t` is built by
+    // `box_result::<TerminateTransactionResult, _>` (in `box_terminate_transaction_result`), as
+    // `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -53,6 +62,8 @@ unsafe fn handle<'a>(
 pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
     self_: *const kafka_admin_TerminateTransactionResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.result())
 }
@@ -62,11 +73,16 @@ pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_destroy(
     self_: *mut kafka_admin_TerminateTransactionResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_TerminateTransactionResult_t` is built by
+    // `box_result::<TerminateTransactionResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<TerminateTransactionResult, _>(self_) }
 }

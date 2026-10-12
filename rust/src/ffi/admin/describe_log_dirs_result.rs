@@ -40,10 +40,17 @@ fn box_i32(broker_id: &i32) -> *mut c_void {
 }
 
 /// Compares two `int32_t *` keys by value, for `kafka_Map_get`.
+///
+/// # Safety
+///
+/// `a` and `b` must each be null or point at a readable, aligned
+/// `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
         return a == b;
     }
+    // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, each
+    // points at a readable, aligned `int32_t`; the reads copy the two values.
     unsafe { *(a as *const i32) == *(b as *const i32) }
 }
 
@@ -79,7 +86,16 @@ pub(crate) fn box_describe_log_dirs_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(self_: *const kafka_admin_DescribeLogDirsResult_t) -> &'a ResultHandle<DescribeLogDirsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DescribeLogDirsResult_t` is built by
+    // `box_result::<DescribeLogDirsResult, _>` (in `box_describe_log_dirs_result`), as `result_ref`
+    // requires.
     unsafe { result_ref(self_) }
 }
 
@@ -98,6 +114,8 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeLogDirsResult_t) -> &'a R
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
     self_: *const kafka_admin_DescribeLogDirsResult_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     let sorted: BTreeMap<&i32, &KafkaFuture<HashMap<String, LogDirDescription>>> =
         h.result.descriptions().iter().collect();
@@ -125,6 +143,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
     self_: *const kafka_admin_DescribeLogDirsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `all_descriptions_map` makes through
     // `box_map`, and the handle holds only owned data and no thread-bound state, so it may be freed
@@ -140,9 +160,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(self_: *mut kafka_admin_DescribeLogDirsResult_t) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DescribeLogDirsResult_t` is built by `box_result::<DescribeLogDirsResult, _>`,
+    // as `destroy_result` requires.
     unsafe { destroy_result::<DescribeLogDirsResult, _>(self_) }
 }

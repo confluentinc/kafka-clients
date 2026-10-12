@@ -44,12 +44,24 @@ pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
 }
 
 /// Frees a `kafka_common_TopicPartition_t *` key of an owned map.
+///
+/// # Safety
+///
+/// `element` must be an owned topic-partition handle not yet destroyed.
 unsafe fn destroy_topic_partition_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition handle not yet
+    // destroyed, as `kafka_common_TopicPartition_destroy` requires.
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
 /// Frees a `kafka_consumer_OffsetAndMetadata_t *` value of an owned map.
+///
+/// # Safety
+///
+/// `element` must be an owned offset-and-metadata handle not yet destroyed.
 unsafe fn destroy_offset_and_metadata_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned offset-and-metadata handle not
+    // yet destroyed, as `kafka_consumer_OffsetAndMetadata_destroy` requires.
     unsafe { kafka_consumer_OffsetAndMetadata_destroy(element as *mut kafka_consumer_OffsetAndMetadata_t) }
 }
 
@@ -98,9 +110,18 @@ pub(crate) fn box_list_consumer_group_offsets_result(
     box_result(result, ctx)
 }
 
+/// The handle `self_` points at.
+///
+/// # Safety
+///
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) -> &'a ResultHandle<ListConsumerGroupOffsetsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_ListConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<ListConsumerGroupOffsetsResult, _>` (in
+    // `box_list_consumer_group_offsets_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -123,6 +144,8 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     out_partitions_to_offset_and_metadata: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: Per this function's `# Safety`, `out_partitions_to_offset_and_metadata` is a valid
     // slot, as `out_slot` requires. For `handle_future`, `destroy_map_element` frees exactly the
@@ -157,7 +180,11 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     group_id: *const c_char,
     out_partitions_to_offset_and_metadata_with_group_id: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into a `String` during the call.
     let group_id = unsafe { c_str_to_string(group_id) };
     // SAFETY: Per this function's `# Safety`, `out_partitions_to_offset_and_metadata_with_group_id`
     // is a valid slot, as `out_slot` requires. For `handle_future`, `destroy_map_element` frees
@@ -186,6 +213,8 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     // SAFETY: `destroy_map_element` frees exactly the map `all_map` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
@@ -198,11 +227,16 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     self_: *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_ListConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<ListConsumerGroupOffsetsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<ListConsumerGroupOffsetsResult, _>(self_) }
 }

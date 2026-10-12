@@ -40,10 +40,14 @@ pub(crate) fn box_delete_consumer_group_offsets_result(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) -> &'a ResultHandle<DeleteConsumerGroupOffsetsResult> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
+    // and every `kafka_admin_DeleteConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<DeleteConsumerGroupOffsetsResult, _>` (in
+    // `box_delete_consumer_group_offsets_result`), as `result_ref` requires.
     unsafe { result_ref(self_) }
 }
 
@@ -67,8 +71,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
     partition: *const kafka_common_TopicPartition_t,
     out_partition_result: *mut *mut kafka_common_KafkaFuture_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
+    // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+    // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
+    // which the caller keeps the handle alive.
     let result = h.result.partition_result(unsafe { topic_partition_ref(partition) });
+    // SAFETY: Per this function's `# Safety`, `out_partition_result` is a valid slot, as `out_slot`
+    // requires.
     unsafe { out_slot(result, out_partition_result, |future| h.ctx.void_future(&future)) }
 }
 
@@ -84,6 +95,8 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
     self_: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
+    // call, as `handle` requires.
     let h = unsafe { handle(self_) };
     h.ctx.void_future(&h.result.all())
 }
@@ -93,11 +106,16 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed.
+/// `self_` must be null or an owned result handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
     self_: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned result handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards; every
+    // `kafka_admin_DeleteConsumerGroupOffsetsResult_t` is built by
+    // `box_result::<DeleteConsumerGroupOffsetsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DeleteConsumerGroupOffsetsResult, _>(self_) }
 }
