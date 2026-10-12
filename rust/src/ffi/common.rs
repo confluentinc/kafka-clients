@@ -1739,8 +1739,10 @@ pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Erro
 
 /// Returns the error message as a null-terminated C string.
 ///
-/// The returned pointer is valid until [`kafka_common_Error_destroy`] is called on
-/// the same handle.
+/// The returned pointer is valid as long as `error` is: until
+/// [`kafka_common_Error_destroy`] is called on it or, for a borrowed handle
+/// (from [`kafka_common_Error_source`] or a payload or struct-field accessor),
+/// until its owner is destroyed by that owner's own `_destroy`.
 ///
 /// # Parameters
 ///
@@ -1766,7 +1768,8 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The returned `message_cstring.as_ptr()` points into that same `ErrorInner`, so, as
     // this function's rustdoc states, it stays valid while the handle does: until
-    // `kafka_common_Error_destroy` is called on it, or on its owner for a borrowed one.
+    // `kafka_common_Error_destroy` is called on it, or, for a borrowed one, until its owner
+    // is destroyed by that owner's own `_destroy`.
     unsafe { error_ref(error) }.message_cstring.as_ptr()
 }
 
