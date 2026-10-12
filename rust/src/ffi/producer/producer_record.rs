@@ -315,10 +315,12 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
 
 /// `ProducerRecord.timestamp()`: `-1` for `null`.
 ///
+/// A caught Rust panic returns -2, which is no record timestamp: Java's `ProducerRecord` rejects a negative one.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const kafka_producer_ProducerRecord_t) -> i64 {
     unsafe { producer_record_ref(self_) }.timestamp().unwrap_or(-1)
@@ -326,10 +328,12 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const k
 
 /// `ProducerRecord.partition()`: `-1` for `null`.
 ///
+/// A caught Rust panic returns -2, which is no partition: Java's `ProducerRecord` rejects a negative one.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const kafka_producer_ProducerRecord_t) -> i32 {
     unsafe { producer_record_ref(self_) }.partition().unwrap_or(-1)

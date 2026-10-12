@@ -60,7 +60,13 @@
 //!   (`kafka_consumer_ConsumerRecord_serialized_key_size`) included. An
 //!   integer whose Java domain holds that value but leaves out another one
 //!   returns the other instead, as its documentation states
-//!   (`kafka_admin_NewTopic_replication_factor` returns 0);
+//!   (`kafka_admin_NewTopic_replication_factor` returns 0). In particular an
+//!   integer accessor that maps Java's empty `Optional`, or `null`, to -1
+//!   returns -2 when its Java domain is that or a value >= 0
+//!   (`kafka_consumer_ConsumerRecord_leader_epoch`,
+//!   `kafka_producer_ProducerRecord_partition`), and keeps -1 when Java gives
+//!   -2 a meaning (`kafka_admin_MemberDescription_member_epoch`, where -2 is a
+//!   static member that left, and the admin options' `timeout_ms`);
 //! - a `double`: NaN;
 //! - a `kafka_Bytes_t`: a NULL one (Java's `null` array);
 //! - `kafka_common_ErrorCode_e` (`kafka_common_Error_code`):
@@ -75,11 +81,12 @@
 //! pointer or `kafka_Bytes_t`, a boolean, a `double` that may be NaN, a C enum
 //! without an `UNKNOWN` enumerator, and an integer whose -1 (or, for a count or
 //! size, 0) is itself a valid value return a value the function can also
-//! return without a panic. The integers include Java's sentinels: an absent
-//! leader epoch, `NO_TIMESTAMP`, an unknown offset or partition, the id of
-//! `Node.noNode()`, `kafka_admin_AbortTransactionSpec_producer_epoch`, an unset
-//! optional value. Such a panic shows only in the error-level log line every
-//! caught panic writes.
+//! return without a panic. The integers include Java's sentinels:
+//! `NO_TIMESTAMP`, an unknown offset or partition, the id of `Node.noNode()`,
+//! `kafka_admin_AbortTransactionSpec_producer_epoch`, and the empty optional
+//! values whose Java domain holds -2 (a member epoch, a consumer's lag, a log
+//! dir's byte counts, a node id, an admin option's timeout). Such a panic shows
+//! only in the error-level log line every caught panic writes.
 //!
 //! A `_cb` function reports a caught panic the way it reports every other
 //! outcome, exactly once, whether the panic happens on the calling thread or
@@ -280,7 +287,9 @@ mod tests {
     /// enum has none) and the integers whose derived value is a valid answer
     /// (`NewTopic` counts, where -1 is the broker default; `*_count` / `*_size`
     /// accessors whose 0 is legal; `TimestampType.id`, whose -1 is
-    /// `NO_TIMESTAMP_TYPE`). An enum value is compared by its last path segment.
+    /// `NO_TIMESTAMP_TYPE`; the accessors mapping Java's empty `Optional`, or
+    /// null, to -1, whose Java domain is that or a value >= 0, so they return
+    /// -2). An enum value is compared by its last path segment.
     /// Pins the set in both directions, so a new explicit fallback, or one
     /// dropped back to the derived value, is a reviewed change.
     #[test]
@@ -297,7 +306,7 @@ mod tests {
             "kafka_common_resource_PatternType_code",
             "kafka_common_resource_ResourceType_code",
         ];
-        const EXPECTED: [(&str, &str); 57] = [
+        const EXPECTED: [(&str, &str); 75] = [
             ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
             (
                 "kafka_admin_ConfigEntry_ConfigSource__enum",
@@ -307,6 +316,8 @@ mod tests {
                 "kafka_admin_ConfigEntry_ConfigType__enum",
                 "kafka_admin_ConfigEntry_ConfigType_UNKNOWN",
             ),
+            ("kafka_admin_ConsumerGroupDescription_group_epoch", "-2"),
+            ("kafka_admin_ConsumerGroupDescription_target_assignment_epoch", "-2"),
             ("kafka_admin_DeleteAclsResult_FilterResult_error", "null()"),
             (
                 "kafka_admin_DeleteTopicsResult__enum",
@@ -316,22 +327,28 @@ mod tests {
                 "kafka_admin_DescribeTopicsResult__enum",
                 "kafka_admin_DescribeTopicsResult_BY_TOPIC_ID",
             ),
+            ("kafka_admin_FeatureMetadata_finalized_features_epoch", "-2"),
             (
                 "kafka_admin_FeatureUpdate_UpgradeType__enum",
                 "kafka_admin_FeatureUpdate_UpgradeType_UNKNOWN",
             ),
+            ("kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch", "-2"),
             ("kafka_admin_LogDirDescription_error", "null()"),
             ("kafka_admin_NewTopic_num_partitions", "0"),
             ("kafka_admin_NewTopic_replication_factor", "0"),
             ("kafka_admin_OffsetSpec__enum", "kafka_admin_OffsetSpec_EARLIEST"),
+            ("kafka_admin_ProducerState_coordinator_epoch", "-2"),
+            ("kafka_admin_ProducerState_current_transaction_start_offset", "-2"),
             ("kafka_admin_ReplicaInfo_size", "-1"),
             ("kafka_admin_ScramMechanism__enum", "kafka_admin_ScramMechanism_UNKNOWN"),
+            ("kafka_admin_TransactionDescription_transaction_start_time_ms", "-2"),
             ("kafka_admin_TransactionState__enum", "kafka_admin_TransactionState_UNKNOWN"),
             (
                 "kafka_admin_UserScramCredentialAlteration__enum",
                 "kafka_admin_UserScramCredentialAlteration_UPSERTION",
             ),
             ("kafka_common_ClassicGroupState__enum", "kafka_common_ClassicGroupState_UNKNOWN"),
+            ("kafka_common_Cluster_partition_count_for_topic", "-2"),
             ("kafka_common_ConsumerCommitFailedError_source", "null()"),
             ("kafka_common_ConsumerLogTruncationError_source", "null()"),
             ("kafka_common_ConsumerNoOffsetForPartitionError_source", "null()"),
@@ -340,6 +357,7 @@ mod tests {
             ("kafka_common_DuplicateResourceError_source", "null()"),
             ("kafka_common_ElectionType__enum", "kafka_common_ElectionType_PREFERRED"),
             ("kafka_common_Error_source", "null()"),
+            ("kafka_common_Error_throttle_time_ms", "-2"),
             ("kafka_common_GroupAuthorizationError_source", "null()"),
             ("kafka_common_GroupState__enum", "kafka_common_GroupState_UNKNOWN"),
             ("kafka_common_GroupType__enum", "kafka_common_GroupType_UNKNOWN"),
@@ -413,8 +431,17 @@ mod tests {
                 "kafka_consumer_CloseOptions_GroupMembershipOperation__enum",
                 "kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP",
             ),
+            ("kafka_consumer_CloseOptions_timeout", "-2"),
+            ("kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id", "-2"),
+            ("kafka_consumer_ConsumerRecord_delivery_count", "-2"),
+            ("kafka_consumer_ConsumerRecord_leader_epoch", "-2"),
             ("kafka_consumer_GroupProtocol__enum", "kafka_consumer_GroupProtocol_CLASSIC"),
+            ("kafka_consumer_MockConsumer_last_poll_timeout", "-2"),
+            ("kafka_consumer_OffsetAndMetadata_leader_epoch", "-2"),
+            ("kafka_consumer_OffsetAndTimestamp_leader_epoch", "-2"),
             ("kafka_producer_MockProducer_commit_count", "-1"),
+            ("kafka_producer_ProducerRecord_partition", "-2"),
+            ("kafka_producer_ProducerRecord_timestamp", "-2"),
         ];
         let mut found = Vec::new();
         for (_, text) in sources() {

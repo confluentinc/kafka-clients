@@ -389,10 +389,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 /// `lastPollTimeout()`: the last `poll` timeout in milliseconds, `-1` when
 /// `poll` never ran (and while an operation is in flight).
 ///
+/// A caught Rust panic returns -2, which is no poll timeout: `Consumer.poll` rejects a negative one.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     self_: *const kafka_consumer_MockConsumer_t,

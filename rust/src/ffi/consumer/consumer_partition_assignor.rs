@@ -288,10 +288,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 
 /// `generationId()`: the generation, or `-1` for `Optional.empty()`.
 ///
+/// A caught Rust panic returns -2, which is no generation: Java's `Subscription` stores a negative one as `Optional.empty()`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,

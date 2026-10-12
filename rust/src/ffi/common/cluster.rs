@@ -406,11 +406,13 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
 /// `partitionCountForTopic(String topic)`: the count, or `-1` for Java's
 /// null (an unknown topic).
 ///
+/// A caught Rust panic returns -2, which is no partition count.
+///
 /// # Safety
 ///
 /// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
 /// string.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
     self_: *const kafka_common_Cluster_t,

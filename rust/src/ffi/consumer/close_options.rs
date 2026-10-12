@@ -202,10 +202,12 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
 
 /// `timeout()`: milliseconds, or `-1` when none was set.
 ///
+/// A caught Rust panic returns -2, which is no close timeout: Java's `close` rejects a negative one.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka_consumer_CloseOptions_t) -> i64 {
     unsafe { close_options_ref(self_) }

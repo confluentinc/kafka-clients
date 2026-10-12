@@ -61,7 +61,7 @@
 //! | `()` | nothing to return; the panic is only logged |
 //! | `i8` | `0`, which an `int8_t` boolean reads as false. An `int8_t` that carries a Java `byte` code whose 0 is a valid constant (`IsolationLevel.READ_UNCOMMITTED`, `AlterConfigOp.OpType.SET`, `ElectionType.PREFERRED`, an `UNKNOWN`) declares `fallback = -1`, a value outside its domain |
 //! | `bool` | `false` |
-//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size`, since C feeds a count or size to `malloc` and to a `for` bound. A size that already returns -1 for a null key or value (`serialized_key_size`) still returns `0` on a panic |
+//! | `i16`, `i32`, `i64` | `-1`, or `0` when the function name ends in `_count` or `_size`, since C feeds a count or size to `malloc` and to a `for` bound. A size that already returns -1 for a null key or value (`serialized_key_size`) still returns `0` on a panic. An accessor mapping Java's empty `Optional`, or `null`, to -1 whose Java domain is that or a value >= 0 (a leader epoch) declares `fallback = -2` |
 //! | `f64` | `f64::NAN` |
 //! | `kafka_common_ErrorCode_e` | `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR` |
 //! | `kafka_Bytes_t` | `kafka_Bytes_t::NULL`, Java's `null` array |

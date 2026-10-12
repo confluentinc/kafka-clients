@@ -124,10 +124,12 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const 
 
 /// `coordinatorEpoch()`: the epoch, or `-1` for `OptionalInt.empty()`.
 ///
+/// A caught Rust panic returns -2, which is no coordinator epoch: Java reads a negative one as `OptionalInt.empty()`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
     unsafe { producer_state_ref(self_) }.coordinator_epoch().unwrap_or(-1)
@@ -136,10 +138,12 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *con
 /// `currentTransactionStartOffset()`: the offset, or `-1` for
 /// `OptionalLong.empty()`.
 ///
+/// A caught Rust panic returns -2, which is no transaction start offset: Java reads a negative one as `OptionalLong.empty()`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_offset(
     self_: *const kafka_admin_ProducerState_t,

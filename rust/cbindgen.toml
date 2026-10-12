@@ -25,7 +25,13 @@ header = """
  *     (kafka_consumer_ConsumerRecord_serialized_key_size) included. An
  *     integer whose Java domain holds that value but leaves out another one
  *     returns the other instead, as its documentation states
- *     (kafka_admin_NewTopic_replication_factor returns 0);
+ *     (kafka_admin_NewTopic_replication_factor returns 0). In particular an
+ *     integer accessor that maps Java's empty Optional, or null, to -1
+ *     returns -2 when its Java domain is that or a value >= 0
+ *     (kafka_consumer_ConsumerRecord_leader_epoch,
+ *     kafka_producer_ProducerRecord_partition), and keeps -1 when Java gives
+ *     -2 a meaning (kafka_admin_MemberDescription_member_epoch, where -2 is a
+ *     static member that left, and the admin options' timeout_ms);
  *   - a double: NaN;
  *   - a kafka_Bytes_t: a NULL one (Java's null array);
  *   - kafka_common_ErrorCode_e (kafka_common_Error_code):
@@ -39,11 +45,12 @@ header = """
  * pointer or kafka_Bytes_t, a boolean, a double that may be NaN, a C enum
  * without an UNKNOWN enumerator, and an integer whose -1 (or, for a count or
  * size, 0) is itself a valid value return a value the function can also
- * return without a panic. The integers include Java's sentinels: an absent
- * leader epoch, NO_TIMESTAMP, an unknown offset or partition, the id of
- * Node.noNode(), kafka_admin_AbortTransactionSpec_producer_epoch, an unset
- * optional value. Such a panic shows only in the error-level log line every
- * caught panic writes.
+ * return without a panic. The integers include Java's sentinels:
+ * NO_TIMESTAMP, an unknown offset or partition, the id of Node.noNode(),
+ * kafka_admin_AbortTransactionSpec_producer_epoch, and the empty optional
+ * values whose Java domain holds -2 (a member epoch, a consumer's lag, a log
+ * dir's byte counts, a node id, an admin option's timeout). Such a panic shows
+ * only in the error-level log line every caught panic writes.
  *
  * A _cb function reports a caught panic the way it reports every other
  * outcome, exactly once, whether the panic happens on the calling thread or

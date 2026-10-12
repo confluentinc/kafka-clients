@@ -268,10 +268,12 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 
 /// `groupEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
+/// A caught Rust panic returns -2, which is no group epoch.
+///
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
@@ -281,10 +283,12 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 
 /// `targetAssignmentEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
+/// A caught Rust panic returns -2, which is no assignment epoch.
+///
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,

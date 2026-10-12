@@ -99,10 +99,12 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
 /// `finalizedFeaturesEpoch()`: the epoch, or `-1` when the broker reported
 /// none (Java's empty `Optional<Long>`).
 ///
+/// A caught Rust panic returns -2, which is no finalized-features epoch: Java reads a negative one as `Optional.empty()`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
-#[ffi_guard]
+#[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
     self_: *const kafka_admin_FeatureMetadata_t,
