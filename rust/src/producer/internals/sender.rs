@@ -3302,6 +3302,7 @@ mod tests {
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
                 PartitionerConfig::new(true, 0, false, "").unwrap(),
+                Arc::clone(&clock),
                 buffer_pool
                     .unwrap_or_else(|| Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize))),
                 transaction_manager.clone(),
@@ -3949,6 +3950,7 @@ mod tests {
             RETRY_BACKOFF_MS * 10,
             120000, // use long delivery timeout for this test
             PartitionerConfig::new(true, 0, false, "").unwrap(),
+            mock_time(0),
             Arc::new(BufferPool::new_for_test(1024 * 1024, 16384)),
             None,
         ));
@@ -5056,6 +5058,7 @@ mod tests {
             0,
             DELIVERY_TIMEOUT_MS,
             PartitionerConfig::new(false, 42, false, "").unwrap(),
+            Arc::clone(&clock),
             Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             None,
         ));
@@ -9331,6 +9334,7 @@ mod tests {
             0,
             3000,
             PartitionerConfig::new(true, 0, false, "").unwrap(),
+            Arc::clone(&clock),
             Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             Some(Arc::clone(&transaction_manager)),
         ));
