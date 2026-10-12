@@ -135,7 +135,7 @@ static void on_close(kafka_common_Error_t *error, void *user_data) {
 }
 
 /* A KafkaProducer rejects a negative close timeout with Java's
- * KafkaProducer.close(Duration) message (KafkaProducer.java:1393-1394), on both
+ * KafkaProducer.close(Duration) message (KafkaProducer.java:1480-1481), on both
  * the sync and the async entry point, and stays open for a real close. */
 void test_close_with_negative_timeout_is_rejected(void) {
     kafka_common_Error_t *err = NULL;

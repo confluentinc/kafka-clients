@@ -797,7 +797,7 @@ impl<K, V> MockProducer<K, V> {
     /// completed successfully.
     ///
     /// Corresponds to Java's `MockProducer.transactionInitialized()`
-    /// (`MockProducer.java:438`).
+    /// (`MockProducer.java:470`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionInitialized")]
     pub fn transaction_initialized(&self) -> bool {
         let inner = self.inner.lock().unwrap();

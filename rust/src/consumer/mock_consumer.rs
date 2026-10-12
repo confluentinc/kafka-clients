@@ -1227,7 +1227,7 @@ mod tests {
     }
 
     /// Java's `setPollException(null)` clears a pending poll exception
-    /// (`MockConsumer.java:344-346`): the next `poll` then succeeds.
+    /// (`MockConsumer.java:385-387`): the next `poll` then succeeds.
     #[tokio::test]
     async fn set_poll_error_none_clears_the_pending_error() {
         let mut c: MockConsumer<String, String> =
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     /// Java's `setOffsetsException(null)` clears a pending offsets exception
-    /// (`MockConsumer.java:348-350`).
+    /// (`MockConsumer.java:394-396`).
     #[tokio::test]
     async fn set_offsets_error_none_clears_the_pending_error() {
         let mut c: MockConsumer<String, String> =

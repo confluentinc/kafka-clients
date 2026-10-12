@@ -3004,7 +3004,7 @@ async fn close_with_zero_timeout_from_caller_thread_inner<F: ProducerBackendFact
 /// The borrowed byte-slice `send` (`KafkaProducer<Vec<u8>, Vec<u8>>::send`,
 /// which the C FFI's `send_batch` and single-record sends call, so every C and
 /// Python `KafkaProducer` record) delivers the record's headers to the broker,
-/// as Java's `doSend` appends them (`KafkaProducer.java:1020`, `:1029-1030`):
+/// as Java's `doSend` appends them (`KafkaProducer.java:1101`, `:1110-1111`):
 /// in order, an empty value and a null value kept apart. It used to append
 /// none. Rust-only: the gRPC producer proto has no headers.
 #[cfg(feature = "integration-tests")]

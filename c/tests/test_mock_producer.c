@@ -1078,7 +1078,7 @@ void test_close_with_timeout_async(void) {
 
 /* close_with_timeout (sync) closes the mock producer. A negative timeout
  * closes it too: Java's MockProducer.close(Duration) never reads the timeout
- * (MockProducer.java:436-442); only a KafkaProducer rejects it
+ * (MockProducer.java:438-444); only a KafkaProducer rejects it
  * (test_kafka_producer.c). */
 void test_close_with_timeout(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
