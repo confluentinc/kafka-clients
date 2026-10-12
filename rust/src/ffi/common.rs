@@ -571,15 +571,19 @@ pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
 ///
 /// # Safety
 ///
-/// The pointer must be non-null and must have been created by [`box_error`],
-/// and the handle must stay alive (not passed to [`kafka_common_Error_destroy`]
-/// nor consumed by [`take_error`]) for as long as the returned reference, or
-/// anything borrowed from it, is used: the `'static` lifetime is not real.
+/// The pointer must be non-null and point at a live `ErrorInner`: either an
+/// owned handle from [`box_error`], or a borrowed handle a live owner hands out
+/// ([`kafka_common_Error_source`], or a payload's or struct field's error
+/// accessor). The handle, and for a borrowed one its owner, must stay alive
+/// (not passed to [`kafka_common_Error_destroy`] nor consumed by
+/// [`take_error`]) for as long as the returned reference, or anything borrowed
+/// from it, is used: the `'static` lifetime is not real.
 pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
-    // SAFETY: Per this function's `# Safety`, `error` is non-null and was created by
-    // `box_error`, whose `Box::into_raw` of an `ErrorInner` is the single allocation behind
-    // every `kafka_common_Error_t`, so the cast targets a live, correctly typed
-    // `ErrorInner`. The `&'static` is a convenience only: the same contract makes the caller
+    // SAFETY: Per this function's `# Safety`, `error` is non-null and points at a live
+    // `ErrorInner`: an owned handle (the `Box::into_raw` of `box_error`) or one borrowed from
+    // a live owner (an `ErrorInner` held inside another handle). Either way the cast targets
+    // a live, correctly typed `ErrorInner`. The `&'static` is a convenience only: the same
+    // contract makes the caller
     // keep the handle alive while it uses the reference, which is shared, so nothing writes
     // the `ErrorInner` under it (its lazy slots are `OnceLock`s).
     unsafe { &*(error as *const ErrorInner) }
@@ -1726,10 +1730,10 @@ pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Erro
         return kafka_common_ErrorCode_NONE;
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. one created by `box_error`
-    // and not yet passed to `kafka_common_Error_destroy`, which is exactly `error_ref`'s
-    // precondition. The `&'static ErrorInner` is used only to read `.error` for the
-    // duration of this call, during which the C caller keeps the handle alive.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The `&'static ErrorInner` is used only to read `.error` for the duration of this
+    // call, during which the C caller keeps the handle alive.
     error_code_of(&unsafe { error_ref(error) }.error)
 }
 
@@ -1758,11 +1762,11 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
         return std::ptr::null();
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned
-    // `message_cstring.as_ptr()` points into that same `ErrorInner` allocation and, as this
-    // function's rustdoc states, stays valid until `kafka_common_Error_destroy` is called
-    // on the handle.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The returned `message_cstring.as_ptr()` points into that same `ErrorInner`, so, as
+    // this function's rustdoc states, it stays valid while the handle does: until
+    // `kafka_common_Error_destroy` is called on it, or on its owner for a borrowed one.
     unsafe { error_ref(error) }.message_cstring.as_ptr()
 }
 
@@ -1784,10 +1788,10 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
         return std::ptr::null();
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The returned cause handle is
-    // owned by that `ErrorInner` (its `source` slot), so, as this function's rustdoc states,
-    // it stays valid until `kafka_common_Error_destroy` is called on `error`.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The returned cause is a borrowed handle owned by that `ErrorInner` (its `source`
+    // slot), so, as this function's rustdoc states, it stays valid while `error` does.
     unsafe { error_ref(error) }.source_ptr()
 }
 
@@ -1809,9 +1813,9 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
         return -1;
     }
     // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
-    // valid handle from a function that returned an error, i.e. created by `box_error` and
-    // not yet destroyed, which is `error_ref`'s precondition. The borrow lasts only for this
-    // call, while the caller keeps the handle alive.
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
     unsafe { error_ref(error) }.error.throttle_time_ms().unwrap_or(-1)
 }
 
@@ -1830,15 +1834,18 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
 /// # Safety
 ///
 /// - `error` must be null or a valid handle from a function that returned an error.
+///   It must be an owned handle: a borrowed one ([`kafka_common_Error_source`], a
+///   payload's or struct field's error accessor) belongs to its owner and is
+///   never passed here.
 /// - After this call, the pointer is invalid and must not be used.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Error_t) {
     if !error.is_null() {
         // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`,
-        // a valid handle from a function that returned an error, i.e. the `ErrorInner` that
-        // `box_error` leaked with `Box::into_raw` (the one allocation behind every
-        // `kafka_common_Error_t`). The contract declares the pointer invalid after this
+        // an owned handle from a function that returned an error, i.e. the `ErrorInner` that
+        // `box_error` leaked with `Box::into_raw` (a borrowed handle, which points into its
+        // owner, is never passed here). The contract declares the pointer invalid after this
         // call, and `take_error`'s contract forbids destroying a handle it already
         // consumed, so this `Box::from_raw` is the single, final use of the allocation.
         unsafe {
