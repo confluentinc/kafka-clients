@@ -352,8 +352,13 @@ def sasl_config_from_env(for_v2):
             "sasl.username": sasl_username,
             "sasl.password": sasl_password,
         }
+    # The Java client (and the Java seed producer) needs the login module that
+    # matches the mechanism: ScramLoginModule for SCRAM-SHA-256/512.
+    login_module = ("org.apache.kafka.common.security.scram.ScramLoginModule"
+                    if sasl_mechanism.startswith("SCRAM")
+                    else "org.apache.kafka.common.security.plain.PlainLoginModule")
     jaas = (
-        "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
+        f"{login_module} required \n\t"
         f"username=\"{sasl_username}\" \n\tpassword=\"{sasl_password}\";")
     return {
         "security.protocol": security_protocol,

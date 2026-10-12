@@ -1601,15 +1601,24 @@ static void spawn_seed_producer(long seed_count) {
     props_path[0] = '\0';
     if (sasl_enabled) {
         snprintf(props_path, sizeof props_path, "/tmp/txn_perf_seed_%d.properties", (int)getpid());
-        FILE *pf = fopen(props_path, "w");
+        // The file holds the SASL password: create it owner-only (0600) rather
+        // than with the umask default (typically world-readable 0644).
+        int pfd = open(props_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        FILE *pf = pfd >= 0 ? fdopen(pfd, "w") : NULL;
+        if (!pf && pfd >= 0) close(pfd);
         if (pf) {
+            // The Java seed producer needs the login module matching the
+            // mechanism (ScramLoginModule for SCRAM-SHA-256/512).
+            const char *login_module = strncmp(SASL_MECHANISM, "SCRAM", 5) == 0
+                ? "org.apache.kafka.common.security.scram.ScramLoginModule"
+                : "org.apache.kafka.common.security.plain.PlainLoginModule";
             fprintf(pf, "bootstrap.servers=%s\n", BOOTSTRAP_SERVERS);
             fprintf(pf, "security.protocol=%s\n", SECURITY_PROTOCOL);
             fprintf(pf, "sasl.mechanism=%s\n", SASL_MECHANISM);
             fprintf(pf,
-                    "sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule "
+                    "sasl.jaas.config=%s "
                     "required username=\"%s\" password=\"%s\";\n",
-                    SASL_USERNAME, SASL_PASSWORD);
+                    login_module, SASL_USERNAME, SASL_PASSWORD);
             fclose(pf);
         } else {
             props_path[0] = '\0';  // fall back to the plaintext bootstrap form below

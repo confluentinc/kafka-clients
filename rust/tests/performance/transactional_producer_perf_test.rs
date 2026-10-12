@@ -366,8 +366,9 @@ impl PerfTestConfig {
         if sasl_enabled {
             let user = self.sasl_username.as_deref().unwrap();
             let pass = self.sasl_password.as_deref().unwrap();
+            let login_module = jaas_login_module(self.sasl_mechanism.as_deref().unwrap());
             let jaas = format!(
-                "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t\
+                "{login_module} required \n\t\
                  username=\"{user}\" \n\tpassword=\"{pass}\";"
             );
             props.insert("security.protocol".to_string(), self.security_protocol.clone().unwrap());
@@ -404,8 +405,9 @@ impl PerfTestConfig {
         if sasl_enabled {
             let user = self.sasl_username.as_deref().unwrap();
             let pass = self.sasl_password.as_deref().unwrap();
+            let login_module = jaas_login_module(self.sasl_mechanism.as_deref().unwrap());
             let jaas = format!(
-                "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t\
+                "{login_module} required \n\t\
                  username=\"{user}\" \n\tpassword=\"{pass}\";"
             );
             props.insert("security.protocol".to_string(), self.security_protocol.clone().unwrap());
@@ -413,6 +415,19 @@ impl PerfTestConfig {
             props.insert("sasl.jaas.config".to_string(), jaas);
         }
         props
+    }
+}
+
+/// The JAAS login module class for a SASL mechanism, as the Java client
+/// expects it: `ScramLoginModule` for `SCRAM-SHA-256` / `SCRAM-SHA-512`,
+/// `PlainLoginModule` otherwise. The Rust client reads only the username and
+/// password out of `sasl.jaas.config`, but the Java seed producer
+/// (`kafka-producer-perf-test.sh`) fails to authenticate with the wrong module.
+fn jaas_login_module(mechanism: &str) -> &'static str {
+    if mechanism.starts_with("SCRAM") {
+        "org.apache.kafka.common.security.scram.ScramLoginModule"
+    } else {
+        "org.apache.kafka.common.security.plain.PlainLoginModule"
     }
 }
 
@@ -1416,11 +1431,20 @@ fn spawn_seed_producer(
         let pass = config.sasl_password.as_deref().unwrap();
         // One logical line per property (a raw newline ends a .properties entry),
         // so collapse the cosmetic whitespace in the jaas value to single spaces.
-        let jaas = format!(
-            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"{user}\" password=\"{pass}\";"
-        );
+        let login_module = jaas_login_module(config.sasl_mechanism.as_deref().unwrap());
+        let jaas = format!("{login_module} required username=\"{user}\" password=\"{pass}\";");
         let path = std::env::temp_dir().join(format!("txn_perf_seed_{}.properties", std::process::id()));
-        let mut f = std::fs::File::create(&path)?;
+        // The file holds the SASL password: create it owner-only (0600) rather
+        // than with the umask default (typically world-readable 0644).
+        let mut f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)?
+        };
         writeln!(f, "bootstrap.servers={bootstrap_servers}")?;
         writeln!(f, "security.protocol={}", config.security_protocol.as_deref().unwrap())?;
         writeln!(f, "sasl.mechanism={}", config.sasl_mechanism.as_deref().unwrap())?;
