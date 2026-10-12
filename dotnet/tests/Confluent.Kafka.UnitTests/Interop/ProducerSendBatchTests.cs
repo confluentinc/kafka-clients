@@ -60,6 +60,8 @@ public sealed class ProducerSendBatchTests
         int keyLength = (int)Marshal.OffsetOf<ProducerRecordNative>(nameof(ProducerRecordNative.KeyLength));
         int value = (int)Marshal.OffsetOf<ProducerRecordNative>(nameof(ProducerRecordNative.Value));
         int valueLength = (int)Marshal.OffsetOf<ProducerRecordNative>(nameof(ProducerRecordNative.ValueLength));
+        int headers = (int)Marshal.OffsetOf<ProducerRecordNative>(nameof(ProducerRecordNative.Headers));
+        int headerCount = (int)Marshal.OffsetOf<ProducerRecordNative>(nameof(ProducerRecordNative.HeaderCount));
 
         // Strictly increasing, each field clearing the previous one — catches a reorder on any
         // pointer width.
@@ -69,18 +71,25 @@ public sealed class ProducerSendBatchTests
         Assert.Equal(key + IntPtr.Size, keyLength);
         Assert.True(value >= keyLength + sizeof(int));
         Assert.Equal(value + IntPtr.Size, valueLength);
+        Assert.True(headers >= valueLength + sizeof(int));
+        Assert.Equal(headers + IntPtr.Size, headerCount);
 
         if (IntPtr.Size == 8)
         {
             // The exact 64-bit layout Rust's #[repr(C)] produces for
-            // kafka_producer_ProducerRecord_t (rust/src/ffi/producer.rs): 8/4+pad/8/8/4+pad/8/4+pad.
+            // kafka_producer_ProducerRecord_t (rust/src/ffi/producer.rs):
+            // 8/4+pad/8/8/4+pad/8/4+pad/8/4+pad. The size is the stride the core walks the
+            // send_batch array with, so a mirror without the header fields misreads every record
+            // after the first.
             Assert.Equal(8, partition);
             Assert.Equal(16, timestamp);
             Assert.Equal(24, key);
             Assert.Equal(32, keyLength);
             Assert.Equal(40, value);
             Assert.Equal(48, valueLength);
-            Assert.Equal(56, Marshal.SizeOf<ProducerRecordNative>());
+            Assert.Equal(56, headers);
+            Assert.Equal(64, headerCount);
+            Assert.Equal(72, Marshal.SizeOf<ProducerRecordNative>());
         }
     }
 

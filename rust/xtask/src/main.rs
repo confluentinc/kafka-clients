@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod config_types;
+mod error_hierarchy;
 mod java;
+mod java_parse;
 mod lint_custom;
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 use anyhow::Context as _;
@@ -163,14 +166,19 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 // cannot use the enum itself: `src/ffi` is behind the `ffi` feature, which the
 // multilanguage test targets do not enable.
 //
-// The Python binding's copy, `python/_error_code.py`, is generated and
-// checked by the binding itself (`python/tools/generate_error_code.py`
-// and `test/static/test_error_code_generated.py`).
+// The flat `python/_error_code.py` copy was retired in P6: the
+// `confluent_kafka` package expresses error codes through the typed hierarchy
+// the same xtask generates (each `…Error` class carries its code as `_ffi_id`),
+// and the gRPC test servers now read those `_ffi_id`s instead of the flat
+// constants. The typed hierarchy is still generated below.
 //
 // `check-generated` re-runs the generation and fails on any difference, so a
 // stale copy breaks the build rather than a test (CLAUDE.md #8: xtask programs
 // rather than shell scripts).
 
+/// The repository root, seen from the crate root `cargo xtask` runs in: the Java
+/// sources (`kafka/`) and the Python binding (`python/`) sit beside `rust/`.
+const REPO_ROOT: &str = "..";
 const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
 const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
 
@@ -418,6 +426,15 @@ fn generate_error_codes() -> anyhow::Result<()> {
     fs::write(ERROR_CODE_RS, error_codes_rust(&codes, &classes)?)?;
 
     println!("✅ Wrote {} constants to {ERROR_CODE_RS}", codes.len());
+
+    // Also regenerate the Python exception hierarchy from the Java sources,
+    // cross-checked against the same FFI enum (spec §5.5 / Design Decisions D1).
+    println!("🔧 Generating the Python error hierarchy from the Java sources...");
+    error_hierarchy::generate(Path::new(REPO_ROOT))?;
+
+    // And the ConfigDef type of every producer / consumer config key.
+    println!("🔧 Generating the Python config key types from the Java sources...");
+    config_types::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
 
@@ -428,13 +445,27 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes = parse_error_codes()?;
     let classes = parse_error_classes(&codes)?;
     let expected = error_codes_rust(&codes, &classes)?;
-    if !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected) {
-        eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
+    let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
+
+    // The Python exception hierarchy generated from the Java sources.
+    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The config key types generated from ProducerConfig / ConsumerConfig.
+    hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+
+    if codes_stale || !hierarchy_stale.is_empty() {
+        if codes_stale {
+            eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
+        }
+        if !hierarchy_stale.is_empty() {
+            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
+            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        }
         eprintln!("   Run: cargo xtask generate-error-codes");
         exit(1);
     }
 
     println!("✅ Error-code constants are up to date ({} codes)", codes.len());
+    println!("✅ Generated error hierarchy is up to date");
     Ok(())
 }
 

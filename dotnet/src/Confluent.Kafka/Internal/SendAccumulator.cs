@@ -1616,9 +1616,11 @@ internal sealed class SendAccumulator
     /// differs. The anchor's arrays are fixed because a C struct has no other option, and its five
     /// slots are <em>pointers</em> — 44 KB per node (5 × 1100 × 8). .NET's eight slots are mostly
     /// by-value: a <see cref="PinnedTopicCache.TopicPin"/> (16 B), two
-    /// <see cref="MemoryHandle"/>s (24 B each), a <see cref="ProducerRecordNative"/> (56 B), two
-    /// references and two <see cref="IntPtr"/> result slots (8 B each) — <b>~152 B per slot, so
-    /// ~167 KB per node, roughly 3.8× the anchor's</b>. (Not ~232 B: that figure counts a
+    /// <see cref="MemoryHandle"/>s (24 B each), a <see cref="ProducerRecordNative"/> (72 B since the
+    /// ABI record gained its header fields; 56 B before), two
+    /// references and two <see cref="IntPtr"/> result slots (8 B each) — <b>~168 B per slot, so
+    /// ~185 KB per node, roughly 4.2× the anchor's</b>. (Not §4.3's ~232 B: that figure, taken with
+    /// the 56 B record, counts a
     /// <see cref="SerializedProducerRecord"/> slot this node does <em>not</em> have — §4.3's type
     /// sketch had one and <see cref="Append"/> marshals in its place, which is where its ~80 B
     /// went.) A node is allocated

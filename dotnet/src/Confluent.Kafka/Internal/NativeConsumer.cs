@@ -2466,7 +2466,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Injects an error to be returned by the <b>next</b> poll on a
+    /// Injects an <c>illegal_state</c> error to be returned by the <b>next</b> poll on a
     /// <c>MockConsumer</c> (mirrors Java <c>setPollException</c>) — the broker-free
     /// FAILURE driver. Errors (via <see cref="KafkaException"/>) on a real consumer.
     /// </summary>
@@ -2485,7 +2485,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr error;
         using (Utf8Marshal.PinnedUtf8String messagePin = Utf8Marshal.Pin(message))
         {
-            error = NativeMethods.MockConsumerSetPollError(_handle, messagePin.Pointer);
+            // Always LOCAL_ILLEGAL_STATE: the error this mock injected before the ABI took a
+            // code (the core built Error::local_illegal_state(message)), which the poll-error
+            // tests assert.
+            error = NativeMethods.MockConsumerSetPollError(
+                _handle,
+                clear: false,
+                PollErrorCode,
+                messagePin.Pointer);
         }
 
         KafkaException? failure = KafkaException.FromHandle(error);
@@ -2494,6 +2501,9 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw failure;
         }
     }
+
+    /// <summary><c>kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE</c>.</summary>
+    private const int PollErrorCode = -4;
 
     /// <summary>
     /// Interrupts the in-flight op (Java <c>wakeup()</c>). Sync and cross-thread — the

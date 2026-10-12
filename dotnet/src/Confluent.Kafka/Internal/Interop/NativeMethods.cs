@@ -890,14 +890,22 @@ internal static partial class NativeMethods
         int valueLen);
 
     /// <summary>
-    /// <c>kafka_consumer_MockConsumer_set_poll_error</c> — injects an
-    /// <c>illegal_state</c> error returned by the <b>next</b> poll on a mock consumer
-    /// (mock only; mirrors Java <c>setPollException</c>). Drives the FAILURE test
-    /// broker-free. <paramref name="message"/> is a pinned NUL-terminated UTF-8 buffer.
-    /// Returns a <c>kafka_common_Error_t</c> handle (null = success).
+    /// <c>kafka_consumer_MockConsumer_set_poll_error</c> — injects an error returned by
+    /// the <b>next</b> poll on a mock consumer, or clears a pending one (mock only;
+    /// mirrors Java <c>setPollException</c>, whose <c>null</c> argument clears). With
+    /// <paramref name="clear"/> set, <paramref name="code"/> and
+    /// <paramref name="message"/> are ignored; otherwise the error is built from the
+    /// <c>kafka_common_ErrorCode_t</c> <paramref name="code"/> and
+    /// <paramref name="message"/>, a pinned NUL-terminated UTF-8 buffer (null = empty
+    /// message). Drives the FAILURE test broker-free. Returns a
+    /// <c>kafka_common_Error_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr MockConsumerSetPollError(SafeConsumerHandle consumer, IntPtr message);
+    internal static extern IntPtr MockConsumerSetPollError(
+        SafeConsumerHandle consumer,
+        [MarshalAs(UnmanagedType.I1)] bool clear,
+        int code,
+        IntPtr message);
 
     /// <summary>
     /// <c>kafka_consumer_MockConsumer_rebalance</c> — simulates a rebalance on a mock

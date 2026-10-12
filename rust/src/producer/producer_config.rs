@@ -492,38 +492,55 @@ impl ProducerConfig {
                     // `ConfigDef.parseType` trims every `Type.STRING` value (`ConfigDef.java:729-731`).
                     config.client_id = value.trim().to_string();
                 },
+                // The `at_least` bounds below are the `ConfigDef` validators of
+                // Java's `ProducerConfig` `define(...)` chain
+                // (`ProducerConfig.java:386-530`): `atLeast(0)` unless noted.
                 Self::BATCH_SIZE_CONFIG => {
-                    config.batch_size = Self::parse_i32(key, value)?;
+                    config.batch_size = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::LINGER_MS_CONFIG => {
-                    config.linger_ms = Self::parse_i64(key, value)?;
+                    config.linger_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::BUFFER_MEMORY_CONFIG => {
-                    config.buffer_memory = Self::parse_i64(key, value)?;
+                    config.buffer_memory = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::MAX_BLOCK_MS_CONFIG => {
-                    config.max_block_ms = Self::parse_i64(key, value)?;
+                    config.max_block_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::ACKS_CONFIG => {
-                    config.acks = Self::parse_acks(value)?;
+                    // `in("all", "-1", "0", "1")`: `ConfigDef.ValidString` matches
+                    // the trimmed value exactly (case-sensitive) before `parseAcks`
+                    // runs.
+                    let trimmed = value.trim();
+                    if !Self::ACKS_VALID_STRINGS.contains(&trimmed) {
+                        return Err(Error::config_name_value_message(
+                            key,
+                            trimmed,
+                            format!("String must be one of: {}", Self::ACKS_VALID_STRINGS.join(", ")),
+                        ));
+                    }
+                    config.acks = Self::parse_acks(trimmed)?;
                 },
                 Self::RETRIES_CONFIG => {
-                    config.retries = Self::parse_i32(key, value)?;
+                    // `between(0, Integer.MAX_VALUE)`: the upper bound is the `i32` range.
+                    config.retries = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::DELIVERY_TIMEOUT_MS_CONFIG => {
-                    config.delivery_timeout_ms = Self::parse_i32(key, value)?;
+                    config.delivery_timeout_ms = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::REQUEST_TIMEOUT_MS_CONFIG => {
-                    config.request_timeout_ms = Self::parse_i32(key, value)?;
+                    config.request_timeout_ms = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::ENABLE_IDEMPOTENCE_CONFIG => {
                     config.enable_idempotence = Self::parse_bool(key, value)?;
                 },
                 Self::MAX_REQUEST_SIZE_CONFIG => {
-                    config.max_request_size = Self::parse_i32(key, value)?;
+                    config.max_request_size = Self::at_least(key, Self::parse_i32(key, value)?, 0)?;
                 },
                 Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION => {
-                    config.max_in_flight_requests_per_connection = Self::parse_i32(key, value)?;
+                    // `atLeast(1)`.
+                    config.max_in_flight_requests_per_connection =
+                        Self::at_least(key, Self::parse_i32(key, value)?, 1)?;
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
                     // Java never reaches `CompressionType.forName` for a bad
@@ -546,28 +563,31 @@ impl ProducerConfig {
                     config.connections_max_idle_ms = Self::parse_i64(key, value)?;
                 },
                 Self::RECONNECT_BACKOFF_MS_CONFIG => {
-                    config.reconnect_backoff_ms = Self::parse_i64(key, value)?;
+                    config.reconnect_backoff_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RECONNECT_BACKOFF_MAX_MS_CONFIG => {
-                    config.reconnect_backoff_max_ms = Self::parse_i64(key, value)?;
+                    config.reconnect_backoff_max_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RETRY_BACKOFF_MS_CONFIG => {
-                    config.retry_backoff_ms = Self::parse_i64(key, value)?;
+                    config.retry_backoff_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::RETRY_BACKOFF_MAX_MS_CONFIG => {
-                    config.retry_backoff_max_ms = Self::parse_i64(key, value)?;
+                    config.retry_backoff_max_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::SEND_BUFFER_CONFIG => {
-                    config.send_buffer_bytes = Self::parse_i32(key, value)?;
+                    // `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)`, -1.
+                    config.send_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
                 },
                 Self::RECEIVE_BUFFER_CONFIG => {
-                    config.receive_buffer_bytes = Self::parse_i32(key, value)?;
+                    // `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`, -1.
+                    config.receive_buffer_bytes = Self::at_least(key, Self::parse_i32(key, value)?, -1)?;
                 },
                 Self::METADATA_MAX_AGE_CONFIG => {
-                    config.metadata_max_age_ms = Self::parse_i64(key, value)?;
+                    config.metadata_max_age_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::METADATA_MAX_IDLE_CONFIG => {
-                    config.metadata_max_idle_ms = Self::parse_i64(key, value)?;
+                    // `atLeast(5000)`.
+                    config.metadata_max_idle_ms = Self::at_least(key, Self::parse_i64(key, value)?, 5000)?;
                 },
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
@@ -588,7 +608,7 @@ impl ProducerConfig {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
                 },
                 Self::PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG => {
-                    config.partitioner_availability_timeout_ms = Self::parse_i64(key, value)?;
+                    config.partitioner_availability_timeout_ms = Self::at_least(key, Self::parse_i64(key, value)?, 0)?;
                 },
                 Self::PARTITIONER_IGNORE_KEYS_CONFIG => {
                     config.partitioner_ignore_keys = Self::parse_bool(key, value)?;
@@ -618,11 +638,15 @@ impl ProducerConfig {
                     config.partitioner_type = Some(value.to_string());
                 },
                 Self::TRANSACTIONAL_ID_CONFIG => {
-                    config.transactional_id = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
+                    // `new ConfigDef.NonEmptyString()` on the trimmed value
+                    // (`ConfigDef.parseType` trims a `STRING`): an empty id is
+                    // rejected, not read as "no transactional id". An absent key is
+                    // Java's `null` default.
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        return Err(Error::config_name_value_message(key, trimmed, "String must be non-empty"));
+                    }
+                    config.transactional_id = Some(trimmed.to_string());
                 },
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
@@ -915,6 +939,24 @@ impl ProducerConfig {
                 PRODUCER_CLIENT_ID_SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
             ),
         };
+    }
+
+    /// The `in("all", "-1", "0", "1")` validator of `acks`
+    /// (`ProducerConfig.java:392-397`).
+    const ACKS_VALID_STRINGS: [&'static str; 4] = ["all", "-1", "0", "1"];
+
+    /// Java's `ConfigDef.Range.atLeast(min)`: a `value` below `min` is rejected
+    /// with `ConfigException(name, value, "Value must be at least " + min)`
+    /// (`ConfigDef.java:1011`).
+    fn at_least<T: PartialOrd + std::fmt::Display>(key: &str, value: T, min: T) -> Result<T, Error> {
+        if value < min {
+            return Err(Error::config_name_value_message(
+                key,
+                value,
+                format!("Value must be at least {min}"),
+            ));
+        }
+        Ok(value)
     }
 
     /// Parses a string value as `i32`.
@@ -1368,11 +1410,81 @@ mod tests {
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Empty string -> None
-        let mut props = base_props();
-        props.insert("transactional.id".to_string(), String::new());
-        let config = ProducerConfig::new(&props).unwrap();
-        assert_eq!(config.transactional_id, None);
+        // Java's `NonEmptyString` validator rejects an empty (or blank, after the
+        // `STRING` trim) id; only an absent key means "no transactional id".
+        for empty in ["", "  "] {
+            let mut props = base_props();
+            props.insert("transactional.id".to_string(), empty.to_string());
+            let error = ProducerConfig::new(&props).expect_err("an empty transactional.id is rejected");
+            assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+            assert_eq!(
+                error.message(),
+                "Invalid value  for configuration transactional.id: String must be non-empty"
+            );
+        }
+        assert_eq!(ProducerConfig::new(&base_props()).unwrap().transactional_id, None);
+    }
+
+    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig.java:386-530`):
+    /// each bound rejects the value just below it with `ConfigDef.Range.atLeast`'s
+    /// message and accepts the bound itself.
+    #[test]
+    fn test_config_def_range_validators() {
+        let cases: [(&str, i64); 19] = [
+            ("batch.size", 0),
+            ("linger.ms", 0),
+            ("buffer.memory", 0),
+            ("max.block.ms", 0),
+            ("retries", 0),
+            ("delivery.timeout.ms", 0),
+            ("request.timeout.ms", 0),
+            ("max.request.size", 0),
+            ("max.in.flight.requests.per.connection", 1),
+            ("reconnect.backoff.ms", 0),
+            ("reconnect.backoff.max.ms", 0),
+            ("retry.backoff.ms", 0),
+            ("retry.backoff.max.ms", 0),
+            ("send.buffer.bytes", -1),
+            ("receive.buffer.bytes", -1),
+            ("metadata.max.age.ms", 0),
+            ("metadata.max.idle.ms", 5000),
+            ("partitioner.availability.timeout.ms", 0),
+            ("metrics.sample.window.ms", 0),
+        ];
+        for (key, min) in cases {
+            let below = (min - 1).to_string();
+            let error = ProducerConfig::new(&props_with(&[(key, &below)]))
+                .expect_err(&format!("{key}={below} must be rejected"));
+            assert!(
+                matches!(error, Error::Config(_)),
+                "{key}: expected Error::Config, got {error:?}"
+            );
+            assert_eq!(
+                error.message(),
+                format!("Invalid value {below} for configuration {key}: Value must be at least {min}"),
+            );
+            let at = min.to_string();
+            ProducerConfig::new(&props_with(&[(key, &at)]))
+                .unwrap_or_else(|e| panic!("{key}={at} must be accepted: {e}"));
+        }
+    }
+
+    /// `acks` is `in("all", "-1", "0", "1")`, matched exactly on the trimmed value
+    /// (`ConfigDef.ValidString`), before `parseAcks`.
+    #[test]
+    fn test_acks_valid_strings() {
+        for (acks, expected) in [("all", -1), (" all ", -1), ("-1", -1), ("0", 0), ("1", 1)] {
+            let props = props_with(&[("acks", acks), ("enable.idempotence", "false")]);
+            assert_eq!(ProducerConfig::new(&props).unwrap().acks, expected, "acks={acks:?}");
+        }
+        for acks in ["ALL", "2", "invalid"] {
+            let error = ProducerConfig::new(&props_with(&[("acks", acks)])).expect_err("rejected");
+            assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+            assert_eq!(
+                error.message(),
+                format!("Invalid value {acks} for configuration acks: String must be one of: all, -1, 0, 1"),
+            );
+        }
     }
 
     #[test]
@@ -1396,9 +1508,10 @@ mod tests {
     /// Every `ConfigException` this config raises must answer `true` to
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
-    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:657`) and the
-    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`,
-    /// `:621`, `:635`, `:645`). They all used to be `IllegalArgumentException`,
+    /// The six sites are the `acks` validator (`ConfigDef.ValidString`, which runs
+    /// before Java's `parseAcks` at `ProducerConfig.java:657`) and the five throws
+    /// in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`, `:621`,
+    /// `:635`, `:645`). They all used to be `IllegalArgumentException`,
     /// which sits *beside* `KafkaException` rather than below it, so
     /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
     /// that a bad `linger.ms` did not.
@@ -1407,7 +1520,7 @@ mod tests {
         let cases: [(&[(&str, &str)], &str); 6] = [
             (
                 &[("acks", "not-a-number")],
-                "Invalid configuration value for 'acks': not-a-number",
+                "Invalid value not-a-number for configuration acks: String must be one of: all, -1, 0, 1",
             ),
             (
                 &[("enable.idempotence", "true"), ("retries", "0")],

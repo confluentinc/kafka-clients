@@ -153,6 +153,11 @@ internal static class ProducerSendBatchMarshal
             native.Value = (IntPtr)valuePin.Pointer;
             native.ValueLength = record.Value.Value.Length;
         }
+
+        // No headers: the record type carries none yet (CLAUDE.md §3), so every record sends an
+        // empty header list.
+        native.Headers = IntPtr.Zero;
+        native.HeaderCount = 0;
     }
 
     /// <summary>

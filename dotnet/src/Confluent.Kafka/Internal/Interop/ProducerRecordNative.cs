@@ -39,12 +39,17 @@ namespace Confluent.Kafka.Internal.Interop;
 /// null-value guards inside <c>send_batch_inner</c>), which is why an <b>empty</b> (zero-length)
 /// key/value must pass a non-null sentinel pointer rather than the null a <c>fixed</c> over an
 /// empty span yields (ffi §A4; <see cref="ProducerSendBatchMarshal"/> applies it).</item>
+/// <item><see cref="Headers"/> / <see cref="HeaderCount"/> — <see cref="Headers"/> points to
+/// <see cref="HeaderCount"/> <c>kafka_common_header_Header_t</c> entries, or is null when the count
+/// is <c>0</c>.</item>
 /// </list>
 /// </para>
 /// <para>
-/// <b>No headers field.</b> The ABI struct has none, so the binding's record carries none either
-/// (CLAUDE.md §3's "clipped to today's ABI"). This is not an omission to fix here — adding headers
-/// would be a Mode-B ABI change.
+/// <b>The header fields are always empty.</b> The ABI struct gained them (it is 72 bytes on 64-bit,
+/// was 56), but <c>ProducerRecord&lt;TKey,TValue&gt;</c> carries no headers yet (CLAUDE.md §3's
+/// "clipped to today's ABI"), so <see cref="ProducerSendBatchMarshal"/> writes a null pointer and a
+/// zero count. The fields must still be declared: the core walks the record array with the Rust
+/// struct's stride, so a shorter mirror would misread every record after the first.
 /// </para>
 /// <para>
 /// <b>Mutable fields, deliberately.</b> The batch marshaller fills an array of these in place, one
@@ -77,4 +82,13 @@ internal struct ProducerRecordNative
 
     /// <summary>The value length in bytes, or <c>-1</c> for an absent value (a tombstone).</summary>
     internal int ValueLength;
+
+    /// <summary>
+    /// The record's <c>kafka_common_header_Header_t</c> array, or <see cref="IntPtr.Zero"/> when
+    /// <see cref="HeaderCount"/> is <c>0</c>.
+    /// </summary>
+    internal IntPtr Headers;
+
+    /// <summary>The number of entries <see cref="Headers"/> points to.</summary>
+    internal int HeaderCount;
 }
