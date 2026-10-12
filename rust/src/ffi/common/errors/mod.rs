@@ -131,7 +131,8 @@ impl<T: PayloadClass> Payload<T> {
 
     /// Replaces the value in place, as a Rust `with_*` builder step does on
     /// an owned handle: the message and text strings are rebuilt and the
-    /// cached cause dropped, so strings and cause previously borrowed from
+    /// cached cause dropped, and the value is a clone, so strings, cause and
+    /// any view into the value's own data (a buffer) previously borrowed from
     /// the handle are invalidated. The structured views are kept, so the
     /// replacement must leave the fields they derive from unchanged (the one
     /// caller, `with_source`, changes only the cause).

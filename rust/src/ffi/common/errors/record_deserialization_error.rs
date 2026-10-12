@@ -230,9 +230,9 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
 }
 
 /// `with_source(Error source)`: sets `source` as the cause, in place on an
-/// owned handle; `source` is consumed. Strings and the cause previously
-/// borrowed from the handle are invalidated, the structured views
-/// (`topic_partition`, `headers`) stay valid.
+/// owned handle; `source` is consumed. Strings, the key and value buffer
+/// views and the cause previously borrowed from the handle are invalidated,
+/// the structured views (`topic_partition`, `headers`) stay valid.
 ///
 /// # Safety
 ///
@@ -315,8 +315,9 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     timestamp_type::singleton(unsafe { payload(self_) }.value().timestamp_type())
 }
 
-/// `keyBuffer()`: a view over the raw key, valid as long as the handle;
-/// `data` is null for Java's null.
+/// `keyBuffer()`: a view over the raw key, valid as long as the handle, or
+/// until [`kafka_common_RecordDeserializationError_with_source`] is called on
+/// it; `data` is null for Java's null.
 ///
 /// # Safety
 ///
@@ -329,8 +330,9 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     kafka_Bytes_t::from_option(unsafe { payload(self_) }.value().key_buffer())
 }
 
-/// `valueBuffer()`: a view over the raw value, valid as long as the handle;
-/// `data` is null for Java's null.
+/// `valueBuffer()`: a view over the raw value, valid as long as the handle,
+/// or until [`kafka_common_RecordDeserializationError_with_source`] is called
+/// on it; `data` is null for Java's null.
 ///
 /// # Safety
 ///
