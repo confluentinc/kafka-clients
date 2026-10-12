@@ -108,6 +108,48 @@ rebalance listener it runs); the others (`assignment()`, `subscription()`,
   writes them: `c: MockConsumer[str, str] =
   MockConsumer(offset_reset_strategy="earliest")`.
 
+## Admin
+
+`Admin.create(configs={...})` returns a `KafkaAdminClient` (`AsyncAdmin.create` an
+`AsyncKafkaAdminClient`); the client is a context manager, and leaving the block
+closes it. The package is `confluent_kafka.admin`: the client, one `…Options` per
+call, one `…Result` per call, and the value types (`NewTopic`, `TopicDescription`, …).
+
+```python
+from confluent_kafka.admin import Admin, NewTopic
+from confluent_kafka.common.errors import TopicExistsError
+
+with Admin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
+    result = admin.create_topics(
+        new_topics=[NewTopic(name="demo", num_partitions=3, replication_factor=1)])
+    try:
+        result.all().result()               # one future per topic: result.values()
+    except TopicExistsError:
+        pass
+```
+
+- Every call waits for the core's one answer, so every future in the returned result
+  is already complete when the call returns *(deviation from Java, whose calls return
+  at once: the FFI calls back once, when every key is done)*. Reading a future
+  (`.result()`) raises the error of that key as its class.
+- On the async peer each call is an `async def`: `await admin.create_topics(...)`
+  returns the result, whose futures are `asyncio.Future`s, already complete:
+
+  ```python
+  from confluent_kafka.admin import AsyncAdmin, NewTopic
+
+  async with AsyncAdmin.create(configs={"bootstrap.servers": "localhost:9092"}) as admin:
+      result = await admin.create_topics(new_topics=[NewTopic(name="demo", num_partitions=3, replication_factor=1)])
+      await result.all()
+  ```
+
+- Errors are classes: `except TopicExistsError`, `except RetriableError`.
+- `MockAdminClient` (and `AsyncMockAdminClient`) is Java's `MockAdminClient`, for tests: no
+  broker, in-memory state, `MockAdminClient.create()...build()` (`MockAdminClient()` has one `Node.no_node()` broker, as Java's, so topic calls need real brokers). Where Java's mock
+  throws "Not implemented yet", it raises `UnsupportedVersionError`.
+- Overloads whose entry point the core lacks (streams and share groups, metadata quorum, …)
+  are not generated; they are listed in the docstring of `confluent_kafka.admin.admin`.
+
 ## Errors
 
 Errors are a typed hierarchy caught by class, not a flat error with a `code()`.
@@ -122,14 +164,13 @@ Java sources). The Java built-in exception classes (`IllegalStateError`,
 
 ```
 confluent_kafka/        # The client package, one module per Java package
-admin.py                # Admin client (sync and asyncio), outside the package
 _confluentkafka.c       # Hand-written CPython extension over the C API
 tinycthread.{c,h}, c11threads_compat.h  # C11 threads shim (macOS)
 setup.py, pyproject.toml
 grpc_server.py, grpc_server_async.py, grpc_translate.py
                         # gRPC servers for the multilanguage tests
 Dockerfile.grpc, Dockerfile.grpc.async  # Their images
-examples/               # Runnable producer and consumer examples
+examples/               # Runnable producer, consumer and admin examples
 test/
 ├── unit/               # pytest unit tests, no broker needed
 ├── integration/        # Broker-backed binding tests (testcontainers; skip without Docker)

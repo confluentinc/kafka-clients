@@ -8,9 +8,8 @@ it stands. The dated, step-by-step record of how it got here lives in
 **Last verified against the tree:** 2026-09-27
 **Coverage:** Producer (including idempotence and transactions), Consumer
 (KIP-848) and AdminClient are all translated. The C FFI and the Python bindings
-cover all three: the `confluent_kafka` Python package covers the producer and
-the consumer, and the admin client has a separate, older module
-(`python/admin.py`).
+cover all three: the `confluent_kafka` Python package covers the producer, the
+consumer and the admin client (`confluent_kafka.admin`).
 
 > **Paths:** the repository has three top-level directories, `rust/`, `python/`
 > and `c/` (see [structure.md](structure.md#top-level)). Paths in this document
@@ -1111,9 +1110,9 @@ queue above and runs the listener or commit callback itself (`_run_sync` /
 listener registered, `commit_nowait()` runs its C call on a per-consumer helper
 thread, because `commit_async` has no `_async` form.
 
-`admin.py` is the older admin binding. It is paused and outside the
-conventions, and keeps its flat `KafkaError` and positional value types through
-the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+The admin binding is `confluent_kafka.admin`, generated from the same
+conventions; the older `admin.py` and its shim `confluent_kafka/_legacy_compat.py`
+are removed. `grpc_server.py`,
 `grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
 multilanguage tests, and `soak/` holds the long-running soak client.
 
