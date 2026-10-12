@@ -1,0 +1,39 @@
+# How the C and Python bindings sit on the async Rust API.
+#
+# Source of truth for design/current/img/bindings-layering.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: every blocking operation crosses the C ABI in
+# two shapes -- a sync entry point that block_on's on the handle's own
+# runtime, and an *_async entry point whose result reaches the caller on a
+# dispatcher thread -- and both bindings are thin layers over those two.
+
+direction: down
+
+py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / Admin (sync, concurrent.futures.Future)\nAsyncProducer / AsyncConsumer / AsyncAdmin (asyncio coroutines)" {
+  style.fill: "#eef6ff"
+}
+pyext: "_confluentkafka.c — hand-written CPython extension"
+c: "C callers / c/tests (Unity) / c/grpc_server"
+
+header: "rust/target/include/confluent_kafka.h\n(cbindgen, feature ffi)" {
+  style.fill: "#f3f0ff"
+}
+
+ffi: "rust/src/ffi/ — admin.rs, producer.rs, consumer.rs,\nconsumer_handle.rs, common.rs" {
+  style.fill: "#fff7e6"
+
+  sync: "sync entry point\nruntime.block_on(api(...))\nreturns *mut kafka_common_Error_t (NULL = ok)"
+  async: "*_async entry point\nspawn on the handle's runtime;\nresult -> CompletionJob -> dispatcher thread\n-> *_callback_t(user_data, ...)"
+}
+
+core: "Rust public API — Producer / Consumer / Admin\n(async fn, KafkaFuture<T>)" {
+  style.fill: "#e8f5e9"
+}
+
+py -> pyext -> header
+c -> header
+header -> ffi.sync
+header -> ffi.async
+ffi.sync -> core
+ffi.async -> core

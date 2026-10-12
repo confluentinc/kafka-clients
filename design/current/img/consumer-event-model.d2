@@ -1,7 +1,6 @@
-# The consumer event & threading model, including the §31 rebalance-listener
-# handshake.
+# The consumer event & threading model.
 #
-# Source of truth for design/current/consumer-event-model.svg.
+# Source of truth for design/current/img/consumer-event-model.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: user callbacks always run on the app task, and
@@ -27,15 +26,15 @@ bg: "Background task (ConsumerNetworkThread)" {
   style.fill: "#fff7e6"
 
   loop: "run_once() loop"
-  mm: "ConsumerMembershipManager\npending_reconcile / pending_release"
+  mm: "ConsumerMembershipManager\npending reconcile / pending release"
   drive: "drive_pending_{release,reconcile}()\ntry_recv the ack — loop never frozen"
 
   loop -> mm -> drive
 }
 
 app.api -> bg.loop: "ApplicationEvent (mpsc)\n+ poke wakeup Notify"
-bg.mm -> app.pbe: "BackgroundEvent::\nConsumerRebalanceListenerCallbackNeeded\n{ method_name, partitions, ack }"
-app.listener -> bg.drive: "ack.send(result)\n+ poke bg Notify" {
+bg.mm -> app.pbe: "BackgroundEvent::PartitionsRemoved\n{ method_name, partitions, ack }\nBackgroundEvent::PartitionsAssigned\n{ assigned, added, ack }"
+app.listener -> bg.drive: "ack.send(result)\n+ poke wakeup Notify" {
   style.stroke: "#2e7d32"
 }
 

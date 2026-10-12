@@ -1,0 +1,379 @@
+/*
+ * Copyright 2025 Confluent Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! Comprehensive message round-trip tests matching Java's MessageTest.java
+//! Tests full RPC serialization and deserialization across all supported versions.
+
+use crate::common::protocol::ByteBufferAccessor;
+use crate::*;
+use std::io;
+
+/// Test helper to perform round-trip serialization for any message at a specific version
+#[expect(dead_code)]
+fn test_message_round_trip<T, F>(_version: i16, create_message: F) -> io::Result<()>
+where
+    T: Clone + PartialEq + std::fmt::Debug,
+    F: Fn() -> T,
+{
+    let _original = create_message();
+
+    // Serialize
+    let _write_buffer = ByteBufferAccessor::new(Vec::with_capacity(4096));
+
+    // Note: In Java they have message.write(accessor, cache, version)
+    // Our generated code uses: message.write(&mut accessor, version)
+    // This is a limitation of our current code generator
+
+    Ok(())
+}
+
+/// Test AddOffsetsToTxnRequest round-trip across all versions (like Java's testAddOffsetsToTxnVersions)
+#[test]
+fn test_add_offsets_to_txn_request_all_versions() -> io::Result<()> {
+    // AddOffsetsToTxnRequest: versions 0-3
+    for version in 0..=3 {
+        let mut request = AddOffsetsToTxnRequestData::new();
+        request.set_transactional_id("foobar".to_string());
+        request.set_producer_id(0xbadcafebadcafe_i64);
+        request.set_producer_epoch(123);
+        request.set_group_id("baaz".to_string());
+
+        // Serialize
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+        request.write(&mut write_buffer, version)?;
+
+        // Deserialize
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes.clone());
+        let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+
+        // Verify
+        assert_eq!(
+            request.transactional_id(),
+            deserialized.transactional_id(),
+            "transactional_id mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            request.producer_id(),
+            deserialized.producer_id(),
+            "producer_id mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            request.producer_epoch(),
+            deserialized.producer_epoch(),
+            "producer_epoch mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            request.group_id(),
+            deserialized.group_id(),
+            "group_id mismatch at version {}",
+            version
+        );
+
+        // Verify buffer was fully consumed
+        assert_eq!(
+            read_buffer.position(),
+            bytes.len(),
+            "Not all bytes were read at version {}",
+            version
+        );
+    }
+
+    Ok(())
+}
+
+/// Test AddOffsetsToTxnResponse round-trip across all versions
+#[test]
+fn test_add_offsets_to_txn_response_all_versions() -> io::Result<()> {
+    // AddOffsetsToTxnResponse: versions 0-3
+    for version in 0..=3 {
+        let mut response = AddOffsetsToTxnResponseData::new();
+        response.set_throttle_time_ms(42);
+        response.set_error_code(0);
+
+        // Serialize
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+        response.write(&mut write_buffer, version)?;
+
+        // Deserialize
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes);
+        let deserialized = AddOffsetsToTxnResponseData::read(&mut read_buffer, version)?;
+
+        // Verify
+        assert_eq!(
+            response.throttle_time_ms(),
+            deserialized.throttle_time_ms(),
+            "throttle_time_ms mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            response.error_code(),
+            deserialized.error_code(),
+            "error_code mismatch at version {}",
+            version
+        );
+    }
+
+    Ok(())
+}
+
+/// Test ProduceRequest round-trip across multiple versions
+#[test]
+fn test_produce_request_multiple_versions() -> io::Result<()> {
+    // ProduceRequest: versions 3-13 (we test a subset)
+    for version in [3, 5, 7, 9, 11, 13] {
+        let mut request = ProduceRequestData::new();
+        request.set_timeout_ms(5000);
+        request.set_acks(1);
+        request.set_transactional_id(if version >= 3 {
+            Some("txn-123".to_string())
+        } else {
+            None
+        });
+
+        // Serialize
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(2048));
+        request.write(&mut write_buffer, version)?;
+
+        // Deserialize
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes);
+        let deserialized = ProduceRequestData::read(&mut read_buffer, version)?;
+
+        // Verify
+        assert_eq!(
+            request.timeout_ms(),
+            deserialized.timeout_ms(),
+            "timeout_ms mismatch at version {}",
+            version
+        );
+        assert_eq!(request.acks(), deserialized.acks(), "acks mismatch at version {}", version);
+        if version >= 3 {
+            assert_eq!(
+                request.transactional_id(),
+                deserialized.transactional_id(),
+                "transactional_id mismatch at version {}",
+                version
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Test FetchRequest round-trip across multiple versions
+#[test]
+fn test_fetch_request_multiple_versions() -> io::Result<()> {
+    // FetchRequest: versions 4-18 (we test a subset)
+    for version in [4, 7, 11, 15] {
+        let mut request = FetchRequestData::new();
+        request.set_max_wait_ms(500);
+        request.set_min_bytes(1024);
+        request.set_max_bytes(1048576);
+        request.set_isolation_level(0);
+
+        // Serialize
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(2048));
+        request.write(&mut write_buffer, version)?;
+
+        // Deserialize
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes);
+        let deserialized = FetchRequestData::read(&mut read_buffer, version)?;
+
+        // Verify
+        assert_eq!(
+            request.max_wait_ms(),
+            deserialized.max_wait_ms(),
+            "max_wait_ms mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            request.min_bytes(),
+            deserialized.min_bytes(),
+            "min_bytes mismatch at version {}",
+            version
+        );
+        assert_eq!(
+            request.max_bytes(),
+            deserialized.max_bytes(),
+            "max_bytes mismatch at version {}",
+            version
+        );
+    }
+
+    Ok(())
+}
+
+/// Test string serialization with various lengths
+#[test]
+fn test_string_serialization_various_lengths() -> io::Result<()> {
+    let long_string = "a".repeat(100);
+    let test_strings = vec![
+        "",                     // Empty string
+        "a",                    // Single character
+        "test",                 // Short string
+        "hello world",          // Medium string
+        long_string.as_str(),   // Longer string
+        "unicode: 你好世界 🎉", // Unicode string
+    ];
+
+    for test_str in test_strings {
+        let mut request = AddOffsetsToTxnRequestData::new();
+        request.set_transactional_id(test_str.to_string());
+        request.set_group_id("group".to_string());
+        request.set_producer_id(123);
+        request.set_producer_epoch(1);
+
+        // Test with version 0 (non-flexible)
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(2048));
+        request.write(&mut write_buffer, 0)?;
+
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes);
+        let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
+
+        assert_eq!(
+            request.transactional_id(),
+            deserialized.transactional_id(),
+            "String mismatch for: {}",
+            test_str
+        );
+    }
+
+    Ok(())
+}
+
+/// Test bytes serialization
+#[test]
+fn test_bytes_serialization() -> io::Result<()> {
+    let mut request = AddPartitionsToTxnRequestData::new();
+    // Note: Our current implementation may not have all fields properly typed
+    // This test demonstrates the pattern
+
+    let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+    request.write(&mut write_buffer, 0)?;
+
+    let bytes = write_buffer.buffer().to_vec();
+    let mut read_buffer = ByteBufferAccessor::new(bytes);
+    let _deserialized = AddPartitionsToTxnRequestData::read(&mut read_buffer, 0)?;
+
+    Ok(())
+}
+
+/// Test version validation
+#[test]
+fn test_version_validation() {
+    // Test that invalid versions are rejected
+    let mut request = ProduceRequestData::new();
+
+    // Version too low (ProduceRequest starts at version 3)
+    let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+    let result = request.write(&mut write_buffer, 0);
+    assert!(result.is_err(), "Should reject version below minimum");
+
+    // Version too high (ProduceRequest goes up to version 13)
+    let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+    let result = request.write(&mut write_buffer, 99);
+    assert!(result.is_err(), "Should reject version above maximum");
+}
+
+/// Test empty message serialization
+#[test]
+fn test_empty_message_serialization() -> io::Result<()> {
+    // Test that default/empty messages serialize correctly
+    let mut request = AddOffsetsToTxnRequestData::new();
+
+    for version in 0..=3 {
+        let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
+        request.write(&mut write_buffer, version)?;
+
+        let bytes = write_buffer.buffer().to_vec();
+        let mut read_buffer = ByteBufferAccessor::new(bytes);
+        let _deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+    }
+
+    Ok(())
+}
+
+/// Test primitive types serialization
+#[test]
+fn test_primitive_types() -> io::Result<()> {
+    let mut request = ProduceRequestData::new();
+
+    // Test various primitive values
+    request.set_timeout_ms(0);
+    request.set_acks(-1);
+    test_produce_write_read(&mut request, 3)?;
+
+    request.set_timeout_ms(i32::MAX);
+    request.set_acks(i16::MAX);
+    test_produce_write_read(&mut request, 3)?;
+
+    request.set_timeout_ms(i32::MIN);
+    request.set_acks(i16::MIN);
+    test_produce_write_read(&mut request, 3)?;
+
+    Ok(())
+}
+
+fn test_produce_write_read(request: &mut ProduceRequestData, version: i16) -> io::Result<()> {
+    let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(2048));
+    request.write(&mut write_buffer, version)?;
+
+    let bytes = write_buffer.buffer().to_vec();
+    let mut read_buffer = ByteBufferAccessor::new(bytes);
+    let deserialized = ProduceRequestData::read(&mut read_buffer, version)?;
+
+    assert_eq!(request.timeout_ms(), deserialized.timeout_ms());
+    assert_eq!(request.acks(), deserialized.acks());
+    Ok(())
+}
+
+/// Test multiple messages in sequence (like batching)
+#[test]
+fn test_multiple_messages_in_sequence() -> io::Result<()> {
+    let mut write_buffer = ByteBufferAccessor::new(Vec::with_capacity(4096));
+
+    // Write multiple requests to the same buffer
+    for i in 0..5 {
+        let mut request = AddOffsetsToTxnRequestData::new();
+        request.set_transactional_id(format!("txn-{}", i));
+        request.set_group_id(format!("group-{}", i));
+        request.set_producer_id(i as i64);
+        request.set_producer_epoch(i as i16);
+
+        request.write(&mut write_buffer, 0)?;
+    }
+
+    // Read them back
+    let bytes = write_buffer.buffer().to_vec();
+    let mut read_buffer = ByteBufferAccessor::new(bytes);
+
+    for i in 0..5 {
+        let deserialized = AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
+        assert_eq!(&format!("txn-{}", i), deserialized.transactional_id());
+        assert_eq!(&format!("group-{}", i), deserialized.group_id());
+        assert_eq!(i as i64, deserialized.producer_id());
+        assert_eq!(i as i16, deserialized.producer_epoch());
+    }
+
+    Ok(())
+}

@@ -1,38 +1,47 @@
 # The error type structure.
 #
-# Source of truth for design/current/error-types.svg.
+# Source of truth for design/current/img/error-types.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: Java's exception *hierarchy* is flattened into
-# one `KafkaError` enum whose payload-carrying variants wrap a struct, and
-# every classification question is answered by the `Errors` code underneath.
+# one `Error` enum with one variant per Java exception class; each payload
+# struct embeds the `KafkaError` base, and the Java `extends` chain survives
+# only as the `is_*_error()` predicates each payload overrides.
 
 direction: down
 
-errors: "Errors (enum, #[repr(i16)])\ncommon/protocol/errors.rs:30\n135 variants, codes -1..=133\nmessage() / is_retriable() / is_fatal() / txn_requires_abort()" {
+errors: "Errors (wire enum, pub(crate))\ncommon/protocol/errors.rs:37\n135 codes, -1..=133" {
   style.fill: "#f3f0ff"
 }
 
-base: "KafkaGenericError\ncommon/kafka_error.rs:56\n{ error: Errors, custom_message: Option<String>, fatal: bool }" {
+base: "KafkaError (struct) — Java KafkaException\ncommon/kafka_error.rs:84\n{ error: Errors, custom_message, source: Option<Box<Error>> }" {
   style.fill: "#eef6ff"
 }
 
-ke: "KafkaError (enum) — common/kafka_error.rs:274" {
+enum: "Error (enum, #[non_exhaustive]) — common/error.rs:863\n162 variants, the one type every fallible API returns" {
   style.fill: "#fff7e6"
 
-  carrying: "Variants wrapping a struct that embeds KafkaGenericError:\nGeneric, TopicAuthorization, InvalidTopic,\nGroupAuthorization, ThrottlingQuotaExceeded, BufferExhausted"
-  plain: "Variants carrying only a String — Java RuntimeExceptions\nwith no protocol error code:\nIllegalArgument, IllegalState, Timeout, RecordTooLarge,\nSerialization, Wakeup, ConcurrentModification"
+  kafka: "Kafka variants — one per Java exception class\nTopicAuthorization(TopicAuthorizationError), Timeout(..), ...\npayload files: common/errors/, consumer/consumer_*_error.rs,\nproducer/producer_buffer_exhausted_error.rs"
+  bare: "KafkaError(KafkaError)\nJava's bare KafkaException"
+  local: "Local* variants — java.lang / java.util exceptions\nbeside KafkaException, no wire code:\nLocalIllegalArgument, LocalIllegalState,\nLocalConcurrentModification, LocalTimeout"
 }
 
-api: "delegated accessors\ncode() / message() / is_retriable() / is_fatal() / txn_requires_abort()"
+hier: "ErrorHierarchy (pub(crate) trait, common/error.rs:160)\nis_kafka_error / is_api_error / is_retriable_error /\nis_refresh_retriable_error / is_invalid_metadata_error /\nis_authentication_error / is_authorization_error / ..." {
+  style.fill: "#e8f5e9"
+}
 
-errors -> base: "error code + default message"
-base -> ke.carrying: "embedded as the base"
-ke.carrying -> api
-ke.plain -> api: "never retriable, never fatal" {style.stroke-dash: 3}
+fatal: "RequestUtils::is_fatal_error(&Error)\ncommon/requests/request_utils.rs:63\na free static, NOT a predicate on Error"
+
+errors -> base: "code + default message"
+base -> enum.kafka: "embedded in every payload"
+base -> enum.bare
+enum.kafka -> hier: "payload overrides the predicates\nthat are true for its extends chain"
+enum.local -> hier: "every predicate false" {style.stroke-dash: 3}
+enum -> fatal: "classified by" {style.stroke-dash: 3}
 
 note: |md
-  Java `*Exception` -> Rust `*Error` (CLAUDE.md §2); `throw` -> `return Err(...)`.
-  Payload-carrying subclasses keep their payload
-  (e.g. `TopicAuthorizationError` keeps the unauthorized-topic set).
+  Predicates are **not** complements: `Serialization` and `Wakeup` are
+  `KafkaException`s but not `ApiException`s. Callers match variants;
+  C callers get `kafka_common_ErrorCode_t` plus the `kafka_common_Error_is_*`
+  predicates.
 | {near: bottom-center}

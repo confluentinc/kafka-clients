@@ -1,0 +1,2303 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod config_types;
+mod error_hierarchy;
+mod java;
+mod java_parse;
+mod lint_custom;
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{exit, Command};
+
+use anyhow::Context as _;
+
+mod chaos_matrix;
+
+fn main() -> anyhow::Result<()> {
+    let task = env::args().nth(1);
+
+    match task.as_deref() {
+        Some("format") => format()?,
+        Some("format-check") => format_check()?,
+        Some("check-generated") => check_generated()?,
+        Some("generate-error-codes") => generate_error_codes()?,
+        Some("java-deprecated") => java_deprecated()?,
+        Some("fetch-java-refs") => fetch_java_refs()?,
+        Some("lint-custom") => lint_custom::lint_custom()?,
+        Some("lint") => lint()?,
+        Some("doc-hygiene") => doc_hygiene()?,
+        Some("lint-fix") => lint_fix()?,
+        Some("coverage") => coverage()?,
+        Some("coverage-lcov") => coverage_lcov()?,
+        Some("coverage-all") => coverage_all()?,
+        Some("test-multilanguage") => test_multilanguage()?,
+        Some("producer-perf-test") => producer_perf_test()?,
+        Some("package-check") => package_check()?,
+        Some("chaos") => chaos()?,
+        Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        _ => print_help(),
+    }
+
+    Ok(())
+}
+
+fn format() -> anyhow::Result<()> {
+    println!("🎨 Formatting Rust code...");
+
+    // Format main crate
+    run_command("cargo", &["fmt"])?;
+
+    // Format generator crate
+    run_command("cargo", &["fmt", "--manifest-path", "generator/crate/Cargo.toml"])?;
+
+    println!("✅ Formatting complete!");
+    Ok(())
+}
+
+fn format_check() -> anyhow::Result<()> {
+    println!("🔍 Checking Rust code formatting...");
+
+    // Check main crate
+    let main_result = Command::new("cargo").args(["fmt", "--", "--check"]).status()?;
+
+    // Check generator crate
+    let gen_result = Command::new("cargo")
+        .args(["fmt", "--manifest-path", "generator/crate/Cargo.toml", "--", "--check"])
+        .status()?;
+
+    if !main_result.success() || !gen_result.success() {
+        eprintln!("❌ Code is not formatted. Run: cargo xtask format");
+        exit(1);
+    }
+
+    println!("✅ All code is properly formatted!");
+    Ok(())
+}
+
+fn check_generated() -> anyhow::Result<()> {
+    check_error_codes_up_to_date()?;
+
+    println!("🔍 Checking generated code formatting...");
+
+    let generated_files = find_generated_files()?;
+
+    if generated_files.is_empty() {
+        println!("⚠️  No generated files found (build first with cargo build)");
+        return Ok(());
+    }
+
+    println!("   Checking {} generated file(s)", generated_files.len());
+
+    let status = Command::new("rustfmt").arg("--check").args(&generated_files).status()?;
+
+    if !status.success() {
+        eprintln!("\n❌ Generated code has formatting issues. Run: cargo build && cargo xtask format");
+        exit(1);
+    }
+
+    println!("✅ All generated code is properly formatted!");
+    Ok(())
+}
+
+fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let target_dir = PathBuf::from("target/debug/build");
+
+    if !target_dir.exists() {
+        return Ok(files);
+    }
+
+    // Find the most recently modified generated directory to avoid
+    // formatting stale build artifacts (there can be many).
+    let mut newest_dir: Option<(PathBuf, std::time::SystemTime)> = None;
+
+    for entry in fs::read_dir(&target_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() && path.file_name().unwrap().to_str().unwrap().starts_with("confluent-kafka-") {
+            let generated_dir = path.join("out/generated");
+            if generated_dir.exists() {
+                let modified = entry.metadata()?.modified()?;
+                if newest_dir.as_ref().is_none_or(|(_, t)| modified > *t) {
+                    newest_dir = Some((generated_dir, modified));
+                }
+            }
+        }
+    }
+
+    if let Some((generated_dir, _)) = newest_dir {
+        for file_entry in fs::read_dir(generated_dir)? {
+            let file_entry = file_entry?;
+            let file_path = file_entry.path();
+            if file_path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(file_path);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+// ---------------------------------------------------------------------------
+// Error-code constants generated from `kafka_common_ErrorCode_t`
+// ---------------------------------------------------------------------------
+//
+// `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
+// codes are declared. C sees them through the cbindgen-generated header, so it
+// needs nothing here. `tests/common/error_code.rs` cannot include that header
+// and needs a copy of the values, and copies are what drift: the multilanguage
+// harness decodes a proto `KafkaError` back into a Rust `Error` by its code. It
+// cannot use the enum itself: `src/ffi` is behind the `ffi` feature, which the
+// multilanguage test targets do not enable.
+//
+// The flat `python/_error_code.py` copy was retired in P6: the
+// `confluent_kafka` package expresses error codes through the typed hierarchy
+// the same xtask generates (each `…Error` class carries its code as `_ffi_id`),
+// and the gRPC test servers now read those `_ffi_id`s instead of the flat
+// constants. The typed hierarchy is still generated below.
+//
+// `check-generated` re-runs the generation and fails on any difference, so a
+// stale copy breaks the build rather than a test (CLAUDE.md #8: xtask programs
+// rather than shell scripts).
+
+/// The repository root, seen from the crate root `cargo xtask` runs in: the Java
+/// sources (`kafka/`) and the Python binding (`python/`) sit beside `rust/`.
+const REPO_ROOT: &str = "..";
+const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
+const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
+
+/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
+fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
+    let source = fs::read_to_string(ERROR_CODE_SOURCE)?;
+    let body = source
+        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+    // The enum is the only item declared before the next top-level `}`.
+    let body = body.split_once("\n}").map(|(body, _)| body).unwrap_or(body);
+
+    let mut codes = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let value: i32 = value.trim_end_matches(',').parse()?;
+        codes.push((name.to_string(), value));
+    }
+    if codes.is_empty() {
+        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+    }
+    Ok(codes)
+}
+
+fn error_codes_rust(codes: &[(String, i32)], classes: &[(String, String)]) -> anyhow::Result<String> {
+    let mut out = String::new();
+    out.push_str(
+        r#"// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Error-code constants -- GENERATED, DO NOT EDIT.
+//!
+//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! `cargo xtask generate-error-codes`, and checked for staleness by
+//! `cargo xtask check-generated`.
+//!
+//! The multilanguage harness decodes a proto `KafkaError` back into an
+//! [`Error`](confluent_kafka::common::Error) by its code, and cannot use the
+//! enum itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
+//! test targets do not enable.
+//!
+//! Values are the FFI error codes: Java's wire codes at Java's own values, plus
+//! negatives for the classes only the client raises. They are injective over
+//! the error classes, so the code alone identifies the class.
+
+"#,
+    );
+    out.push_str("use std::collections::HashSet;\n\n");
+    for import in parse_error_class_imports()? {
+        out.push_str(&format!("use {import};\n"));
+    }
+    out.push('\n');
+    for (name, value) in codes {
+        out.push_str(&format!("pub const {name}: i32 = {value};\n"));
+    }
+    out.push_str(
+        r#"
+/// Rebuild the error class that owns the protocol error `code`, carrying
+/// `message` -- the table of `Errors::error_with_message` (Java's
+/// `Errors.exception(String)`), spelled with the classes' public constructors
+/// because `Errors` itself is not public API.
+///
+/// `None` for a code no broker-side class owns: `NONE`, and the negatives of
+/// the classes only the client raises.
+pub fn error_with_message(code: i32, message: String) -> Option<Error> {
+    match code {
+"#,
+    );
+    for (name, expr) in classes {
+        out.push_str(&format!("        {name} => Some({expr}),\n"));
+    }
+    out.push_str("        _ => None,\n    }\n}\n");
+    rustfmt(&out)
+}
+
+/// Format generated Rust source with the repository's `rustfmt.toml`, so the
+/// generated file also passes `cargo xtask format-check`.
+///
+/// `cargo fmt` passes the crate's edition to rustfmt, overriding the
+/// `edition = "2021"` of `rustfmt.toml`; so must we. The 2024 style edition
+/// sorts imports differently (`Error` before `errors::*`), and without it the
+/// output `format-check` accepts would never match the generator's.
+fn rustfmt(source: &str) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let edition = crate_edition()?;
+    let mut child = Command::new("rustfmt")
+        .args([
+            "--emit",
+            "stdout",
+            "--config-path",
+            "rustfmt.toml",
+            "--edition",
+            &edition,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().expect("piped stdin").write_all(source.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("rustfmt failed on the generated error-code table");
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+/// The `edition` of the root crate's `[package]`, as `cargo fmt` reads it.
+fn crate_edition() -> anyhow::Result<String> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    manifest
+        .lines()
+        .skip_while(|l| l.trim() != "[package]")
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            (key.trim() == "edition").then(|| value.trim().trim_matches('"').to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no `edition` in the `[package]` of Cargo.toml"))
+}
+
+const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
+
+/// Extract `(C enumerator name, constructor expression)` for every arm of
+/// `Errors::error_with_message` that yields an error.
+///
+/// Each arm is `Self::<Variant> => Some(<expr>)`; the enumerator name is the
+/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_t`
+/// spells Java's `Errors` constants. An arm naming no enumerator is an error, so
+/// the two tables cannot drift apart silently.
+fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, String)>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    let body = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .find_map(|item| match item {
+            syn::ImplItem::Fn(f) if f.sig.ident == "error_with_message" => Some(&f.block),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: Errors::error_with_message not found"))?;
+    let arms = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(&m.arms),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: error_with_message has no match"))?;
+
+    let known: std::collections::HashSet<&str> = codes.iter().map(|(name, _)| name.as_str()).collect();
+    let mut classes = Vec::new();
+    for arm in arms {
+        let syn::Pat::Path(path) = &arm.pat else {
+            anyhow::bail!("{ERRORS_SOURCE}: unexpected error_with_message arm pattern");
+        };
+        let variant = path.path.segments.last().expect("non-empty path").ident.to_string();
+        let mut expr = &*arm.body;
+        if let syn::Expr::Block(block) = expr {
+            match block.block.stmts.as_slice() {
+                [syn::Stmt::Expr(inner, None)] => expr = inner,
+                _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is not a single expression"),
+            }
+        }
+        let inner = match expr {
+            syn::Expr::Path(p) if p.path.is_ident("None") => continue,
+            syn::Expr::Call(call) if matches!(&*call.func, syn::Expr::Path(p) if p.path.is_ident("Some")) => {
+                &call.args[0]
+            },
+            _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is neither `Some(..)` nor `None`"),
+        };
+        let name = screaming_snake(&variant);
+        if !known.contains(name.as_str()) {
+            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_{name}` enumerator");
+        }
+        classes.push((name, inner.to_token_stream().to_string()));
+    }
+    Ok(classes)
+}
+
+/// The `use crate::common::…` imports of [`ERRORS_SOURCE`], re-rooted at
+/// `confluent_kafka`, so the constructor expressions copied out of
+/// `error_with_message` resolve the same way in the generated file. Only the
+/// `common` imports are copied: the arms name error classes, which live there.
+fn parse_error_class_imports() -> anyhow::Result<Vec<String>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    Ok(file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Use(item) => Some(item.tree.to_token_stream().to_string().replace(' ', "")),
+            _ => None,
+        })
+        .filter_map(|tree| {
+            tree.strip_prefix("crate::common::")
+                .map(|rest| format!("confluent_kafka::common::{rest}"))
+        })
+        .collect())
+}
+
+/// `UnknownTopicOrPartition` -> `UNKNOWN_TOPIC_OR_PARTITION`.
+fn screaming_snake(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
+
+fn generate_error_codes() -> anyhow::Result<()> {
+    println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
+
+    let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
+    fs::write(ERROR_CODE_RS, error_codes_rust(&codes, &classes)?)?;
+
+    println!("✅ Wrote {} constants to {ERROR_CODE_RS}", codes.len());
+
+    // Also regenerate the Python exception hierarchy from the Java sources,
+    // cross-checked against the same FFI enum (spec §5.5 / Design Decisions D1).
+    println!("🔧 Generating the Python error hierarchy from the Java sources...");
+    error_hierarchy::generate(Path::new(REPO_ROOT))?;
+
+    // And the ConfigDef type of every producer / consumer config key.
+    println!("🔧 Generating the Python config key types from the Java sources...");
+    config_types::generate(Path::new(REPO_ROOT))?;
+    Ok(())
+}
+
+/// Fail when a generated error-code file no longer matches the Rust enum.
+fn check_error_codes_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking generated error-code constants...");
+
+    let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
+    let expected = error_codes_rust(&codes, &classes)?;
+    let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
+
+    // The Python exception hierarchy generated from the Java sources.
+    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The config key types generated from ProducerConfig / ConsumerConfig.
+    hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+
+    if codes_stale || !hierarchy_stale.is_empty() {
+        if codes_stale {
+            eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
+        }
+        if !hierarchy_stale.is_empty() {
+            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
+            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        }
+        eprintln!("   Run: cargo xtask generate-error-codes");
+        exit(1);
+    }
+
+    println!("✅ Error-code constants are up to date ({} codes)", codes.len());
+    println!("✅ Generated error hierarchy is up to date");
+    Ok(())
+}
+
+fn lint() -> anyhow::Result<()> {
+    // Runs first: it is a fast source-only scan, so a violation is reported
+    // before paying for three full clippy passes. It covers what clippy cannot:
+    // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
+    // of its variants and the visibility of public structs' fields.
+    lint_custom::lint_custom()?;
+
+    // Structural doc defects clippy cannot see: an item's attributes or doc
+    // comment migrated onto a neighbour. Run first, because it is instant and its
+    // failures are always real.
+    doc_hygiene()?;
+
+    // CLAUDE.md §2's import rule, in the one place the compiler cannot enforce it:
+    // a file module stays visible inside its own subtree even when declared `mod x;`.
+    module_path_hygiene()?;
+
+    println!("🔍 Running clippy lints...");
+
+    // Two passes over the whole workspace are needed to cover every module:
+    //
+    // - Default features: catches code behind `#[cfg(not(feature = ...))]`, and
+    //   imports that are only unused when a feature is off.
+    // - `--all-features`: `src/ffi/*` is gated behind `ffi`, and the integration
+    //   tests behind `integration-tests` / `multilanguage-tests`. Without this
+    //   pass those modules are compiled out and silently never linted.
+    //
+    // `--workspace` covers every member (including `generator`), so no
+    // per-crate pass is needed.
+    for pass in [
+        &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ][..],
+    ] {
+        run_command("cargo", pass)?;
+    }
+
+    // Lint the xtask crate itself. `cargo clippy` from the workspace root only
+    // covers the root package, so without this the build tooling — including
+    // the `lint-custom` scanner — would escape the lint gate entirely.
+    run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"])?;
+
+    println!("✅ No lint issues found!");
+    Ok(())
+}
+
+fn lint_fix() -> anyhow::Result<()> {
+    println!("🔧 Running clippy with automatic fixes...");
+
+    // Same two passes as `lint()` — see the comment there for why both are
+    // needed. Fixing only the default-feature pass would leave `src/ffi/*` and
+    // the integration tests untouched.
+    for pass in [
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ][..],
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ][..],
+    ] {
+        run_command("cargo", pass)?;
+    }
+
+    // Fix the xtask crate itself (see the matching comment in `lint`).
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "xtask",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    println!("✅ Lint fixes applied!");
+    Ok(())
+}
+
+fn coverage() -> anyhow::Result<()> {
+    println!("Running unit test coverage...");
+    run_coverage_lcov(&[])?;
+    run_grcov_html()?;
+    println!("Coverage report: coverage/html/index.html");
+    Ok(())
+}
+
+fn coverage_lcov() -> anyhow::Result<()> {
+    println!("Running unit test coverage (lcov)...");
+    run_coverage_lcov(&[])?;
+    println!("lcov report: coverage/lcov.info");
+    Ok(())
+}
+
+fn coverage_all() -> anyhow::Result<()> {
+    println!("Running full test coverage (unit + integration, requires Docker)...");
+    run_coverage_lcov(&["--features", "integration-tests"])?;
+    run_grcov_html()?;
+    println!("Coverage report: coverage/html/index.html");
+    Ok(())
+}
+
+fn test_multilanguage() -> anyhow::Result<()> {
+    println!("Running multilanguage integration tests (requires Docker)...");
+    println!("This builds the python + c gRPC server images, then runs");
+    println!("`cargo test --features integration-tests,multilanguage-tests`.");
+    // Delegated to the repository root's Makefile so the image-build steps
+    // stay in one place; it shells out to python/Makefile and c/Makefile.
+    run_command("make", &["-C", "..", "test-integration-python", "test-integration-c"])
+}
+
+/// Run the producer performance test as an env-driven benchmark binary.
+///
+/// Runs the same `producer_perf_test` that ships in the integration suite, but in
+/// release mode and driven entirely by environment variables
+/// (`BOOTSTRAP_SERVERS`, `VALUE_SIZE`, `LIMIT_RPS`, `TEST_DURATION_SECONDS`,
+/// `COMPRESSION_TYPE`, `P99_LIMIT_MS`, ... — see the doc comment at the top of
+/// `tests/integration/producer_perf_test.rs`). It writes `metrics.jsonl` in the
+/// schema `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this
+/// in sync with the other producer performance tests in the project.
+///
+/// Extra arguments after `producer-perf-test` are forwarded to the test binary,
+/// e.g. `cargo xtask producer-perf-test --test-threads=1`.
+fn producer_perf_test() -> anyhow::Result<()> {
+    println!("🚀 Running env-driven producer performance benchmark...");
+    println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
+    println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).");
+    println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
+    println!("   See tests/integration/producer_perf_test.rs for the full list.");
+
+    let mut args: Vec<String> = vec![
+        "test".into(),
+        "--release".into(),
+        "--features".into(),
+        "integration-tests".into(),
+        "--test".into(),
+        "integration".into(),
+        "--".into(),
+        "--exact".into(),
+        "producer_perf_test::producer_perf_test".into(),
+        "--nocapture".into(),
+    ];
+    // Forward any extra args (e.g. --test-threads=1) to the test binary.
+    args.extend(env::args().skip(2));
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command("cargo", &arg_refs)
+}
+
+/// Runs the flag-driven chaos / fault-injection runner (producer + KIP-848
+/// consumer), the single-command entry point at parity with librdkafka's
+/// `chaos.py`.
+///
+/// It stands up a dedicated Docker cluster and stops/kills/restarts its
+/// brokers, so it is slow, destructive, and excluded from the default sweep
+/// (`test = false` + `#[ignore]`). CLI flags are translated to `CHAOS_*`
+/// environment variables and forwarded to the `chaos_run` test (the same
+/// env-driven pattern the producer perf test uses); `CHAOS_*` variables of the
+/// invoking shell are not passed on, so only the given flags count.
+///
+/// The flags are listed in [`CHAOS_HELP`] (`cargo xtask chaos --help`).
+///
+/// The run fails unless libtest reports that exactly the one selected test
+/// ran and passed, so a filter that matches nothing cannot pass. Every
+/// iteration appends a line to `target/chaos-runs/run-history.tsv` under the
+/// package root: unix time, iteration, verdict (PASS, FAIL, ERROR for a build
+/// or configuration failure, INTERRUPTED), seconds, seed, reports directory.
+///
+/// A Ctrl-C (or SIGTERM / SIGHUP) is forwarded to the test as SIGINT, so it
+/// tears its cluster down; a second one kills it.
+///
+/// See design/current/chaos-fault-injection-harness.md and chaos-parity-gap.md.
+fn chaos() -> anyhow::Result<()> {
+    let mut raw: Vec<String> = env::args().skip(2).collect();
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    if raw[..xtask_end].iter().any(|a| a == "--help" || a == "-h") {
+        println!("{CHAOS_HELP}");
+        return Ok(());
+    }
+
+    println!("🔥 Running chaos / fault-injection runner (Docker required)...");
+    println!("   Slow and destructive to its own cluster; not part of `cargo test`.");
+
+    // `--repeat N` is an xtask-level loop control (the chaos_until_fail.sh
+    // analog), not a CHAOS_* flag — pull it out before parsing the rest.
+    let repeat = take_repeat(&mut raw)?;
+
+    // `--scenario NAME`: run that named smoke test instead of the generic
+    // runner. Otherwise parse the chaos flags into CHAOS_* env vars for
+    // `chaos_run`.
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    let (args, env_vars, test) = if raw[..xtask_end].iter().any(|a| a == "--scenario") {
+        let (args, test) = scenario_test_args(&raw)?;
+        (args, Vec::new(), test)
+    } else {
+        let env_vars = parse_chaos_flags(&raw)?;
+        let feature = chaos_test_feature(&env_vars);
+        if feature == "multilanguage-tests" {
+            println!("   python/c workload requested → building with `--features multilanguage-tests`");
+        }
+        let args: Vec<String> = [
+            "test",
+            "--features",
+            feature,
+            "--test",
+            "chaos",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--exact",
+            CHAOS_RUN_TEST,
+        ]
+        .map(String::from)
+        .to_vec();
+        (args, env_vars, CHAOS_RUN_TEST.to_string())
+    };
+
+    signals::install();
+    // Run once, or loop until failure / `repeat` iterations (the
+    // chaos_until_fail.sh analog), appending a TSV history line per iteration.
+    let history = chaos_matrix::package_root().join("target/chaos-runs/run-history.tsv");
+    for iter in 1..=repeat {
+        if repeat > 1 {
+            println!("🔁 chaos iteration {iter}/{repeat}");
+        }
+        let start = std::time::Instant::now();
+        let run = run_chaos_test(&args, &env_vars);
+        let secs = start.elapsed().as_secs();
+        let (verdict, failure, scan) = match run {
+            Ok((exited_ok, scan)) => {
+                let (verdict, failure) = chaos_verdict(&scan, exited_ok, signals::count() > 0, &test);
+                (verdict, failure, scan)
+            },
+            Err(e) => ("ERROR", Some(format!("{e:#}")), ChaosTestScan::default()),
+        };
+        let reports = scan
+            .reports
+            .as_deref()
+            .map(|dir| chaos_matrix::package_root().join(dir).display().to_string());
+        append_history(
+            &history,
+            iter,
+            verdict,
+            secs,
+            scan.seed.as_deref().unwrap_or(""),
+            reports.as_deref().unwrap_or(""),
+        );
+        if let Some(failure) = failure {
+            eprintln!(
+                "❌ chaos iteration {iter} {verdict} after {secs}s — stopping (history: {})",
+                history.display()
+            );
+            anyhow::bail!("chaos {verdict}: {failure}");
+        }
+    }
+    if repeat > 1 {
+        println!("✅ all {repeat} chaos iterations passed (history: {})", history.display());
+    }
+    Ok(())
+}
+
+/// The libtest path of the flag-driven runner test.
+const CHAOS_RUN_TEST: &str = "run_test::chaos_run";
+
+/// The module holding the named smoke tests `--scenario NAME` runs.
+const CHAOS_SCENARIO_MODULE: &str = "simple_flow_test";
+
+/// The flags of `cargo xtask chaos` (defaults mirror librdkafka's chaos.py
+/// where they overlap). Printed by `cargo xtask chaos --help`; every flag the
+/// parser accepts must appear here (checked by a test).
+const CHAOS_HELP: &str = "\
+cargo xtask chaos [FLAGS]           run the flag-driven chaos runner
+cargo xtask chaos --scenario NAME   run a named #[ignore] smoke test instead
+                                    (e.g. simple_flow_clean_broker_roll, or a
+                                    full libtest path like module::name);
+                                    arguments after `--` go to libtest
+
+Values may be given as `--flag value` or `--flag=value`; a flag may be given
+only once (except --workload).
+
+  --brokers N            broker count (3)
+  --num-topics N         number of test topics (1). With >1, --topic is the
+                         prefix and topics are named <topic>_0.._N-1; one
+                         producer runs per topic (each at --rps, aggregate =
+                         N*rps) and consumers subscribe to all topics
+  --partitions N         partitions per topic (6)
+  --replication-factor N replication factor per topic (default min(brokers,3);
+                         FATAL if > brokers)
+  --msg-size N           producer value payload size in bytes (100)
+  --cycles N             chaos cycles (3)
+  (broker rolling is the default fault; layer more faults on with the flags
+   below, each taking an OPTIONAL cadence N = every N cycles, else every cycle)
+  --no-broker-roll       disable the implicit broker roll (e.g. pure migration)
+  --topic-recreate [N]      also delete/recreate the topic
+  --reassign-partitions [N] also reassign partitions (data moves)
+  --change-leader [N]       also do a preferred-leader change (no data move)
+  --all-brokers-down [N]    also kill every broker at once (SIGKILL), keep the
+                            cluster down for --outage-s, then restart it all
+  --outage-s N           whole-cluster outage for --all-brokers-down (30)
+  --allow-multi-topic-recreate  run --topic-recreate with --num-topics > 1
+                         despite the known consumer defect; a failure with
+                         exactly its signature is labelled KNOWN DEFECT
+  --unclean              SIGKILL instead of SIGTERM for broker roll
+  --workload role:backend  repeatable; role=producer|consumer,
+                           backend=rust|python|python-async|c
+                           (default: producer:rust,consumer:rust)
+  --consumers N          shorthand for 1 rust producer + N rust consumers
+                         (librdkafka's --consumers; not usable with --workload)
+  --consumer-churn-min M      consumer churn: keep the live consumer count in
+  --consumer-churn-max X      [M, X]; each cycle stop a random batch then start
+                              a random batch (librdkafka chaos churn). Both
+                              required together; owns the consumer set (not
+                              usable with --consumers/--workload)
+  --security-protocol P  broker listener the producer/consumer workloads
+                         connect through: plaintext (default) | ssl |
+                         sasl_plaintext | sasl_ssl. SSL trusts the cluster CA;
+                         SASL is PLAIN as admin/admin-secret. Applies to
+                         every backend (sasl_plaintext is unavailable to a
+                         containerised gRPC server); the harness's own admin
+                         stays on PLAINTEXT
+  --rps N                producer target records/sec, 0 = max (1000)
+  --stop-s N             seconds a broker stays down per roll (5)
+  --up-wait-s N          max seconds to wait for a restarted broker to become
+                         operational (60)
+  --warmup-s N           warm-up before the first fault (5)
+  --between-s N          cooldown between cycles (3)
+  --drain-s N            drain window at the end (15)
+  --idle-threshold-s N   end the drain once consumption has been quiet this
+                         long, 0 = wait the full --drain-s (3); no effect with
+                         the default verifier, whose drain ends once every
+                         acknowledged record was seen
+  --dwell-s N            delete->recreate dwell for topic-recreate (0)
+  --leave-broker-down N  keep broker N down for the whole run
+  --random               chaos-monkey mode: each cycle the seeded RNG picks
+                         whether/which fault fires (broker-roll, recreate,
+                         reassign, change-leader — all candidates) AND its
+                         parameters (broker, clean/unclean, down, dwell) and
+                         the timing. Rejects the per-fault flags (--unclean,
+                         --stop-s, --dwell-s, --no-broker-roll, the fault
+                         cadences, --rebalance-mid-roll): it draws those itself
+  --action-prob P        --random only: per-cycle probability a fault fires
+                         (0.7, within 0..=1)
+  --seed N               reproducibility seed (0 = auto-pick & print). Drives
+                         the broker-roll order and, with --random, the ENTIRE
+                         run; rerun with the printed seed to reproduce it
+  --commit sync|async    consumer commit mode (sync)
+  --topic NAME           topic name (chaos-run)
+  --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
+  --rebalance-remove-cycle N  remove that consumer at cycle N
+  --rebalance-mid-roll        fire the add/remove INSIDE the broker-roll
+                              down-window (rebalance overlaps leader
+                              migration in time); needs a roll that cycle
+  --reports              write target/chaos-runs/<id>/ (verdict, leader
+                         changes, per-workload client logs, summary)
+  --log-budget-mb N      per-workload client-log rotation budget (64)
+  --repeat N             run up to N times, stop on first failure, append
+                         target/chaos-runs/run-history.tsv (until-fail loop);
+                         also works with --scenario";
+
+/// The `cargo` arguments for `cargo xtask chaos --scenario NAME`, and the
+/// full libtest path of the test they select. Arguments before a `--`
+/// (besides the `--scenario NAME` pair) go to `cargo test`; the ones after it
+/// go to libtest, after the flags selecting the named test. `--exact` matches
+/// the whole path, so a bare name is looked up in [`CHAOS_SCENARIO_MODULE`].
+fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
+    let (xtask_args, libtest_args) = match raw.iter().position(|a| a == "--") {
+        Some(split) => (&raw[..split], &raw[split + 1..]),
+        None => (raw, &raw[raw.len()..]),
+    };
+    let pos = xtask_args
+        .iter()
+        .position(|a| a == "--scenario")
+        .ok_or_else(|| anyhow::anyhow!("--scenario must come before `--`"))?;
+    let name = match xtask_args.get(pos + 1) {
+        Some(name) if !name.is_empty() && !name.starts_with('-') => name.clone(),
+        _ => anyhow::bail!("--scenario requires a test name"),
+    };
+    let test = if name.contains("::") {
+        name
+    } else {
+        format!("{CHAOS_SCENARIO_MODULE}::{name}")
+    };
+    let mut args: Vec<String> = ["test", "--features", "integration-tests", "--test", "chaos"]
+        .map(String::from)
+        .to_vec();
+    args.extend(
+        xtask_args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != pos && *i != pos + 1)
+            .map(|(_, a)| a.clone()),
+    );
+    args.extend(["--", "--ignored", "--nocapture", "--exact"].map(String::from));
+    args.push(test.clone());
+    args.extend(libtest_args.iter().cloned());
+    Ok((args, test))
+}
+
+/// The cargo feature the chaos test must be built with for a run with these
+/// `CHAOS_*` settings. A python/c workload backend needs the gRPC bridge,
+/// which only compiles under `multilanguage-tests`, so that feature is picked
+/// whenever such a workload is requested and the user does not have to.
+fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
+    let needs_grpc = env_vars
+        .iter()
+        .find(|(k, _)| k == "CHAOS_WORKLOADS")
+        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c"));
+    if needs_grpc {
+        "multilanguage-tests"
+    } else {
+        "integration-tests"
+    }
+}
+
+/// Extract `--repeat N` from the raw args before any `--`, returning N
+/// (default 1). The flag and its value are removed so the remaining args
+/// parse as chaos flags (or `--scenario` arguments).
+fn take_repeat(raw: &mut Vec<String>) -> anyhow::Result<u32> {
+    let xtask_end = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
+    let positions: Vec<usize> = (0..xtask_end).filter(|&i| raw[i] == "--repeat").collect();
+    let Some(&pos) = positions.first() else {
+        return Ok(1);
+    };
+    anyhow::ensure!(positions.len() == 1, "--repeat is given more than once");
+    let val = raw
+        .get(pos + 1)
+        .filter(|_| pos + 1 < xtask_end)
+        .ok_or_else(|| anyhow::anyhow!("--repeat requires a count"))?;
+    let n: u32 = val
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--repeat must be a positive integer"))?;
+    anyhow::ensure!(n >= 1, "--repeat must be >= 1");
+    raw.drain(pos..=pos + 1);
+    Ok(n)
+}
+
+/// What a chaos test run printed that the driver needs: whether exactly one
+/// test ran and passed, and the run's seed and reports directory.
+#[derive(Debug, Default, PartialEq)]
+struct ChaosTestScan {
+    /// libtest's `running N tests`; `None` when the test binary never ran
+    /// (a build failure).
+    tests_run: Option<usize>,
+    /// libtest's `test result: ok. 1 passed`.
+    passed_one: bool,
+    /// The harness force-exited a process that had passed; libtest's summary
+    /// never prints then.
+    forced_pass: bool,
+    /// The harness rejected the `CHAOS_*` configuration.
+    config_error: bool,
+    seed: Option<String>,
+    reports: Option<String>,
+}
+
+impl ChaosTestScan {
+    fn observe(&mut self, line: &str) {
+        let line = line.trim();
+        if self.tests_run.is_none() {
+            if let Some(rest) = line.strip_prefix("running ") {
+                let mut words = rest.split_whitespace();
+                if let (Some(n), Some("test" | "tests"), None) = (words.next(), words.next(), words.next()) {
+                    self.tests_run = n.parse().ok();
+                }
+            }
+        }
+        if line.starts_with("test result: ok. 1 passed;") {
+            self.passed_one = true;
+        }
+        if line.starts_with(chaos_matrix::FORCED_EXIT_AFTER_PASS) {
+            self.forced_pass = true;
+        }
+        if line.starts_with("invalid chaos configuration") {
+            self.config_error = true;
+        }
+        if let Some(header) = line.strip_prefix("chaos: ") {
+            if let Some(seed) = header.split_whitespace().find_map(|w| w.strip_prefix("seed=")) {
+                self.seed = Some(seed.to_string());
+            }
+            if let Some(dir) = header
+                .strip_prefix("reports -> ")
+                .or_else(|| header.strip_prefix("reports written to "))
+            {
+                self.reports = Some(dir.trim().to_string());
+            }
+        }
+    }
+
+    /// Combine the scans of the run's stdout and stderr.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            tests_run: self.tests_run.or(other.tests_run),
+            passed_one: self.passed_one || other.passed_one,
+            forced_pass: self.forced_pass || other.forced_pass,
+            config_error: self.config_error || other.config_error,
+            seed: self.seed.or(other.seed),
+            reports: self.reports.or(other.reports),
+        }
+    }
+}
+
+/// The verdict of one chaos test run, and why it is not a pass. A run passes
+/// only when libtest ran exactly the selected test and it passed, so a filter
+/// matching nothing (libtest exits 0 then) or several tests cannot pass.
+fn chaos_verdict(
+    scan: &ChaosTestScan,
+    exited_ok: bool,
+    interrupted: bool,
+    test: &str,
+) -> (&'static str, Option<String>) {
+    if interrupted {
+        return ("INTERRUPTED", Some("interrupted by a signal".to_string()));
+    }
+    if scan.config_error {
+        return ("ERROR", Some("the harness rejected the chaos configuration".to_string()));
+    }
+    match scan.tests_run {
+        None => (
+            "ERROR",
+            Some("the chaos test binary never ran (did it fail to build?)".to_string()),
+        ),
+        Some(n) if n != 1 => (
+            "ERROR",
+            Some(format!("expected exactly one test ({test}) to run, but libtest ran {n}")),
+        ),
+        Some(_) if exited_ok && (scan.passed_one || scan.forced_pass) => ("PASS", None),
+        Some(_) if exited_ok => ("ERROR", Some(format!("{test} exited without reporting a pass"))),
+        Some(_) => ("FAIL", Some(format!("{test} failed"))),
+    }
+}
+
+/// Run `cargo` with `args` and exactly the given `CHAOS_*` environment,
+/// echoing its output while scanning it. Returns whether it exited
+/// successfully, and the scan.
+///
+/// The child gets its own process group, and a signal to xtask is forwarded
+/// to that group: SIGINT first, so the harness tears its cluster down, then
+/// SIGKILL for any further one. xtask itself stays alive until the whole group
+/// has exited, so the pipes it echoes stay open while the harness reports.
+fn run_chaos_test(args: &[String], env_vars: &[(String, String)]) -> anyhow::Result<(bool, ChaosTestScan)> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    let mut command = Command::new("cargo");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    set_chaos_env(&mut command, env_vars);
+    let mut child = command.spawn().context("running cargo test")?;
+    let pgid = child.id();
+    let stdout = tee(child.stdout.take().context("cargo stdout")?, false);
+    let stderr = tee(child.stderr.take().context("cargo stderr")?, true);
+    let mut forwarded = 0;
+    while chaos_matrix::group_running(&mut child, pgid)? {
+        let seen = signals::count();
+        if seen > forwarded {
+            chaos_matrix::signal_group(pgid, if forwarded == 0 { "INT" } else { "KILL" });
+            forwarded = seen;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let exited_ok = child.wait()?.success();
+    let scan = stdout.join().unwrap_or_default().merge(stderr.join().unwrap_or_default());
+    Ok((exited_ok, scan))
+}
+
+/// Give `command` exactly the `CHAOS_*` variables in `env_vars`: none
+/// inherited from the invoking shell (a stale `CHAOS_CHECK_CONFIG` would skip
+/// the cluster and still pass) and none set on it before. Shared by
+/// `cargo xtask chaos` and every `chaos-matrix` run.
+fn set_chaos_env(command: &mut Command, env_vars: &[(String, String)]) {
+    let explicit: Vec<std::ffi::OsString> = command.get_envs().map(|(k, _)| k.to_owned()).collect();
+    for key in env::vars_os().map(|(k, _)| k).chain(explicit) {
+        if key.to_string_lossy().starts_with("CHAOS_") {
+            command.env_remove(key);
+        }
+    }
+    command.envs(env_vars.iter().map(|(k, v)| (k, v)));
+}
+
+/// Echo `source` line by line to xtask's stdout (or stderr) while scanning
+/// it. Write errors (a closed terminal) are ignored: the pipe must keep
+/// draining or the test would block on it.
+fn tee(source: impl std::io::Read + Send + 'static, to_stderr: bool) -> std::thread::JoinHandle<ChaosTestScan> {
+    use std::io::{BufRead as _, Write as _};
+    std::thread::spawn(move || {
+        let mut scan = ChaosTestScan::default();
+        let mut reader = std::io::BufReader::new(source);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {},
+            }
+            let _ = if to_stderr {
+                std::io::stderr().write_all(&line)
+            } else {
+                let mut out = std::io::stdout().lock();
+                out.write_all(&line).and_then(|()| out.flush())
+            };
+            scan.observe(&String::from_utf8_lossy(&line));
+        }
+        scan
+    })
+}
+
+/// Append one tab-separated line to the chaos run history (unix time,
+/// iteration, verdict, seconds, seed, reports directory) — the
+/// run-history.tsv analog. Best-effort.
+fn append_history(path: &std::path::Path, iter: u32, verdict: &str, secs: u64, seed: &str, reports: &str) {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{ts}\t{iter}\t{verdict}\t{secs}\t{seed}\t{reports}");
+    }
+}
+
+/// Fault flags with an OPTIONAL cadence argument (present = fire every cycle;
+/// `N` = every N cycles). Broker rolling is implicit/default-on and toggled
+/// off with `--no-broker-roll`, so it is not in this table.
+const CHAOS_FAULT_FLAGS: &[(&str, &str)] = &[
+    ("--topic-recreate", "CHAOS_TOPIC_RECREATE"),
+    ("--reassign-partitions", "CHAOS_REASSIGN_PARTITIONS"),
+    ("--change-leader", "CHAOS_CHANGE_LEADER"),
+    ("--all-brokers-down", "CHAOS_ALL_BROKERS_DOWN"),
+];
+
+/// Flags that take no value, each setting its variable to `1`.
+const CHAOS_BOOL_FLAGS: &[(&str, &str)] = &[
+    ("--unclean", "CHAOS_UNCLEAN"),
+    ("--reports", "CHAOS_REPORTS"),
+    ("--no-broker-roll", "CHAOS_NO_BROKER_ROLL"),
+    ("--rebalance-mid-roll", "CHAOS_REBALANCE_MID_ROLL"),
+    ("--random", "CHAOS_RANDOM"),
+    ("--allow-multi-topic-recreate", "CHAOS_ALLOW_MULTI_TOPIC_RECREATE"),
+];
+
+/// (flag, env-var) pairs that take a value.
+const CHAOS_VALUED_FLAGS: &[(&str, &str)] = &[
+    ("--brokers", "CHAOS_BROKERS"),
+    ("--num-topics", "CHAOS_NUM_TOPICS"),
+    ("--partitions", "CHAOS_PARTITIONS"),
+    ("--replication-factor", "CHAOS_REPLICATION_FACTOR"),
+    ("--msg-size", "CHAOS_MSG_SIZE"),
+    ("--cycles", "CHAOS_CYCLES"),
+    ("--rps", "CHAOS_RPS"),
+    ("--stop-s", "CHAOS_STOP_S"),
+    ("--up-wait-s", "CHAOS_UP_WAIT_S"),
+    ("--warmup-s", "CHAOS_WARMUP_S"),
+    ("--between-s", "CHAOS_BETWEEN_S"),
+    ("--drain-s", "CHAOS_DRAIN_S"),
+    ("--idle-threshold-s", "CHAOS_IDLE_THRESHOLD_S"),
+    ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
+    ("--seed", "CHAOS_SEED"),
+    ("--action-prob", "CHAOS_ACTION_PROB"),
+    ("--dwell-s", "CHAOS_DWELL_S"),
+    ("--outage-s", "CHAOS_OUTAGE_S"),
+    ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
+    ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
+    ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
+    ("--commit", "CHAOS_COMMIT"),
+    ("--topic", "CHAOS_TOPIC"),
+    ("--consumers", "CHAOS_CONSUMERS"),
+    ("--consumer-churn-min", "CHAOS_CONSUMER_CHURN_MIN"),
+    ("--consumer-churn-max", "CHAOS_CONSUMER_CHURN_MAX"),
+    ("--security-protocol", "CHAOS_SECURITY_PROTOCOL"),
+];
+
+/// Translate `--flag value` / `--flag=value` / `--bool-flag` chaos flags into
+/// the `CHAOS_*` environment variables `ChaosConfig::from_env` reads.
+/// `--workload` is repeatable and accumulates into a comma-separated
+/// `CHAOS_WORKLOADS`; every other flag may be given once. A value may not be
+/// empty or start with `--`, so a flag missing its value cannot swallow the
+/// next flag.
+fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let lookup = |table: &[(&str, &'static str)], flag: &str| table.iter().find(|(f, _)| *f == flag).map(|(_, e)| *e);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut workloads: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let token = raw[i].as_str();
+        i += 1;
+        let (flag, inline) = match token.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (token, None),
+        };
+        let bool_env = lookup(CHAOS_BOOL_FLAGS, flag);
+        let fault_env = lookup(CHAOS_FAULT_FLAGS, flag);
+        let valued_env = lookup(CHAOS_VALUED_FLAGS, flag);
+        if flag != "--workload" && bool_env.is_none() && fault_env.is_none() && valued_env.is_none() {
+            anyhow::bail!("unknown chaos flag: {token} (see `cargo xtask chaos --help`)");
+        }
+        if flag != "--workload" {
+            anyhow::ensure!(!seen.contains(&flag), "{flag} is given more than once");
+            seen.push(flag);
+        }
+        if let Some(envk) = bool_env {
+            anyhow::ensure!(inline.is_none(), "{flag} takes no value");
+            out.push((envk.to_string(), "1".to_string()));
+        } else if let Some(envk) = fault_env {
+            // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
+            // cycle) or `--topic-recreate 2` (every 2 cycles). The next token is
+            // the cadence only if it is a bare number; otherwise the flag is
+            // bare and the token belongs to the next flag.
+            let cadence = match (inline, raw.get(i)) {
+                (Some(v), _) => {
+                    anyhow::ensure!(v.parse::<u32>().is_ok(), "{flag}: cadence '{v}' is not a number of cycles");
+                    v.to_string()
+                },
+                (None, Some(v)) if v.parse::<u32>().is_ok() => {
+                    i += 1;
+                    v.clone()
+                },
+                (None, _) => "1".to_string(),
+            };
+            out.push((envk.to_string(), cadence));
+        } else {
+            let value = match inline {
+                Some(v) => v,
+                None => {
+                    let v = raw.get(i).ok_or_else(|| {
+                        if flag == "--workload" {
+                            anyhow::anyhow!("--workload requires role:backend")
+                        } else {
+                            anyhow::anyhow!("{flag} requires a value")
+                        }
+                    })?;
+                    i += 1;
+                    v.as_str()
+                },
+            };
+            anyhow::ensure!(!value.is_empty(), "{flag} requires a non-empty value");
+            anyhow::ensure!(!value.starts_with("--"), "{flag} requires a value, but got the flag {value}");
+            match valued_env {
+                Some(envk) => out.push((envk.to_string(), value.to_string())),
+                None => workloads.push(value.to_string()),
+            }
+        }
+    }
+
+    if !workloads.is_empty() {
+        out.push(("CHAOS_WORKLOADS".to_string(), workloads.join(",")));
+    }
+    Ok(out)
+}
+
+/// SIGHUP, SIGINT and SIGTERM, recorded instead of ending the process, so the
+/// chaos tasks can stop the run they started — its Docker cluster included —
+/// before they exit. std has no signal API and xtask takes no `libc`
+/// dependency, so `signal(3)` is declared directly; the three numbers are the
+/// same on Linux and macOS. `exec` resets a caught signal to its default, so
+/// the processes a task spawns are unaffected.
+mod signals {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+    static LAST: AtomicI32 = AtomicI32::new(0);
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+
+    const HANDLED: [(i32, &str); 3] = [(1, "SIGHUP"), (2, "SIGINT"), (15, "SIGTERM")];
+
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    extern "C" fn record(signum: i32) {
+        LAST.store(signum, Ordering::SeqCst);
+        COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record SIGHUP, SIGINT and SIGTERM from now on.
+    pub fn install() {
+        for (signum, _) in HANDLED {
+            // SAFETY: `record` only stores to lock-free atomics, which is
+            // async-signal-safe, and `signal` is given a valid handler.
+            unsafe { signal(signum, record) };
+        }
+    }
+
+    /// How many of those signals arrived since `install`.
+    pub fn count() -> u32 {
+        COUNT.load(Ordering::SeqCst)
+    }
+
+    /// The name of the latest one, for messages.
+    pub fn last_name() -> &'static str {
+        let last = LAST.load(Ordering::SeqCst);
+        HANDLED.iter().find(|(n, _)| *n == last).map_or("a signal", |(_, name)| name)
+    }
+}
+
+fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
+    fs::create_dir_all("coverage")?;
+    let mut args = vec![
+        "llvm-cov",
+        "--package",
+        "confluent-kafka",
+        "--ignore-filename-regex",
+        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        "--lcov",
+        "--output-path",
+        "coverage/lcov.info",
+    ];
+    args.extend_from_slice(extra_args);
+    run_command("cargo", &args)
+}
+
+fn run_grcov_html() -> anyhow::Result<()> {
+    run_command("grcov", &["coverage/lcov.info", "-s", ".", "-t", "html", "-o", "coverage/html"])
+}
+
+// ---------------------------------------------------------------------------
+// Published-package check
+// ---------------------------------------------------------------------------
+//
+// `cargo package` only compiles the unpacked crate on its own. This check goes
+// one step further and uses the `.crate` the way a user does: it depends on it
+// from a fresh project outside the workspace, resolving the dependencies anew,
+// so a file missing from the `include` list in `Cargo.toml`, or a dependency
+// that only resolves through the workspace lock file, fails here and not after
+// a release. It also bounds the compressed size, so the package cannot grow
+// back unnoticed (tests, the C FFI, generated output, ...).
+//
+// It packages the way `.semaphore/publish-crates-io.yml` publishes: without the
+// unpublished `ffi-macros` dependency (see `strip_ffi_macros`), and `--locked`.
+
+const PACKAGE_NAME: &str = "confluent-kafka";
+/// The largest `.crate` accepted, compressed: 3 MiB (crates.io allows 10 MiB).
+const MAX_PACKAGE_BYTES: u64 = 3 * 1024 * 1024;
+const PACKAGE_CHECK_DIR: &str = "target/package-check";
+
+fn package_check() -> anyhow::Result<()> {
+    println!("📦 Packaging {PACKAGE_NAME}...");
+    with_ffi_macros_stripped(|| {
+        // `--no-verify`: the install below builds the packaged crate anyway.
+        // `--allow-dirty`: the stripped files are uncommitted, and the task also
+        // runs before a commit.
+        // `--locked`: as the publish pipeline does, so a stripped lock file that
+        // no longer matches the manifest fails here and not at release time.
+        run_command(
+            "cargo",
+            &[
+                "package",
+                "-p",
+                PACKAGE_NAME,
+                "--no-verify",
+                "--allow-dirty",
+                "--locked",
+            ],
+        )
+    })?;
+
+    let version = package_version()?;
+    let crate_file = PathBuf::from(format!("target/package/{PACKAGE_NAME}-{version}.crate"));
+    let size = fs::metadata(&crate_file)?.len();
+    println!(
+        "   {}: {:.2} MiB (limit {:.2} MiB)",
+        crate_file.display(),
+        size as f64 / (1024.0 * 1024.0),
+        MAX_PACKAGE_BYTES as f64 / (1024.0 * 1024.0)
+    );
+    if size > MAX_PACKAGE_BYTES {
+        eprintln!(
+            "❌ {} is {size} bytes, above the {MAX_PACKAGE_BYTES}-byte limit. \
+             Check the `include` list in Cargo.toml for files that should not ship.",
+            crate_file.display()
+        );
+        exit(1);
+    }
+
+    println!("📥 Installing the package in a fresh project...");
+    let check_dir = PathBuf::from(PACKAGE_CHECK_DIR);
+    if check_dir.exists() {
+        fs::remove_dir_all(&check_dir)?;
+    }
+    let unpacked = check_dir.join("unpacked");
+    fs::create_dir_all(&unpacked)?;
+    run_command(
+        "tar",
+        &[
+            "-xzf",
+            &crate_file.display().to_string(),
+            "-C",
+            &unpacked.display().to_string(),
+        ],
+    )?;
+    let package_dir = fs::canonicalize(unpacked.join(format!("{PACKAGE_NAME}-{version}")))?;
+
+    let consumer = check_dir.join("consumer");
+    fs::create_dir_all(consumer.join("src"))?;
+    // The empty `[workspace]` makes the project its own workspace root, so the
+    // enclosing `rust/` workspace neither claims it nor lends it its lock file.
+    fs::write(
+        consumer.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"package-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+             [workspace]\n\n[dependencies]\n{PACKAGE_NAME} = {{ path = {:?} }}\n",
+            package_dir.display().to_string()
+        ),
+    )?;
+    fs::write(
+        consumer.join("src/main.rs"),
+        "fn main() {\n    let error: Option<confluent_kafka::common::Error> = None;\n    assert!(error.is_none());\n}\n",
+    )?;
+    let manifest = consumer.join("Cargo.toml").display().to_string();
+    let status = Command::new("cargo")
+        .args(["build", "--manifest-path", &manifest])
+        .env("CARGO_TARGET_DIR", check_dir.join("target"))
+        .status()?;
+    if !status.success() {
+        eprintln!("❌ A project depending on the packaged {PACKAGE_NAME} does not build");
+        exit(1);
+    }
+
+    println!("✅ {PACKAGE_NAME} {version} packages within the size limit and builds as a dependency");
+    Ok(())
+}
+
+/// The `ffi-macros` dependency line in `Cargo.toml` starts with this.
+const FFI_MACROS_DEPENDENCY: &str = "ffi-macros = ";
+/// Its entry in the `ffi` feature, with the separator before it.
+const FFI_MACROS_FEATURE_ENTRY: &str = ", \"dep:ffi-macros\"";
+/// The line listing it among [`PACKAGE_NAME`]'s dependencies in `Cargo.lock`.
+const FFI_MACROS_LOCK_LINE: &str = " \"ffi-macros\",";
+
+/// Runs `package` with `Cargo.toml` and `Cargo.lock` stripped by
+/// [`strip_ffi_macros`], then puts both files back, whatever `package` returned.
+/// An interrupted run leaves them stripped, and the next one stops in
+/// [`strip_ffi_macros`].
+fn with_ffi_macros_stripped(package: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    let lock = fs::read_to_string("Cargo.lock")?;
+    let (stripped_manifest, stripped_lock) = strip_ffi_macros(&manifest, &lock)?;
+    let result = fs::write("Cargo.toml", stripped_manifest)
+        .and_then(|()| fs::write("Cargo.lock", stripped_lock))
+        .map_err(anyhow::Error::from)
+        .and_then(|()| package());
+    fs::write("Cargo.toml", manifest)?;
+    fs::write("Cargo.lock", lock)?;
+    result
+}
+
+/// `Cargo.toml` and `Cargo.lock` without the `ffi-macros` dependency.
+///
+/// `cargo package` requires every dependency to come from a registry, even an
+/// optional one whose only user, `src/ffi`, is not packaged; `ffi-macros` is not
+/// published. So the manifest loses its line and its entry in the `ffi` feature,
+/// and the lock file the line listing it, which keeps the lock file valid under
+/// `--locked`. `.semaphore/publish-crates-io.yml` makes the same edit with
+/// `sed`, because no code built from the repository may run on its publish VM;
+/// `test_publish_pipeline_strips_the_same_lines` keeps the two in step.
+///
+/// Each of the three must occur exactly once, so a reformatted manifest, or
+/// files an interrupted run left stripped, stop the check instead of packaging
+/// something else.
+fn strip_ffi_macros(manifest: &str, lock: &str) -> anyhow::Result<(String, String)> {
+    let manifest = remove_line(manifest, "Cargo.toml", FFI_MACROS_DEPENDENCY, |line| {
+        line.starts_with(FFI_MACROS_DEPENDENCY)
+    })?;
+    let entries = manifest.matches(FFI_MACROS_FEATURE_ENTRY).count();
+    if entries != 1 {
+        anyhow::bail!(strip_error("Cargo.toml", FFI_MACROS_FEATURE_ENTRY, entries));
+    }
+    let lock = remove_line(lock, "Cargo.lock", FFI_MACROS_LOCK_LINE, |line| line == FFI_MACROS_LOCK_LINE)?;
+    Ok((manifest.replacen(FFI_MACROS_FEATURE_ENTRY, "", 1), lock))
+}
+
+/// `text` without the one line `is_target` accepts, named `pattern` in the error.
+fn remove_line(text: &str, file: &str, pattern: &str, is_target: impl Fn(&str) -> bool) -> anyhow::Result<String> {
+    let mut found = 0;
+    let kept: String = text
+        .split_inclusive('\n')
+        .filter(|line| {
+            let target = is_target(line.strip_suffix('\n').unwrap_or(line));
+            found += usize::from(target);
+            !target
+        })
+        .collect();
+    if found != 1 {
+        anyhow::bail!(strip_error(file, pattern, found));
+    }
+    Ok(kept)
+}
+
+fn strip_error(file: &str, pattern: &str, found: usize) -> String {
+    format!(
+        "expected `{pattern}` once in {file}, found it {found} times. A `cargo xtask package-check` \
+         interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: `git diff` shows what \
+         to restore. Otherwise update `strip_ffi_macros` in xtask/src/main.rs and the `sed` in \
+         .semaphore/publish-crates-io.yml together."
+    )
+}
+
+/// The version of [`PACKAGE_NAME`], from `cargo pkgid`
+/// (`path+file:///…/rust#confluent-kafka@0.1.0`, or `…#0.1.0` when the
+/// directory is named after the package).
+fn package_version() -> anyhow::Result<String> {
+    let output = Command::new("cargo").args(["pkgid", "-p", PACKAGE_NAME]).output()?;
+    if !output.status.success() {
+        anyhow::bail!("cargo pkgid -p {PACKAGE_NAME} failed");
+    }
+    let pkgid = String::from_utf8(output.stdout)?;
+    let fragment = pkgid.trim().rsplit('#').next().unwrap_or_default();
+    Ok(fragment.rsplit('@').next().unwrap_or(fragment).to_string())
+}
+
+fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
+    let status = Command::new(program).args(args).status()?;
+
+    if !status.success() {
+        anyhow::bail!("Command failed: {} {}", program, args.join(" "));
+    }
+
+    Ok(())
+}
+
+/// Checks for two structural doc defects that neither `rustfmt` nor clippy reports,
+/// both of which occurred in Milestone 11 Phase 8 — and the second of which occurred
+/// *in the fix for* the first.
+///
+/// 1. **A migrated attribute or doc comment.** An item inserted into a preceding
+///    item's attribute list silently steals the attributes and doc between them, so
+///    the earlier item loses (for example) its `#[cfg(test)]` and ships in release
+///    builds. Signature: a `///` line, then one or more `#[..]` lines, then another
+///    `///` line. Rust accepts it, so only a shape check finds it.
+///
+/// 2. **A doc block stacked on a doc block.** An item's doc left in place while a
+///    rewritten block was added below it, giving two summaries and two
+///    `Translated from` lines that rustdoc runs into one paragraph. Signature: one
+///    contiguous `///` run containing two or more `Translated from` openers.
+///
+/// Shape 1's check was shipped for Phase 8 as an ad-hoc script and could not see
+/// shape 2 — an attribute-free stack. Both live here now, and in `lint`, because
+/// CLAUDE.md §8 puts repeatable checks in xtask rather than in shell scripts, and
+/// because a check nobody is obliged to run is a check that finds the next instance
+/// one review round late.
+///
+/// # Two known edge cases, both zero-hit in this repo
+///
+/// Recorded so the next reader has the repro rather than re-deriving it (found by
+/// Critic 48 pass 3, which tested this binary against a synthetic tree):
+///
+/// - **False positive on the conditional-doc idiom.** `/// doc` /
+///   `#[cfg_attr(docsrs, doc = "..")]` / `/// doc` is legitimate and would be flagged
+///   as shape 1, as would a bare `#[doc = ".."]` between doc lines. Exposure is nil and
+///   checkable — `grep -rn 'cfg_attr' src/`, `grep -rn '#\[doc' src/` and `docsrs`
+///   anywhere all return 0, and `cargo doc` is in neither CLAUDE.md's workflow list nor
+///   `make verify`. If it ever fires, skip attributes whose content starts `doc` or
+///   `cfg_attr(..., doc`.
+/// - **False negative on multi-line attributes.** The skip loop consumes only lines that
+///   *start* with `#[`, so `/// doc` / `#[cfg(all(` / `feature = "a",` / `))]` /
+///   `/// doc` is not flagged. The two multi-line attribute sites in `src/`
+///   (`consumer_group_metadata.rs:54` and `:67`, both `#[deprecated(`) were each read
+///   and are ordinary doc → attribute → `pub fn`, so nothing is hiding behind the gap.
+fn doc_hygiene() -> anyhow::Result<()> {
+    println!("🔍 Checking doc-comment hygiene...");
+
+    let mut findings: Vec<String> = Vec::new();
+    for path in rust_sources("src")? {
+        let text = fs::read_to_string(&path)?;
+        let lines: Vec<&str> = text.lines().collect();
+
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("///") {
+                continue;
+            }
+            // Shape 1: doc line -> attribute line(s) -> doc line.
+            let mut cursor = index + 1;
+            let mut saw_attribute = false;
+            while cursor < lines.len() && lines[cursor].trim_start().starts_with("#[") {
+                saw_attribute = true;
+                cursor += 1;
+            }
+            if saw_attribute && cursor < lines.len() && lines[cursor].trim_start().starts_with("///") {
+                findings.push(format!(
+                    "{}:{} doc comment separated from its item by an attribute list — an item \
+                     was probably inserted into the preceding item's attributes",
+                    path.display(),
+                    index + 1
+                ));
+            }
+        }
+
+        // Shape 2: one contiguous `///` run with two or more `Translated from` openers.
+        let mut run_start: Option<usize> = None;
+        let mut openers = 0;
+        for (index, line) in lines.iter().enumerate().chain(std::iter::once((lines.len(), &""))) {
+            if line.trim_start().starts_with("///") {
+                if run_start.is_none() {
+                    run_start = Some(index);
+                    openers = 0;
+                }
+                if line.contains("Translated from") {
+                    openers += 1;
+                }
+            } else {
+                if let Some(start) = run_start.filter(|_| openers > 1) {
+                    findings.push(format!(
+                        "{}:{} one doc block carries {} `Translated from` openers — a doc block \
+                         was probably stacked on another",
+                        path.display(),
+                        start + 1,
+                        openers
+                    ));
+                }
+                run_start = None;
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("✅ Doc-comment hygiene clean!");
+        return Ok(());
+    }
+    for finding in &findings {
+        eprintln!("  {finding}");
+    }
+    Err(anyhow::anyhow!("{} doc-hygiene finding(s)", findings.len()))
+}
+
+/// CLAUDE.md §2: a translated Java class is imported through its parent module's
+/// re-export (`crate::producer::ProducerRecord`), never through the file module that
+/// holds it (the same type spelled with a `producer_record` segment in between). The
+/// file module path is reserved for Java *nested* types, e.g. `ConfigSource` reached
+/// through `config_entry`.
+///
+/// Most of that rule is enforced by the compiler, because the file modules are
+/// declared `mod x;` — but a private module stays visible to the declaring module and
+/// all of its descendants, so a sibling reaching through `super::<file module>::<Type>`
+/// still compiles. This check covers exactly that blind spot.
+///
+/// It flags a `<file module>::<Name>` segment pair only when the file module's own
+/// parent re-exports that exact `Name`, and only when the pair is reached through a
+/// longer path (preceded by `::`). Both conditions matter: the first leaves Java nested
+/// types alone (`common::network` re-exports `ChannelState` but not the nested `State`,
+/// so only the former is a violation), and the second leaves the defining
+/// `pub use` line in the parent's own `mod.rs` alone.
+///
+/// A file module whose name is also a directory module's name is skipped, because the
+/// pair is keyed on the bare segment rather than the full path: the three
+/// module-inception files (`metrics`, `utils`, `resource`) sit inside a directory of
+/// the same name, so `common::metrics::Metrics` — the *correct* path — is
+/// indistinguishable from a violation by segment name alone.
+fn module_path_hygiene() -> anyhow::Result<()> {
+    println!("🔍 Checking module-path hygiene...");
+
+    // (file module segment, re-exported name) for every hand-written parent module.
+    let mut reexports: Vec<(String, String)> = Vec::new();
+    let mut directory_modules: Vec<String> = Vec::new();
+    for path in rust_sources("src")? {
+        if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+            if let Some(name) = path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) {
+                directory_modules.push(name.to_string());
+            }
+        }
+    }
+    for path in rust_sources("src")? {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if file_name != "mod.rs" && file_name != "lib.rs" {
+            continue;
+        }
+        let dir = path.parent().unwrap_or(&path);
+        let text = fs::read_to_string(&path)?;
+        for body in use_statements(&text) {
+            // Only a re-export of a *direct child file module* counts: `<seg>::<Name>`
+            // or `self::<seg>::<Name>`, with `<seg>.rs` sitting next to this `mod.rs`.
+            let body = body.trim_start_matches("self::");
+            let Some((segment, tail)) = body.split_once("::") else {
+                continue;
+            };
+            if segment.contains(' ') || !dir.join(format!("{segment}.rs")).is_file() {
+                continue;
+            }
+            if directory_modules.iter().any(|name| name == segment) {
+                continue;
+            }
+            for name in brace_list(tail) {
+                // `pub use x::y as z;` re-exports under `z`; the path a caller must not
+                // write is still `x::y`, so key on the original name.
+                let original = name.split(" as ").next().unwrap_or(&name).trim().to_string();
+                if !original.is_empty() && original != "*" && original != "self" {
+                    reexports.push((segment.to_string(), original));
+                }
+            }
+        }
+    }
+    reexports.sort();
+    reexports.dedup();
+
+    // A path is only ours to judge if its first segment names this crate. Without
+    // that guard a file module sharing a name with a std one — `common/error.rs`
+    // against `std::error` — matches every `std::error::Error` in the repo.
+    let mut crate_roots: Vec<String> = ["crate", "self", "super", "confluent_kafka"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    crate_roots.extend(directory_modules.iter().cloned());
+    crate_roots.sort();
+    crate_roots.dedup();
+
+    let mut findings: Vec<String> = Vec::new();
+    for root in ["src", "tests", "examples", "consumer-perf/src"] {
+        if !PathBuf::from(root).is_dir() {
+            continue;
+        }
+        for path in rust_sources(root)? {
+            let text = fs::read_to_string(&path)?;
+            for (number, line) in text.lines().enumerate() {
+                for (segment, name) in &reexports {
+                    let needle = format!("::{segment}::{name}");
+                    let mut from = 0;
+                    while let Some(at) = line[from..].find(&needle) {
+                        let start = from + at;
+                        let end = start + needle.len();
+                        from = start + 1;
+                        // Reject a longer identifier on either side (`::topic::TopicX`).
+                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let head: String = line[..start]
+                            .chars()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+                        if !crate_roots.iter().any(|allowed| allowed == root) {
+                            continue;
+                        }
+                        findings.push(format!(
+                            "{}:{} reaches `{name}` through the file module `{segment}` — \
+                             import it from the parent re-export instead (CLAUDE.md §2)",
+                            path.display(),
+                            number + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("✅ Module-path hygiene clean!");
+        return Ok(());
+    }
+    for finding in &findings {
+        eprintln!("  {finding}");
+    }
+    Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// The body of every `use` statement in `text`, whitespace-collapsed and with the
+/// leading visibility/keyword and trailing `;` stripped. Multi-line statements are
+/// joined, so a braced list arrives as one string.
+fn use_statements(text: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("use ") {
+        let before_is_boundary = rest[..at].ends_with('\n')
+            || rest[..at].trim_end().ends_with("pub")
+            || rest[..at].trim_end().ends_with("(crate)")
+            || rest[..at].chars().rev().take_while(|c| *c == ' ').count() == at;
+        let after = &rest[at + 4..];
+        let Some(end) = after.find(';') else { break };
+        if before_is_boundary {
+            bodies.push(after[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        rest = &after[end + 1..];
+    }
+    bodies
+}
+
+/// `Name` -> `["Name"]`; `{A, B as C}` -> `["A", "B as C"]`. Nested braces are skipped,
+/// since this check only needs the simple shapes the repo's `mod.rs` files use.
+fn brace_list(tail: &str) -> Vec<String> {
+    let tail = tail.trim();
+    let Some(inner) = tail.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+        return vec![tail.to_string()];
+    };
+    if inner.contains('{') {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// Every `.rs` file under `root`, recursively, in a deterministic order.
+fn rust_sources(root: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut stack = vec![PathBuf::from(root)];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()?;
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Writes [`java::DEPRECATED_LIST`]: the union of the deprecated items of each
+/// ref given (default [`java::DEPRECATION_REFS`]).
+fn java_deprecated() -> anyhow::Result<()> {
+    let args: Vec<String> = env::args().skip(2).collect();
+    let refs: Vec<&str> = if args.is_empty() {
+        java::DEPRECATION_REFS.to_vec()
+    } else {
+        args.iter().map(String::as_str).collect()
+    };
+    let mut items = std::collections::BTreeSet::new();
+    for reference in &refs {
+        let classes = java::load_ref(reference).ok_or_else(|| {
+            anyhow::anyhow!("ref `{reference}` is not in the `kafka` submodule (run `git -C ../kafka fetch --tags`)")
+        })?;
+        items.extend(java::deprecated_items(&classes));
+    }
+    let mut out = format!(
+        "# Java client API marked @Deprecated in Apache Kafka {}.\n\
+         # Generated by `cargo xtask java-deprecated`; read by `cargo xtask lint-custom`.\n\
+         # CLAUDE.md §3: deprecated API MUST NOT be translated.\n\
+         # A class covers its members and nested classes; `#name(T1,T2)` is one overload, `#NAME` a field.\n",
+        refs.join(" + ")
+    );
+    for item in &items {
+        out.push_str(item);
+        out.push('\n');
+    }
+    fs::write(java::DEPRECATED_LIST, out)?;
+    println!("✅ Wrote {} deprecated items to {}", items.len(), java::DEPRECATED_LIST);
+    Ok(())
+}
+
+/// Fetches the tags of [`java::lint_refs`] into the `kafka` submodule, one
+/// commit deep each, so a shallow clone (CI's) can run `lint-custom`, which
+/// reads those refs and fails without them.
+fn fetch_java_refs() -> anyhow::Result<()> {
+    let refs = java::lint_refs();
+    let mut args = vec!["-C", java::KAFKA_SUBMODULE, "fetch", "--depth=1", "--no-tags", "origin"];
+    let specs: Vec<String> = refs.iter().map(|r| format!("+refs/tags/{r}:refs/tags/{r}")).collect();
+    args.extend(specs.iter().map(String::as_str));
+    let status = Command::new("git").args(&args).status()?;
+    if !status.success() {
+        anyhow::bail!("fetching {} into `{}` failed", refs.join(", "), java::KAFKA_SUBMODULE);
+    }
+    println!("✅ Fetched {} into `{}`", refs.join(", "), java::KAFKA_SUBMODULE);
+    Ok(())
+}
+
+fn print_help() {
+    eprintln!(
+        "Tasks:
+  format          Format all Rust code including generated files
+  format-check    Check if code is formatted correctly
+  check-generated Check generated code formatting and error-code staleness (no changes)
+  generate-error-codes  Regenerate the error-code constants for the multilanguage test harness
+  java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
+  fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
+  lint-custom     Run the source-level rules clippy cannot express
+                  (also runs as the first step of `lint`):
+                    check-no-data-carrying-enum-variants  public enum variants hold no data inline
+                    check-no-public-field                 public structs have no `pub` field
+  lint            Run doc-hygiene plus clippy lints (warnings are errors)
+  doc-hygiene     Check for migrated attributes and stacked doc blocks
+  lint-fix        Run clippy and automatically fix what it can
+  coverage        Run unit test coverage (HTML report)
+  coverage-lcov   Run unit test coverage (lcov for CI)
+  coverage-all    Run all test coverage including integration (requires Docker)
+  test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
+  producer-perf-test  Run the env-driven producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
+  package-check   Package the crate as the crates.io publish does (without ffi-macros),
+                  fail above 3 MiB, and build a fresh project depending on it
+  chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
+                    e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
+                             --workload producer:rust --workload consumer:rust
+                    --scenario NAME runs a named #[ignore] smoke test instead;
+                    arguments after `--` go to libtest (e.g. -- --test-threads 1)
+                    `cargo xtask chaos --help` lists every flag
+  chaos-matrix    Run every scenario of a matrix file across security protocols and
+                  message sizes, one after another, saving each run's logs and
+                  reports and keeping a running summary (requires Docker)
+                    e.g. cargo xtask chaos-matrix --matrix my-matrix.txt \
+                             --protocols plaintext,ssl,sasl_ssl --msg-sizes 100,1048576 --rps 1000
+                    --out DIR (default target/chaos-matrix/<matrix name>; re-running resumes)
+                    --only ID,ID  --run-timeout-min N (default 240)  --rerun-failed
+                    --rerun RUN,RUN (run again these run ids, e.g. 15-ssl-1MiB, whatever their outcome)
+                    --check-only (validate every run's configuration, then stop)
+                    --stall-min N (default 20; longer for runs with longer silent phases)
+                    --known-defect-attempts N (default 3)
+                    a run recorded with other flags (scenario line or --rps changed) runs again;
+                    --only / fewer --protocols or --msg-sizes select what runs, the summary
+                    and exit status cover the whole matrix; one runner per --out directory;
+                    Ctrl-C stops the current run (its cluster torn down) and leaves it unrecorded
+                    exits non-zero when a recorded run did not pass (KNOWN-DEFECT excepted)
+  chaos-matrix-status  Show a running (or finished) matrix's progress: current run and
+                  cycle, pass/fail counts, recent results, failures, time estimate
+                    e.g. cargo xtask chaos-matrix-status --watch 30
+                    --out DIR (default: the most recently active matrix)
+
+Usage:
+  cargo xtask format
+  cargo xtask format-check
+  cargo xtask check-generated
+  cargo xtask generate-error-codes
+  cargo xtask java-deprecated [kafka-ref ...]
+  cargo xtask lint-custom
+  cargo xtask lint
+  cargo xtask doc-hygiene
+  cargo xtask lint-fix
+  cargo xtask coverage
+  cargo xtask coverage-lcov
+  cargo xtask coverage-all
+  cargo xtask test-multilanguage
+  cargo xtask producer-perf-test
+  cargo xtask package-check
+  cargo xtask chaos [FLAGS | --help]
+  cargo xtask chaos-matrix --matrix FILE
+  cargo xtask chaos-matrix-status [--watch [SECS]]"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MANIFEST: &str = r#"[workspace]
+members = [".", "ffi-macros"]
+
+[features]
+ffi = ["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]
+
+[dependencies]
+# Packaging removes this line and `dep:ffi-macros` from the `ffi` feature.
+ffi-macros = { path = "ffi-macros", optional = true }
+flate2 = "1"
+"#;
+
+    const LOCK: &str = r#"[[package]]
+name = "confluent-kafka"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "ffi-macros",
+ "flate2",
+]
+
+[[package]]
+name = "ffi-macros"
+version = "0.1.0"
+"#;
+
+    #[test]
+    fn test_strip_ffi_macros_drops_the_dependency_and_its_feature_entry() {
+        let (manifest, lock) = strip_ffi_macros(MANIFEST, LOCK).unwrap();
+        // The workspace member, the comment and the lock file's own entry for the
+        // `ffi-macros` package stay.
+        assert_eq!(
+            manifest,
+            r#"[workspace]
+members = [".", "ffi-macros"]
+
+[features]
+ffi = ["dep:cbindgen", "dep:env_logger"]
+
+[dependencies]
+# Packaging removes this line and `dep:ffi-macros` from the `ffi` feature.
+flate2 = "1"
+"#
+        );
+        assert_eq!(
+            lock,
+            r#"[[package]]
+name = "confluent-kafka"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "flate2",
+]
+
+[[package]]
+name = "ffi-macros"
+version = "0.1.0"
+"#
+        );
+    }
+
+    #[test]
+    fn test_strip_ffi_macros_needs_each_line_exactly_once() {
+        // What an interrupted run leaves behind.
+        let (manifest, lock) = strip_ffi_macros(MANIFEST, LOCK).unwrap();
+        assert_eq!(
+            strip_ffi_macros(&manifest, &lock).unwrap_err().to_string(),
+            "expected `ffi-macros = ` once in Cargo.toml, found it 0 times. A `cargo xtask \
+             package-check` interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: \
+             `git diff` shows what to restore. Otherwise update `strip_ffi_macros` in \
+             xtask/src/main.rs and the `sed` in .semaphore/publish-crates-io.yml together."
+        );
+        let second_line = MANIFEST.replace("flate2", "ffi-macros = { path = \"ffi-macros\" }\nflate2");
+        assert_eq!(
+            strip_ffi_macros(&second_line, LOCK).unwrap_err().to_string(),
+            strip_error("Cargo.toml", "ffi-macros = ", 2)
+        );
+        // First in the list, the entry has no comma before it.
+        let entry_first = MANIFEST.replace(
+            r#"["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]"#,
+            r#"["dep:ffi-macros", "dep:cbindgen", "dep:env_logger"]"#,
+        );
+        assert_eq!(
+            strip_ffi_macros(&entry_first, LOCK).unwrap_err().to_string(),
+            strip_error("Cargo.toml", r#", "dep:ffi-macros""#, 0)
+        );
+        assert_eq!(
+            strip_ffi_macros(MANIFEST, &lock).unwrap_err().to_string(),
+            strip_error("Cargo.lock", r#" "ffi-macros","#, 0)
+        );
+    }
+
+    /// The publish pipeline cannot run this crate, so it strips the real files with
+    /// `sed`, which reads the three patterns as regular expressions.
+    #[test]
+    fn test_publish_pipeline_strips_the_same_lines() {
+        let rust_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |path: &str| fs::read_to_string(rust_dir.join(path)).unwrap();
+        strip_ffi_macros(&read("Cargo.toml"), &read("Cargo.lock")).unwrap();
+
+        for pattern in [FFI_MACROS_DEPENDENCY, FFI_MACROS_FEATURE_ENTRY, FFI_MACROS_LOCK_LINE] {
+            assert!(!pattern.contains(['.', '*', '[', ']', '^', '$', '\\', '/']), "{pattern}");
+        }
+        let pipeline = read("../.semaphore/publish-crates-io.yml");
+        for command in [
+            format!("sed -i -e '/^{FFI_MACROS_DEPENDENCY}/d' -e 's/{FFI_MACROS_FEATURE_ENTRY}//' rust/Cargo.toml"),
+            format!("sed -i -e '/^{FFI_MACROS_LOCK_LINE}$/d' rust/Cargo.lock"),
+        ] {
+            assert!(pipeline.contains(&command), "publish-crates-io.yml does not run `{command}`");
+        }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn scenario_args_after_the_separator_go_to_libtest() {
+        let (args, test) = scenario_test_args(&strings(&[
+            "--release",
+            "--scenario",
+            "simple_flow_clean_broker_roll",
+            "--",
+            "--test-threads",
+            "1",
+        ]))
+        .unwrap();
+        // `--exact` matches the full path, so the bare name gets its module.
+        assert_eq!(
+            args.join(" "),
+            "test --features integration-tests --test chaos --release -- --ignored --nocapture --exact \
+             simple_flow_test::simple_flow_clean_broker_roll --test-threads 1"
+        );
+        assert_eq!(test, "simple_flow_test::simple_flow_clean_broker_roll");
+        let (bare, _) = scenario_test_args(&strings(&["--scenario", "x"])).unwrap();
+        assert_eq!(
+            bare.join(" "),
+            "test --features integration-tests --test chaos -- --ignored --nocapture --exact simple_flow_test::x"
+        );
+        let (_, full) = scenario_test_args(&strings(&["--scenario", "run_test::chaos_run"])).unwrap();
+        assert_eq!(full, "run_test::chaos_run");
+    }
+
+    #[test]
+    fn every_scenario_test_lives_in_the_scenario_module() {
+        // A bare `--scenario NAME` resolves to `simple_flow_test::NAME`; a
+        // smoke test moved elsewhere would make that path match nothing.
+        let source = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/simple_flow_test.rs")).unwrap();
+        assert!(source.contains("async fn simple_flow_clean_broker_roll()"));
+        let main = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/main.rs")).unwrap();
+        assert!(main.contains(&format!("mod {CHAOS_SCENARIO_MODULE};")));
+        assert!(main.contains("mod run_test;"));
+        let run_test = fs::read_to_string(chaos_matrix::package_root().join("tests/chaos/run_test.rs")).unwrap();
+        assert!(run_test.contains("fn chaos_run()"), "{CHAOS_RUN_TEST} must exist");
+    }
+
+    #[test]
+    fn repeat_is_taken_from_before_the_separator_and_works_with_scenario() {
+        let mut raw = strings(&["--scenario", "x", "--repeat", "3", "--", "--test-threads", "1"]);
+        assert_eq!(take_repeat(&mut raw).unwrap(), 3);
+        assert_eq!(raw, strings(&["--scenario", "x", "--", "--test-threads", "1"]));
+        let mut none = strings(&["--cycles", "1"]);
+        assert_eq!(take_repeat(&mut none).unwrap(), 1);
+        let mut twice = strings(&["--repeat", "2", "--repeat", "3"]);
+        assert_eq!(
+            take_repeat(&mut twice).unwrap_err().to_string(),
+            "--repeat is given more than once"
+        );
+        let mut missing = strings(&["--repeat", "--", "2"]);
+        assert_eq!(take_repeat(&mut missing).unwrap_err().to_string(), "--repeat requires a count");
+        let mut zero = strings(&["--repeat", "0"]);
+        assert_eq!(take_repeat(&mut zero).unwrap_err().to_string(), "--repeat must be >= 1");
+    }
+
+    #[test]
+    fn a_valued_flag_never_swallows_the_next_flag() {
+        let err = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap_err().to_string();
+        assert_eq!(
+            err(&["--topic", "--unclean"]),
+            "--topic requires a value, but got the flag --unclean"
+        );
+        assert_eq!(err(&["--brokers", ""]), "--brokers requires a non-empty value");
+        assert_eq!(err(&["--brokers="]), "--brokers requires a non-empty value");
+        assert_eq!(err(&["--brokers"]), "--brokers requires a value");
+        assert_eq!(err(&["--workload"]), "--workload requires role:backend");
+        assert_eq!(err(&["--brokers", "3", "--brokers", "5"]), "--brokers is given more than once");
+        assert_eq!(err(&["--unclean", "--unclean"]), "--unclean is given more than once");
+        assert_eq!(err(&["--unclean=yes"]), "--unclean takes no value");
+        assert_eq!(
+            err(&["--topic-recreate=often"]),
+            "--topic-recreate: cadence 'often' is not a number of cycles"
+        );
+        assert_eq!(
+            err(&["--bogus", "1"]),
+            "unknown chaos flag: --bogus (see `cargo xtask chaos --help`)"
+        );
+    }
+
+    #[test]
+    fn flags_parse_in_both_value_forms() {
+        let env = parse_chaos_flags(&strings(&[
+            "--brokers=5",
+            "--topic",
+            "t",
+            "--topic-recreate",
+            "--change-leader=2",
+            "--reassign-partitions",
+            "3",
+            "--unclean",
+            "--workload",
+            "producer:rust",
+            "--workload=consumer:python",
+            "--seed",
+            "-1",
+        ]))
+        .unwrap();
+        let pairs: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert_eq!(
+            pairs,
+            [
+                "CHAOS_BROKERS=5",
+                "CHAOS_TOPIC=t",
+                "CHAOS_TOPIC_RECREATE=1",
+                "CHAOS_CHANGE_LEADER=2",
+                "CHAOS_REASSIGN_PARTITIONS=3",
+                "CHAOS_UNCLEAN=1",
+                "CHAOS_SEED=-1",
+                "CHAOS_WORKLOADS=producer:rust,consumer:python",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_help_lists_every_flag_the_parser_accepts() {
+        for (flag, _) in CHAOS_BOOL_FLAGS.iter().chain(CHAOS_FAULT_FLAGS).chain(CHAOS_VALUED_FLAGS) {
+            assert!(
+                CHAOS_HELP.lines().any(|l| l.trim_start().starts_with(&format!("{flag} "))),
+                "{flag} is missing from CHAOS_HELP"
+            );
+        }
+        for extra in ["--workload ", "--repeat ", "--scenario NAME"] {
+            assert!(CHAOS_HELP.contains(extra), "{extra} is missing from CHAOS_HELP");
+        }
+    }
+
+    #[test]
+    fn only_exactly_one_passing_test_is_a_pass() {
+        let scan = |lines: &[&str]| {
+            let mut scan = ChaosTestScan::default();
+            for line in lines {
+                scan.observe(line);
+            }
+            scan
+        };
+        let test = "simple_flow_test::x";
+        let passed = scan(&["running 1 test", "test result: ok. 1 passed; 0 failed; 0 ignored"]);
+        assert_eq!(chaos_verdict(&passed, true, false, test), ("PASS", None));
+        // The documented `--exact NAME` mistake: libtest exits 0 having run nothing.
+        let nothing = scan(&["running 0 tests", "test result: ok. 0 passed; 0 failed; 0 ignored"]);
+        assert_eq!(
+            chaos_verdict(&nothing, true, false, test),
+            (
+                "ERROR",
+                Some("expected exactly one test (simple_flow_test::x) to run, but libtest ran 0".to_string())
+            )
+        );
+        let failed = scan(&["running 1 test", "test result: FAILED. 0 passed; 1 failed"]);
+        assert_eq!(
+            chaos_verdict(&failed, false, false, test),
+            ("FAIL", Some("simple_flow_test::x failed".to_string()))
+        );
+        assert_eq!(
+            chaos_verdict(&ChaosTestScan::default(), false, false, test),
+            (
+                "ERROR",
+                Some("the chaos test binary never ran (did it fail to build?)".to_string())
+            )
+        );
+        let rejected = scan(&["running 1 test", "invalid chaos configuration: --brokers must be >= 1"]);
+        assert_eq!(
+            chaos_verdict(&rejected, false, false, test),
+            ("ERROR", Some("the harness rejected the chaos configuration".to_string()))
+        );
+        let forced = scan(&["running 1 test", chaos_matrix::FORCED_EXIT_AFTER_PASS]);
+        assert_eq!(chaos_verdict(&forced, true, false, test).0, "PASS");
+        assert_eq!(
+            chaos_verdict(&passed, false, true, test),
+            ("INTERRUPTED", Some("interrupted by a signal".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_seed_and_reports_directory_are_read_from_the_run_output() {
+        let mut out = ChaosTestScan::default();
+        out.observe("running 1 test\n");
+        let mut err = ChaosTestScan::default();
+        err.observe("chaos: brokers=3 topics=1 partitions=6 replication=min(3,3) seed=12345 security=plaintext\n");
+        err.observe("chaos: reports -> target/chaos-runs/1-2\n");
+        let scan = out.merge(err);
+        assert_eq!(scan.tests_run, Some(1));
+        assert_eq!(scan.seed.as_deref(), Some("12345"));
+        assert_eq!(scan.reports.as_deref(), Some("target/chaos-runs/1-2"));
+    }
+
+    #[test]
+    fn inherited_chaos_variables_do_not_reach_the_run() {
+        // The run's environment is exactly the parsed flags: a stale
+        // `CHAOS_CHECK_CONFIG` would otherwise skip the cluster and still
+        // pass. Checked on a real child via `env`; the stale variable is set
+        // on the command rather than in this process, which the same loop
+        // strips along with the inherited ones.
+        let mut command = Command::new("sh");
+        command.args(["-c", "env | grep ^CHAOS_ | sort"]).env("CHAOS_CHECK_CONFIG", "1");
+        set_chaos_env(&mut command, &parse_chaos_flags(&strings(&["--cycles", "1"])).unwrap());
+        let output = command.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "CHAOS_CYCLES=1\n");
+    }
+
+    #[test]
+    fn a_caught_signal_is_recorded_not_fatal() {
+        signals::install();
+        let before = signals::count();
+        Command::new("kill")
+            .args(["-s", "HUP", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while signals::count() == before && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(signals::count() > before);
+        assert_eq!(signals::last_name(), "SIGHUP");
+    }
+
+    #[test]
+    fn scenario_requires_a_name_before_the_separator() {
+        let missing = scenario_test_args(&strings(&["--scenario"])).unwrap_err();
+        assert_eq!(missing.to_string(), "--scenario requires a test name");
+        let flag = scenario_test_args(&strings(&["--scenario", "--", "--nocapture"])).unwrap_err();
+        assert_eq!(flag.to_string(), "--scenario requires a test name");
+        let late = scenario_test_args(&strings(&["--", "--scenario", "x"])).unwrap_err();
+        assert_eq!(late.to_string(), "--scenario must come before `--`");
+    }
+
+    #[test]
+    fn python_and_c_workloads_select_the_multilanguage_feature() {
+        let env = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap();
+        assert_eq!(chaos_test_feature(&env(&["--cycles", "1"])), "integration-tests");
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:rust"])),
+            "integration-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:python"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(chaos_test_feature(&env(&["--workload", "producer:c"])), "multilanguage-tests");
+    }
+}

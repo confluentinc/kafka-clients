@@ -1,0 +1,9 @@
+# Java API deprecated after the Rust item translating it shipped in a released
+# major version of this client (CLAUDE.md §3, forward compatibility). Such an
+# item stays until the next major, marked `#[deprecated]`;
+# `cargo xtask lint-custom` (check-no-deprecated-translation) accepts it only if
+# listed here. One marker per line, followed by the Rust version it shipped in:
+#
+#   org.apache.kafka.clients.consumer.Consumer#close(Duration)  1.0.0
+#
+# Empty before 1.0: no Java-deprecated API ships in the first major version.

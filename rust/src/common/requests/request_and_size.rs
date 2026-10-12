@@ -1,0 +1,50 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! A simple struct combining a parsed request with its size.
+//!
+//! Corresponds to `org.apache.kafka.common.requests.RequestAndSize`.
+
+use super::AbstractRequest;
+
+/// A parsed request together with the number of bytes it consumed from the buffer.
+///
+/// Corresponds to `RequestAndSize` in Java.
+#[derive(Debug)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.RequestAndSize")]
+pub struct RequestAndSize {
+    /// The parsed request.
+    pub(crate) request: AbstractRequest,
+    /// The number of bytes consumed during parsing.
+    pub(crate) size: usize,
+}
+
+impl RequestAndSize {
+    /// Creates a new `RequestAndSize`.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestAndSize#RequestAndSize")]
+    pub fn new(request: AbstractRequest, size: usize) -> Self {
+        Self { request, size }
+    }
+
+    /// The parsed request. Java's public `RequestAndSize.request`.
+    pub fn request(&self) -> &AbstractRequest {
+        &self.request
+    }
+
+    /// The number of bytes consumed during parsing. Java's public `RequestAndSize.size`.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}

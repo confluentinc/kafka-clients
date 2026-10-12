@@ -1,0 +1,332 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! The result of `Admin::remove_members_from_consumer_group`.
+//!
+//! Corresponds to
+//! `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult`.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::admin::MemberToRemove;
+use crate::common::protocol::Errors;
+use crate::common::{Error, KafkaFuture};
+use crate::leave_group_request_data::MemberIdentity;
+
+/// The per-member removal errors carried by the underlying future.
+type MemberErrors = HashMap<MemberIdentity, Errors>;
+
+/// The result of `Admin::remove_members_from_consumer_group`.
+///
+/// Corresponds to
+/// `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult`.
+#[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult")]
+pub struct RemoveMembersFromConsumerGroupResult {
+    future: KafkaFuture<MemberErrors>,
+    member_infos: HashSet<MemberToRemove>,
+}
+
+impl RemoveMembersFromConsumerGroupResult {
+    /// Creates a result wrapping the per-member-error future and the set of
+    /// members from the original request (empty in `removeAll` mode).
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#RemoveMembersFromConsumerGroupResult"
+    )]
+    pub(crate) fn new(future: KafkaFuture<MemberErrors>, member_infos: HashSet<MemberToRemove>) -> Self {
+        Self { future, member_infos }
+    }
+
+    /// Whether all members were removed (no specific members were provided).
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#removeAll")]
+    fn remove_all(&self) -> bool {
+        self.member_infos.is_empty()
+    }
+
+    /// Returns a future which indicates whether the request was 100% successful
+    /// (no top-level or member-level error); otherwise the first member error
+    /// is returned.
+    ///
+    /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#all")]
+    pub fn all(&self) -> KafkaFuture<()> {
+        // Stable iteration order for a deterministic "first error" (Java relies
+        // on unspecified set/map iteration order anyway).
+        let mut member_infos: Vec<MemberToRemove> = self.member_infos.iter().cloned().collect();
+        member_infos.sort_by(|a, b| a.group_instance_id().cmp(b.group_instance_id()));
+        self.future.then_apply_try(move |member_errors| {
+            if member_infos.is_empty() {
+                // removeAll mode: fail on the first member-level error.
+                let mut entries: Vec<(&MemberIdentity, &Errors)> = member_errors.iter().collect();
+                entries.sort_by(|a, b| {
+                    (a.0.member_id.as_str(), a.0.group_instance_id.as_deref())
+                        .cmp(&(b.0.member_id.as_str(), b.0.group_instance_id.as_deref()))
+                });
+                for (identity, error) in entries {
+                    if *error != Errors::None {
+                        return Err(Error::with_message(
+                            *error,
+                            format!("Encounter error when trying to remove: {}", describe_identity(identity)),
+                        ));
+                    }
+                }
+            } else {
+                for member in &member_infos {
+                    let identity = member.to_member_identity();
+                    if let Some(error) = sub_level_error(&member_errors, &identity) {
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns the selected member's future.
+    ///
+    /// Mirrors `memberResult(MemberToRemove)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error immediately (Java's `IllegalArgumentException`) when
+    /// called in `removeAll` mode, or when `member` was not part of the original
+    /// request. The returned future fails if the member's removal failed (or the
+    /// member is missing from the response).
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#memberResult")]
+    pub fn member_result(&self, member: &MemberToRemove) -> Result<KafkaFuture<()>, Error> {
+        if self.remove_all() {
+            return Err(Error::local_illegal_argument(
+                "The method: memberResult is not applicable in 'removeAll' mode",
+            ));
+        }
+        if !self.member_infos.contains(member) {
+            return Err(Error::local_illegal_argument(format!(
+                "Member {} was not included in the original request",
+                member.group_instance_id()
+            )));
+        }
+        let identity = member.to_member_identity();
+        Ok(self
+            .future
+            .then_apply_try(move |member_errors| match sub_level_error(&member_errors, &identity) {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }))
+    }
+}
+
+/// Mirrors `KafkaAdminClient.getSubLevelError` specialised for member removal:
+/// an absent member yields the "not included in the response"
+/// `IllegalArgumentException`, a present member yields its error (or `None` when
+/// the error is `NONE`).
+fn sub_level_error(member_errors: &MemberErrors, member: &MemberIdentity) -> Option<Error> {
+    match member_errors.get(member) {
+        None => Some(Error::local_illegal_argument(format!(
+            "Member \"{}\" was not included in the removal response",
+            describe_identity(member)
+        ))),
+        Some(&Errors::None) => None,
+        Some(&error) => Some(Error::new(error)),
+    }
+}
+
+/// Renders a `MemberIdentity` exactly as its Java counterpart's generated
+/// `toString()` does, because two user-visible error messages embed it.
+///
+/// The Kafka message generator emits, for every declared field of a struct,
+/// `"<name>=" + ((<name> == null) ? "null" : "'" + <name> + "'")` when the
+/// field is a string (`MessageDataGenerator.generateFieldToString`), joins the
+/// fields with `", "` and wraps them in `<ClassName>(...)`. `MemberIdentity`
+/// declares three fields — `MemberId`, `GroupInstanceId` and `Reason`
+/// (`LeaveGroupRequest.json`) — so all three are printed, strings are quoted,
+/// and a null renders as a bare `null`. Unknown tagged fields are *not*
+/// printed: the generated `toString` iterates only over declared fields.
+///
+/// This crate's generated `Display` for message structs is `{:?}` (derived
+/// `Debug`), which is a different rendering, hence this local helper.
+fn describe_identity(identity: &MemberIdentity) -> String {
+    fn quote(value: Option<&str>) -> String {
+        match value {
+            Some(value) => format!("'{value}'"),
+            None => "null".to_string(),
+        }
+    }
+    format!(
+        "MemberIdentity(memberId={}, groupInstanceId={}, reason={})",
+        quote(Some(&identity.member_id)),
+        quote(identity.group_instance_id.as_deref()),
+        quote(identity.reason.as_deref())
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::internals::KafkaFutureImpl;
+
+    fn instance_one() -> MemberToRemove {
+        MemberToRemove::new("instance-1")
+    }
+
+    fn instance_two() -> MemberToRemove {
+        MemberToRemove::new("instance-2")
+    }
+
+    fn members_to_remove() -> HashSet<MemberToRemove> {
+        HashSet::from([instance_one(), instance_two()])
+    }
+
+    fn errors_map() -> MemberErrors {
+        MemberErrors::from([
+            (instance_one().to_member_identity(), Errors::None),
+            (instance_two().to_member_identity(), Errors::FencedInstanceId),
+        ])
+    }
+
+    /// Translated from `testTopLevelErrorConstructor`.
+    #[tokio::test]
+    async fn top_level_error_constructor() {
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::group_authorization("group"));
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::GroupAuthorization(_)));
+    }
+
+    /// Translated from `testMemberLevelErrorConstructor` +
+    /// `testMemberLevelErrorInResponseConstructor`.
+    #[tokio::test]
+    async fn member_level_error_constructor() {
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(errors_map());
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
+
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::FencedInstanceId);
+        assert_eq!(result.member_result(&instance_one()).unwrap().get().await.unwrap(), ());
+        assert_eq!(
+            result.member_result(&instance_two()).unwrap().get().await.unwrap_err().error(),
+            Errors::FencedInstanceId
+        );
+
+        // memberResult for a member not in the original request throws synchronously.
+        assert!(matches!(
+            result.member_result(&MemberToRemove::new("invalid-instance-id")),
+            Err(Error::LocalIllegalArgument(_))
+        ));
+    }
+
+    /// Translated from `testMemberMissingErrorInRequestConstructor`.
+    #[tokio::test]
+    async fn member_missing_error_in_request_constructor() {
+        let mut errors = errors_map();
+        errors.remove(&instance_two().to_member_identity());
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(errors);
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
+
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
+        assert_eq!(result.member_result(&instance_one()).unwrap().get().await.unwrap(), ());
+        let err = result.member_result(&instance_two()).unwrap().get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
+        // The embedded identity must render as Java's generated `toString()`:
+        // all three declared fields, strings quoted, absent fields as `null`.
+        // `MemberToRemove.toMemberIdentity()` sets the member id to
+        // `UNKNOWN_MEMBER_ID` (the empty string), which is *not* null, so it
+        // is quoted as `''` and not printed as `null`.
+        assert_eq!(
+            err.message(),
+            "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" \
+             was not included in the removal response"
+        );
+    }
+
+    /// Translated from `testNoErrorConstructor`.
+    #[tokio::test]
+    async fn no_error_constructor() {
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(MemberErrors::from([
+            (instance_one().to_member_identity(), Errors::None),
+            (instance_two().to_member_identity(), Errors::None),
+        ]));
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
+        assert_eq!(result.all().get().await.unwrap(), ());
+        assert_eq!(result.member_result(&instance_one()).unwrap().get().await.unwrap(), ());
+        assert_eq!(result.member_result(&instance_two()).unwrap().get().await.unwrap(), ());
+    }
+
+    /// `removeAll` mode: `member_result` is not applicable.
+    #[tokio::test]
+    async fn remove_all_mode_member_result_errors() {
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(MemberErrors::new());
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
+        assert!(matches!(
+            result.member_result(&instance_one()),
+            Err(Error::LocalIllegalArgument(_))
+        ));
+    }
+
+    /// `removeAll` mode: `all` fails on the first member-level error.
+    #[tokio::test]
+    async fn remove_all_mode_all_reports_member_error() {
+        let mut member = MemberIdentity::new();
+        member
+            .set_member_id("m1".to_string())
+            .set_group_instance_id(Some("instance-1".to_string()))
+            .set_reason(Some("left the group".to_string()));
+        let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
+        handle.complete(MemberErrors::from([(member, Errors::UnknownMemberId)]));
+        let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
+        let err = result.all().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownMemberId);
+        // Exact Java text (with `exception` spelled `error`, per CLAUDE.md §2),
+        // including the generated `toString()` of the identity. `reason` is
+        // populated here so the field a shorter rendering would omit is the
+        // one carrying a distinctive value.
+        assert_eq!(
+            err.message(),
+            "Encounter error when trying to remove: \
+             MemberIdentity(memberId='m1', groupInstanceId='instance-1', reason='left the group')"
+        );
+    }
+
+    /// The three-field, quoted rendering is what Java's generated
+    /// `MemberIdentity.toString()` produces; both messages above embed it.
+    #[test]
+    fn describe_identity_matches_the_generated_java_to_string() {
+        let mut identity = MemberIdentity::new();
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='', groupInstanceId=null, reason=null)"
+        );
+
+        identity
+            .set_member_id("m-9".to_string())
+            .set_group_instance_id(Some("inst-1".to_string()))
+            .set_reason(Some("shutting down".to_string()));
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='m-9', groupInstanceId='inst-1', reason='shutting down')"
+        );
+
+        // An empty nullable string is quoted-empty, never `null`: the
+        // generator branches on null, not on emptiness.
+        identity
+            .set_group_instance_id(Some(String::new()))
+            .set_reason(Some(String::new()));
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='m-9', groupInstanceId='', reason='')"
+        );
+    }
+}

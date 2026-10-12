@@ -40,11 +40,9 @@ org.apache.kafka.clients.admin.AlterReplicaLogDirsResult
 org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions
 org.apache.kafka.clients.admin.AlterUserScramCredentialsResult
 org.apache.kafka.clients.admin.ClassicGroupDescription
-org.apache.kafka.clients.admin.ClientMetricsResourceListing
 org.apache.kafka.clients.admin.Config
 org.apache.kafka.clients.admin.ConfigEntry
 org.apache.kafka.clients.admin.ConsumerGroupDescription
-org.apache.kafka.clients.admin.ConsumerGroupListing
 org.apache.kafka.clients.admin.CreateAclsOptions
 org.apache.kafka.clients.admin.CreateAclsResult
 org.apache.kafka.clients.admin.CreateDelegationTokenOptions
@@ -103,15 +101,11 @@ org.apache.kafka.clients.admin.FenceProducersResult
 org.apache.kafka.clients.admin.FinalizedVersionRange
 org.apache.kafka.clients.admin.GroupListing
 org.apache.kafka.clients.admin.KafkaAdminClient
-org.apache.kafka.clients.admin.ListClientMetricsResourcesOptions
-org.apache.kafka.clients.admin.ListClientMetricsResourcesResult
 org.apache.kafka.clients.admin.ListConfigResourcesOptions
 org.apache.kafka.clients.admin.ListConfigResourcesResult
 org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions
 org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult
 org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec
-org.apache.kafka.clients.admin.ListConsumerGroupsOptions
-org.apache.kafka.clients.admin.ListConsumerGroupsResult
 org.apache.kafka.clients.admin.ListGroupsOptions
 org.apache.kafka.clients.admin.ListGroupsResult
 org.apache.kafka.clients.admin.ListOffsetsOptions
@@ -204,7 +198,6 @@ org.apache.kafka.common.ClassicGroupState
 org.apache.kafka.common.Cluster
 org.apache.kafka.common.ClusterResource
 org.apache.kafka.common.ClusterResourceListener
-org.apache.kafka.common.ConsumerGroupState
 org.apache.kafka.common.ElectionType
 org.apache.kafka.common.GroupState
 org.apache.kafka.common.GroupType

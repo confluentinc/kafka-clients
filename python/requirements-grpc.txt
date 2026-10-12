@@ -1,0 +1,10 @@
+# Runtime dependencies of the Python gRPC test servers (grpc_server.py,
+# grpc_server_async.py). Used by Dockerfile.grpc{,.async} and by
+# `make build-grpc-native-python`, so container and native runs use the same
+# versions.
+#
+# Keep grpcio on the same series as grpcio-tools (requirements-grpc-tools.txt):
+# the generated stubs require a grpcio and protobuf runtime at least as new as
+# the generator. grpcio-tools 1.76 requires protobuf >=6.31.1,<7.
+grpcio==1.76.*
+protobuf>=6.31.1,<7.0

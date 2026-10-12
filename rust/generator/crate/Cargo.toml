@@ -1,0 +1,30 @@
+# The generator's own crate, for its tests and the `message_generator` CLI.
+#
+# The manifest sits one level below the generator's sources on purpose: cargo
+# leaves any directory holding a `Cargo.toml` out of the parent's package, so a
+# manifest in `generator/` would keep `generator/src` and `generator/messages`
+# out of the published `confluent-kafka` crate. Its `build.rs` compiles these
+# same sources as a module (`#[path = "generator/src/lib.rs"]`), so the crate
+# generates the protocol code at build time without a `generator` dependency,
+# which could not be published as a path-only dependency.
+[package]
+name = "generator"
+version = "0.1.1"
+edition = "2024"
+publish = false
+
+[lib]
+path = "../src/lib.rs"
+
+[[bin]]
+name = "message_generator"
+path = "message_generator.rs"
+
+[dependencies]
+regex = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints.clippy]
+# See the root Cargo.toml: `#[expect]`, never `#[allow]`.
+allow_attributes = "deny"

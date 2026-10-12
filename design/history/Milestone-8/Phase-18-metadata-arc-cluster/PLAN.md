@@ -2,7 +2,7 @@
 
 **Milestone-8 / Phase-18** · Agent number **N = 18**
 
-Carry over **PR #10 item #3** (producer repo `example-confluent-kafka-rust`,
+Carry over **PR #10 item #3** (producer repo `kafka-clients`,
 commit `c2e9b79` "Arc-wrap MetadataSnapshot and Cluster") into this branch.
 This is the single highest-value, lowest-conflict perf win from PR #10 that the
 consumer branch does not yet have. The other PR #10 carry-overs (#5 `Arc<str>`

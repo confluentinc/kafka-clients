@@ -1,6 +1,6 @@
 # The producer send path, from `send()` to the wire.
 #
-# Source of truth for design/current/producer-send-path.svg.
+# Source of truth for design/current/img/producer-send-path.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: the app task only appends into the
@@ -12,9 +12,9 @@ direction: down
 appside: "App task — KafkaProducer::send()" {
   style.fill: "#eef6ff"
 
-  send: "send(record) / send_callback(record, cb)"
+  send: "send(record) / send_with_callback(record, cb)"
   meta: "do_send(): wait_on_metadata(max_block_ms)"
-  prep: "serialize key/value -> choose partition -> validate size"
+  prep: "serialize key/value -> compute_partition -> ensure_valid_record_size"
   append: "accumulator.append(...) — writes into the batch buffer"
   fut: "return KafkaFuture<RecordMetadata>"
 
@@ -25,16 +25,17 @@ wake: "batch_is_full || new_batch_created  =>  wakeup.notify_one()" {
   style.fill: "#e8f5e9"
 }
 
-senderside: "Sender task (one tokio::spawn per producer)" {
+senderside: "Sender task — run_once() (one tokio::spawn per producer)" {
   style.fill: "#fff7e6"
 
+  txn: "transactional only: run_transaction_phase()\nmay send one txn request and return early"
   spd: "send_producer_data(now): ready() -> client.ready() -> drain()"
   build: "send_produce_requests(): one ProduceRequest per ready node"
-  poll: "client.poll(poll_timeout, now).await"
-  handle: "handle_produce_responses(): complete / Reenqueue / Split"
+  poll: "poll_and_dispatch(): client.poll(timeout, now).await"
+  handle: "handle_client_responses(): Done / Reenqueue / SplitAndReenqueue"
 
-  spd -> build -> poll -> handle
-  handle -> spd: "next run_once() while running" {style.stroke-dash: 3}
+  txn -> spd -> build -> poll -> handle
+  handle -> txn: "next run_once() while running" {style.stroke-dash: 3}
 }
 
 appside.append -> wake
