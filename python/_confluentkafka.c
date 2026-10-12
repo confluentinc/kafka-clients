@@ -1927,6 +1927,20 @@ static PyObject* py_KafkaError_source(PyObject* self, PyObject* args) {
     return error_handle_to_py(kafka_common_Error_source(e));
 }
 
+// KafkaError_callback_opaque(handle) -> int | None: the opaque pointer of the
+// first foreign callback error in the handle's cause chain, the handle
+// included (`callback_opaque_of`), or None. A Python callback that raised
+// reports its exception object as that pointer
+// (`callback_error_from_py_exception`), so the consumer can swap the original
+// back in; the int is only compared, never turned back into an object.
+static PyObject* py_KafkaError_callback_opaque(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    void* opaque = callback_opaque_of((const kafka_common_Error_t*)(uintptr_t)ptr);
+    if (opaque == NULL) Py_RETURN_NONE;
+    return PyLong_FromVoidPtr(opaque);
+}
+
 // KafkaError_is_api_error(handle) -> bool: Java's `instanceof ApiException`,
 // which tells an UnknownServerError apart from a bare KafkaException (both
 // report code -1).
@@ -2104,10 +2118,18 @@ static kafka_common_Error_t* callback_error_from_py_exception(void) {
     return err;
 }
 
-// NULL -> None; an owned error -> its tuple (the error is destroyed).
+// The int Python receives for an OWNED error (0 for NULL): Python takes
+// ownership (`from_ffi_error` frees it, a free path `KafkaError_destroy`).
 static PyObject* err_result(kafka_common_Error_t* err) {
-    if (err == NULL) Py_RETURN_NONE;
-    return owned_error_to_py(err);
+    return error_handle_to_py(err);
+}
+
+// A new (value, error) pair: `value` a borrowed reference, `err` an OWNED error
+// handed to Python as an int (0 for NULL), as `err_result`.
+static PyObject* cvalue_error(PyObject* value, kafka_common_Error_t* err) {
+    PyObject* py_err = error_handle_to_py(err);
+    if (py_err == NULL) { if (err) kafka_common_Error_destroy(err); return NULL; }
+    return Py_BuildValue("(ON)", value, py_err);
 }
 
 // ---- conversions: C values -> Python ---------------------------------------
@@ -2382,18 +2404,95 @@ static int tp_i64_map_build(PyObject* seq, tp_i64_map_t* m) {
 
 // ---- ConsumerRecords / ConsumerRecord extension types ----------------------
 
+// ---- _BorrowedBytes: zero-copy buffer exporter over a ConsumerRecords batch --
+//
+// A record's key, value and header values are memoryview(_BorrowedBytes(batch,
+// ptr, len)). The memoryview holds a reference to the _BorrowedBytes (the
+// buffer protocol's view->obj), and the _BorrowedBytes a strong reference to
+// the owning ConsumerRecords batch, so the Rust buffer the slice points into
+// lives as long as any view over it (consumer-threading.md §27).
+typedef struct {
+    PyObject_HEAD
+    PyObject* batch;        // strong ref to the owning ConsumerRecordsObject
+    const uint8_t* ptr;     // borrowed slice into the batch buffer
+    Py_ssize_t len;
+} BorrowedBytesObject;
+
+static int BorrowedBytes_getbuffer(PyObject* exporter, Py_buffer* view, int flags) {
+    BorrowedBytesObject* self = (BorrowedBytesObject*)exporter;
+    // PyBuffer_FillInfo sets view->obj = exporter and INCREFs it.
+    return PyBuffer_FillInfo(view, exporter, (void*)self->ptr, self->len, 1 /* readonly */, flags);
+}
+
+static PyBufferProcs BorrowedBytes_as_buffer = {
+    .bf_getbuffer = BorrowedBytes_getbuffer,
+    .bf_releasebuffer = NULL,
+};
+
+static void BorrowedBytes_dealloc(BorrowedBytesObject* self) {
+    Py_XDECREF(self->batch);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyTypeObject BorrowedBytesType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_confluentkafka._BorrowedBytes",
+    .tp_doc = "Zero-copy buffer exporter over a ConsumerRecords batch",
+    .tp_basicsize = sizeof(BorrowedBytesObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)BorrowedBytes_dealloc,
+    .tp_as_buffer = &BorrowedBytes_as_buffer,
+};
+
+// memoryview(_BorrowedBytes(batch, b->data, b->len)), or None for a NULL `b`
+// or a NULL data pointer (Java null).
+static PyObject* borrowed_memoryview(PyObject* batch, const kafka_Bytes_t* b) {
+    if (b == NULL || b->data == NULL) Py_RETURN_NONE;
+    BorrowedBytesObject* bb = PyObject_New(BorrowedBytesObject, &BorrowedBytesType);
+    if (bb == NULL) return NULL;
+    Py_INCREF(batch);
+    bb->batch = batch;
+    bb->ptr = b->data;
+    bb->len = (Py_ssize_t)b->len;
+    PyObject* mv = PyMemoryView_FromObject((PyObject*)bb);
+    Py_DECREF(bb);  // the memoryview holds its own reference
+    return mv;
+}
+
 // Owns the Rust batch handle; every record object borrows from it.
+//
+// `get(i)` indexes a flat array of the batch's records, built on first use from
+// `partitions()` x `records_with_partition()` (the C API has no indexed
+// accessor): Java's iterator order, partition by partition. The pointers are
+// borrowed from the batch; the lists that carried them are freed at once.
+//
+// `copy_bytes` is set for a MockConsumer's batch: its records share the
+// buffers pinned by add_record, which live only until the consumer is
+// destroyed, so their bytes are copied out rather than viewed.
 typedef struct {
     PyObject_HEAD
     kafka_consumer_ConsumerRecords_t* records;  // owned; freed in dealloc
+    int copy_bytes;
+    const kafka_consumer_ConsumerRecord_t** flat;  // NULL until built
+    Py_ssize_t flat_len;
 } ConsumerRecordsObject;
 
 static void ConsumerRecords_dealloc(ConsumerRecordsObject* self) {
+    PyMem_Free((void*)self->flat);
+    self->flat = NULL;
     if (self->records != NULL) {
         kafka_consumer_ConsumerRecords_destroy(self->records);
         self->records = NULL;
     }
     Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+// A key / value / header value of a record of `batch`: a view into the batch,
+// or a bytes copy for a mock batch (see ConsumerRecordsObject).
+static PyObject* record_bytes_to_py(PyObject* batch, const kafka_Bytes_t* b) {
+    if (((ConsumerRecordsObject*)batch)->copy_bytes) return bytes_to_py(b);
+    return borrowed_memoryview(batch, b);
 }
 
 static PyTypeObject ConsumerRecordsType;  // forward decl (defined after record)
@@ -2402,14 +2501,14 @@ static PyTypeObject ConsumerRecordType;
 // Borrows a record from the batch (strong ref to it). The key and value are
 // `kafka_Bytes_t *` -- owned by the batch for a KafkaConsumer with NULL
 // deserializers, shared with the mock's add_record caller for a MockConsumer --
-// and are copied into `bytes` when the record object is created, while both
-// owners are certainly alive.
+// and are wrapped when the record object is created: memoryviews into the
+// batch, or bytes copies for a mock batch (`record_bytes_to_py`).
 typedef struct {
     PyObject_HEAD
     PyObject* batch;                            // strong ref to ConsumerRecordsObject
     const kafka_consumer_ConsumerRecord_t* rec; // borrowed from the batch
-    PyObject* key;                              // bytes or None
-    PyObject* value;                            // bytes or None
+    PyObject* key;                              // memoryview, bytes or None
+    PyObject* value;                            // memoryview, bytes or None
 } ConsumerRecordObject;
 
 static void ConsumerRecord_dealloc(ConsumerRecordObject* self) {
@@ -2474,7 +2573,8 @@ static PyObject* ConsumerRecord_get_delivery_count(ConsumerRecordObject* self, v
     return PyLong_FromLong(count);
 }
 
-// headers -> list[(key: str, value: bytes | None)], in insertion order.
+// headers -> list[(key: str, value: memoryview | None)], in insertion order
+// (bytes for a mock batch, see `record_bytes_to_py`).
 static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* closure) {
     const kafka_common_header_internals_RecordHeaders_t* rh = kafka_consumer_ConsumerRecord_headers(self->rec);
     if (rh == NULL) return PyList_New(0);
@@ -2493,7 +2593,7 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
         const char* hkey = kafka_common_header_Header_key(h);
         kafka_Bytes_t hval = kafka_common_header_Header_value(h);
         PyObject* pykey = PyUnicode_FromString(hkey ? hkey : "");
-        PyObject* pyval = bytes_to_py(&hval);
+        PyObject* pyval = record_bytes_to_py(self->batch, &hval);
         if (pykey == NULL || pyval == NULL) {
             Py_XDECREF(pykey); Py_XDECREF(pyval); Py_DECREF(list); kafka_List_destroy(arr);
             return NULL;
@@ -2520,8 +2620,8 @@ static PyGetSetDef ConsumerRecord_getsetters[] = {
     {"offset", (getter)ConsumerRecord_get_offset, NULL, "Offset", NULL},
     {"timestamp", (getter)ConsumerRecord_get_timestamp, NULL, "Timestamp", NULL},
     {"timestamp_type", (getter)ConsumerRecord_get_timestamp_type, NULL, "Timestamp type id", NULL},
-    {"key", (getter)ConsumerRecord_get_key, NULL, "Key (bytes or None)", NULL},
-    {"value", (getter)ConsumerRecord_get_value, NULL, "Value (bytes or None)", NULL},
+    {"key", (getter)ConsumerRecord_get_key, NULL, "Key (memoryview, bytes for a mock batch, or None)", NULL},
+    {"value", (getter)ConsumerRecord_get_value, NULL, "Value (memoryview, bytes for a mock batch, or None)", NULL},
     {"serialized_key_size", (getter)ConsumerRecord_get_serialized_key_size, NULL, "Serialized key size", NULL},
     {"serialized_value_size", (getter)ConsumerRecord_get_serialized_value_size, NULL, "Serialized value size", NULL},
     {"leader_epoch", (getter)ConsumerRecord_get_leader_epoch, NULL, "Leader epoch or None", NULL},
@@ -2542,11 +2642,11 @@ static PyTypeObject ConsumerRecordType = {
     .tp_getset = ConsumerRecord_getsetters,
 };
 
-// Wraps a BORROWED record of `batch` into a ConsumerRecord object, copying its
-// key and value bytes now.
+// Wraps a BORROWED record of `batch` into a ConsumerRecord object, wrapping its
+// key and value now (`record_bytes_to_py`).
 static PyObject* wrap_record(ConsumerRecordsObject* batch, const kafka_consumer_ConsumerRecord_t* rec) {
-    PyObject* key = bytes_to_py((const kafka_Bytes_t*)kafka_consumer_ConsumerRecord_key(rec));
-    PyObject* value = bytes_to_py((const kafka_Bytes_t*)kafka_consumer_ConsumerRecord_value(rec));
+    PyObject* key = record_bytes_to_py((PyObject*)batch, (const kafka_Bytes_t*)kafka_consumer_ConsumerRecord_key(rec));
+    PyObject* value = record_bytes_to_py((PyObject*)batch, (const kafka_Bytes_t*)kafka_consumer_ConsumerRecord_value(rec));
     if (key == NULL || value == NULL) { Py_XDECREF(key); Py_XDECREF(value); return NULL; }
     ConsumerRecordObject* obj = PyObject_New(ConsumerRecordObject, &ConsumerRecordType);
     if (obj == NULL) { Py_DECREF(key); Py_DECREF(value); return NULL; }
@@ -2628,6 +2728,47 @@ static PyObject* ConsumerRecords_count(ConsumerRecordsObject* self, PyObject* ar
     return PyLong_FromLong(kafka_consumer_ConsumerRecords_count(self->records));
 }
 
+// Builds `self->flat` (see ConsumerRecordsObject). Returns 0 on success.
+static int ConsumerRecords_build_flat(ConsumerRecordsObject* self) {
+    if (self->flat != NULL) return 0;
+    int32_t total = kafka_consumer_ConsumerRecords_count(self->records);
+    const kafka_consumer_ConsumerRecord_t** flat =
+        PyMem_Calloc(total > 0 ? (size_t)total : 1, sizeof(*flat));
+    if (flat == NULL) { PyErr_NoMemory(); return -1; }
+    Py_ssize_t len = 0;
+    kafka_List_t* parts = kafka_consumer_ConsumerRecords_partitions(self->records);  // owned, owns its TPs
+    if (parts != NULL) {
+        int32_t n = kafka_List_size(parts);
+        for (int32_t i = 0; i < n; i++) {
+            const kafka_common_TopicPartition_t* tp = (const kafka_common_TopicPartition_t*)kafka_List_get(parts, i);
+            kafka_List_t* recs = kafka_consumer_ConsumerRecords_records_with_partition(self->records, tp);
+            if (recs == NULL) continue;
+            int32_t m = kafka_List_size(recs);
+            for (int32_t j = 0; j < m && len < total; j++) {
+                flat[len++] = (const kafka_consumer_ConsumerRecord_t*)kafka_List_get(recs, j);
+            }
+            kafka_List_destroy(recs);  // the list only: the records stay in the batch
+        }
+        kafka_List_destroy(parts);
+    }
+    self->flat = flat;
+    self->flat_len = len;
+    return 0;
+}
+
+// ConsumerRecords.get(i) -> ConsumerRecord: the i-th record in Java's iterator
+// order.
+static PyObject* ConsumerRecords_get(ConsumerRecordsObject* self, PyObject* args) {
+    Py_ssize_t i;
+    if (!PyArg_ParseTuple(args, "n", &i)) return NULL;
+    if (ConsumerRecords_build_flat(self) < 0) return NULL;
+    if (i < 0 || i >= self->flat_len) {
+        PyErr_SetString(PyExc_IndexError, "record index out of range");
+        return NULL;
+    }
+    return wrap_record(self, self->flat[i]);
+}
+
 static PyObject* ConsumerRecords_is_empty(ConsumerRecordsObject* self, PyObject* args) {
     return PyBool_FromLong(kafka_consumer_ConsumerRecords_is_empty(self->records) ? 1 : 0);
 }
@@ -2635,6 +2776,7 @@ static PyObject* ConsumerRecords_is_empty(ConsumerRecordsObject* self, PyObject*
 static PyMethodDef ConsumerRecords_methods[] = {
     {"count", (PyCFunction)ConsumerRecords_count, METH_NOARGS, "Number of records"},
     {"is_empty", (PyCFunction)ConsumerRecords_is_empty, METH_NOARGS, "Whether the batch is empty"},
+    {"get", (PyCFunction)ConsumerRecords_get, METH_VARARGS, "The i-th record, in iterator order"},
     {"records", (PyCFunction)ConsumerRecords_records, METH_NOARGS, "All records, partition by partition"},
     {"partitions", (PyCFunction)ConsumerRecords_partitions, METH_NOARGS, "Partitions with records"},
     {"records_with_partition", (PyCFunction)ConsumerRecords_records_with_partition, METH_VARARGS,
@@ -2656,8 +2798,9 @@ static PyTypeObject ConsumerRecordsType = {
     .tp_methods = ConsumerRecords_methods,
 };
 
-// Wrap an OWNED records handle into a ConsumerRecordsObject (NULL -> None).
-static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records) {
+// Wrap an OWNED records handle into a ConsumerRecordsObject (NULL -> None);
+// `copy_bytes` for a MockConsumer's batch (see ConsumerRecordsObject).
+static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records, int copy_bytes) {
     if (records == NULL) Py_RETURN_NONE;
     ConsumerRecordsObject* obj = PyObject_New(ConsumerRecordsObject, &ConsumerRecordsType);
     if (obj == NULL) {
@@ -2665,6 +2808,9 @@ static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records) {
         return NULL;
     }
     obj->records = records;
+    obj->copy_bytes = copy_bytes;
+    obj->flat = NULL;
+    obj->flat_len = 0;
     return (PyObject*)obj;
 }
 
@@ -2687,7 +2833,7 @@ typedef struct {
 // callback): a late `onComplete` finds it alive, a never-firing one is freed
 // with the consumer.
 typedef struct CommitCbCtx {
-    PyObject* adapter;                    // callable(offsets_dict, err_tuple | None), or NULL to discard
+    PyObject* adapter;                    // callable(offsets_dict, error), or NULL to discard
     kafka_consumer_Consumer_t* consumer;
     int orphaned;
     struct CommitCbCtx* next;
@@ -2848,7 +2994,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets,
     PyGILState_STATE g = PyGILState_Ensure();
     if (ctx->adapter != NULL) {
         PyObject* py_offsets = offset_map_to_py_borrowed(offsets);
-        PyObject* py_err = error ? error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+        PyObject* py_err = error_handle_to_py(error);  // borrowed: converted, never destroyed
         if (py_offsets != NULL && py_err != NULL) {
             PyObject* r = PyObject_CallFunctionObjArgs(ctx->adapter, py_offsets, py_err, NULL);
             if (r == NULL) PyErr_WriteUnraisable(ctx->adapter); else Py_DECREF(r);
@@ -2958,24 +3104,22 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)c);
 }
 
-// Consumer_KafkaConsumer_new(config: dict[str, str]) -> handle. NULL
-// deserializers: records carry `kafka_Bytes_t *` keys and values. Raises
-// RuntimeError with the Rust error's message when the config is rejected.
+// Consumer_KafkaConsumer_new(config: dict[str, str]) -> (handle, error): NULL
+// deserializers, so records carry `kafka_Bytes_t *` keys and values. On failure
+// the handle is 0 and `error` the owned error handle (an int, 0 on success);
+// the construction runs with the GIL released (it resolves the bootstrap
+// servers).
 static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     PyObject* config_dict;
-    if (!PyArg_ParseTuple(args, "O", &config_dict)) return NULL;
-    if (!PyDict_Check(config_dict)) {
-        PyErr_SetString(PyExc_TypeError, "config must be a dict");
-        return NULL;
-    }
+    if (!PyArg_ParseTuple(args, "O!", &PyDict_Type, &config_dict)) return NULL;
     // A C-built kafka_Map_t holds BORROWED char* -> char*: the strings stay
     // owned by the dict's str objects, which outlive this call.
     kafka_Map_t* props = kafka_Map_new();
     PyObject *key, *value;
     Py_ssize_t pos = 0;
     while (PyDict_Next(config_dict, &pos, &key, &value)) {
-        const char* k = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : NULL;
-        const char* v = PyUnicode_Check(value) ? PyUnicode_AsUTF8(value) : NULL;
+        const char* k = PyUnicode_Check(key) ? str_utf8_borrowed(key) : NULL;
+        const char* v = (k != NULL && PyUnicode_Check(value)) ? str_utf8_borrowed(value) : NULL;
         if (k == NULL || v == NULL) {
             kafka_Map_destroy(props);
             if (!PyErr_Occurred())
@@ -2989,20 +3133,26 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_Map_destroy(props);
     kafka_consumer_Consumer_t* consumer = NULL;
     if (err == NULL) {
+        Py_BEGIN_ALLOW_THREADS
         err = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &consumer);  // config copied
+        Py_END_ALLOW_THREADS
         kafka_consumer_ConsumerConfig_destroy(config);
     }
     if (err != NULL) {
-        const char* msg = kafka_common_Error_message(err);
-        PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaConsumer");
-        kafka_common_Error_destroy(err);
-        return NULL;
+        PyObject* py_err = error_handle_to_py(err);
+        if (py_err == NULL) { kafka_common_Error_destroy(err); return NULL; }
+        return Py_BuildValue("(iN)", 0, py_err);
     }
     Consumer* c = consumer_alloc();
-    if (c == NULL) { kafka_consumer_Consumer_destroy(consumer); return NULL; }
+    if (c == NULL) {
+        Py_BEGIN_ALLOW_THREADS
+        kafka_consumer_Consumer_destroy(consumer);
+        Py_END_ALLOW_THREADS
+        return NULL;
+    }
     c->consumer = consumer;  // owned
     kafka_consumer_Consumer__set_callbacks_notify(c->consumer, consumer_callbacks_notify, c);
-    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)c);
+    return Py_BuildValue("(Ki)", (unsigned long long)(uintptr_t)c, 0);
 }
 
 // Consumer_destroy(handle): destroys the Rust consumer (which runs every still
@@ -3110,31 +3260,41 @@ static PyObject* py_Consumer_current_lag(PyObject* self, PyObject* args) {
 // hands copied Python values to the registered callable. The void shape reuses
 // the producer's VoidCbCtx / producer_void_cb.
 
-// Delivers cb(value, err_tuple | None); `value` is a new reference (or NULL
-// with an exception set), `err` an owned error or NULL.
+// Delivers cb(value, error); `value` is a new reference (or NULL with an
+// exception set), `err` an OWNED error or NULL, handed to the callable as an
+// int it takes ownership of (0 for none). When the call cannot be made the
+// error is destroyed here.
 static void deliver_value_cb(PyObject* cb, PyObject* value, kafka_common_Error_t* err) {
-    PyObject* py_err = err ? owned_error_to_py(err) : (Py_INCREF(Py_None), Py_None);
+    PyObject* py_err = value != NULL ? error_handle_to_py(err) : NULL;
     if (value != NULL && py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(cb, value, py_err, NULL);
         if (r == NULL) PyErr_WriteUnraisable(cb); else Py_DECREF(r);
     } else {
         PyErr_WriteUnraisable(cb);
+        if (err != NULL) kafka_common_Error_destroy(err);
     }
     Py_XDECREF(value);
     Py_XDECREF(py_err);
 }
 
-// poll: cb(ConsumerRecords | None, err_tuple | None)
+// A poll's completion context: the callable and whether the batch copies its
+// bytes (a MockConsumer's, see ConsumerRecordsObject).
+typedef struct {
+    PyObject* cb;
+    int copy_bytes;
+} PollCbCtx;
+
+// poll: cb(ConsumerRecords | None, error)
 static void consumer_poll_cb(kafka_consumer_ConsumerRecords_t* records, kafka_common_Error_t* error, void* opaque) {
-    VoidCbCtx* ctx = (VoidCbCtx*)opaque;
+    PollCbCtx* ctx = (PollCbCtx*)opaque;
     PyGILState_STATE g = PyGILState_Ensure();
-    deliver_value_cb(ctx->cb, wrap_records(records), error);
+    deliver_value_cb(ctx->cb, wrap_records(records, ctx->copy_bytes), error);
     Py_DECREF(ctx->cb);
     PyMem_Free(ctx);
     PyGILState_Release(g);
 }
 
-// position: cb(int, err_tuple | None)   (-1 beside an error)
+// position: cb(int, error)   (-1 beside an error)
 static void consumer_i64_cb(int64_t value, kafka_common_Error_t* error, void* opaque) {
     VoidCbCtx* ctx = (VoidCbCtx*)opaque;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -3163,7 +3323,7 @@ static ValueCbCtx* value_cb_ctx_new(PyObject* cb, owned_map_conv_fn conv_map, ow
     return ctx;
 }
 
-// map results: cb(dict | None, err_tuple | None); the owned map is converted
+// map results: cb(dict | None, error); the owned map is converted
 // and freed here.
 static void consumer_map_cb(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
     ValueCbCtx* ctx = (ValueCbCtx*)opaque;
@@ -3175,7 +3335,7 @@ static void consumer_map_cb(kafka_Map_t* value, kafka_common_Error_t* error, voi
     PyGILState_Release(g);
 }
 
-// list results: cb(list | None, err_tuple | None); the owned list is converted
+// list results: cb(list | None, error); the owned list is converted
 // and freed here.
 static void consumer_list_cb(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     ValueCbCtx* ctx = (ValueCbCtx*)opaque;
@@ -3268,10 +3428,10 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     else err = OP(s, l.list, &out);                                                     \
     Py_END_ALLOW_THREADS                                                                \
     tp_list_free(&l);                                                                   \
-    if (err != NULL) { if (out) kafka_Map_destroy(out); return build_value_error(Py_None, err); } \
+    if (err != NULL) { if (out) kafka_Map_destroy(out); return cvalue_error(Py_None, err); } \
     PyObject* value = CONV(out);                                                        \
     if (value == NULL) return NULL;                                                     \
-    PyObject* ret = build_value_error(value, NULL);                                     \
+    PyObject* ret = cvalue_error(value, NULL);                                     \
     Py_DECREF(value);                                                                   \
     return ret;                                                                         \
 }                                                                                       \
@@ -3307,10 +3467,10 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     else err = OP(s, m.map, &out);                                                      \
     Py_END_ALLOW_THREADS                                                                \
     tp_i64_map_free(&m);                                                                \
-    if (err != NULL) { if (out) kafka_Map_destroy(out); return build_value_error(Py_None, err); } \
+    if (err != NULL) { if (out) kafka_Map_destroy(out); return cvalue_error(Py_None, err); } \
     PyObject* value = oat_map_to_py(out);                                               \
     if (value == NULL) return NULL;                                                     \
-    PyObject* ret = build_value_error(value, NULL);                                     \
+    PyObject* ret = cvalue_error(value, NULL);                                     \
     Py_DECREF(value);                                                                   \
     return ret;                                                                         \
 }                                                                                       \
@@ -3366,7 +3526,7 @@ static PyObject* py_##prefix##_seek_with_metadata(PyObject* self, PyObject* args
     kafka_consumer_OffsetAndMetadata_t* oam = NULL;                                     \
     kafka_common_Error_t* err = kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata( \
         (int64_t)offset, (int32_t)epoch, metadata, &oam);                               \
-    if (err != NULL) return owned_error_to_py(err);                                     \
+    if (err != NULL) return err_result(err);                                            \
     kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(topic, (int32_t)partition); \
     SELF_T s = SELF_FN(h);                                                              \
     Py_BEGIN_ALLOW_THREADS                                                              \
@@ -3384,8 +3544,8 @@ static PyObject* py_##prefix##_seek_with_metadata_cb(PyObject* self, PyObject* a
         (int64_t)offset, (int32_t)epoch, metadata, &oam);                               \
     if (err != NULL) {                                                                  \
         /* deliver the construction error through the callback like any other */       \
-        PyObject* py_err = owned_error_to_py(err);                                      \
-        if (py_err == NULL) return NULL;                                                \
+        PyObject* py_err = err_result(err);  /* owned: the callable takes it */         \
+        if (py_err == NULL) { kafka_common_Error_destroy(err); return NULL; }           \
         PyObject* r = PyObject_CallFunctionObjArgs(cb, py_err, NULL);                   \
         Py_DECREF(py_err);                                                              \
         if (r == NULL) return NULL;                                                     \
@@ -3421,7 +3581,7 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     kafka_common_TopicPartition_destroy(tp);                                            \
     PyObject* value = PyLong_FromLongLong((long long)(err ? -1 : pos));                 \
     if (value == NULL) { if (err) kafka_common_Error_destroy(err); return NULL; }       \
-    PyObject* ret = build_value_error(value, err);                                      \
+    PyObject* ret = cvalue_error(value, err);                                      \
     Py_DECREF(value);                                                                   \
     return ret;                                                                         \
 }                                                                                       \
@@ -3570,11 +3730,11 @@ static PyObject* py_Consumer_poll(PyObject* self, PyObject* args) {
     Py_END_ALLOW_THREADS
     if (err != NULL) {
         if (records) kafka_consumer_ConsumerRecords_destroy(records);
-        return build_value_error(Py_None, err);
+        return cvalue_error(Py_None, err);
     }
-    PyObject* value = wrap_records(records);
+    PyObject* value = wrap_records(records, consumer_from_handle(h)->is_mock);
     if (value == NULL) return NULL;
-    PyObject* ret = build_value_error(value, NULL);
+    PyObject* ret = cvalue_error(value, NULL);
     Py_DECREF(value);
     return ret;
 }
@@ -3582,8 +3742,11 @@ static PyObject* py_Consumer_poll(PyObject* self, PyObject* args) {
 static PyObject* py_Consumer_poll_cb(PyObject* self, PyObject* args) {
     unsigned long long h; long long ms; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KLO", &h, &ms, &cb)) return NULL;
-    VoidCbCtx* ctx = void_cb_ctx_new(cb);
-    if (ctx == NULL) return NULL;
+    PollCbCtx* ctx = (PollCbCtx*)PyMem_Malloc(sizeof(PollCbCtx));
+    if (ctx == NULL) return PyErr_NoMemory();
+    Py_INCREF(cb);
+    ctx->cb = cb;
+    ctx->copy_bytes = consumer_from_handle(h)->is_mock;
     kafka_consumer_Consumer_t* s = consumer_self(h);
     Py_BEGIN_ALLOW_THREADS
     kafka_consumer_Consumer_poll_cb(s, (int64_t)ms, consumer_poll_cb, ctx);
@@ -3591,13 +3754,41 @@ static PyObject* py_Consumer_poll_cb(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Consumer_close(h, timeout_ms) -> err | None. A negative timeout selects
-// Java's close() (default CloseOptions); otherwise close(CloseOptions.timeout).
+// The CloseOptions for Consumer_close(_cb)'s (timeout_ms, operation): NULL for
+// Java's close() (no timeout and the DEFAULT operation); otherwise
+// CloseOptions.timeout(ms) and/or groupMembershipOperation(op). `op` is the
+// Python discriminant: 0 DEFAULT, 1 LEAVE_GROUP, 2 REMAIN_IN_GROUP. Returns 0,
+// or -1 with ValueError set for an unknown `op`.
+static int close_options_build(long long ms, int op, kafka_consumer_CloseOptions_t** out) {
+    *out = NULL;
+    const kafka_consumer_CloseOptions_GroupMembershipOperation_t* operation;
+    switch (op) {
+    case 0: operation = kafka_consumer_CloseOptions_GroupMembershipOperation_default(); break;
+    case 1: operation = kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group(); break;
+    case 2: operation = kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group(); break;
+    default:
+        PyErr_Format(PyExc_ValueError, "unknown group membership operation %d", op);
+        return -1;
+    }
+    if (ms < 0 && op == 0) return 0;
+    if (ms >= 0) {
+        *out = kafka_consumer_CloseOptions_new_with_timeout((int64_t)ms);
+        if (op != 0) kafka_consumer_CloseOptions_with_group_membership_operation(*out, operation);
+    } else {
+        *out = kafka_consumer_CloseOptions_with_operation(operation);
+    }
+    return 0;
+}
+
+// Consumer_close(h, timeout_ms, operation) -> error. A negative timeout and the
+// DEFAULT operation select Java's close(); otherwise close(CloseOptions), see
+// close_options_build.
 static PyObject* py_Consumer_close(PyObject* self, PyObject* args) {
-    unsigned long long h; long long ms;
-    if (!PyArg_ParseTuple(args, "KL", &h, &ms)) return NULL;
+    unsigned long long h; long long ms; int op;
+    if (!PyArg_ParseTuple(args, "KLi", &h, &ms, &op)) return NULL;
+    kafka_consumer_CloseOptions_t* opts;
+    if (close_options_build(ms, op, &opts) < 0) return NULL;
     kafka_consumer_Consumer_t* s = consumer_self(h);
-    kafka_consumer_CloseOptions_t* opts = ms >= 0 ? kafka_consumer_CloseOptions_new_with_timeout((int64_t)ms) : NULL;
     kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
     err = opts ? kafka_consumer_Consumer_close_with_options(s, opts) : kafka_consumer_Consumer_close(s);
@@ -3607,12 +3798,13 @@ static PyObject* py_Consumer_close(PyObject* self, PyObject* args) {
 }
 
 static PyObject* py_Consumer_close_cb(PyObject* self, PyObject* args) {
-    unsigned long long h; long long ms; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KLO", &h, &ms, &cb)) return NULL;
+    unsigned long long h; long long ms; int op; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KLiO", &h, &ms, &op, &cb)) return NULL;
+    kafka_consumer_CloseOptions_t* opts;
+    if (close_options_build(ms, op, &opts) < 0) return NULL;
     VoidCbCtx* ctx = void_cb_ctx_new(cb);
-    if (ctx == NULL) return NULL;
+    if (ctx == NULL) { if (opts) kafka_consumer_CloseOptions_destroy(opts); return NULL; }
     kafka_consumer_Consumer_t* s = consumer_self(h);
-    kafka_consumer_CloseOptions_t* opts = ms >= 0 ? kafka_consumer_CloseOptions_new_with_timeout((int64_t)ms) : NULL;
     Py_BEGIN_ALLOW_THREADS
     if (opts) kafka_consumer_Consumer_close_with_options_cb(s, opts, producer_void_cb, ctx);
     else kafka_consumer_Consumer_close_cb(s, producer_void_cb, ctx);
@@ -3624,7 +3816,7 @@ static PyObject* py_Consumer_close_cb(PyObject* self, PyObject* args) {
 // ---- subscribe -------------------------------------------------------------
 
 // Completion of a `_cb` subscribe: settles the listener registration (see
-// consumer_listener_commit) before delivering cb(err_tuple | None).
+// consumer_listener_commit) before delivering cb(error).
 typedef struct {
     PyObject* cb;
     Consumer* c;
@@ -3635,12 +3827,13 @@ static void consumer_subscribe_cb(kafka_common_Error_t* error, void* opaque) {
     SubscribeCbCtx* ctx = (SubscribeCbCtx*)opaque;
     PyGILState_STATE g = PyGILState_Ensure();
     consumer_listener_commit(ctx->c, ctx->lctx, error != NULL);
-    PyObject* py_err = error ? owned_error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+    PyObject* py_err = error_handle_to_py(error);  // owned: the callable takes it
     if (py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_err, NULL);
         if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
         Py_DECREF(py_err);
     } else {
+        if (error != NULL) kafka_common_Error_destroy(error);
         PyErr_WriteUnraisable(ctx->cb);
     }
     Py_DECREF(ctx->cb);
@@ -3783,7 +3976,7 @@ static PyObject* py_Consumer_commit_async(PyObject* self, PyObject* args) {
 }
 
 // Completion of a `_cb` commit_async: an Err'd commit orphans its callback
-// context (see CommitCbCtx) before delivering cb(err_tuple | None).
+// context (see CommitCbCtx) before delivering cb(error).
 typedef struct {
     PyObject* cb;
     Consumer* c;
@@ -3794,12 +3987,13 @@ static void consumer_commit_async_cb(kafka_common_Error_t* error, void* opaque) 
     CommitAsyncCbCtx* ctx = (CommitAsyncCbCtx*)opaque;
     PyGILState_STATE g = PyGILState_Ensure();
     if (error != NULL) consumer_orphan_commit(ctx->c, ctx->cctx);
-    PyObject* py_err = error ? owned_error_to_py(error) : (Py_INCREF(Py_None), Py_None);
+    PyObject* py_err = error_handle_to_py(error);  // owned: the callable takes it
     if (py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_err, NULL);
         if (r == NULL) PyErr_WriteUnraisable(ctx->cb); else Py_DECREF(r);
         Py_DECREF(py_err);
     } else {
+        if (error != NULL) kafka_common_Error_destroy(error);
         PyErr_WriteUnraisable(ctx->cb);
     }
     Py_DECREF(ctx->cb);
@@ -3854,11 +4048,11 @@ static PyObject* py_Consumer_partitions_for(PyObject* self, PyObject* args) {
     Py_END_ALLOW_THREADS
     if (err != NULL) {
         if (infos) kafka_List_destroy(infos);
-        return build_value_error(Py_None, err);
+        return cvalue_error(Py_None, err);
     }
     PyObject* value = partition_info_list_to_py(infos);
     if (value == NULL) return NULL;
-    PyObject* ret = build_value_error(value, NULL);
+    PyObject* ret = cvalue_error(value, NULL);
     Py_DECREF(value);
     return ret;
 }
@@ -3889,11 +4083,11 @@ static PyObject* py_Consumer_list_topics(PyObject* self, PyObject* args) {
     Py_END_ALLOW_THREADS
     if (err != NULL) {
         if (out) kafka_Map_destroy(out);
-        return build_value_error(Py_None, err);
+        return cvalue_error(Py_None, err);
     }
     PyObject* value = topics_map_to_py(out);
     if (value == NULL) return NULL;
-    PyObject* ret = build_value_error(value, NULL);
+    PyObject* ret = cvalue_error(value, NULL);
     Py_DECREF(value);
     return ret;
 }
@@ -3975,10 +4169,10 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     err = OP(s, l.list, &out);                                                          \
     Py_END_ALLOW_THREADS                                                                \
     tp_list_free(&l);                                                                   \
-    if (err != NULL) { if (out) kafka_Map_destroy(out); return build_value_error(Py_None, err); } \
+    if (err != NULL) { if (out) kafka_Map_destroy(out); return cvalue_error(Py_None, err); } \
     PyObject* value = CONV(out);                                                        \
     if (value == NULL) return NULL;                                                     \
-    PyObject* ret = build_value_error(value, NULL);                                     \
+    PyObject* ret = cvalue_error(value, NULL);                                     \
     Py_DECREF(value);                                                                   \
     return ret;                                                                         \
 }                                                                                       \
@@ -4011,10 +4205,10 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     err = OP(s, m.map, &out);                                                           \
     Py_END_ALLOW_THREADS                                                                \
     tp_i64_map_free(&m);                                                                \
-    if (err != NULL) { if (out) kafka_Map_destroy(out); return build_value_error(Py_None, err); } \
+    if (err != NULL) { if (out) kafka_Map_destroy(out); return cvalue_error(Py_None, err); } \
     PyObject* value = oat_map_to_py(out);                                               \
     if (value == NULL) return NULL;                                                     \
-    PyObject* ret = build_value_error(value, NULL);                                     \
+    PyObject* ret = cvalue_error(value, NULL);                                     \
     Py_DECREF(value);                                                                   \
     return ret;                                                                         \
 }                                                                                       \
@@ -4151,11 +4345,13 @@ static int pin_bytes(Consumer* c, PyObject* obj, kafka_Bytes_t** out) {
     if (obj == Py_None) return 0;
     Py_buffer view;
     if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) return -1;
+    int32_t len;
+    if (checked_len_to_int32(view.len, "record bytes", &len) < 0) { PyBuffer_Release(&view); return -1; }
     PinnedBytes* pb = (PinnedBytes*)PyMem_Malloc(sizeof(PinnedBytes) + (size_t)view.len);
     if (pb == NULL) { PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
     if (view.len > 0) memcpy(pb->data, view.buf, (size_t)view.len);
     pb->bytes.data = pb->data;
-    pb->bytes.len = (int32_t)view.len;
+    pb->bytes.len = len;
     PyBuffer_Release(&view);
     pb->next = c->pinned;
     c->pinned = pb;
@@ -8273,6 +8469,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Java getCause(): the BORROWED source handle, 0 when none (never destroy it)"},
     {"KafkaError_is_api_error", py_KafkaError_is_api_error, METH_VARARGS,
      "Java instanceof ApiException"},
+    {"KafkaError_callback_opaque", py_KafkaError_callback_opaque, METH_VARARGS,
+     "The opaque of the first foreign callback error in the cause chain, or None"},
     {"KafkaError_new", py_KafkaError_new, METH_VARARGS,
      "KafkaError_new(code, message | None) -> owned error handle (-1 = bare KafkaException)"},
     // ---- Consumer ----
@@ -8281,7 +8479,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     // queues its completion for Consumer__execute_callbacks; the callable then
     // receives the same payload the blocking form returns.
     {"Consumer_MockConsumer_new", py_Consumer_MockConsumer_new, METH_VARARGS, "Create a MockConsumer; returns a handle"},
-    {"Consumer_KafkaConsumer_new", py_Consumer_KafkaConsumer_new, METH_VARARGS, "Create a KafkaConsumer from a config dict; returns a handle"},
+    {"Consumer_KafkaConsumer_new", py_Consumer_KafkaConsumer_new, METH_VARARGS, "Create a KafkaConsumer from a config dict; returns (handle, error)"},
     {"Consumer_destroy", py_Consumer_destroy, METH_VARARGS, "Destroy a consumer handle (runs the still pending callbacks)"},
     {"Consumer_wakeup", py_Consumer_wakeup, METH_VARARGS, "Wake up a blocked operation"},
     {"Consumer__execute_callbacks", py_Consumer__execute_callbacks, METH_VARARGS, "Run the queued callbacks on this thread; returns how many ran"},
@@ -8341,7 +8539,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_enforce_rebalance_cb", py_Consumer_enforce_rebalance_cb, METH_VARARGS, "enforce_rebalance twin; cb(err | None)"},
     {"Consumer_enforce_rebalance_with_reason", py_Consumer_enforce_rebalance_with_reason, METH_VARARGS, "enforce_rebalance_with_reason(h, reason) -> err | None"},
     {"Consumer_enforce_rebalance_with_reason_cb", py_Consumer_enforce_rebalance_with_reason_cb, METH_VARARGS, "enforce_rebalance_with_reason twin; cb(err | None)"},
-    {"Consumer_close", py_Consumer_close, METH_VARARGS, "close(h, timeout_ms) -> err | None (negative timeout: Java's close())"},
+    {"Consumer_close", py_Consumer_close, METH_VARARGS, "close(h, timeout_ms, operation) -> error (negative timeout and DEFAULT: Java's close())"},
     {"Consumer_close_cb", py_Consumer_close_cb, METH_VARARGS, "close twin; cb(err | None)"},
     // ---- ConsumerHandle (re-entrancy handle; safe from inside listeners) ----
     {"Consumer_handle", py_Consumer_handle, METH_VARARGS, "New re-entrancy handle for a consumer"},
@@ -8478,6 +8676,9 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
         return NULL;
     }
     if (PyType_Ready(&ConsumerRecordType) < 0) {
+        return NULL;
+    }
+    if (PyType_Ready(&BorrowedBytesType) < 0) {
         return NULL;
     }
     if (PyType_Ready(&ConsumerRecordsType) < 0) {
