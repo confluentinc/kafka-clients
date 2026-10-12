@@ -744,8 +744,8 @@ def test_list_config_resources():
         _created(admin, "lcr-a")
 
         topics = admin.list_config_resources([ConfigResourceType.TOPIC])
-        # Sorted by (type id, name).
-        assert [r.name for r in topics] == ["lcr-a", "lcr-b"]
+        # Unordered: Java's MockAdminClient collects a HashSet (MockAdminClient.java:1402).
+        assert sorted(r.name for r in topics) == ["lcr-a", "lcr-b"]
         assert all(r.resource_type == ConfigResourceType.TOPIC for r in topics)
 
         # No filter means every supported type: 2 topics + 1 BROKER and
@@ -2133,21 +2133,20 @@ def test_alter_client_quotas_keeps_the_default_entity_distinct():
         assert by_name["alice"].entries == {ClientQuotaEntity.USER: "alice"}
 
 
-def test_alter_client_quotas_rejects_a_duplicate_entity():
-    """A deliberate deviation: Java accepts a duplicate entity -- both
-    alterations are sent and only the future map collapses
-    (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
-    built from that map, so the surviving outcome could not be attributed to
-    either row."""
+def test_alter_client_quotas_collapses_a_duplicate_entity():
+    """Java accepts a duplicate entity: both alterations are sent and only the
+    future map collapses (`KafkaAdminClient.java:4315-4318`). The branch C
+    result is that map (`AlterClientQuotasResult_values`), so the deviation the
+    flat-array C result needed is gone: one key, the mock's own outcome."""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
-        with pytest.raises(KafkaError) as exc:
-            admin.alter_client_quotas([
-                ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
-                ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
-            ])
-        assert str(exc.value) == (
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry")
+        result = admin.alter_client_quotas([
+            ClientQuotaAlteration(entity, [ClientQuotaOp("producer_byte_rate", 1.0)]),
+            ClientQuotaAlteration(entity, [ClientQuotaOp("consumer_byte_rate", 2.0)]),
+        ])
+        assert list(result) == [entity]
+        # MockAdminClient.java:1250 throws UnsupportedOperationException.
+        assert str(result[entity]) == "Not implement yet"
 
 
 def test_client_quota_op_none_value_means_remove():

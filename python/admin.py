@@ -2574,8 +2574,11 @@ class _AdminBase:
     def _alter_consumer_group_offsets_spec(self, group_id, offsets, timeout):
         spec = self._alter_consumer_group_offsets_rows(offsets)
         ms = _ms(timeout)
+        # With no partition the extension resolves Java's `all()`: its failure
+        # has no per-key slot, so it raises; its success is the empty map.
+        convert = _to_keyed_errors if spec else _whole(lambda _value: {})
         return (lambda: _lib.Admin_alter_consumer_group_offsets(
-                    self._h, str(group_id), spec, ms), _to_keyed_errors)
+                    self._h, str(group_id), spec, ms), convert)
 
     @staticmethod
     def _delete_consumer_group_offsets_rows(partitions):

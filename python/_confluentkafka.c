@@ -7108,6 +7108,7 @@ static void alter_config_op_list_free(void* l) {
 // resource (consecutive rows with the same (type, name) share one
 // ConfigResource key, as the Python side emits them).
 static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* args) {
+    (void)self;
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &validate_only)) return NULL;
     AdminHandle* a = admin_from_handle(h);
@@ -7130,7 +7131,16 @@ static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* ar
             last_type = type; last_name = name;
         }
         const kafka_admin_AlterConfigOp_OpType_t* op_type = kafka_admin_AlterConfigOp_OpType_for_id((int8_t)op);
-        if (op_type == NULL) { PyErr_Format(PyExc_ValueError, "unknown AlterConfigOp type id %d", op); goto fail; }
+        if (op_type == NULL) {
+            // Reported through the error channel, as the call's KafkaError:
+            // Java's typed OpType cannot carry an unknown id, so this is the
+            // marshaling failure admin.py documents (the RPC is not submitted).
+            char msg[64];
+            snprintf(msg, sizeof msg, "unknown AlterConfigOp type id %d", op);
+            obj_map_free(&m);
+            Py_DECREF(fast);
+            return job_or_error(NULL, kafka_common_Error_local_illegal_argument(msg));
+        }
         kafka_admin_ConfigEntry_t* entry = kafka_admin_ConfigEntry_new(entry_name, value);
         kafka_List_add(ops, kafka_admin_AlterConfigOp_new(entry, op_type));
         kafka_admin_ConfigEntry_destroy(entry);   // copied by AlterConfigOp_new
@@ -7565,8 +7575,10 @@ fail:
 
 // Admin_alter_consumer_group_offsets(h, group_id,
 //     [(topic, partition, offset, metadata | None, has_leader_epoch, leader_epoch)],
-//     timeout_ms) -> (job, err). Payload: {(topic, partition): error}.
+//     timeout_ms) -> (job, err). Payload: {(topic, partition): error}, or for
+//     an empty offsets map (error | None, None) from `all()`.
 static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject* args) {
+    (void)self;
     unsigned long long h; const char* gid; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KsOL", &h, &gid, &spec, &timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
@@ -7598,6 +7610,15 @@ static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject*
     kafka_admin_AlterConsumerGroupOffsetsOptions_destroy(o);
     AdminJob* job = job_new(r, JOB_RESULT_DESTROY(AlterConsumerGroupOffsets), assemble_keyed_errors);
     if (job == NULL) { obj_map_free(&m); kafka_admin_AlterConsumerGroupOffsetsResult_destroy(r); return NULL; }
+    if (m.n == 0) {
+        // No partition, so no per-key slot to report the outcome in: the job
+        // resolves Java's `all()` instead, payload (error | None, None), which
+        // admin.py raises (or returns {} for).
+        obj_map_free(&m);
+        job->assemble = assemble_single;
+        JOB_TRY(job, job_add_single(job, kafka_admin_AlterConsumerGroupOffsetsResult_all(r), 1, NULL, 0));
+        return job_or_error(job, NULL);
+    }
     for (Py_ssize_t i = 0; i < m.n; i++) {
         const kafka_common_TopicPartition_t* tp = (const kafka_common_TopicPartition_t*)m.keys[i];
         kafka_common_KafkaFuture_t* f = kafka_admin_AlterConsumerGroupOffsetsResult_partition_result(r, tp);
@@ -8025,6 +8046,7 @@ static PyObject* py_Admin_describe_user_scram_credentials(PyObject* self, PyObje
 //     [(user, is_deletion, mechanism_type, iterations, password | None, salt | None)],
 //     timeout_ms) -> (job, err). Payload: {user: error}.
 static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject* args) {
+    (void)self;
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
@@ -8049,7 +8071,9 @@ static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject*
         } else {
             Py_buffer pw, sa;
             if (PyObject_GetBuffer(password, &pw, PyBUF_SIMPLE) < 0) goto fail;
-            kafka_Bytes_t pw_bytes = { (const uint8_t*)pw.buf, (int32_t)pw.len };
+            int32_t pw_len;
+            if (checked_len_to_int32(pw.len, "password", &pw_len) < 0) { PyBuffer_Release(&pw); goto fail; }
+            kafka_Bytes_t pw_bytes = { (const uint8_t*)pw.buf, pw_len };
             kafka_admin_ScramCredentialInfo_t* info = kafka_admin_ScramCredentialInfo_new(mechanism, (int32_t)iterations);
             kafka_admin_UserScramCredentialUpsertion_t* up;
             if (salt == Py_None) {
@@ -8059,7 +8083,12 @@ static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject*
                 if (PyObject_GetBuffer(salt, &sa, PyBUF_SIMPLE) < 0) {
                     PyBuffer_Release(&pw); kafka_admin_ScramCredentialInfo_destroy(info); goto fail;
                 }
-                kafka_Bytes_t salt_bytes = { (const uint8_t*)sa.buf, (int32_t)sa.len };
+                int32_t salt_len;
+                if (checked_len_to_int32(sa.len, "salt", &salt_len) < 0) {
+                    PyBuffer_Release(&sa); PyBuffer_Release(&pw);
+                    kafka_admin_ScramCredentialInfo_destroy(info); goto fail;
+                }
+                kafka_Bytes_t salt_bytes = { (const uint8_t*)sa.buf, salt_len };
                 up = kafka_admin_UserScramCredentialUpsertion_with_salt(user, info, pw_bytes, salt_bytes);
                 PyBuffer_Release(&sa);
             }
@@ -8120,10 +8149,13 @@ static PyObject* py_Admin_create_delegation_token(PyObject* self, PyObject* args
 // Admin_renew_delegation_token(h, hmac, renew_time_period_ms, timeout_ms) -> (job, err).
 // Payload: (error, expiry_timestamp).
 static PyObject* py_Admin_renew_delegation_token(PyObject* self, PyObject* args) {
+    (void)self;
     unsigned long long h; const uint8_t* hmac; Py_ssize_t hmac_len; long long period_ms, timeout_ms;
     if (!PyArg_ParseTuple(args, "Ky#LL", &h, &hmac, &hmac_len, &period_ms, &timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    kafka_Bytes_t bytes = { hmac, (int32_t)hmac_len };
+    int32_t hmac_len32;
+    if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
+    kafka_Bytes_t bytes = { hmac, hmac_len32 };
     ADMIN_OPTIONS(RenewDelegationToken, o, timeout_ms);
     kafka_admin_RenewDelegationTokenOptions_set_renew_time_period_ms(o, (int64_t)period_ms);
     kafka_admin_RenewDelegationTokenResult_t* r = kafka_admin_Admin_renew_delegation_token_with_options(a->admin, bytes, o);
@@ -8137,10 +8169,13 @@ static PyObject* py_Admin_renew_delegation_token(PyObject* self, PyObject* args)
 // Admin_expire_delegation_token(h, hmac, expiry_time_period_ms, timeout_ms) -> (job, err).
 // Payload: (error, expiry_timestamp).
 static PyObject* py_Admin_expire_delegation_token(PyObject* self, PyObject* args) {
+    (void)self;
     unsigned long long h; const uint8_t* hmac; Py_ssize_t hmac_len; long long period_ms, timeout_ms;
     if (!PyArg_ParseTuple(args, "Ky#LL", &h, &hmac, &hmac_len, &period_ms, &timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    kafka_Bytes_t bytes = { hmac, (int32_t)hmac_len };
+    int32_t hmac_len32;
+    if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
+    kafka_Bytes_t bytes = { hmac, hmac_len32 };
     ADMIN_OPTIONS(ExpireDelegationToken, o, timeout_ms);
     kafka_admin_ExpireDelegationTokenOptions_set_expiry_time_period_ms(o, (int64_t)period_ms);
     kafka_admin_ExpireDelegationTokenResult_t* r = kafka_admin_Admin_expire_delegation_token_with_options(a->admin, bytes, o);
