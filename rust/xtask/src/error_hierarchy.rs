@@ -2839,6 +2839,113 @@ fn splice_block(current: &str, block: &str) -> String {
     }
 }
 
+/// Java's `Errors` enum, the source of each wire error code's default message.
+const ERRORS_SOURCE: &str = "kafka/clients/src/main/java/org/apache/kafka/common/protocol/Errors.java";
+
+/// Each `Errors` constant's code and default message (the string `Errors.exception()`'s
+/// cached instance carries, which `Errors.exception(null)` returns), in code order;
+/// `NONE`'s `null` is left out. The constants run from the first `NAME(` to the `;`
+/// closing the list, each `NAME(code, "literal" + "literal" | null, builder)`.
+fn errors_default_messages(repo_root: &Path) -> anyhow::Result<BTreeMap<i32, String>> {
+    let path = repo_root.join(ERRORS_SOURCE);
+    let src = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let start = src
+        .find("UNKNOWN_SERVER_ERROR(")
+        .ok_or_else(|| anyhow::anyhow!("{}: no UNKNOWN_SERVER_ERROR constant", path.display()))?;
+    let chars: Vec<char> = src[start..].chars().collect();
+    let bad = |what: &str, at: usize| anyhow::anyhow!("{}: {what} at offset {at} of the constants", path.display());
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    let mut out = BTreeMap::new();
+    let mut i = 0;
+    loop {
+        skip_ws(&mut i);
+        let name_start = i;
+        while i < chars.len() && (chars[i].is_ascii_uppercase() || chars[i].is_ascii_digit() || chars[i] == '_') {
+            i += 1;
+        }
+        if i == name_start || chars.get(i) != Some(&'(') {
+            return Err(bad("expected a constant", name_start));
+        }
+        i += 1;
+        skip_ws(&mut i);
+        let code_start = i;
+        if chars.get(i) == Some(&'-') {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        let code: i32 = chars[code_start..i]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .map_err(|_| bad("expected a code", code_start))?;
+        skip_ws(&mut i);
+        if chars.get(i) != Some(&',') {
+            return Err(bad("expected ','", i));
+        }
+        i += 1;
+        skip_ws(&mut i);
+        let mut message: Option<String> = None;
+        if chars[i..].starts_with(&['n', 'u', 'l', 'l']) {
+            i += 4;
+        } else {
+            let mut text = String::new();
+            loop {
+                if chars.get(i) != Some(&'"') {
+                    return Err(bad("expected a string literal", i));
+                }
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        return Err(bad("unsupported escape in a message", i));
+                    }
+                    text.push(chars[i]);
+                    i += 1;
+                }
+                i += 1;
+                skip_ws(&mut i);
+                if chars.get(i) == Some(&'+') {
+                    i += 1;
+                    skip_ws(&mut i);
+                    continue;
+                }
+                break;
+            }
+            message = Some(text);
+        }
+        // The builder, up to the constant's closing parenthesis.
+        let mut depth = 1;
+        while i < chars.len() && depth > 0 {
+            match chars[i] {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {},
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return Err(bad("unclosed constant", name_start));
+        }
+        if let Some(text) = message {
+            if out.insert(code, text).is_some() {
+                return Err(bad("duplicate code", code_start));
+            }
+        }
+        skip_ws(&mut i);
+        match chars.get(i) {
+            Some(',') => i += 1,
+            Some(';') => break,
+            _ => return Err(bad("expected ',' or ';'", i)),
+        }
+    }
+    Ok(out)
+}
+
 /// The generated files, so `check-generated` can compare.
 pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, String)>> {
     let classes = build_graph(repo_root)?;
@@ -2916,10 +3023,15 @@ pub fn generated_outputs(repo_root: &Path) -> anyhow::Result<Vec<(PathBuf, Strin
         .map(|c| format!("    (\"{}\", \"{}\", \"{}\"),", c.module_file(), c.py_name, c.java_fqn))
         .collect();
     rows.sort();
+    let messages: Vec<String> = errors_default_messages(repo_root)?
+        .into_iter()
+        .map(|(code, text)| format!("    {code}: {},", py_str_literal(&text)))
+        .collect();
     let registry = format!(
-        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class).\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n",
+        "{}\n\n\"\"\"Every generated error class: (defining module, class name, Java class), and\nJava's ``Errors`` default message per wire error code.\n\n{GENERATED_NOTE}\n\"\"\"\n\nfrom __future__ import annotations\n\nERRORS: tuple[tuple[str, str, str], ...] = (\n{}\n)\n\n# Java's ``Errors`` default message by wire code (``NONE`` has none): what\n# ``Errors.exception()`` and ``Errors.exception(null)`` carry. The FFI id of an API error\n# is its wire code.\nDEFAULT_MESSAGES: dict[int, str] = {{\n{}\n}}\n",
         PY_HEADER.trim_end(),
-        rows.join("\n")
+        rows.join("\n"),
+        messages.join("\n")
     );
     outputs.push((repo_root.join(PY_ROOT).join("confluent_kafka/_error_registry.py"), registry));
     Ok(outputs)
@@ -3255,6 +3367,24 @@ mod tests {
             merge_order(&forms).unwrap(),
             v(&["topic_id", "topic_partition", "partition", "topic"])
         );
+    }
+
+    #[test]
+    fn errors_default_messages_follow_errors_java() {
+        let messages = errors_default_messages(&repo_root()).expect("Errors.java must parse");
+        // UNKNOWN_SERVER_ERROR (-1) and codes 1..=133; NONE's null message is left out.
+        assert_eq!(messages.len(), 134);
+        assert!(!messages.contains_key(&0));
+        assert_eq!(
+            messages[&-1],
+            "The server experienced an unexpected error when processing the request."
+        );
+        assert_eq!(messages[&92], "A request illegally referred to the same resource twice.");
+        // A message Java splits over `+` concatenations is joined.
+        assert!(messages[&6].starts_with(
+            "For requests intended only for the leader, this error indicates that the broker is not the \
+             current leader. For requests intended for any replica,"
+        ));
     }
 
     #[test]

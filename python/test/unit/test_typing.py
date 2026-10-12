@@ -439,3 +439,429 @@ def test_typing_module_imports() -> None:
     _error_reexport_is_typed()
     _consumer_family_types()
     _producer_family_types()
+
+
+def _admin_reference_set_types(c: object = None) -> None:
+    """The admin reference set: the Options setters return the subclass
+    (``typing.Self`` / re-declared), the keyword constructors, and the result
+    classes' futures per client kind, bound from the futures a public constructor
+    is given (no code writes the kind marker).
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    import asyncio
+    import concurrent.futures
+
+    from confluent_kafka.admin.create_topics_options import CreateTopicsOptions
+    from confluent_kafka.admin.delete_records_options import DeleteRecordsOptions
+    from confluent_kafka.admin.describe_features_options import DescribeFeaturesOptions
+    from confluent_kafka.admin.list_offsets_result import ListOffsetsResult
+
+    # AbstractOptions.timeout_ms returns Self; a re-declaration its own class.
+    assert_type(DeleteRecordsOptions().timeout_ms(timeout_ms=1), DeleteRecordsOptions)
+    assert_type(DeleteRecordsOptions().timeout_ms(), "int | None")
+    assert_type(CreateTopicsOptions(timeout_ms=1, validate_only=True)
+                .timeout_ms(timeout_ms=None).validate_only(validate_only=False),
+                CreateTopicsOptions)
+    assert_type(DescribeFeaturesOptions(node_id=1).node_id(), "int | None")
+    assert_type(DescribeFeaturesOptions().node_id(node_id=2), DescribeFeaturesOptions)
+
+    Info = ListOffsetsResult.ListOffsetsResultInfo
+    tp = TopicPartition(topic="t", partition=0)
+    sync_future: concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo] = (
+        concurrent.futures.Future())
+    sync_result = ListOffsetsResult(futures={tp: sync_future})
+    assert_type(sync_result.partition_result(partition=tp),
+                "concurrent.futures.Future[ListOffsetsResult.ListOffsetsResultInfo]")
+    assert_type(sync_result.all(),
+                "concurrent.futures.Future[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+
+    async def _async() -> None:
+        async_future: asyncio.Future[ListOffsetsResult.ListOffsetsResultInfo] = (
+            asyncio.get_running_loop().create_future())
+        async_result = ListOffsetsResult(futures={tp: async_future})
+        assert_type(async_result.all(),
+                    "asyncio.Future[dict[TopicPartition, ListOffsetsResult.ListOffsetsResultInfo]]")
+        assert_type((await async_result.partition_result(partition=tp)).offset(), int)
+
+    del _async, Info
+
+
+def test_admin_reference_set_typing_imports() -> None:
+    """Runtime smoke check of the admin reference set's typing function."""
+    _admin_reference_set_types()
+
+
+def _admin_client_types(c: object = None) -> None:
+    """The admin clients: ``Admin.create`` returns ``Admin``, ``AsyncAdmin.create``
+    its async peer, and a result's futures follow the client that returned it, the
+    kind bound without any written type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    import asyncio
+    import concurrent.futures
+
+    from confluent_kafka.admin import Admin, AsyncAdmin, NewTopic, TopicListing
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    assert_type(admin, Admin)
+    created = admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                       replication_factor=1)])
+    assert_type(created.all(), "concurrent.futures.Future[None]")
+    assert_type(created.values(), "dict[str, concurrent.futures.Future[None]]")
+    assert_type(admin.list_topics().names(), "concurrent.futures.Future[set[str]]")
+    with admin as same:
+        assert_type(same, Admin)
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        assert_type(async_admin, AsyncAdmin)
+        async_created = await async_admin.create_topics(new_topics=[])
+        assert_type(async_created.all(), "asyncio.Future[None]")
+        listings = await (await async_admin.list_topics()).listings()
+        assert_type(listings, list[TopicListing])
+        async with async_admin as same_async:
+            assert_type(same_async, AsyncAdmin)
+
+    del _async, asyncio, concurrent
+
+
+def test_admin_client_typing_imports() -> None:
+    """Runtime smoke check of the admin clients' typing function."""
+    _admin_client_types()
+
+
+# Typing assertions of the admin RPCs.
+def _admin_topic_rpc_types(c: object = None) -> None:
+    """The topic, cluster, config, log-dir, partition, record, election, reassignment
+    and offset RPCs: each result's futures follow the client that returned it, the
+    kind bound without any written type argument, and every stub of a form-checked
+    method types.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    import asyncio
+    import concurrent.futures
+
+    from confluent_kafka.admin import (
+        Admin,
+        AlterConfigOp,
+        AsyncAdmin,
+        Config,
+        ConfigEntry,
+        DeletedRecords,
+        DescribeReplicaLogDirsResult,
+        ListConfigResourcesOptions,
+        ListOffsetsResult,
+        LogDirDescription,
+        NewPartitionReassignment,
+        NewPartitions,
+        OffsetSpec,
+        PartitionReassignment,
+        RecordsToDelete,
+        TopicDescription,
+    )
+    from confluent_kafka.common import (
+        AclOperation,
+        ElectionType,
+        Node,
+        TopicCollection,
+        TopicPartition,
+        TopicPartitionReplica,
+        Uuid,
+    )
+    from confluent_kafka.common.config import ConfigResource
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    resource = ConfigResource(type=ConfigResource.Type.TOPIC, name="t")
+    replica = TopicPartitionReplica(topic="t", partition=0, broker_id=1)
+    op = AlterConfigOp(config_entry=ConfigEntry(name="k", value="v"),
+                       operation_type=AlterConfigOp.OpType.SET)
+
+    deleted = admin.delete_topics(topics=["t"])
+    assert_type(deleted.all(), "concurrent.futures.Future[None]")
+    by_ids = admin.delete_topics(topics=TopicCollection.of_topic_ids(topics=[]))
+    assert_type(by_ids.topic_id_values(), "dict[Uuid, concurrent.futures.Future[None]] | None")
+    assert_type(admin.describe_topics(topic_names=["t"]).topic_name_values(),
+                "dict[str, concurrent.futures.Future[TopicDescription]] | None")
+    assert_type(admin.describe_topics(
+        topics=TopicCollection.of_topic_names(topics=[])).all_topic_names(),
+        "concurrent.futures.Future[dict[str, TopicDescription]] | None")
+    cluster = admin.describe_cluster()
+    assert_type(cluster.nodes(), "concurrent.futures.Future[list[Node]]")
+    assert_type(cluster.authorized_operations(),
+                "concurrent.futures.Future[set[AclOperation] | None]")
+    assert_type(admin.describe_configs(resources=[resource]).all(),
+                "concurrent.futures.Future[dict[ConfigResource, Config]]")
+    assert_type(admin.incremental_alter_configs(configs={resource: [op]}).values(),
+                "dict[ConfigResource, concurrent.futures.Future[None]]")
+    assert_type(admin.alter_replica_log_dirs(replica_assignment={replica: "/d"}).all(),
+                "concurrent.futures.Future[None]")
+    assert_type(admin.describe_log_dirs(brokers=[1]).all_descriptions(),
+                "concurrent.futures.Future[dict[int, dict[str, LogDirDescription]]]")
+    assert_type(admin.describe_replica_log_dirs(replicas=[replica]).values(),
+                "dict[TopicPartitionReplica, "
+                "concurrent.futures.Future[DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
+    assert_type(admin.create_partitions(
+        new_partitions={"t": NewPartitions.increase_to(total_count=2)}).values(),
+        "dict[str, concurrent.futures.Future[None]]")
+    assert_type(admin.delete_records(
+        records_to_delete={tp: RecordsToDelete.before_offset(offset=1)}).low_watermarks(),
+        "dict[TopicPartition, concurrent.futures.Future[DeletedRecords]]")
+    assert_type(admin.elect_leaders(election_type=ElectionType.PREFERRED,
+                                    partitions=None).partitions(),
+                "concurrent.futures.Future[dict[TopicPartition, BaseException | None]]")
+    assert_type(admin.alter_partition_reassignments(
+        reassignments={tp: NewPartitionReassignment(target_replicas=[1]), tp: None}).all(),
+        "concurrent.futures.Future[None]")
+    assert_type(admin.list_partition_reassignments().reassignments(),
+                "concurrent.futures.Future[dict[TopicPartition, PartitionReassignment]]")
+    assert_type(admin.list_offsets(topic_partition_offsets={tp: OffsetSpec.latest()}).all(),
+                "concurrent.futures.Future[dict[TopicPartition, "
+                "ListOffsetsResult.ListOffsetsResultInfo]]")
+    assert_type(admin.list_config_resources().all(),
+                "concurrent.futures.Future[list[ConfigResource]]")
+    assert_type(admin.list_config_resources(
+        config_resource_types=[ConfigResource.Type.TOPIC],
+        options=ListConfigResourcesOptions()).all(),
+        "concurrent.futures.Future[list[ConfigResource]]")
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        async_deleted = await async_admin.delete_topics(topics=["t"])
+        assert_type(async_deleted.all(), "asyncio.Future[None]")
+        async_described = await async_admin.describe_topics(
+            topics=TopicCollection.of_topic_ids(topics=[Uuid.random_uuid()]))
+        assert_type(async_described.all_topic_ids(),
+                    "asyncio.Future[dict[Uuid, TopicDescription]] | None")
+        nodes = await (await async_admin.describe_cluster()).nodes()
+        assert_type(nodes, list[Node])
+        assert_type((await async_admin.describe_configs(resources=[])).all(),
+                    "asyncio.Future[dict[ConfigResource, Config]]")
+        assert_type((await async_admin.incremental_alter_configs(configs={})).all(),
+                    "asyncio.Future[None]")
+        assert_type((await async_admin.alter_replica_log_dirs(replica_assignment={})).all(),
+                    "asyncio.Future[None]")
+        assert_type((await async_admin.describe_log_dirs(brokers=[])).all_descriptions(),
+                    "asyncio.Future[dict[int, dict[str, LogDirDescription]]]")
+        assert_type((await async_admin.describe_replica_log_dirs(replicas=[])).all(),
+                    "asyncio.Future[dict[TopicPartitionReplica, "
+                    "DescribeReplicaLogDirsResult.ReplicaLogDirInfo]]")
+        assert_type((await async_admin.create_partitions(new_partitions={})).all(),
+                    "asyncio.Future[None]")
+        assert_type((await async_admin.delete_records(records_to_delete={})).all(),
+                    "asyncio.Future[None]")
+        assert_type((await async_admin.elect_leaders(election_type=ElectionType.UNCLEAN,
+                                                     partitions=[tp])).all(),
+                    "asyncio.Future[None]")
+        assert_type((await async_admin.alter_partition_reassignments(reassignments={})).all(),
+                    "asyncio.Future[None]")
+        listed = await (await async_admin.list_partition_reassignments(
+            partitions=[tp])).reassignments()
+        assert_type(listed, dict[TopicPartition, PartitionReassignment])
+        assert_type((await async_admin.list_offsets(topic_partition_offsets={})).all(),
+                    "asyncio.Future[dict[TopicPartition, "
+                    "ListOffsetsResult.ListOffsetsResultInfo]]")
+        resources = await (await async_admin.list_config_resources()).all()
+        assert_type(resources, list[ConfigResource])
+
+    del _async, asyncio, concurrent
+
+
+def test_admin_topic_rpc_typing_imports() -> None:
+    """Runtime smoke check of the topic, cluster, config and offset RPCs' typing function."""
+    _admin_topic_rpc_types()
+
+
+def _admin_group_rpc_types(c: object = None) -> None:
+    """The consumer-group RPCs: each result's futures follow the client that
+    returned it, and ``list_consumer_group_offsets`` takes either of its Java
+    forms, with no written type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    import asyncio
+    import concurrent.futures
+
+    from confluent_kafka.admin import (
+        Admin,
+        AsyncAdmin,
+        ClassicGroupDescription,
+        ConsumerGroupDescription,
+        GroupListing,
+        ListConsumerGroupOffsetsSpec,
+        MemberToRemove,
+        RemoveMembersFromConsumerGroupOptions,
+    )
+    from confluent_kafka.consumer import OffsetAndMetadata
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    assert_type(admin.describe_consumer_groups(group_ids=["g"]).described_groups(),
+                "dict[str, concurrent.futures.Future[ConsumerGroupDescription]]")
+    assert_type(admin.list_consumer_group_offsets(group_id="g").all(),
+                "concurrent.futures.Future[dict[str, dict[TopicPartition, "
+                "OffsetAndMetadata | None]]]")
+    by_spec = admin.list_consumer_group_offsets(
+        group_specs={"g": ListConsumerGroupOffsetsSpec(topic_partitions=[tp])})
+    assert_type(by_spec.partitions_to_offset_and_metadata(group_id="g"),
+                "concurrent.futures.Future[dict[TopicPartition, OffsetAndMetadata | None]]")
+    assert_type(admin.delete_consumer_groups(group_ids=["g"]).deleted_groups(),
+                "dict[str, concurrent.futures.Future[None]]")
+    assert_type(admin.delete_consumer_group_offsets(group_id="g", partitions={tp})
+                .partition_result(partition=tp), "concurrent.futures.Future[None]")
+    assert_type(admin.list_groups().valid(), "concurrent.futures.Future[list[GroupListing]]")
+    options = RemoveMembersFromConsumerGroupOptions(
+        members=[MemberToRemove(group_instance_id="i")])
+    assert_type(admin.remove_members_from_consumer_group(group_id="g", options=options).all(),
+                "concurrent.futures.Future[None]")
+    assert_type(admin.alter_consumer_group_offsets(
+        group_id="g", offsets={tp: OffsetAndMetadata(offset=1)}).all(),
+        "concurrent.futures.Future[None]")
+    assert_type(admin.describe_classic_groups(group_ids=["g"]).all(),
+                "concurrent.futures.Future[dict[str, ClassicGroupDescription]]")
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        described = await async_admin.describe_consumer_groups(group_ids=["g"])
+        assert_type(described.all(), "asyncio.Future[dict[str, ConsumerGroupDescription]]")
+        offsets = await (await async_admin.list_consumer_group_offsets(
+            group_id="g")).partitions_to_offset_and_metadata()
+        assert_type(offsets, dict[TopicPartition, OffsetAndMetadata | None])
+        assert_type(await (await async_admin.list_groups()).errors(), list[BaseException])
+        removed = await async_admin.remove_members_from_consumer_group(group_id="g",
+                                                                       options=options)
+        assert_type(removed.member_result(member=MemberToRemove(group_instance_id="i")),
+                    "asyncio.Future[None]")
+        altered = await async_admin.alter_consumer_group_offsets(group_id="g", offsets={})
+        assert_type(altered.partition_result(partition=tp), "asyncio.Future[None]")
+        deleted = await async_admin.delete_consumer_group_offsets(group_id="g", partitions=[])
+        assert_type(deleted.all(), "asyncio.Future[None]")
+        assert_type(await (await async_admin.delete_consumer_groups(group_ids=[])).all(), None)
+        classic = await async_admin.describe_classic_groups(group_ids=["g"])
+        assert_type(classic.described_groups(),
+                    "dict[str, asyncio.Future[ClassicGroupDescription]]")
+
+    del _async, asyncio, concurrent
+
+
+def test_admin_group_rpc_typing_imports() -> None:
+    """Runtime smoke check of the consumer-group RPCs' typing function."""
+    _admin_group_rpc_types()
+
+
+def _admin_security_rpc_types(c: object = None) -> None:
+    """The ACL, delegation-token, quota, SCRAM, feature, producer and transaction
+    RPCs: each result's futures follow the client that returned it, and
+    ``describe_user_scram_credentials`` takes each of its Java forms, with no written
+    type argument.
+
+    Type-check-only: the body is statically analysed by mypy --strict but never
+    executed at runtime."""
+    if c is None:
+        return
+    import asyncio
+    import concurrent.futures
+
+    from confluent_kafka.admin import (
+        AbortTransactionSpec,
+        Admin,
+        AsyncAdmin,
+        DescribeProducersResult,
+        DescribeUserScramCredentialsOptions,
+        FeatureMetadata,
+        FeatureUpdate,
+        ScramMechanism,
+        TransactionDescription,
+        TransactionListing,
+        UserScramCredentialDeletion,
+        UserScramCredentialsDescription,
+    )
+    from confluent_kafka.common import (
+        AclBinding,
+        AclBindingFilter,
+        ClientQuotaAlteration,
+        ClientQuotaEntity,
+        ClientQuotaFilter,
+        DelegationToken,
+    )
+
+    admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
+    tp = TopicPartition(topic="t", partition=0)
+    assert_type(admin.describe_acls(filter=AclBindingFilter.ANY).values(),
+                "concurrent.futures.Future[list[AclBinding]]")
+    created = admin.create_acls(acls=[])
+    assert_type(created.all(), "concurrent.futures.Future[None]")
+    assert_type(admin.delete_acls(filters=[AclBindingFilter.ANY]).all(),
+                "concurrent.futures.Future[list[AclBinding]]")
+    assert_type(admin.create_delegation_token().delegation_token(),
+                "concurrent.futures.Future[DelegationToken]")
+    assert_type(admin.renew_delegation_token(hmac=b"h").expiry_timestamp(),
+                "concurrent.futures.Future[int]")
+    assert_type(admin.expire_delegation_token(hmac=b"h").expiry_timestamp(),
+                "concurrent.futures.Future[int]")
+    assert_type(admin.describe_delegation_token().delegation_tokens(),
+                "concurrent.futures.Future[list[DelegationToken]]")
+    assert_type(admin.describe_client_quotas(filter=ClientQuotaFilter.all()).entities(),
+                "concurrent.futures.Future[dict[ClientQuotaEntity, dict[str, float]]]")
+    altered = admin.alter_client_quotas(entries=[ClientQuotaAlteration(
+        entity=ClientQuotaEntity(entries={"user": "u"}), ops=[])])
+    assert_type(altered.all(), "concurrent.futures.Future[None]")
+    assert_type(admin.describe_user_scram_credentials().all(),
+                "concurrent.futures.Future[dict[str, UserScramCredentialsDescription]]")
+    assert_type(admin.describe_user_scram_credentials(users=["u"]).users(),
+                "concurrent.futures.Future[list[str]]")
+    assert_type(admin.describe_user_scram_credentials(
+        users=None, options=DescribeUserScramCredentialsOptions()).description(user_name="u"),
+        "concurrent.futures.Future[UserScramCredentialsDescription]")
+    assert_type(admin.alter_user_scram_credentials(alterations=[UserScramCredentialDeletion(
+        user="u", mechanism=ScramMechanism.SCRAM_SHA_256)]).all(),
+        "concurrent.futures.Future[None]")
+    assert_type(admin.describe_features().feature_metadata(),
+                "concurrent.futures.Future[FeatureMetadata]")
+    assert_type(admin.update_features(feature_updates={"f": FeatureUpdate(
+        max_version_level=1, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)}).all(),
+        "concurrent.futures.Future[None]")
+    assert_type(admin.describe_producers(partitions=[tp]).partition_result(partition=tp),
+                "concurrent.futures.Future[DescribeProducersResult.PartitionProducerState]")
+    assert_type(admin.describe_transactions(transactional_ids=["x"]).description(
+        transactional_id="x"), "concurrent.futures.Future[TransactionDescription]")
+    assert_type(admin.abort_transaction(spec=AbortTransactionSpec(
+        topic_partition=tp, producer_id=1, producer_epoch=0, coordinator_epoch=0)).all(),
+        "concurrent.futures.Future[None]")
+    assert_type(admin.list_transactions().all(),
+                "concurrent.futures.Future[list[TransactionListing]]")
+    assert_type(admin.fence_producers(transactional_ids=["x"]).producer_id(
+        transactional_id="x"), "concurrent.futures.Future[int]")
+    assert_type(admin.force_terminate_transaction(transactional_id="x").result(),
+                "concurrent.futures.Future[None]")
+
+    async def _async() -> None:
+        async_admin = AsyncAdmin.create(configs={"bootstrap.servers": "b:9092"})
+        acls = await async_admin.describe_acls(filter=AclBindingFilter.ANY)
+        assert_type(acls.values(), "asyncio.Future[list[AclBinding]]")
+        scram = await async_admin.describe_user_scram_credentials(users=["u"])
+        assert_type(await scram.users(), list[str])
+        features = await async_admin.describe_features()
+        assert_type(await features.feature_metadata(), FeatureMetadata)
+        listed = await async_admin.list_transactions()
+        assert_type(listed.all(), "asyncio.Future[list[TransactionListing]]")
+        terminated = await async_admin.force_terminate_transaction(transactional_id="x")
+        assert_type(terminated.result(), "asyncio.Future[None]")
+
+    del _async, asyncio, concurrent
+
+
+def test_admin_security_rpc_typing_imports() -> None:
+    """Runtime smoke check of the security RPCs' typing function."""
+    _admin_security_rpc_types()

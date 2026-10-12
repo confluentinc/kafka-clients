@@ -3583,3 +3583,31 @@ def test_a_bare_kafka_exception_from_the_core_is_the_base_error(
     assert type(errmod.from_ffi_error(1)) is KafkaError
     _Lib.api_error = True
     assert type(errmod.from_ffi_error(1)) is UnknownServerError
+
+
+async def test_a_payload_delivered_just_before_a_cancellation_is_freed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The completion reaches the loop and fills the awaited future, then the task
+    # is cancelled before it resumes (an ``asyncio.wait_for`` timeout in the same
+    # loop iteration): ``cancel()`` cannot cancel the done future, so the awaiting
+    # coroutine frees the payload.
+    from confluent_kafka.producer import async_producer
+
+    freed: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(async_producer, "free_payload",
+                        lambda payload, partitions: freed.append(payload))
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    try:
+        captured: dict[str, Any] = {}
+        task = asyncio.ensure_future(
+            p._await_payload(lambda cb: captured.__setitem__("cb", cb), False))
+        await asyncio.sleep(0)  # the task now awaits its future
+        captured["cb"](0)  # the completion: its delivery is scheduled on the loop
+        await asyncio.sleep(0)  # the delivery fills the future; the task is not run yet
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert freed == [(0,)]
+    finally:
+        monkeypatch.undo()
+        await p.close(timeout=0)
