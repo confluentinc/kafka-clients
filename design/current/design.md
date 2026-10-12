@@ -1076,8 +1076,8 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   `kafka_Bytes_t *`, written straight into the batch (CLAUDE.md §14) or
   borrowed from the fetch buffer.
 - **Collections** are the package-less `kafka_List_t` / `kafka_Map_t` of
-  `void *`: inputs hold borrowed elements, outputs own theirs and are sorted
-  deterministically.
+  `void *`: inputs hold borrowed elements; outputs are owned, except the
+  borrowed view lists, and are sorted deterministically.
 - **Panics never cross the boundary.** Every export carries `#[ffi_guard]`
   (proc-macro crate `rust/ffi-macros`), which wraps the body in
   `catch_unwind`; `ffi::tests::test_every_exported_function_is_guarded` fails on
@@ -1154,9 +1154,9 @@ per Java class. Each family has a non-instantiable base, a `Kafka*` client, a
 `Mock*`, and an `Async*` peer of each.
 
 `MockProducer` and `MockConsumer` (and their async peers) are plain Python
-translated from Java's mocks. The consumer mock is a recorded deviation: the
-FFI's `MockConsumer_add_record` cannot carry the `ConsumerRecord` objects Java's
-mock buffers (`consumer/_mock_core.py`). The other clients call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+translated from Java's mocks, as CLAUDE.md's "Implementation over the FFI"
+requires (`producer/_mock_core.py`, `consumer/_mock_core.py`); the FFI's `Mock*`
+entry points serve the C binding. The other clients call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
 marshalling layer that links the `confluent_kafka` cdylib
 (`python/setup.py:37-40`). `setup.py` resolves the library under
 `../rust/target/`, and `CONFLUENT_KAFKA_LIB_DIR` overrides that. The error
@@ -1219,7 +1219,14 @@ Deviations recorded in the package's module docstrings:
   `buffer.memory` space are bounded by `max.block.ms`, as in Java, and a record
   that times out fails through its callback and future. Java blocks the
   `send()` caller for those waits; here records queued behind a full buffer are
-  held by the submission task instead.
+  held by the submission task instead. Two consequences follow:
+  - the submission queue is an unbounded channel (`ffi/producer/mod.rs`,
+    `ProducerHandle::new`), so the records waiting in it are not bounded by
+    `buffer.memory`;
+  - `submission_loop` waits for one record at a time, so the k-th record queued
+    behind a full buffer can wait up to k × `max.block.ms` before it fails,
+    where each Java `send()` waits at most `max.block.ms`, whatever the number
+    of sending threads.
 - A call from inside a `send()` callback cannot have its completion run,
   since that runs on the thread the callback blocks. There, `send()` does not
   wait for its record to reach the producer. `init_transactions`,

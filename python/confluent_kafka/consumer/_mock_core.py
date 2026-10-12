@@ -15,14 +15,15 @@
 """The body of ``MockConsumer`` and ``AsyncMockConsumer`` (private): a direct
 Python translation of Java's ``org.apache.kafka.clients.consumer.MockConsumer``.
 
-*(deviation, logged for the post-phase review)* The mock is not FFI-backed,
-although the Implementation-over-the-FFI rule lists ``MockConsumer`` with the
-clients: the FFI's ``kafka_consumer_MockConsumer_add_record`` carries only a
-topic, partition, offset and serialized key/value, while Java's mock buffers
-the very ``ConsumerRecord`` objects it is given and returns them from
-``poll()`` undeserialized, with their timestamps, headers and leader epochs
-(which it also records in the positions ``commit()`` commits); the core's
-``ConsumerHandle`` rejects the blocking calls a listener makes on a mock; and
+The mock is not FFI-backed, as CLAUDE.md's Implementation-over-the-FFI rule
+requires of every ``Mock*`` (the FFI's ``kafka_consumer_MockConsumer_*`` entry
+points serve the C binding). It could not be anyway: the FFI's
+``kafka_consumer_MockConsumer_add_record`` carries only a topic, partition,
+offset and serialized key/value, while Java's mock buffers the very
+``ConsumerRecord`` objects it is given and returns them from ``poll()``
+undeserialized, with their timestamps, headers and leader epochs (which it also
+records in the positions ``commit()`` commits); the core's ``ConsumerHandle``
+rejects the blocking calls a listener makes on a mock; and
 ``schedulePollTask(Runnable)`` has no entry point. Translated from Java, the
 mock keeps all of that, as ``MockProducer`` does.
 

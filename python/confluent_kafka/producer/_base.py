@@ -37,7 +37,15 @@ for ``buffer.memory`` space are bounded by ``max.block.ms`` as in Java, and a
 record that times out fails through its callback and future. Java's
 ``send()`` blocks its caller for those waits instead; here the caller is not
 blocked, and records queued behind a full buffer are held by the submission
-task meanwhile.
+task meanwhile. Two consequences follow:
+
+- The submission queue is unbounded, so the records waiting in it are not
+  bounded by ``buffer.memory``: a caller that sends faster than the producer
+  drains keeps growing it.
+- The submission task waits for one record at a time, so the k-th record queued
+  behind a full buffer can wait up to k × ``max.block.ms`` before it fails,
+  where each Java ``send()`` waits at most ``max.block.ms``, whatever the number
+  of sending threads.
 """
 
 from __future__ import annotations

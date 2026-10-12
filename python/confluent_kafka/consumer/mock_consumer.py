@@ -29,8 +29,9 @@ does. Nothing binds ``K`` / ``V``, so the caller annotates the mock as Java
 writes its type arguments: ``c: MockConsumer[str, str] =
 MockConsumer(offset_reset_strategy="earliest")``.
 
-A direct Python translation of Java's mock (``_mock_core``), not FFI-backed
-*(deviation, see there)*.
+A direct Python translation of Java's mock (``_mock_core``), not FFI-backed,
+as every ``Mock*`` is (CLAUDE.md, Python Binding Conventions, Implementation
+over the FFI).
 """
 
 from __future__ import annotations
