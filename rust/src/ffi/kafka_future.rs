@@ -91,7 +91,7 @@ unsafe impl Send for FfiValue {}
 // SAFETY: a shared `&FfiValue` only copies `ptr` out (`ptr()`) and never
 // dereferences it; `destroy` is used only by `Drop`, through `&mut self`. What
 // C reads through the pointer, possibly from several threads, is one of these:
-// - a value boxed by `owned`, reached only from `map_future`, whose `T` is `Sync`;
+// - a value boxed by `owned`, `Sync` by the bound on `owned`;
 // - a C handle made by `handle`, whose caller guarantees, per `handle`'s doc,
 //   that its accessors may run from several threads at once;
 // - C's own pointee.
@@ -99,7 +99,7 @@ unsafe impl Sync for FfiValue {}
 
 impl FfiValue {
     /// Boxes a Rust value behind the `void *`, freed with the handle.
-    pub(crate) fn owned<T: Send + 'static>(value: T) -> Arc<Self> {
+    pub(crate) fn owned<T: Send + Sync + 'static>(value: T) -> Arc<Self> {
         Arc::new(Self {
             ptr: Box::into_raw(Box::new(value)) as *mut c_void,
             destroy: Some(destroy_boxed::<T>),
