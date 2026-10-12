@@ -146,11 +146,16 @@ pub(crate) fn box_describe_client_quotas_result(
     result: DescribeClientQuotasResult,
     ctx: &FutureCtx,
 ) -> *mut kafka_admin_DescribeClientQuotasResult_t {
-    let entities = ctx.handle_future(
-        result.entities(),
-        |entities| box_entities(entities) as *mut c_void,
-        destroy_map_element,
-    );
+    // SAFETY: `destroy_map_element` frees exactly the map `box_entities` makes through `box_map`,
+    // and the handle holds only owned data and no thread-bound state, so it may be freed from any
+    // thread and read from several at once, as `handle_future` requires.
+    let entities = unsafe {
+        ctx.handle_future(
+            result.entities(),
+            |entities| box_entities(entities) as *mut c_void,
+            destroy_map_element,
+        )
+    };
     box_result(DescribeClientQuotasResultInner { entities }, ctx)
 }
 

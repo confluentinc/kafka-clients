@@ -66,11 +66,16 @@ pub(crate) fn box_create_delegation_token_result(
     result: CreateDelegationTokenResult,
     ctx: &FutureCtx,
 ) -> *mut kafka_admin_CreateDelegationTokenResult_t {
-    let delegation_token = ctx.handle_future(
-        result.delegation_token(),
-        |token| box_delegation_token(token) as *mut c_void,
-        destroy_delegation_token_element,
-    );
+    // SAFETY: `destroy_delegation_token_element` frees exactly the handle `box_delegation_token`
+    // makes, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    let delegation_token = unsafe {
+        ctx.handle_future(
+            result.delegation_token(),
+            |token| box_delegation_token(token) as *mut c_void,
+            destroy_delegation_token_element,
+        )
+    };
     box_result(CreateDelegationTokenResultInner { delegation_token }, ctx)
 }
 

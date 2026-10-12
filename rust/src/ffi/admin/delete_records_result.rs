@@ -84,11 +84,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
         destroy_topic_partition_element,
         topic_partition_key_eq,
         |ctx, future| {
-            ctx.handle_future(
-                future,
-                |records| box_deleted_records(records) as *mut c_void,
-                destroy_deleted_records_element,
-            )
+            // SAFETY: `destroy_deleted_records_element` frees exactly the handle
+            // `box_deleted_records` makes, and the handle holds only owned data and no thread-bound
+            // state, so it may be freed from any thread and read from several at once, as
+            // `handle_future` requires.
+            unsafe {
+                ctx.handle_future(
+                    future,
+                    |records| box_deleted_records(records) as *mut c_void,
+                    destroy_deleted_records_element,
+                )
+            }
         },
     )
 }

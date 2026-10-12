@@ -81,11 +81,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_described_grou
     let h = unsafe { handle(self_) };
     let groups = h.result.described_groups();
     h.ctx.string_keyed_future_map(groups.iter(), |ctx, future| {
-        ctx.handle_future(
-            future,
-            |description| box_consumer_group_description(description) as *mut c_void,
-            destroy_consumer_group_description_element,
-        )
+        // SAFETY: `destroy_consumer_group_description_element` frees exactly the handle
+        // `box_consumer_group_description` makes, and the handle holds only owned data and no
+        // thread-bound state, so it may be freed from any thread and read from several at once, as
+        // `handle_future` requires.
+        unsafe {
+            ctx.handle_future(
+                future,
+                |description| box_consumer_group_description(description) as *mut c_void,
+                destroy_consumer_group_description_element,
+            )
+        }
     })
 }
 
@@ -104,11 +110,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_all(
     self_: *const kafka_admin_DescribeConsumerGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.all(),
-        |groups| box_descriptions(groups) as *mut c_void,
-        destroy_map_element,
-    )
+    // SAFETY: `destroy_map_element` frees exactly the map `box_descriptions` makes through
+    // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
+    // may be freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.all(),
+            |groups| box_descriptions(groups) as *mut c_void,
+            destroy_map_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Maps and futures taken from the

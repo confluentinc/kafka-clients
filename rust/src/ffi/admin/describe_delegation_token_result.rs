@@ -63,14 +63,19 @@ pub(crate) fn box_describe_delegation_token_result(
     result: DescribeDelegationTokenResult,
     ctx: &FutureCtx,
 ) -> *mut kafka_admin_DescribeDelegationTokenResult_t {
-    let delegation_tokens = ctx.handle_future(
-        result.delegation_tokens(),
-        |tokens| {
-            let elements = tokens.into_iter().map(|t| box_delegation_token(t) as *mut c_void).collect();
-            box_list(elements, Some(destroy_delegation_token_element)) as *mut c_void
-        },
-        destroy_list_element,
-    );
+    // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes, and the handle holds
+    // only owned data and no thread-bound state, so it may be freed from any thread and read from
+    // several at once, as `handle_future` requires.
+    let delegation_tokens = unsafe {
+        ctx.handle_future(
+            result.delegation_tokens(),
+            |tokens| {
+                let elements = tokens.into_iter().map(|t| box_delegation_token(t) as *mut c_void).collect();
+                box_list(elements, Some(destroy_delegation_token_element)) as *mut c_void
+            },
+            destroy_list_element,
+        )
+    };
     box_result(Held { delegation_tokens }, ctx)
 }
 

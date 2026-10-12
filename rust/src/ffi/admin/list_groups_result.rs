@@ -68,7 +68,10 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.all(), listings_list, destroy_list_element)
+    // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), listings_list, destroy_list_element) }
 }
 
 /// `valid()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -85,7 +88,10 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.valid(), listings_list, destroy_list_element)
+    // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.valid(), listings_list, destroy_list_element) }
 }
 
 /// `errors()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -101,14 +107,19 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
     self_: *const kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.errors(),
-        |errors: Vec<Error>| {
-            let elements = errors.into_iter().map(|e| box_error(e) as *mut c_void).collect();
-            box_list(elements, Some(destroy_error_element)) as *mut c_void
-        },
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes, and the handle holds
+    // only owned data and no thread-bound state, so it may be freed from any thread and read from
+    // several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.errors(),
+            |errors: Vec<Error>| {
+                let elements = errors.into_iter().map(|e| box_error(e) as *mut c_void).collect();
+                box_list(elements, Some(destroy_error_element)) as *mut c_void
+            },
+            destroy_list_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

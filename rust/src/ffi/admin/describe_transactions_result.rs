@@ -82,6 +82,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle(self_) };
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // SAFETY: Per this function's `# Safety`, `out_description` is a valid slot, as `out_slot`
+    // requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
+    // handle `box_transaction_description` makes, and the handle holds only owned data and no
+    // thread-bound state, so it may be freed from any thread and read from several at once, as
+    // `handle_future` requires.
     unsafe {
         out_slot(h.result.description(&transactional_id), out_description, |f| {
             h.ctx.handle_future(
@@ -106,7 +111,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
     self_: *const kafka_admin_DescribeTransactionsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `descriptions_map` makes through
+    // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
+    // may be freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element) }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

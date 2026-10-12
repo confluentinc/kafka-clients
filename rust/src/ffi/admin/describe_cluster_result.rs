@@ -71,11 +71,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.nodes(),
-        |nodes| node_list(&nodes) as *mut c_void,
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `node_list` makes through `box_list`,
+    // and the handle holds only owned data and no thread-bound state, so it may be freed from any
+    // thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.nodes(),
+            |nodes| node_list(&nodes) as *mut c_void,
+            destroy_list_element,
+        )
+    }
 }
 
 /// `DescribeClusterResult.controller()`: an owned future whose `get`
@@ -92,11 +97,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.controller(),
-        |controller| controller.map_or(ptr::null_mut(), |node| box_node(node) as *mut c_void),
-        destroy_node_element,
-    )
+    // SAFETY: `destroy_node_element` frees exactly the handle `box_node` makes, and the handle
+    // holds only owned data and no thread-bound state, so it may be freed from any thread and read
+    // from several at once, as `handle_future` requires. A `None` gives null, which is never freed.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.controller(),
+            |controller| controller.map_or(ptr::null_mut(), |node| box_node(node) as *mut c_void),
+            destroy_node_element,
+        )
+    }
 }
 
 /// `DescribeClusterResult.clusterId()`: an owned future whose `get`
@@ -131,19 +141,25 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
     self_: *const kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.authorized_operations(),
-        |operations| {
-            operations.map_or(ptr::null_mut(), |operations| {
-                let elements = operations
-                    .iter()
-                    .map(|&op| acl_operation_singleton(op) as *mut c_void)
-                    .collect();
-                box_list(elements, None) as *mut c_void
-            })
-        },
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes (a view list: its
+    // elements are static singletons it does not free), and the handle holds only owned data and no
+    // thread-bound state, so it may be freed from any thread and read from several at once, as
+    // `handle_future` requires. A `None` gives null, which is never freed.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.authorized_operations(),
+            |operations| {
+                operations.map_or(ptr::null_mut(), |operations| {
+                    let elements = operations
+                        .iter()
+                        .map(|&op| acl_operation_singleton(op) as *mut c_void)
+                        .collect();
+                    box_list(elements, None) as *mut c_void
+                })
+            },
+            destroy_list_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures taken from the result

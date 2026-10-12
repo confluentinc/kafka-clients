@@ -72,11 +72,16 @@ pub(crate) fn box_describe_acls_result(
     result: DescribeAclsResult,
     ctx: &FutureCtx,
 ) -> *mut kafka_admin_DescribeAclsResult_t {
-    let values = ctx.handle_future(
-        result.values(),
-        |bindings| acl_binding_list(bindings) as *mut c_void,
-        destroy_list_element,
-    );
+    // SAFETY: `destroy_list_element` frees exactly the list `acl_binding_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    let values = unsafe {
+        ctx.handle_future(
+            result.values(),
+            |bindings| acl_binding_list(bindings) as *mut c_void,
+            destroy_list_element,
+        )
+    };
     box_result(DescribeAclsResultInner { values }, ctx)
 }
 

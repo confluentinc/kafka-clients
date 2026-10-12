@@ -103,7 +103,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
         h.result.descriptions().iter().collect();
     h.ctx
         .keyed_future_map(sorted, box_i32, destroy_boxed::<i32>, i32_key_eq, |ctx, f| {
-            ctx.handle_future(f, log_dir_map, destroy_map_element)
+            // SAFETY: `destroy_map_element` frees exactly the map `log_dir_map` makes through
+            // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound
+            // state, so it may be freed from any thread and read from several at once, as
+            // `handle_future` requires.
+            unsafe { ctx.handle_future(f, log_dir_map, destroy_map_element) }
         })
 }
 
@@ -122,8 +126,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
     self_: *const kafka_admin_DescribeLogDirsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx
-        .handle_future(&h.result.all_descriptions(), all_descriptions_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `all_descriptions_map` makes through
+    // `box_map`, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&h.result.all_descriptions(), all_descriptions_map, destroy_map_element)
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

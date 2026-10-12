@@ -116,7 +116,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
         |resource| box_config_resource(resource.clone()) as *mut c_void,
         destroy_config_resource_element,
         config_resource_key_eq,
-        |ctx, future| ctx.handle_future(future, |config| box_config(config) as *mut c_void, destroy_config_element),
+        // SAFETY: `destroy_config_element` frees exactly the handle `box_config` makes, and the
+        // handle holds only owned data and no thread-bound state, so it may be freed from any
+        // thread and read from several at once, as `handle_future` requires.
+        |ctx, future| unsafe {
+            ctx.handle_future(future, |config| box_config(config) as *mut c_void, destroy_config_element)
+        },
     )
 }
 
@@ -135,11 +140,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
     self_: *const kafka_admin_DescribeConfigsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.all(),
-        |configs| box_configs(configs) as *mut c_void,
-        destroy_map_element,
-    )
+    // SAFETY: `destroy_map_element` frees exactly the map `box_configs` makes through `box_map`,
+    // and the handle holds only owned data and no thread-bound state, so it may be freed from any
+    // thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.all(),
+            |configs| box_configs(configs) as *mut c_void,
+            destroy_map_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Maps and futures taken from the

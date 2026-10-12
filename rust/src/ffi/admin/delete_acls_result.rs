@@ -306,11 +306,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
         destroy_acl_binding_filter_element,
         acl_binding_filter_key_eq,
         |ctx, future| {
-            ctx.handle_future(
-                future,
-                |results| box_filter_results(results) as *mut c_void,
-                destroy_filter_results_element,
-            )
+            // SAFETY: `destroy_filter_results_element` frees exactly the handle
+            // `box_filter_results` makes, and the handle holds only owned data and no thread-bound
+            // state, so it may be freed from any thread and read from several at once, as
+            // `handle_future` requires.
+            unsafe {
+                ctx.handle_future(
+                    future,
+                    |results| box_filter_results(results) as *mut c_void,
+                    destroy_filter_results_element,
+                )
+            }
         },
     )
 }
@@ -329,11 +335,16 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
     self_: *const kafka_admin_DeleteAclsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.all(),
-        |bindings| acl_binding_list(bindings) as *mut c_void,
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `acl_binding_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.all(),
+            |bindings| acl_binding_list(bindings) as *mut c_void,
+            destroy_list_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Maps and futures taken from the

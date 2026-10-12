@@ -232,6 +232,11 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle(self_) };
     let partition = unsafe { topic_partition_ref(partition) };
+    // SAFETY: Per this function's `# Safety`, `out_partition_result` is a valid slot, as `out_slot`
+    // requires. For `handle_future`, `destroy_list_offsets_result_info_element` frees exactly the
+    // handle `box_list_offsets_result_info` makes, and the handle holds only owned data and no
+    // thread-bound state, so it may be freed from any thread and read from several at once, as
+    // `handle_future` requires.
     unsafe {
         out_slot(h.result.partition_result(partition), out_partition_result, |f| {
             h.ctx.handle_future(
@@ -258,7 +263,10 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
     self_: *const kafka_admin_ListOffsetsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.all(), infos_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `infos_map` makes through `box_map`, and
+    // the handle holds only owned data and no thread-bound state, so it may be freed from any
+    // thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), infos_map, destroy_map_element) }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

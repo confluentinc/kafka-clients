@@ -76,8 +76,13 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx
-        .handle_future(&h.result.names_to_listings(), listings_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `listings_map` makes through
+    // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
+    // may be freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&h.result.names_to_listings(), listings_map, destroy_map_element)
+    }
 }
 
 /// `listings()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -93,7 +98,10 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.listings(), listings_list, destroy_list_element)
+    // SAFETY: `destroy_list_element` frees exactly the list `listings_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.listings(), listings_list, destroy_list_element) }
 }
 
 /// `names()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -109,11 +117,16 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
     self_: *const kafka_admin_ListTopicsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.names(),
-        |names: HashSet<String>| sorted_string_list(names) as *mut c_void,
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `sorted_string_list` makes through
+    // `box_string_list`, and the handle holds only owned data and no thread-bound state, so it may
+    // be freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.names(),
+            |names: HashSet<String>| sorted_string_list(names) as *mut c_void,
+            destroy_list_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

@@ -55,11 +55,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
     self_: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.feature_metadata(),
-        |metadata| box_feature_metadata(metadata) as *mut c_void,
-        destroy_feature_metadata_element,
-    )
+    // SAFETY: `destroy_feature_metadata_element` frees exactly the handle `box_feature_metadata`
+    // makes, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.feature_metadata(),
+            |metadata| box_feature_metadata(metadata) as *mut c_void,
+            destroy_feature_metadata_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

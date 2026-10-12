@@ -83,11 +83,16 @@ fn box_uuid_key(id: &Uuid) -> *mut c_void {
 /// The owned future a per-topic `KafkaFuture<TopicDescription>` becomes:
 /// `get` delivers a `kafka_admin_TopicDescription_t *` owned by the future.
 fn description_future(ctx: &FutureCtx, future: &KafkaFuture<TopicDescription>) -> *mut kafka_common_KafkaFuture_t {
-    ctx.handle_future(
-        future,
-        |d| box_topic_description(d) as *mut c_void,
-        destroy_topic_description_element,
-    )
+    // SAFETY: `destroy_topic_description_element` frees exactly the handle `box_topic_description`
+    // makes, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        ctx.handle_future(
+            future,
+            |d| box_topic_description(d) as *mut c_void,
+            destroy_topic_description_element,
+        )
+    }
 }
 
 /// Java's `Map<String, TopicDescription>` as an owned map of owned `char *`
@@ -285,7 +290,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     match h.result.all_topic_names() {
-        Some(future) => h.ctx.handle_future(&future, names_map, destroy_map_element),
+        // SAFETY: `destroy_map_element` frees exactly the map `names_map` makes through
+        // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state,
+        // so it may be freed from any thread and read from several at once, as `handle_future`
+        // requires.
+        Some(future) => unsafe { h.ctx.handle_future(&future, names_map, destroy_map_element) },
         None => std::ptr::null_mut(),
     }
 }
@@ -306,7 +315,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     match h.result.all_topic_ids() {
-        Some(future) => h.ctx.handle_future(&future, ids_map, destroy_map_element),
+        // SAFETY: `destroy_map_element` frees exactly the map `ids_map` makes through `box_map`,
+        // and the handle holds only owned data and no thread-bound state, so it may be freed from
+        // any thread and read from several at once, as `handle_future` requires.
+        Some(future) => unsafe { h.ctx.handle_future(&future, ids_map, destroy_map_element) },
         None => std::ptr::null_mut(),
     }
 }

@@ -66,14 +66,19 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_all(
     self_: *const kafka_admin_ListConfigResourcesResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.all(),
-        |resources| {
-            let elements = resources.into_iter().map(|r| box_config_resource(r) as *mut c_void).collect();
-            box_list(elements, Some(destroy_config_resource_element)) as *mut c_void
-        },
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes, and the handle holds
+    // only owned data and no thread-bound state, so it may be freed from any thread and read from
+    // several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.all(),
+            |resources| {
+                let elements = resources.into_iter().map(|r| box_config_resource(r) as *mut c_void).collect();
+                box_list(elements, Some(destroy_config_resource_element)) as *mut c_void
+            },
+            destroy_list_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

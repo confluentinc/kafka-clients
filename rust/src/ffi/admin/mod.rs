@@ -476,7 +476,17 @@ impl FutureCtx {
     /// A future resolving to the owned C handle `boxer` builds, freed with
     /// `destroy` (the handle type's `_destroy` as an [`ElementDestroy`]) when
     /// the last future sharing it is destroyed.
-    pub(crate) fn handle_future<T, F>(
+    ///
+    /// # Safety
+    ///
+    /// The caller gives each handle `boxer` makes the guarantees
+    /// [`map_future_handle`] asks of its caller (those of [`FfiValue::handle`]):
+    /// `destroy` frees exactly that handle, being the destructor paired with
+    /// the helper that made it (a `box_*` helper and its `_destroy`), and the
+    /// handle may be freed from any thread, and read through its accessors from
+    /// several threads at once. `boxer` may also return null, which is never
+    /// freed.
+    pub(crate) unsafe fn handle_future<T, F>(
         &self,
         future: &KafkaFuture<T>,
         boxer: F,
@@ -486,6 +496,7 @@ impl FutureCtx {
         T: Clone + Send + Sync + 'static,
         F: Fn(T) -> *mut c_void + Send + Sync + 'static,
     {
+        // `map_future_handle`'s caller guarantee is this function's `# Safety`.
         self.boxed(map_future_handle(future, boxer, destroy))
     }
 

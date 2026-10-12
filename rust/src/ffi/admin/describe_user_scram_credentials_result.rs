@@ -79,7 +79,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `descriptions_map` makes through
+    // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
+    // may be freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element) }
 }
 
 /// `users()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -96,11 +99,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(
-        &h.result.users(),
-        |users: Vec<String>| box_string_list(users) as *mut c_void,
-        destroy_list_element,
-    )
+    // SAFETY: `destroy_list_element` frees exactly the list `box_string_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.users(),
+            |users: Vec<String>| box_string_list(users) as *mut c_void,
+            destroy_list_element,
+        )
+    }
 }
 
 /// `description(String userName)`: an owned future freed with
@@ -121,11 +129,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     let user_name = unsafe { c_str_to_string(user_name) };
-    h.ctx.handle_future(
-        &h.result.description(&user_name),
-        |d| box_user_scram_credentials_description(d) as *mut c_void,
-        destroy_user_scram_credentials_description_element,
-    )
+    // SAFETY: `destroy_user_scram_credentials_description_element` frees exactly the handle
+    // `box_user_scram_credentials_description` makes, and the handle holds only owned data and no
+    // thread-bound state, so it may be freed from any thread and read from several at once, as
+    // `handle_future` requires.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.description(&user_name),
+            |d| box_user_scram_credentials_description(d) as *mut c_void,
+            destroy_user_scram_credentials_description_element,
+        )
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

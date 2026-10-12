@@ -110,7 +110,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
     self_: *const kafka_admin_ListTransactionsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.all(), sorted_listings_list, destroy_list_element)
+    // SAFETY: `destroy_list_element` frees exactly the list `sorted_listings_list` makes through
+    // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
+    // freed from any thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.all(), sorted_listings_list, destroy_list_element) }
 }
 
 /// `byBrokerId()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
@@ -132,16 +135,24 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     let ctx = h.ctx.clone();
-    h.ctx.handle_future(
-        &h.result.by_broker_id(),
-        move |map: HashMap<i32, KafkaFuture<Vec<TransactionListing>>>| {
-            let sorted: BTreeMap<i32, KafkaFuture<Vec<TransactionListing>>> = map.into_iter().collect();
-            ctx.keyed_future_map(sorted.iter(), box_i32, destroy_boxed::<i32>, i32_key_eq, |ctx, f| {
-                ctx.handle_future(f, listings_list, destroy_list_element)
-            }) as *mut c_void
-        },
-        destroy_map_element,
-    )
+    // SAFETY: `destroy_map_element` frees exactly the map the closure makes through
+    // `keyed_future_map` (a `box_map` of owned future handles), and the map and its futures hold no
+    // thread-bound state, so they may be freed from any thread and read from several at once, as
+    // `handle_future` requires. The same holds for the inner futures: `destroy_list_element` frees
+    // exactly the list `listings_list` makes through `box_list`, which holds only owned data and no
+    // thread-bound state.
+    unsafe {
+        h.ctx.handle_future(
+            &h.result.by_broker_id(),
+            move |map: HashMap<i32, KafkaFuture<Vec<TransactionListing>>>| {
+                let sorted: BTreeMap<i32, KafkaFuture<Vec<TransactionListing>>> = map.into_iter().collect();
+                ctx.keyed_future_map(sorted.iter(), box_i32, destroy_boxed::<i32>, i32_key_eq, |ctx, f| {
+                    ctx.handle_future(f, listings_list, destroy_list_element)
+                }) as *mut c_void
+            },
+            destroy_map_element,
+        )
+    }
 }
 
 /// `allByBrokerId()`: an owned future freed with
@@ -160,8 +171,13 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
     self_: *const kafka_admin_ListTransactionsResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx
-        .handle_future(&h.result.all_by_broker_id(), all_by_broker_id_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `all_by_broker_id_map` makes through
+    // `box_map`, and the handle holds only owned data and no thread-bound state, so it may be freed
+    // from any thread and read from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&h.result.all_by_broker_id(), all_by_broker_id_map, destroy_map_element)
+    }
 }
 
 /// Frees a result handle; null is a no-op. Futures already taken from it

@@ -300,8 +300,13 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     let future = unsafe { topic_future(h, topic, CreateTopicsResult::config) };
-    h.ctx
-        .handle_future(&future, |config| box_config(config) as *mut c_void, destroy_config_element)
+    // SAFETY: `destroy_config_element` frees exactly the handle `box_config` makes, and the handle
+    // holds only owned data and no thread-bound state, so it may be freed from any thread and read
+    // from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&future, |config| box_config(config) as *mut c_void, destroy_config_element)
+    }
 }
 
 /// `CreateTopicsResult.topicId(String topic)`: an owned future whose `get`
@@ -322,8 +327,13 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
     let future: KafkaFuture<Uuid> = unsafe { topic_future(h, topic, CreateTopicsResult::topic_id) };
-    h.ctx
-        .handle_future(&future, |uuid| box_uuid(uuid) as *mut c_void, destroy_uuid_element)
+    // SAFETY: `destroy_uuid_element` frees exactly the handle `box_uuid` makes, and the handle
+    // holds only owned data and no thread-bound state, so it may be freed from any thread and read
+    // from several at once, as `handle_future` requires.
+    unsafe {
+        h.ctx
+            .handle_future(&future, |uuid| box_uuid(uuid) as *mut c_void, destroy_uuid_element)
+    }
 }
 
 /// `CreateTopicsResult.numPartitions(String topic)`: an owned future whose

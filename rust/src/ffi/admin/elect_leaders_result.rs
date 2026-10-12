@@ -98,7 +98,10 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
     self_: *const kafka_admin_ElectLeadersResult_t,
 ) -> *mut kafka_common_KafkaFuture_t {
     let h = unsafe { handle(self_) };
-    h.ctx.handle_future(&h.result.partitions(), partitions_map, destroy_map_element)
+    // SAFETY: `destroy_map_element` frees exactly the map `partitions_map` makes through `box_map`,
+    // and the handle holds only owned data and no thread-bound state, so it may be freed from any
+    // thread and read from several at once, as `handle_future` requires.
+    unsafe { h.ctx.handle_future(&h.result.partitions(), partitions_map, destroy_map_element) }
 }
 
 /// `all()`: an owned `KafkaFuture<Void>` freed with
