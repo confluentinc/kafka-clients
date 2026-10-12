@@ -78,6 +78,9 @@ pub(crate) fn singleton(timestamp_type: TimestampType) -> *const kafka_common_re
 ///
 /// `timestamp_type` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(timestamp_type: *const kafka_common_record_TimestampType_t) -> TimestampType {
+    // SAFETY: Per this function's `# Safety`, `timestamp_type` is a singleton returned by this
+    // module, i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it
+    // points at a live, initialised `TimestampType`, which is `Copy` and read out here.
     unsafe { *(timestamp_type as *const TimestampType) }
 }
 
@@ -116,6 +119,8 @@ pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const 
 pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> kafka_common_record_TimestampType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -131,6 +136,8 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
 pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     unsafe { value_of(self_) }.id()
 }
 
@@ -144,6 +151,9 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
 pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
+    // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
@@ -161,8 +171,14 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     name: *const c_char,
     out_for_name: *mut *const kafka_common_record_TimestampType_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     match TimestampType::for_name(&unsafe { c_str_to_string(name) }) {
         Ok(timestamp_type) => {
+            // SAFETY: Per this function's `# Safety`, `out_for_name` is a valid pointer, so the
+            // write is sound; the singleton written points into the static `VARIANTS` array and is
+            // never freed.
             unsafe { *out_for_name = singleton(timestamp_type) };
             std::ptr::null_mut()
         },
@@ -181,6 +197,8 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
 pub unsafe extern "C" fn kafka_common_record_TimestampType_to_string(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -197,6 +215,9 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &timestamp_type) in VARIANTS.iter().enumerate() {
             let handle = singleton(timestamp_type);
+            // SAFETY: Test code: `handle` is a singleton from `singleton`, which points into the
+            // static `VARIANTS` array and is never freed, and the names read are owned by the
+            // static `NAMES`.
             unsafe {
                 assert_eq!(value_of(handle), timestamp_type);
                 assert_eq!(kafka_common_record_TimestampType__enum(handle) as usize, index);
@@ -225,6 +246,9 @@ mod tests {
     fn for_name_and_to_string_follow_java() {
         let create_time = CString::new("CreateTime").unwrap();
         let bogus = CString::new("bogus").unwrap();
+        // SAFETY: Test code: the `CString`s outlive the calls reading them, `timestamp_type` is a
+        // valid out pointer, the error from the unknown name and the string from `to_string` are
+        // each destroyed once, and the singletons are never freed.
         unsafe {
             let mut timestamp_type = ptr::null();
             assert!(kafka_common_record_TimestampType_for_name(create_time.as_ptr(), &mut timestamp_type).is_null());
