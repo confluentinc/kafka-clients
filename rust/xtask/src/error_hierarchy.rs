@@ -3249,11 +3249,11 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 161 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
-        assert_eq!(classes.len(), 169);
+        // 165 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins.
+        assert_eq!(classes.len(), 173);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
-        assert_eq!(with_id, 162, "161 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
+        assert_eq!(with_id, 166, "165 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
         for c in classes.values() {
             assert_eq!(c.is_abstract, c.ffi_id.is_none() && !c.is_jdk, "{}", c.java_fqn);
         }
