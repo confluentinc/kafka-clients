@@ -472,6 +472,11 @@ mod tests {
         assert_eq!(bad.error(), Errors::DelegationTokenAuthDisabled);
     }
 
+    /// Translates the rendering assertions of
+    /// `RequestResponseTest.createCreateTokenResponse`
+    /// (`RequestResponseTest.java:3185-3201`): the redacting `Display` masks the
+    /// token id and empties the hmac. Java's `tokenId='REDACTED'` and `hmac=[]`
+    /// read `token_id: "REDACTED"` and `hmac: []` in the Rust rendering.
     #[test]
     fn display_redacts_token_id_and_hmac() {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
@@ -491,13 +496,18 @@ mod tests {
                 .unwrap(),
         );
         let rendered = response.to_string();
-        assert!(rendered.contains("REDACTED"), "{rendered}");
+        assert_eq!(rendered.matches("token_id: \"REDACTED\"").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("hmac: []").count(), 1, "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
+        assert!(!rendered.contains("secret-hmac"), "{rendered}");
+        assert!(!rendered.contains(&format!("{:?}", &b"secret-hmac"[..])), "{rendered}");
     }
 
-    /// `Debug` renders exactly what `Display` does (Java has a single
-    /// `toString()`): neither the token id nor the hmac, which a derived
-    /// `Debug` would print as its byte values.
+    /// The `Debug` counterpart of `RequestResponseTest.createCreateTokenResponse`'s
+    /// rendering assertions (`RequestResponseTest.java:3185-3201`): `Debug`
+    /// renders exactly what `Display` does (Java has a single `toString()`), so
+    /// the token id is masked and the hmac, which a derived `Debug` would print
+    /// as its byte values, renders empty.
     #[test]
     fn debug_redacts_token_id_and_hmac() {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
@@ -519,7 +529,8 @@ mod tests {
         assert_eq!(response.data().hmac, b"secret-hmac");
         for rendered in [format!("{response:?}"), format!("{response:#?}")] {
             assert_eq!(rendered, response.to_string());
-            assert!(rendered.contains("REDACTED"), "{rendered}");
+            assert_eq!(rendered.matches("token_id: \"REDACTED\"").count(), 1, "{rendered}");
+            assert_eq!(rendered.matches("hmac: []").count(), 1, "{rendered}");
             assert!(!rendered.contains("secret-id"), "{rendered}");
             assert!(!rendered.contains(&format!("{:?}", &b"secret-hmac"[..])), "{rendered}");
         }

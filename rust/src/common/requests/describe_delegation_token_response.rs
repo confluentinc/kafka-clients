@@ -464,6 +464,12 @@ mod tests {
         assert!(response.tokens().is_empty());
     }
 
+    /// Translates the rendering assertions of
+    /// `RequestResponseTest.createDescribeTokenResponse`
+    /// (`RequestResponseTest.java:3241-3265`): with two tokens, the redacting
+    /// `Display` masks both token ids and empties both hmacs. Java counts
+    /// exactly two `tokenId='REDACTED'` and two `hmac=[]`; they read
+    /// `token_id: "REDACTED"` and `hmac: []` in the Rust rendering.
     #[test]
     fn display_redacts_token_id_and_hmac() {
         let response = DescribeDelegationTokenResponse::with_options(
@@ -471,18 +477,25 @@ mod tests {
                 .set_version(3)
                 .set_throttle_time_ms(0)
                 .set_error(Errors::None)
-                .set_tokens(&[token("secret-id")])
+                .set_tokens(&[token("secret-id-1"), token("secret-id-2")])
                 .build()
                 .unwrap(),
         );
         let rendered = response.to_string();
-        assert!(rendered.contains("REDACTED"), "{rendered}");
+        // The two tokens should both be redacted.
+        assert_eq!(rendered.matches("token_id: \"REDACTED\"").count(), 2, "{rendered}");
+        assert_eq!(rendered.matches("hmac: []").count(), 2, "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
+        for hmac in [&b"hmac-secret-id-1"[..], &b"hmac-secret-id-2"[..]] {
+            assert!(!rendered.contains(&format!("{hmac:?}")), "{rendered}");
+        }
     }
 
-    /// `Debug` renders exactly what `Display` does (Java has a single
-    /// `toString()`): neither a token id nor an hmac, which a derived `Debug`
-    /// would print as its byte values.
+    /// The `Debug` counterpart of `RequestResponseTest.createDescribeTokenResponse`'s
+    /// rendering assertions (`RequestResponseTest.java:3241-3265`): `Debug`
+    /// renders exactly what `Display` does (Java has a single `toString()`), so
+    /// with two tokens both ids are masked and both hmacs, which a derived
+    /// `Debug` would print as their byte values, render empty.
     #[test]
     fn debug_redacts_token_id_and_hmac() {
         let response = DescribeDelegationTokenResponse::with_options(
@@ -490,16 +503,20 @@ mod tests {
                 .set_version(3)
                 .set_throttle_time_ms(0)
                 .set_error(Errors::None)
-                .set_tokens(&[token("secret-id")])
+                .set_tokens(&[token("secret-id-1"), token("secret-id-2")])
                 .build()
                 .unwrap(),
         );
-        assert_eq!(response.data().tokens[0].hmac, b"hmac-secret-id");
+        assert_eq!(response.data().tokens[0].hmac, b"hmac-secret-id-1");
+        assert_eq!(response.data().tokens[1].hmac, b"hmac-secret-id-2");
         for rendered in [format!("{response:?}"), format!("{response:#?}")] {
             assert_eq!(rendered, response.to_string());
-            assert!(rendered.contains("REDACTED"), "{rendered}");
+            assert_eq!(rendered.matches("token_id: \"REDACTED\"").count(), 2, "{rendered}");
+            assert_eq!(rendered.matches("hmac: []").count(), 2, "{rendered}");
             assert!(!rendered.contains("secret-id"), "{rendered}");
-            assert!(!rendered.contains(&format!("{:?}", &b"hmac-secret-id"[..])), "{rendered}");
+            for hmac in [&b"hmac-secret-id-1"[..], &b"hmac-secret-id-2"[..]] {
+                assert!(!rendered.contains(&format!("{hmac:?}")), "{rendered}");
+            }
         }
     }
 
