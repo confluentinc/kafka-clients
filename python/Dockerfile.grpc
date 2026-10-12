@@ -90,6 +90,8 @@ COPY --from=builder /workspace/python/_confluentkafka*.so /app/
 # extension sits at /app next to them (top-level import).
 COPY --from=builder /workspace/python/confluent_kafka /app/confluent_kafka
 COPY --from=builder /workspace/python/admin.py /app/admin.py
+# admin.py waits on its _cb entry points through SyncWaiter.
+COPY python/_sync_wait.py /app/_sync_wait.py
 COPY --from=builder /workspace/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
 COPY --from=builder /workspace/python/consumer_service_pb2.py /app/consumer_service_pb2.py
