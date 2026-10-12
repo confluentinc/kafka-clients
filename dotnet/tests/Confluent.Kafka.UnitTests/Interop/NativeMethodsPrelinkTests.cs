@@ -109,9 +109,9 @@ public sealed class NativeMethodsPrelinkTests
 
     /// <summary>
     /// Every method in the library assembly that carries <c>[DllImport]</c>, across all
-    /// types (nested and non-public included).
+    /// types (nested and non-public included). <see cref="NativeAbiConformanceTests"/> sweeps the same set.
     /// </summary>
-    private static MethodInfo[] LibraryImports() =>
+    internal static MethodInfo[] LibraryImports() =>
         typeof(NativeMethods).Assembly
             .GetTypes()
             .SelectMany(type => type.GetMethods(

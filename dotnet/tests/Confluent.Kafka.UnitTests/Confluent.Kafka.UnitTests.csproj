@@ -44,4 +44,18 @@
     <ProjectReference Include="..\..\src\Confluent.Kafka\Confluent.Kafka.csproj" />
   </ItemGroup>
 
+  <!--
+    The generated C header, for NativeAbiConformanceTests. The same cargo build (ffi feature)
+    that builds the native the library copies writes it to rust/target/include/ (rust/build.rs);
+    the repo root is 3 dir levels up from this project. Conditional, so a missing header fails
+    that test with a clear message instead of failing the build.
+  -->
+  <PropertyGroup>
+    <AbiHeaderPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/include/confluent_kafka.h'))</AbiHeaderPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(AbiHeaderPath)" Link="confluent_kafka.h" CopyToOutputDirectory="PreserveNewest" Visible="false" Condition="Exists('$(AbiHeaderPath)')" />
+  </ItemGroup>
+
 </Project>
