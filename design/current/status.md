@@ -56,8 +56,9 @@
 > **Public surface restricted (2026-09-25):** the Rust crate and the C API now
 > export only what Java's audience allows (`@InterfaceAudience.Public` at 4.4,
 > outside `internal*` and "not a supported API" packages), enforced by
-> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions in
-> `xtask/public-audience-allowlist.txt`. Crate-private internals are now tested
+> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions tagged
+> in the code (`#[doc(alias = "rust-only")]`, `#[doc(alias = "public-in-rust")]`;
+> the allowlist file this note first named is gone). Crate-private internals are now tested
 > in-crate. C symbols were renamed to follow their Java package
 > (`kafka_common_TopicPartition*`, `kafka_common_acl_AclBinding*`,
 > `kafka_common_KafkaFuture_RecordMetadata*`, ...) and the

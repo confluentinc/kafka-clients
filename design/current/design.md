@@ -1016,8 +1016,8 @@ The module is gated on the `ffi` feature, which also turns on the `cbindgen`
 build-dependency that emits `rust/target/include/confluent_kafka.h` (31.8K
 lines). Only crate types that are public have bindings (CLAUDE.md §4). The
 layout mirrors the crate: one file per Java class under `src/ffi/common/`,
-`producer/`, `consumer/` and `admin/` (265 files, ~73K lines, 2299 exported
-symbols), plus the package-less helpers:
+`producer/`, `consumer/` and `admin/` (265 files, 2321 exported symbols),
+plus the package-less helpers:
 
 | File / directory | Exported symbols | What it holds |
 |------------------|-----------------:|---------------|
@@ -1078,6 +1078,37 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Collections** are the package-less `kafka_List_t` / `kafka_Map_t` of
   `void *`: inputs hold borrowed elements, outputs own theirs and are sorted
   deterministically.
+- **Panics never cross the boundary.** Every export carries `#[ffi_guard]`
+  (proc-macro crate `rust/ffi-macros`), which wraps the body in
+  `catch_unwind`; `ffi::tests::test_every_exported_function_is_guarded` fails on
+  an unguarded export. A fallible function returns the panic as a
+  `LOCAL_ILLEGAL_STATE` error whose message begins "Rust panic caught at the FFI
+  boundary in <function>", its `out_<name>` parameters unwritten; any other
+  function returns its return type's failure value (NULL, 0 or -1, NaN,
+  `UNKNOWN_SERVER_ERROR`, a NULL `kafka_Bytes_t`), or, where that value is a
+  valid answer in the Java domain, the explicit `fallback` its documentation
+  names (`ffi::tests::test_explicit_fallbacks` pins each one); a `void` function
+  only logs. A `_cb` function delivers a panic exactly once through its
+  completion, whether it happened on the calling thread or on the task running
+  the operation; the three completions without an error parameter
+  (`Admin_close_cb`, `Admin_close_with_timeout_cb`,
+  `OffsetCommitCallback_on_complete_cb`) fire with `opaque` alone. A task
+  owning a callback runs its body under `catch_task_panic`, so a panic inside
+  it still completes the callback once, and is spawned through
+  `spawn_callback_task`, which aborts the process if Tokio itself panics while
+  spawning it: unwinding there would let the guard fire a callback the task may
+  already have queued. The full contract opens the C header
+  (`rust/cbindgen.toml` `header`) and the `src/ffi/mod.rs` module docs. A
+  panic is a library bug: the handle it hit should be destroyed, and its
+  `_destroy` still frees it and runs its pending callbacks once each.
+- **Every `unsafe` block states why it is sound.** Clippy's
+  `undocumented_unsafe_blocks` and `unnecessary_safety_comment` are denied
+  (`rust/Cargo.toml`), so each block and `unsafe impl` carries a `// SAFETY:`
+  comment naming the invariant and where it is established, usually a
+  precondition in the export's `# Safety` rustdoc, which is also its C header
+  text. A borrowed handle (`kafka_common_Error_source`, payload and
+  struct-field accessors, view lists) lives as long as its owner and is never
+  passed to its own `_destroy`.
 
 Values delivered by a `kafka_common_KafkaFuture_t` are borrowed from the
 future and live until `kafka_common_KafkaFuture_destroy`; Java's `Future.get()`
@@ -1092,10 +1123,11 @@ access.") rather than being serialized, Java's `acquire()/release()` contract;
 C rebalance listener uses to call back into the consumer while `poll` holds
 the guard (consumer-threading.md §31/§41).
 
-The producer keeps an async submission outbox for `send_async` /
-`send_batch_async`: `flush`, `close` and every transaction-control operation
-drain it first (`producer-transactions.md` §13), so a send that has returned
-is always included in the next commit, abort or flush.
+The producer keeps a submission outbox for `send_cb` /
+`send_with_callback_cb`: `flush`, `close` and every transaction-control
+operation, blocking or `_cb`, drain it first (`producer-transactions.md` §13),
+so a send that has returned is always included in the next commit, abort or
+flush.
 
 The admin surface is Java-faithful (admin-client.md §1, §5): each RPC is a
 sync call returning a `<Rpc>Result_t` whose `_values()` map holds one
