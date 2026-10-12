@@ -905,8 +905,8 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
         let metadata = Arc::new(ProducerMetadata::with_log_context(
-            config.reconnect_backoff_ms,
-            config.reconnect_backoff_max_ms,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
@@ -1033,6 +1033,7 @@ impl<K, V> KafkaProducer<K, V> {
             },
             Arc::clone(&metrics),
             Self::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time),
             buffer_pool,
             transaction_manager.clone(),
             log_context.clone(),
@@ -1986,8 +1987,13 @@ impl<K, V> KafkaProducer<K, V> {
             // callback back (`AppendFailure::callback`) precisely so this arm can honour
             // that obligation exactly once (CLAUDE.md §11.5) — the four sibling arms
             // covering the same Java block all route through `handle_api_error` too.
+            //
+            // The callback is given the partition `append` chose, as Java reports
+            // `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052`), not the
+            // `partition` passed in, which is `UNKNOWN_PARTITION` when the built-in
+            // partitioner chooses.
             Err(failure) if failure.error.is_api_error() => {
-                self.handle_api_error(failure.error, topic, partition, failure.callback)
+                self.handle_api_error(failure.error, topic, failure.partition, failure.callback)
             },
             // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1072-1080`)
             // rethrow, and neither invokes the callback. `failure.callback` is dropped
@@ -2790,6 +2796,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            default_time(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
@@ -3367,6 +3374,7 @@ mod tests {
             Arc::new(Metrics::new()),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
             // Room for exactly one batch.
+            default_time(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
             None,
         ));
@@ -3941,6 +3949,38 @@ mod tests {
             recorded[0].as_str(),
             producer.client_id(),
             "the partitioner saw the generated client.id"
+        );
+    }
+
+    /// `new` gives the producer's metadata the `retry.backoff.ms` / `retry.backoff.max.ms`
+    /// refresh backoff, as Java's constructor does (`KafkaProducer.java:456-457`), not the
+    /// `reconnect.backoff.*` values that only the `NetworkClient` takes.
+    ///
+    /// Not a translation of a Java test. Each backoff has its initial value equal to its
+    /// maximum, so `ExponentialBackoff` returns exactly the configured value with no jitter,
+    /// and right after a failed refresh `time_to_allow_update` is that backoff. The
+    /// producer is closed first, so the Sender task cannot record a refresh of its own
+    /// while the metadata is read.
+    #[tokio::test]
+    async fn test_metadata_refresh_backoff_follows_retry_backoff() {
+        let props = guard_props(&[
+            ("retry.backoff.ms", "1000"),
+            ("retry.backoff.max.ms", "1000"),
+            ("reconnect.backoff.ms", "50"),
+            ("reconnect.backoff.max.ms", "50"),
+        ]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer =
+            KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+                .expect("constructs");
+        producer.close_with_timeout(Duration::ZERO).await.expect("close");
+
+        let now = SystemTime.milliseconds();
+        producer.metadata.failed_update(now);
+        assert_eq!(
+            1000,
+            producer.metadata.time_to_allow_update(now),
+            "the metadata refresh backoff must be retry.backoff.ms"
         );
     }
 
@@ -4547,6 +4587,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            default_time(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
             None,
         ));
@@ -4604,6 +4645,67 @@ mod tests {
         assert_eq!(TOPIC, topic);
         assert_eq!(1, partition);
         assert_eq!(RecordMetadata::INVALID_OFFSET, offset);
+    }
+
+    /// When the producer chooses the partition, a buffer-exhaustion failure reports the
+    /// partition `append` chose, not `UNKNOWN_PARTITION`.
+    ///
+    /// Java's `append` passes the chosen partition to `AppendCallbacks.setPartition`
+    /// before it waits for memory (`RecordAccumulator.java:309-310`), and `doSend` builds
+    /// the callback's metadata from `appendCallbacks.topicPartition()`
+    /// (`KafkaProducer.java:1052-1053`). Not a translation of a Java test:
+    /// `test_callback_invoked_on_buffer_exhaustion` sends to an explicit partition, so it
+    /// cannot tell the two apart.
+    #[tokio::test]
+    async fn test_buffer_exhaustion_reports_the_partition_chosen_by_the_partitioner() {
+        const BATCH_SIZE: i32 = 16384;
+
+        // `max.block.ms = 0` so the second allocation fails immediately.
+        let config = ProducerConfig { max_block_ms: 0, ..Default::default() };
+        // One partition, so the built-in partitioner can only choose partition 0.
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        // A pool that fits exactly one batch.
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
+            BATCH_SIZE,
+            Compression::none().build(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            default_time(),
+            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
+            None,
+        ));
+        let producer = create_producer_with_config(config, metadata, Arc::clone(&accumulator));
+
+        // The first record takes the pool's only batch and leaves no room in it for
+        // the second, so the second needs a new batch and must allocate.
+        let first: ProducerRecord<String, String> =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), None, None, Some("a".repeat(15_000))).unwrap();
+        producer.send(first).await.expect("the first send should succeed");
+
+        let saw_partition = Arc::new(std::sync::Mutex::new(None::<i32>));
+        let partition_slot = Arc::clone(&saw_partition);
+        let callback: Callback = Box::new(move |record_metadata, _exception| {
+            *partition_slot.lock().unwrap() = record_metadata.map(|rm| rm.partition());
+        });
+        let second: ProducerRecord<String, String> =
+            ProducerRecord::with_partition_key(TOPIC.to_string(), None, None, Some("b".repeat(2_000))).unwrap();
+        let future = producer
+            .send_with_callback(second, Some(callback))
+            .await
+            .expect("an ApiException is reported through the future, not the Result");
+        assert!(
+            matches!(future.get().await.unwrap_err(), Error::ProducerBufferExhausted(_)),
+            "the second send must fail with buffer exhaustion"
+        );
+
+        assert_eq!(
+            Some(0),
+            *saw_partition.lock().unwrap(),
+            "the callback must report the partition the partitioner chose"
+        );
     }
 
     /// The mirror image of `test_callback_invoked_on_buffer_exhaustion`: the
@@ -5076,6 +5178,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
@@ -5158,6 +5261,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
@@ -5322,8 +5426,8 @@ mod tests {
             let pending_requests = Arc::new(Mutex::new(PendingRequests::new()));
 
             let metadata = Arc::new(ProducerMetadata::with_log_context(
-                config.reconnect_backoff_ms,
-                config.reconnect_backoff_max_ms,
+                config.retry_backoff_ms,
+                config.retry_backoff_max_ms,
                 config.metadata_max_age_ms,
                 config.metadata_max_idle_ms,
                 ClusterResourceListeners::new(),
@@ -5365,6 +5469,7 @@ mod tests {
                 },
                 Arc::clone(&metrics),
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(&time) as Arc<dyn Time>,
                 buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
@@ -6928,8 +7033,8 @@ mod tests {
                 .expect("these tests always enable idempotence");
 
         let metadata = Arc::new(ProducerMetadata::with_log_context(
-            config.reconnect_backoff_ms,
-            config.reconnect_backoff_max_ms,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
@@ -6964,6 +7069,7 @@ mod tests {
             },
             Arc::clone(&metrics),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time) as Arc<dyn Time>,
             buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,

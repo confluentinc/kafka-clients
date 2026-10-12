@@ -44,6 +44,7 @@ use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::RecordBatch;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
+use crate::common::utils::Time;
 use crate::producer::Callback;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
@@ -93,13 +94,22 @@ pub struct AppendFailure {
     /// The callback, when this append did not consume it. `None` when the caller
     /// passed no callback, or when the callback was already handed to a batch.
     pub callback: Option<Callback>,
+    /// The partition the record was being appended to when the append failed.
+    ///
+    /// Java's `append` tells the caller the partition as soon as it is chosen
+    /// (`setPartition`, `RecordAccumulator.java:309-310`), before it tries to append
+    /// or waits for memory, and `doSend` reports it to the callback on failure
+    /// through `appendCallbacks.topicPartition()` (`KafkaProducer.java:1052`). When
+    /// the built-in partitioner chooses, the caller's own partition is still
+    /// `UNKNOWN_PARTITION`, so the chosen one comes back here.
+    pub partition: i32,
 }
 
 impl AppendFailure {
     /// An append that failed without ever taking the callback, boxed for the
     /// `Result` position (see the type-level note).
-    fn boxed(error: Error, callback: Option<Callback>) -> Box<Self> {
-        Box::new(Self { error, callback })
+    fn boxed(error: Error, callback: Option<Callback>, partition: i32) -> Box<Self> {
+        Box::new(Self { error, callback, partition })
     }
 }
 
@@ -110,6 +120,7 @@ impl std::fmt::Debug for AppendFailure {
         f.debug_struct("AppendFailure")
             .field("error", &self.error)
             .field("callback_returned", &self.callback.is_some())
+            .field("partition", &self.partition)
             .finish()
     }
 }
@@ -288,6 +299,10 @@ pub struct RecordAccumulator {
     partition_availability_timeout_ms: i64,
     enable_adaptive_partitioning: bool,
     free: Arc<BufferPool>,
+    /// The clock `append` reads after waiting for buffer memory.
+    ///
+    /// Translated from `RecordAccumulator.time` (`RecordAccumulator.java:145`).
+    time: Arc<dyn Time>,
     topic_info_map: DashMap<Arc<str>, Arc<TopicInfo>>,
     node_stats: DashMap<i32, NodeLatencyStats>,
     incomplete: IncompleteBatches,
@@ -339,6 +354,7 @@ impl RecordAccumulator {
     /// * `partitioner_config` - Partitioner configuration
     /// * `metrics` - The metrics
     /// * `metric_grp_name` - The metric group name
+    /// * `time` - The time instance to use
     /// * `buffer_pool` - The buffer pool
     /// * `transaction_manager` - The shared transaction state object which tracks
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
@@ -355,6 +371,7 @@ impl RecordAccumulator {
         partitioner_config: PartitionerConfig,
         metrics: Arc<Metrics>,
         metric_grp_name: &str,
+        time: Arc<dyn Time>,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
@@ -368,6 +385,7 @@ impl RecordAccumulator {
             partitioner_config,
             metrics,
             metric_grp_name,
+            time,
             buffer_pool,
             transaction_manager,
             LogContext::empty(),
@@ -388,6 +406,7 @@ impl RecordAccumulator {
         retry_backoff_max_ms: i64,
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
+        time: Arc<dyn Time>,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
@@ -401,6 +420,7 @@ impl RecordAccumulator {
             partitioner_config,
             Arc::new(Metrics::new()),
             "producer-metrics",
+            time,
             buffer_pool,
             transaction_manager,
         )
@@ -421,6 +441,7 @@ impl RecordAccumulator {
     /// * `partitioner_config` - Partitioner configuration
     /// * `metrics` - The metrics
     /// * `metric_grp_name` - The metric group name
+    /// * `time` - The time instance to use
     /// * `buffer_pool` - The buffer pool
     /// * `transaction_manager` - The shared transaction state object which tracks
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
@@ -438,6 +459,7 @@ impl RecordAccumulator {
         partitioner_config: PartitionerConfig,
         metrics: Arc<Metrics>,
         metric_grp_name: &str,
+        time: Arc<dyn Time>,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         log_context: LogContext,
@@ -464,6 +486,7 @@ impl RecordAccumulator {
             enable_adaptive_partitioning: partitioner_config.enable_adaptive_partitioning,
             partition_availability_timeout_ms: partitioner_config.partition_availability_timeout_ms,
             free: buffer_pool,
+            time,
             topic_info_map: DashMap::new(),
             node_stats: DashMap::new(),
             incomplete: IncompleteBatches::new(),
@@ -622,7 +645,7 @@ impl RecordAccumulator {
         headers: &[RecordHeader],
         callback: Option<Callback>,
         max_time_to_block: i64,
-        now_ms: i64,
+        mut now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
         guard: &mut AppendGuard<'_>,
@@ -714,8 +737,12 @@ impl RecordAccumulator {
                     self.free
                         .allocate(size as usize, max_time_to_block)
                         .await
-                        .map_err(|error| AppendFailure::boxed(error, callback.take()))?,
+                        .map_err(|error| AppendFailure::boxed(error, callback.take(), effective_partition))?,
                 );
+                // Update the current time in case the buffer allocation blocked above.
+                // NOTE: getting time may be expensive, so calling it under a lock
+                // should be avoided.
+                now_ms = self.time.milliseconds();
             }
 
             // Try again under lock -- another thread might have created the batch.
@@ -900,6 +927,7 @@ impl RecordAccumulator {
             return Err(AppendFailure::boxed(
                 Error::kafka_message("Producer closed while send in progress"),
                 callback,
+                partition,
             ));
         }
 
@@ -1490,6 +1518,7 @@ impl RecordAccumulator {
             return Ok(ready);
         }
 
+        // To make starvation less likely each node has its own drain index.
         let mut drain_index = self.get_drain_index(node.id());
         drain_index %= parts.len();
         let start = drain_index;
@@ -1498,6 +1527,11 @@ impl RecordAccumulator {
             let part = &parts[drain_index];
             let tp = TopicPartition::new(part.topic(), part.partition());
 
+            // Record the partition being visited before advancing, as Java does
+            // (`RecordAccumulator.java:865`). When the request fills up at this partition,
+            // the next drain starts from it, so a partition whose batch did not fit is not
+            // skipped again.
+            self.update_drain_index(node.id(), drain_index);
             drain_index = (drain_index + 1) % parts.len();
 
             if self.is_muted(&tp) {
@@ -1586,7 +1620,6 @@ impl RecordAccumulator {
                 break;
             }
         }
-        self.update_drain_index(node.id(), drain_index);
         Ok(ready)
     }
 
@@ -2231,6 +2264,7 @@ mod tests {
     use crate::common::record::internal::CompressionType;
     use crate::common::record::internal::DefaultRecord;
     use crate::common::record::internal::RecordBatch;
+    use crate::common::utils::MockTime;
     use std::collections::{HashMap, HashSet};
 
     const TOPIC: &str = "test";
@@ -2279,6 +2313,12 @@ mod tests {
         )
     }
 
+    /// Java's `MockTime` for the tests that pass explicit `now` values, started at 0 and
+    /// never advanced.
+    fn mock_time() -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0))
+    }
+
     fn create_test_accumulator(
         batch_size: i32,
         total_size: i64,
@@ -2294,6 +2334,7 @@ mod tests {
             1000,  // retry_backoff_max_ms
             30000, // delivery_timeout_ms
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         )
@@ -2362,6 +2403,7 @@ mod tests {
             1000,
             30000,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             Some(transaction_manager),
         )
@@ -2388,6 +2430,7 @@ mod tests {
             PartitionerConfig::default(),
             Arc::clone(&metrics),
             "producer-metrics",
+            mock_time(),
             pool,
             None,
         );
@@ -2558,49 +2601,6 @@ mod tests {
         assert!(result.ready_nodes.contains(&n1), "ready once the linger elapses");
     }
 
-    /// Translated from a subset of `RecordAccumulatorTest.testDrainBatches`.
-    #[tokio::test]
-    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainBatches")]
-    async fn test_drain_batches() {
-        let n1 = node1();
-        let n2 = node2();
-        let now: i64 = 0;
-
-        let k = key();
-        let v = value();
-        let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
-
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
-
-        let metadata =
-            make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
-        let cluster = metadata.cluster().clone();
-
-        // Append to all partitions.
-        accum
-            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-
-        // Drain from both nodes with batch_size limit -- should get one batch per node.
-        let mut nodes = HashSet::new();
-        nodes.insert(n1.clone());
-        nodes.insert(n2.clone());
-        let batches = accum.drain(&metadata, &nodes, batch_size, now).expect("drain");
-
-        // Each node should have at least one batch.
-        let total: usize = batches.values().map(|v| v.len()).sum();
-        assert!(total >= 2, "Expected at least 2 batches, got {}", total);
-    }
-
     /// Test mute/unmute functionality.
     #[test]
     fn test_mute_unmute() {
@@ -2690,6 +2690,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -2879,6 +2880,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -3142,6 +3144,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -3230,7 +3233,12 @@ mod tests {
     async fn do_expire_batch_single(delivery_timeout_ms: i32) {
         let linger_ms = 300;
         let n1 = node1();
-        let mut now: i64 = 1_000_000; // start at a non-zero time
+        // Start at a non-zero time. Java moves its `MockTime` up to the wall clock
+        // before each append; a fixed start is enough here, as only differences
+        // between the clock readings matter.
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000_000, 0,
+        ));
         // test case assumes that the records do not fill the batch completely
         let batch_size = 1025;
 
@@ -3246,6 +3254,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            Arc::clone(&time) as Arc<dyn Time>,
             pool,
             None,
         );
@@ -3259,20 +3268,20 @@ mod tests {
         // Make the batches ready due to linger. These batches are not in retry.
         for mute in [false, true] {
             accum
-                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, time.milliseconds(), &cluster)
                 .await
                 .unwrap();
             assert_eq!(
                 0,
-                accum.ready(&metadata, now).ready_nodes.len(),
+                accum.ready(&metadata, time.milliseconds()).ready_nodes.len(),
                 "No partition should be ready."
             );
 
-            now += linger_ms as i64;
-            let ready_nodes = accum.ready(&metadata, now).ready_nodes;
+            time.sleep(linger_ms as i64);
+            let ready_nodes = accum.ready(&metadata, time.milliseconds()).ready_nodes;
             assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
 
-            let expired_batches = accum.expired_batches(now);
+            let expired_batches = accum.expired_batches(time.milliseconds());
             assert_eq!(
                 0,
                 expired_batches.len(),
@@ -3287,12 +3296,12 @@ mod tests {
             }
 
             // Advance the clock to expire the batch.
-            now += delivery_timeout_ms as i64 - linger_ms as i64;
-            let expired_batches = accum.expired_batches(now);
+            time.sleep(delivery_timeout_ms as i64 - linger_ms as i64);
+            let expired_batches = accum.expired_batches(time.milliseconds());
             assert_eq!(1, expired_batches.len(), "The batch may expire when the partition is muted");
             assert_eq!(
                 0,
-                accum.ready(&metadata, now).ready_nodes.len(),
+                accum.ready(&metadata, time.milliseconds()).ready_nodes.len(),
                 "No partitions should be ready."
             );
         }
@@ -3418,76 +3427,158 @@ mod tests {
         );
     }
 
-    /// Translated from `RecordAccumulatorTest.testDrainBatches` (full version).
+    /// Asserts that `node_batches` holds exactly `expected` batches, in order, for each node.
     ///
-    /// Tests drain order across nodes and partitions, including muting.
+    /// Translated from `RecordAccumulatorTest.verifyTopicPartitionInBatches`. Java concatenates
+    /// the batches of every node in the iteration order of its `HashMap`, which for the test's
+    /// two node ids is node order; Rust's `HashMap` has no fixed order, so the batches are
+    /// compared node by node.
+    fn verify_topic_partition_in_batches(
+        node_batches: &HashMap<i32, Vec<ProducerBatch>>,
+        expected: &[(&Node, &[&TopicPartition])],
+    ) {
+        let all_tp_batch_count: usize = node_batches.values().map(|batches| batches.len()).sum();
+        let expected_count: usize = expected.iter().map(|(_, tps)| tps.len()).sum();
+        assert_eq!(expected_count, all_tp_batch_count);
+        for (node, tps) in expected {
+            let drained: Vec<&TopicPartition> = node_batches
+                .get(&node.id())
+                .map(|batches| batches.iter().map(|batch| &batch.topic_partition).collect())
+                .unwrap_or_default();
+            assert_eq!(*tps, drained.as_slice(), "batches drained for node {}", node.id());
+        }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testDrainBatches`.
+    ///
+    /// Java builds the `Cluster` from an ordered partition list so that each node drains its
+    /// partitions in a known order. The Rust test snapshot does not preserve that order, so the
+    /// test reads each node's drain order from the cluster: `tp1`/`tp2` are node1's partitions
+    /// and `tp3`/`tp4` are node2's, in the order they are drained.
     #[tokio::test]
-    async fn test_drain_batches_full() {
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainBatches")]
+    async fn test_drain_batches() {
+        // test case: node1(tp1,tp2) , node2(tp3,tp4)
         let n1 = node1();
         let n2 = node2();
-        let now: i64 = 0;
-
-        let k = key();
         let v = value();
         let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
+        let accum = create_test_accumulator(batch_size, i32::MAX as i64, Compression::none().build(), 10);
 
-        // 4 partitions: tp1->n1, tp2->n1, tp3->n2, tp4->n2
         let metadata = make_metadata_snapshot(
             &[n1.clone(), n2.clone()],
             TOPIC,
             &[(0, Some(0)), (1, Some(0)), (2, Some(1)), (3, Some(1))],
         );
         let cluster = metadata.cluster().clone();
+        let drain_order = |node: &Node| -> Vec<TopicPartition> {
+            cluster
+                .partitions_for_node(node.id())
+                .iter()
+                .map(|part| TopicPartition::new(part.topic(), part.partition()))
+                .collect()
+        };
+        let (n1_parts, n2_parts) = (drain_order(&n1), drain_order(&n2));
+        let (tp1, tp2, tp3, tp4) = (&n1_parts[0], &n1_parts[1], &n2_parts[0], &n2_parts[1]);
+        let nodes = HashSet::from([n1.clone(), n2.clone()]);
 
-        // Initial data for all 4 partitions
-        for p in 0..4 {
+        async fn append(accum: &RecordAccumulator, cluster: &Cluster, tp: &TopicPartition) {
             accum
-                .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .append(TOPIC, tp.partition(), 0, Some(&key()), Some(&value()), &[], None, 0, 0, cluster)
                 .await
                 .unwrap();
         }
 
-        // drain with batch_size limit: should get one batch per node
-        let nodes_set = HashSet::from([n1.clone(), n2.clone()]);
-        let batches1 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let total1: usize = batches1.values().map(|v| v.len()).sum();
-        assert_eq!(2, total1, "Should drain exactly one batch per node");
-
-        // drain with max size: should get remaining batches
-        let batches2 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let total2: usize = batches2.values().map(|v| v.len()).sum();
-        assert_eq!(2, total2, "Should drain remaining batches");
-
-        // Add records for partitions, mute tp3
-        accum
-            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        accum
-            .append(TOPIC, 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
-            .await
-            .unwrap();
-        let tp4 = TopicPartition::new(TOPIC.to_string(), 3);
-        accum.mute_partition(tp4.clone());
-
-        // Drain: node2 should skip tp4 because it's muted
-        let batches4 = accum.drain(&metadata, &nodes_set, batch_size, now).expect("drain");
-        let n2_batches = batches4.get(&n2.id()).unwrap();
-        for b in n2_batches {
-            assert_ne!(3, b.topic_partition.partition(), "Muted partition 3 should not be drained");
+        // initial data
+        for tp in [tp1, tp2, tp3, tp4] {
+            append(&accum, &cluster, tp).await;
         }
 
-        // Unmute and drain with max size
-        accum.unmute_partition(&tp4);
-        let batches5 = accum.drain(&metadata, &nodes_set, i32::MAX, now).expect("drain");
-        let total5: usize = batches5.values().map(|v| v.len()).sum();
-        assert!(total5 >= 1, "Should drain remaining batches after unmute");
+        // drain batches from 2 nodes: node1 => tp1, node2 => tp3, because the max request size
+        // is full after the first batch drained
+        let batches1 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches1, &[(&n1, &[tp1]), (&n2, &[tp3])]);
+
+        // add record for tp1, tp3
+        append(&accum, &cluster, tp1).await;
+        append(&accum, &cluster, tp3).await;
+
+        // drain batches from 2 nodes: node1 => tp2, node2 => tp4, because the max request size
+        // is full after the first batch drained
+        // The drain index should start from next topic partition, that is, node1 => tp2,
+        // node2 => tp4
+        let batches2 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches2, &[(&n1, &[tp2]), (&n2, &[tp4])]);
+
+        // make sure in next run, the drain index will start from the beginning
+        let batches3 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches3, &[(&n1, &[tp1]), (&n2, &[tp3])]);
+
+        // add record for tp2, tp3, tp4 and mute the tp4
+        append(&accum, &cluster, tp2).await;
+        append(&accum, &cluster, tp3).await;
+        append(&accum, &cluster, tp4).await;
+        accum.mute_partition(tp4.clone());
+        // drain batches from 2 nodes: node1 => tp2, node2 => tp3 (because tp4 is muted)
+        let batches4 = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+        verify_topic_partition_in_batches(&batches4, &[(&n1, &[tp2]), (&n2, &[tp3])]);
+
+        // add record for tp1, tp2, tp3, and unmute tp4
+        append(&accum, &cluster, tp1).await;
+        append(&accum, &cluster, tp2).await;
+        append(&accum, &cluster, tp3).await;
+        accum.unmute_partition(tp4);
+        // set maxSize as a max value, so that the all partitions in 2 nodes should be drained:
+        // node1 => [tp1, tp2], node2 => [tp3, tp4]
+        let batches5 = accum.drain(&metadata, &nodes, i32::MAX, 0).unwrap();
+        verify_topic_partition_in_batches(&batches5, &[(&n1, &[tp1, tp2]), (&n2, &[tp3, tp4])]);
+    }
+
+    /// Under constant load, every partition of a node gets an equal share of the requests when
+    /// only one batch fits in each.
+    ///
+    /// Not a translation of a Java test. `testDrainBatches` checks a single rotation; this test
+    /// keeps a batch waiting on every partition across many drains, so a drain index that skips
+    /// the partition that did not fit leaves some partitions with no requests at all.
+    #[tokio::test]
+    async fn test_drain_batches_rotates_across_partitions_under_constant_load() {
+        const DRAINS: usize = 12;
+        for num_partitions in [2, 3, 4] {
+            let n1 = node1();
+            let k = key();
+            let v = value();
+            let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+            let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none().build(), 10);
+            let partitions: Vec<(i32, Option<i32>)> = (0..num_partitions).map(|p| (p, Some(0))).collect();
+            let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &partitions);
+            let cluster = metadata.cluster().clone();
+            let nodes = HashSet::from([n1.clone()]);
+
+            let mut drained_per_partition: HashMap<i32, usize> = (0..num_partitions).map(|p| (p, 0)).collect();
+            for _ in 0..DRAINS {
+                for p in 0..num_partitions {
+                    if accum.deque_size(&TopicPartition::new(TOPIC.to_string(), p)) == 0 {
+                        accum
+                            .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, 0, &cluster)
+                            .await
+                            .unwrap();
+                    }
+                }
+                // The max request size fits one batch, as in `testDrainBatches`.
+                let mut batches = accum.drain(&metadata, &nodes, batch_size, 0).unwrap();
+                for batch in batches.remove(&n1.id()).unwrap_or_default() {
+                    *drained_per_partition.get_mut(&batch.topic_partition.partition()).unwrap() += 1;
+                }
+            }
+
+            let expected: HashMap<i32, usize> =
+                (0..num_partitions).map(|p| (p, DRAINS / num_partitions as usize)).collect();
+            assert_eq!(
+                expected, drained_per_partition,
+                "batches drained per partition with {num_partitions} partitions"
+            );
+        }
     }
 
     #[expect(dead_code)]
@@ -3568,6 +3659,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -3633,6 +3725,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -4719,6 +4812,95 @@ mod tests {
             accum.appends_in_progress.load(Ordering::Relaxed),
             0,
             "the finally's decrement must run on the error path too"
+        );
+    }
+
+    /// A batch created after `append` waited for buffer memory takes its creation time
+    /// from the clock after the wait. Java's `append` reads `time.milliseconds()` again
+    /// once `free.allocate` returns (`RecordAccumulator.java:334-337`).
+    ///
+    /// Not a translation of a Java test: `RecordAccumulatorTest` has no test for this
+    /// refresh. With the time from before the wait, the batch looked older than it was
+    /// by the time spent waiting, so it reached `delivery.timeout.ms` that much earlier
+    /// and skipped `linger.ms`.
+    #[tokio::test]
+    async fn test_batch_created_after_waiting_for_buffer_memory_uses_the_time_after_the_wait() {
+        const WAIT_MS: i64 = 5_000;
+        let batch_size = 1024;
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000, 0,
+        ));
+        let accum = Arc::new(RecordAccumulator::new_for_test(
+            batch_size,
+            Compression::none().build(),
+            0,
+            100,
+            1000,
+            i32::MAX,
+            PartitionerConfig::default(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            Arc::new(BufferPool::new_for_test(batch_size as i64, batch_size as usize)),
+            None,
+        ));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let nodes: HashSet<Node> = [node1()].into_iter().collect();
+
+        // Consume the pool's only batch, so the next append must wait in `allocate`.
+        append_one(&accum, metadata.cluster(), time.milliseconds()).await;
+
+        let send_ms = time.milliseconds();
+        let waiting = {
+            let accum = Arc::clone(&accum);
+            let cluster = metadata.cluster().clone();
+            tokio::spawn(async move {
+                accum
+                    .append(
+                        TOPIC,
+                        1,
+                        send_ms,
+                        Some(&key()),
+                        Some(&value()),
+                        &[],
+                        None,
+                        60_000,
+                        send_ms,
+                        &cluster,
+                    )
+                    .await
+                    .map_err(|failure| failure.error)
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while accum.free.queued() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the second append must wait in free.allocate");
+
+        // Time passes while the append waits, then the first batch's memory is released.
+        time.sleep(WAIT_MS);
+        for batches in accum
+            .drain(&metadata, &nodes, i32::MAX, time.milliseconds())
+            .expect("drain")
+            .values_mut()
+        {
+            for batch in batches.iter_mut() {
+                accum.deallocate(batch);
+            }
+        }
+
+        let result = waiting.await.expect("the task itself must not panic").expect("append");
+        assert!(result.new_batch_created, "the waiting append must create a new batch");
+
+        let drained = accum.drain(&metadata, &nodes, i32::MAX, time.milliseconds()).expect("drain");
+        let batches = &drained[&node1().id()];
+        assert_eq!(1, batches.len());
+        assert_eq!(1, batches[0].topic_partition.partition());
+        assert_eq!(
+            send_ms + WAIT_MS,
+            batches[0].created_ms,
+            "the batch must be created at the time after the wait, not when send() was called"
         );
     }
 
