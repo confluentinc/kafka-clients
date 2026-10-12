@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaConsumerTest.java`` (Apache Kafka 4.3.1) for ``KafkaConsumer`` without a
+"""``KafkaConsumerTest.java`` (as of Apache Kafka 4.3.1: the accounting below
+predates the 4.4.0 tests, which are not yet translated or named) for ``KafkaConsumer`` without a
 broker, in Java order, with Java's messages; and the binding's own contracts that
 need no broker — the commit callback on the caller's thread (C47), the lifetime of
 the native handle across a racing ``close()``, the deserializers' configuration

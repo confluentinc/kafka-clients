@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaProducerTest.java`` (Apache Kafka 4.3.1): the tests that run without a
+"""``KafkaProducerTest.java`` (as of Apache Kafka 4.3.1: the accounting below
+predates the 4.4.0 tests, which are not yet translated or named): the tests that run without a
 broker, in Java order, asserting Java's messages.
 
 Where Java drives a ``MockClient`` only to make an operation fail, the test uses

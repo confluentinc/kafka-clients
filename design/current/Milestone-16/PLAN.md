@@ -2869,6 +2869,28 @@ bootstrap-window spin.)
       both builds shrinks it to +0.1 … +0.6 %. Reported, not fixed. The keyed-send cost against
       `7ccc9ffb` is §8 O8.
 
+### Post-review merge of master (agent 115)
+
+- **`f5c7b08d`: `origin/master` at `ca5d4f3f` merged in**, bringing the Python client interface spec
+  (#187, the `python/confluent_kafka/` package) and the chaos / fault-injection harness (#184). The
+  merge-commit body lists every resolution. In short:
+  - `cbindgen.toml`, `ffi/consumer.rs` (`MockConsumer_lose_partitions` beside master's
+    `MockConsumer_rebalance_async`), `record_accumulator.rs` and `producer_config.rs` keep both sides;
+    master's 4.3.1 cites in the merged code move to 4.4.
+  - #187 retired `_error_code.py`, `consumer.py` and `producer.py`. The error codes now come from
+    `cargo xtask generate-error-codes`: its BRIDGE table gains the four M16 ids, its exclusions
+    `common.internals.UnsupportedProtocolFieldException`, and its evaluator `Set.of()`. The regenerated
+    `_config_types.py` carries the 4.4 config keys.
+  - `MockConsumer.lose_partitions` is translated into the pure-Python mock (`consumer/_mock_core.py`),
+    sync and async, with Java's five new `MockConsumerTest` cases; `py_MockConsumer_lose_partitions`
+    went with #187's removal of the C extension's mock drivers.
+- Follow-ups: `0ba55fb7` (cite moves), `f787c406` (`kafka_common_Error_new(-29)` builds
+  `BootstrapResolutionError`), and Critic 115's R1, R2, R4, R7 and R8 (`COMMENTS.DONE.115.md`). R3, R5,
+  R6, D1, D2 and S1-S4 are open for the user (`COMMENTS.115.md`).
+- Gates after `f787c406`: `cargo test --all-features` lib 4898 / 0 / 3, integration 326/326 (Docker
+  broker); Python unit 1101 passed, 2 skipped, integration 45; C suites hand-built with `cc`, all pass;
+  `build-c` fails only for want of cmake.
+
 ## 7. Completeness audit (Phase 13, agent 103)
 
 Every commit of `git -C kafka log --no-merges --right-only --cherry-pick 4.3.1...4.4.0-rc4 -- clients/src`

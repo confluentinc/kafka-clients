@@ -31,14 +31,15 @@ task may call back into the mock from the thread holding it, and another thread
 waits instead of failing (Java's mock is not thread-safe but serializes).
 ``wakeup()`` only sets its flag, as Java's ``AtomicBoolean``.
 
-``AsyncMockConsumer`` awaits the same body; ``rebalance`` awaits a coroutine
-listener method there, and holds the mock's monitor for its task until it
-returns, as Java's ``synchronized`` ``rebalance`` runs the listener inside it
+``AsyncMockConsumer`` awaits the same body; ``rebalance`` and
+``lose_partitions`` await a coroutine listener method there, and hold the
+mock's monitor for their task until they return, as Java's ``synchronized``
+``rebalance`` and ``losePartitions`` run the listener inside it
 (``_Monitor``). Meanwhile a method that enters Java's monitor, called from
 another task or another thread, raises ``ConcurrentModificationError`` with
 ``KafkaConsumer``'s message *(deviation: Java's caller waits, which a task on
-the rebalance's own loop cannot do without stopping it)*; the rebalance's own
-task (a coroutine listener calling back into its consumer) passes. The methods
+the listener's own loop cannot do without stopping it)*; the holding task (a
+coroutine listener calling back into its consumer) passes. The methods
 Java does not synchronize pass too: ``group_metadata()``, ``last_poll_timeout()``
 and ``current_lag()`` without an end offset; and ``wakeup()``, which Java's mock
 synchronizes, is never refused (CLAUDE.md, Python Binding Conventions, Threads
@@ -121,14 +122,14 @@ def _current_task() -> asyncio.Task[Any] | None:
 
 class _Monitor:
     """The mock's ``synchronized`` monitor: a reentrant lock, and the task an
-    ``AsyncMockConsumer.rebalance`` holds it for while it awaits the listener
-    (``owner``). Entering it from any other task or thread meanwhile raises
+    ``AsyncMockConsumer.rebalance`` or ``lose_partitions`` holds it for while
+    it awaits the listener (``owner``). Entering it from any other task or thread meanwhile raises
     ``ConcurrentModificationError``; the owner, and anyone while there is
     none, enter as the lock lets them.
 
     It has no Java class: Java's monitor belongs to a thread, and every task of
     one loop runs on the same thread, so the ``RLock`` alone cannot tell the
-    rebalance's task from another."""
+    holding task from another."""
 
     __slots__ = ("_lock", "owner")
 
