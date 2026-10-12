@@ -12,7 +12,7 @@
 
 direction: down
 
-py: "python/ — producer.py, consumer.py, admin.py\nProducer / Consumer / AdminClient (sync: _cb entry points, sliced wait in Python via SyncWaiter)\nAsync* twins (asyncio: _cb entry points + set_callbacks_notify -> call_soon_threadsafe(execute_callbacks))" {
+py: "python/ — the confluent_kafka package (producer, consumer) + admin.py\nsync: _cb entry points, sliced wait in Python; producer completions on its completion thread,\nconsumer callbacks on the waiting thread, admin via SyncWaiter\nAsync* twins (asyncio: _cb entry points + set_callbacks_notify -> call_soon_threadsafe, drain on the loop)" {
   style.fill: "#eef6ff"
 }
 pyext: "_confluentkafka.c — hand-written CPython extension"

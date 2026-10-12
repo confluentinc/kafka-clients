@@ -153,7 +153,7 @@ In practice:
   constructs it and returns it as `Box<dyn Consumer<K, V>>`.
 - `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
   `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
-  callers use `kafka_common_ErrorCode_t`.
+  callers use `kafka_common_ErrorCode_e`.
 - Exceptions are tagged in the code, each under a `//` comment giving the
   reason: `#[doc(alias = "rust-only")]` for an item translating no Java API
   (Rust-only types, JDK translations such as `TimeUnit`, C helper handles,
@@ -382,10 +382,10 @@ python/
 │   │                          # serialization/, config/, …
 │   └── *_error.py             # Java built-in exceptions at the root
 ├── admin.py            # older admin binding, paused (not in the package)
-├── _sync_wait.py       # SyncWaiter: the sync clients' sliced wait over _cb calls
+├── _sync_wait.py       # SyncWaiter: admin.py's sliced wait over _cb calls
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
-├── grpc_server.py, grpc_server_async.py, grpc_translate.py
+├── grpc_server.py, grpc_server_async.py, grpc_translate.py, grpc_chaos.py
 ├── Dockerfile.grpc, Dockerfile.grpc.async, requirements-grpc{,-tools}.txt
 ├── examples/
 ├── test/{unit,integration,static,performance}/, soak/, tools/
@@ -413,7 +413,9 @@ of the exported symbols are accessors, enum singletons and destructors.
 ![Bindings layering](img/bindings-layering.svg)
 
 *Python and C both reach the Rust API through the same header and the same
-blocking / `_cb` entry-point shapes; neither binding adds a thread of its own.*
+blocking / `_cb` entry-point shapes. Neither the C binding nor the Python
+extension adds a thread of its own; the Python producer runs its completions on
+one Python completion thread per producer.*
 
 ## tests/
 

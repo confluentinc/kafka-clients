@@ -42,6 +42,6 @@ enum -> fatal: "classified by" {style.stroke-dash: 3}
 note: |md
   Predicates are **not** complements: `Serialization` and `Wakeup` are
   `KafkaException`s but not `ApiException`s. Callers match variants;
-  C callers get `kafka_common_ErrorCode_t` plus the `kafka_common_Error_is_*`
+  C callers get `kafka_common_ErrorCode_e` plus the `kafka_common_Error_is_*`
   predicates.
 | {near: bottom-center}

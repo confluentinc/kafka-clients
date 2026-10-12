@@ -1119,35 +1119,98 @@ It mirrors Java's packages with `clients` dropped (`confluent_kafka.producer`,
 per Java class. Each family has a non-instantiable base, a `Kafka*` client, a
 `Mock*`, and an `Async*` peer of each.
 
-`MockProducer` is plain Python translated from Java's mock. The other clients
-call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+`MockProducer` and `MockConsumer` (and their async peers) are plain Python
+translated from Java's mocks. The consumer mock is a recorded deviation: the
+FFI's `MockConsumer_add_record` cannot carry the `ConsumerRecord` objects Java's
+mock buffers (`consumer/_mock_core.py`). The other clients call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
 marshalling layer that links the `confluent_kafka` cdylib
 (`python/setup.py:37-40`). `setup.py` resolves the library under
 `../rust/target/`, and `CONFLUENT_KAFKA_LIB_DIR` overrides that. The error
 classes and the config key-type table (`_config_types.py`) are generated from
 the Java sources by `cargo xtask generate-error-codes`.
 
-Each module offers both shapes. Both drive the `_cb` entry points; they
-differ only in who waits for the completion:
-- A synchronous family that submits every blocking-in-Java operation through
-  its `_cb` twin and waits in Python (`_sync_wait.py`, `SyncWaiter`) in short
-  slices: `<Client>__set_callbacks_notify` only sets a `threading.Event` (the
-  producer uses the condvar inside `Producer_poll`), and each slice drains
-  `<Client>__execute_callbacks` on the calling thread, so completions,
-  delivery callbacks, rebalance listeners and commit callbacks run on the
-  thread that made the call. Waiting in Python rather than in a native
-  `block_on` keeps `Ctrl-C` prompt: on `KeyboardInterrupt` the consumer calls
-  `wakeup()` (the producer and admin let the operation finish), the waiter
-  still waits for the completion so the client's single-owner guard is
-  released and the payload freed, then re-raises. The blocking C entry points
-  are used only where the call cannot park (`begin_transaction`, the
-  re-entrant `ConsumerHandle` inside a listener).
-- An async family whose methods are coroutines over the same `_cb` entry
-  points: `<Client>__set_callbacks_notify` is wired to
-  `loop.call_soon_threadsafe(<Client>__execute_callbacks)`, so every completion
-  and every queued interface call runs on the event-loop thread.
-No extension thread exists any more; the old dispatcher thread and the
-producer's two helper threads went with the `_async` functions.
+Each module offers a synchronous and an asyncio family. Both submit every
+blocking-in-Java operation through its `_cb` twin, never a blocking native
+call, and differ only in where the queued callbacks run, that is, who calls
+`<Client>__execute_callbacks`. `<Client>__set_callbacks_notify` only signals or
+schedules; it never runs a callback.
+- **Sync producer.** Each waiting call (`flush`, `partitions_for`, the
+  transaction operations, `close`) waits in Python in 100 ms slices, so
+  `Ctrl-C` is seen. On `KeyboardInterrupt` the operation is let finish, then
+  the interrupt is re-raised and the producer stays usable; a `close()` is
+  forced instead. The completions, meaning the `send()` callbacks and the
+  waiting calls' results, run on one background completion thread per
+  producer. That thread loops on the extension's `Producer_poll`, which waits
+  on the condvar the notify hook signals and then runs
+  `Producer__execute_callbacks`. So `send()` callbacks run one at a time, in
+  completion order, and never on the caller's thread.
+- **Sync consumer.** A waiting call (`poll`, `commit`, `committed`, `close`,
+  ...) submits the `_cb` form and waits in 100 ms slices on a
+  `threading.Event` the notify hook sets. Between slices it drains
+  `Consumer__execute_callbacks` on its own thread. So the completion, the
+  `ConsumerRebalanceListener` methods and the `OffsetCommitCallback` run on
+  the waiting thread, inside the call that delivers them, and the rebalance
+  does not advance before the listener returns (`consumer-threading.md`
+  §31). On `Ctrl-C` the consumer calls `wakeup()` once, lets the call end,
+  and re-raises `KeyboardInterrupt`.
+- **Async families.** The notify hook schedules a drain on the event loop
+  with `loop.call_soon_threadsafe`, so every completion and every queued
+  interface call runs on the loop thread.
+  - The producer pumps on the running loops it was used from, and once on
+    entry to each async method. When none of those loops is running, the pump
+    runs on a short-lived helper thread instead, so a completion whose loop
+    has closed is dropped promptly.
+  - An awaiting consumer call drains on its own loop. A coroutine listener
+    method is awaited there and reports through `Consumer__set_callback_result`.
+- **Admin.** The sync `admin.py` clients wait through `SyncWaiter`
+  (`_sync_wait.py`) on `Admin_resolve_cb`.
+
+The extension starts no thread. The Python-side threads are:
+- the sync producer's completion thread;
+- `begin_transaction`'s helper (see below);
+- the async producer's fallback pump.
+
+Blocking C entry points are used only where the call cannot park:
+`begin_transaction`, and the re-entrant `ConsumerHandle` inside a listener.
+
+Deviations recorded in the package's module docstrings:
+- `begin_transaction` has no `_cb` twin. Like every transaction-control
+  operation it first drains the records already sent
+  (`producer-transactions.md` §13), so its blocking entry point runs on a
+  helper thread (sync) or in the loop's default executor (async).
+- Backpressure is the core's `max.block.ms` wait on the submission task, not
+  master's `Producer_drain` / on-space-available machinery. `send()` returns
+  once the record is queued on the submission task, which hands records to the
+  producer one at a time, in order. There the metadata wait and the wait for
+  `buffer.memory` space are bounded by `max.block.ms`, as in Java, and a record
+  that times out fails through its callback and future. Java blocks the
+  `send()` caller for those waits; here records queued behind a full buffer are
+  held by the submission task instead.
+- A call from inside a `send()` callback cannot have its completion run,
+  since that runs on the thread the callback blocks. There, `send()` does not
+  wait for its record to reach the producer. `init_transactions`,
+  `send_offsets_to_transaction`, `commit_transaction`, `abort_transaction`
+  and `partitions_for` raise `TimeoutError` after `max.block.ms`; the
+  operation itself may still complete.
+- A failure the core reports before the partition is chosen carries partition
+  -1, even when the record names one. The binding fills in the record's
+  partition, as Java's `AppendCallbacks.topicPartition()` gives it.
+- Inside a consumer callback, a listener re-enters the consumer through the
+  guard-free `ConsumerHandle`, since the outer call holds the single-owner
+  guard. Two calls raise `ConcurrentModificationError` at once, because their
+  completion would be queued behind the running callback, where a nested drain
+  cannot reach it:
+  - an operation the handle lacks (`poll`, `subscribe`, `close`, ...);
+  - a `commit_nowait()` with a callback.
+
+  A coroutine listener on the sync `Consumer` raises `TypeError`.
+- While an operation is in flight, the C API's state reads (`assignment`,
+  `subscription`, `paused`, `metrics`) answer empty instead of busy. Python
+  checks its own awaiting calls before reading, so it keeps raising
+  `ConcurrentModificationError`.
+- Fetched key, value and header bytes are `memoryview`s over the fetch
+  batch. The extension's C-mock batch path still copies them, because its
+  pinned buffers die with the consumer.
 
 `admin.py` is the older admin binding. It is paused and outside the
 conventions, and keeps its flat `KafkaError` and positional value types through

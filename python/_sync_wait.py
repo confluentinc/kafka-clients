@@ -14,7 +14,10 @@
 
 """The synchronous clients' waiter over the C API's queued (``_cb``) entry points.
 
-The synchronous ``Producer`` / ``Consumer`` / ``Admin`` classes do not call the
+The synchronous ``AdminClient`` / ``MockAdminClient`` of ``admin.py`` wait here;
+the ``confluent_kafka`` package's synchronous producer and consumer follow the
+same rule with waits of their own (the producer's completion thread and
+``wait_sliced``, the consumer's ``_run_sync``). None of them calls the
 blocking C entry points. A blocking entry point parks the calling thread inside
 a native ``block_on`` where CPython cannot run signal handlers, so ``Ctrl-C``
 would only take effect once the call returned (after a whole ``poll`` timeout,
@@ -32,15 +35,14 @@ How a wait proceeds:
    from empty to non-empty.
 2. The waiter sleeps on the event in 100 ms slices. When it is set, the waiter
    clears it and drains the vector with the client's ``execute_callbacks`` on
-   the *calling* thread, so completions, delivery callbacks, rebalance
-   listeners and commit callbacks all run on the thread that made the call --
-   Java's threading model for these callbacks.
+   the *calling* thread, so the completions run on the thread that made the
+   call.
 3. The wait ends when ``cb`` has run. A ``KeyboardInterrupt`` raised while
-   waiting calls ``on_interrupt()`` once (the consumer passes ``wakeup``, which
-   aborts the in-flight operation; the producer and admin have no equivalent
-   and let the operation finish), keeps waiting for the completion so the
-   client is left in a consistent state (the single-owner guard released, the
-   payload freed), and then re-raises the interrupt.
+   waiting calls ``on_interrupt()`` once, if given (a client with a
+   ``wakeup`` would pass it to abort the in-flight operation; admin has none
+   and lets the operation finish), keeps waiting for the completion so the
+   client is left in a consistent state (the payload freed), and then
+   re-raises the interrupt.
 
 The slice length bounds the latency of a completion by at most one slice only
 when the notify hook has fired *between* a drain and the next wait; the common
@@ -48,12 +50,10 @@ case wakes the event immediately. The 100 ms slices (rather than an unbounded
 ``Event.wait()``) keep the wait interruptible on every platform, including
 those where a blocking lock acquire is not interrupted by signals.
 
-A client whose C layer has its own wake-up primitive subclasses
-:class:`SyncWaiter` and overrides :meth:`SyncWaiter.wait_slice` with one
-bounded call into it, leaving :meth:`SyncWaiter.notify` unused (the producer:
-``Producer_poll`` waits on the condition variable the extension's notify hook
-broadcasts, see ``producer._ProducerWaiter``). :meth:`SyncWaiter.run` only
-relies on ``wait_slice`` returning within about one slice.
+A client whose C layer has its own wake-up primitive may subclass
+:class:`SyncWaiter` and override :meth:`SyncWaiter.wait_slice` with one bounded
+call into it, leaving :meth:`SyncWaiter.notify` unused. :meth:`SyncWaiter.run`
+only relies on ``wait_slice`` returning within about one slice.
 """
 
 import threading
