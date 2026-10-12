@@ -1033,6 +1033,7 @@ impl<K, V> KafkaProducer<K, V> {
             },
             Arc::clone(&metrics),
             Self::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time),
             buffer_pool,
             transaction_manager.clone(),
             log_context.clone(),
@@ -2790,6 +2791,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            default_time(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
@@ -3367,6 +3369,7 @@ mod tests {
             Arc::new(Metrics::new()),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
             // Room for exactly one batch.
+            default_time(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
             None,
         ));
@@ -4547,6 +4550,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            default_time(),
             Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
             None,
         ));
@@ -5076,6 +5080,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
@@ -5158,6 +5163,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                default_time(),
                 Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 None,
             ));
@@ -5365,6 +5371,7 @@ mod tests {
                 },
                 Arc::clone(&metrics),
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+                Arc::clone(&time) as Arc<dyn Time>,
                 buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
@@ -6964,6 +6971,7 @@ mod tests {
             },
             Arc::clone(&metrics),
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
+            Arc::clone(&time) as Arc<dyn Time>,
             buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,
