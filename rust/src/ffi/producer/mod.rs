@@ -1072,6 +1072,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// The callback's `self` must stay alive until then; the registration
 /// handle itself is read during the call.
 ///
+/// When this call returns an error, the callback may still fire later,
+/// exactly once, if the record had reached the accumulator: as in Java's
+/// `doSend`, the record is appended with its callback before
+/// `maybeAddPartition` fails (for example a send outside a transaction), and
+/// it completes with its batch. A record rejected before the append never
+/// fires it. The caller cannot tell the two apart, so after an error the
+/// callback's `self` must stay alive until `_destroy`.
+///
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live
@@ -1117,6 +1125,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 
 /// `Producer.send(ProducerRecord, Callback)`, completion queued as
 /// [`kafka_producer_Producer_send_cb`].
+///
+/// When `cb` receives an error, `callback` may still fire later, exactly
+/// once, if the record had reached the accumulator, as for
+/// [`kafka_producer_Producer_send_with_callback`]; so after an error the
+/// callback's `self` must stay alive until `_destroy`.
 ///
 /// # Safety
 ///
