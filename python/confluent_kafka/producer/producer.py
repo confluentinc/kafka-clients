@@ -31,7 +31,6 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import threading
-import time
 from collections.abc import Mapping
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -39,6 +38,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import UNSET
+from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -110,7 +110,6 @@ class Producer(Generic[K, V], _ProducerState):
         the producer has encountered a previous fatal error.
         """
         self._check_not_closed()
-        self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
 
     def begin_transaction(self) -> None:
@@ -125,17 +124,12 @@ class Producer(Generic[K, V], _ProducerState):
         encountered a previous fatal error.
         """
         self._check_not_closed()
-        # No drain of the batching engine first, as Java's beginTransaction
-        # does not wait, and producer-transactions.md §13 holds without one: a
-        # transactional producer's send() with no transaction open returns only
-        # once its record is with the Rust producer (see send), so nothing that
-        # returned is still accumulated when a begin that can succeed runs; the
-        # records of an open transaction stay in it whatever this call does, and
-        # the commit / abort ending it drains them; and a producer without a
-        # transactional.id fails here whatever it has accumulated. The entry
-        # point has an _async form, so this waits on it (Class family).
+        # The FFI first drains its own submission queue, so a send that returned
+        # belongs to the state this call sets (producer-transactions.md §13); it
+        # does not wait for a record still waiting for its metadata inside the
+        # producer, as Java's beginTransaction does not wait. The entry point
+        # has an _async form, so this waits on it (Class family).
         run_sync(lambda cb: self._call(_lib.Producer_begin_transaction_async, cb))
-        self._in_transaction = True
 
     def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -167,7 +161,6 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         check_group_metadata(group_metadata)
         native = group_metadata_handle(group_metadata)
-        self._drain_sync()
         spec = offsets_to_spec(offsets)
         run_sync(lambda cb: self._call(_lib.Producer_send_offsets_to_transaction_async,
                                        spec, native, cb))
@@ -194,9 +187,6 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         sent = list(self._futures)
-        # Sends from now on wait for their handover again (see _ProducerState).
-        self._in_transaction = False
-        self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
         if not in_callback(self):
             # Their callbacks run on the completion thread, which a callback
@@ -217,9 +207,6 @@ class Producer(Generic[K, V], _ProducerState):
         ``KafkaError`` if the producer has encountered a previous fatal error.
         """
         self._check_not_closed()
-        # Sends from now on wait for their handover again (see _ProducerState).
-        self._in_transaction = False
-        self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
     def send(self, *, record: ProducerRecord[K, V],
@@ -258,20 +245,20 @@ class Producer(Generic[K, V], _ProducerState):
 
         Raises ``IllegalStateError`` when send is invoked after the producer has
         been closed, and ``KafkaError("Producer closed while send in
-        progress")`` when the producer is closed while it runs. With a
+        progress")`` when the producer is closed while it runs: before the
+        record reached the producer, or while the record waited for its topic's
+        metadata inside it. The errors Java's ``send()`` raises are raised here,
+        where its ``doSend`` rethrows them: ``IllegalStateError`` with a
         ``transactional.id`` configured and no transaction started (no
         ``begin_transaction()`` since ``init_transactions()`` or the last
-        ``commit_transaction()`` / ``abort_transaction()``), send returns once
-        the record is with the producer (after the metadata wait, as Java's) and
-        raises ``IllegalStateError`` as Java's does, e.g. "Cannot add partition
-        … to transaction while in state  READY". The other errors of a send
-        (``TimeoutError`` for the metadata wait, ``RecordTooLargeError``,
-        ``ProducerFencedError``, …) are given to the callback and the future, as
-        in Java. So are, unlike Java, the errors its ``send()`` raises once the
-        record reaches the producer inside a started transaction or without a
-        ``transactional.id``: the ``KafkaError`` of a producer in a previous
-        fatal or abortable error state, which ``commit_transaction()`` then
-        raises.
+        ``commit_transaction()`` / ``abort_transaction()``), e.g. "Cannot add
+        partition … to transaction while in state  READY", and the
+        ``KafkaError`` of a producer in a previous fatal or abortable error
+        state. The ``ApiException`` errors of a send (``TimeoutError`` for the
+        metadata wait, ``RecordTooLargeError``, ``ProducerFencedError``, …) are
+        given to the callback and the future, as in Java. As in Java, a
+        transaction-state error is found once the record is in a batch, so the
+        callback still runs once, when that batch completes.
         """
         if callback is UNSET:
             callback = None
@@ -284,29 +271,38 @@ class Producer(Generic[K, V], _ProducerState):
         # cannot be cancelled.
         future.set_running_or_notify_cancel()
 
-        # A transactional producer's send with no transaction started waits
-        # for the handover (below) and raises the error the Rust send() returns:
-        # Java's doSend rethrows those (KafkaProducer.java:1069-1081), where an
-        # ApiException reaches the callback and the future (:1056-1068). Inside
-        # a started transaction the record is not waited for (see
-        # _ProducerState._in_transaction). `waiting` is read and cleared under
-        # `lock`, so an error arriving after the wait ended (a Ctrl+C) goes to
-        # the callback instead.
-        waiting = self._transactional and not self._in_transaction
-        rethrown: Exception | None = None
-        lock = threading.Lock()
+        # The producer's answer for a record it could not take at once (0:
+        # accepted, else the owned handle of the error Java's doSend rethrows),
+        # the latch the caller waits for it on, and whether the caller stopped
+        # waiting (a Ctrl+C); read and set under `guard`. Untouched when the
+        # record is taken at once.
+        answer: int | None = None
+        latch: threading.Lock | None = None
+        abandoned = False
+        guard = threading.Lock()
 
-        def cb(result: int, error: int, immediate: bool) -> None:
-            # Runs on the C completion thread with the GIL held. As in Java's
-            # ProducerBatch.completeFutureAndFireCallbacks, the callback runs
-            # before the future completes.
-            nonlocal rethrown
-            metadata, exception = completion_to_python(result, error, topic, partition)
-            if immediate and waiting:
-                with lock:
-                    if waiting:
-                        rethrown = exception
+        def cb(result: int | None, error: int) -> None:
+            nonlocal answer
+            if result is None:
+                # The producer's answer, from its dispatcher thread.
+                with guard:
+                    if not abandoned:
+                        answer = error
+                        if latch is not None:
+                            latch.release()
                         return
+                if error:
+                    # The caller stopped waiting: nobody left to raise it to.
+                    _lib.KafkaError_destroy(error)
+                else:
+                    # Accepted after the caller left: the record is in the
+                    # producer, so flush() waits for it.
+                    self._track(future)
+                return
+            # A completion: runs on the producer's callback thread with the GIL
+            # held. As in Java's ProducerBatch.completeFutureAndFireCallbacks,
+            # the callback runs before the future completes.
+            metadata, exception = completion_to_python(result, error, topic, partition)
             invoke_callback(self, callback, metadata, exception)
             if exception is not None:
                 future.set_exception(exception)
@@ -316,43 +312,46 @@ class Producer(Generic[K, V], _ProducerState):
         # A close() that began since the check above (the serializers ran in
         # between) refuses the record as Java's RecordAccumulator.append does.
         closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
-        space: Future[None] | None = None
-        handed_over: threading.Event | None = None
         with self._use(closed_while_sending) as c_producer:
-            full = _lib.Producer_send(c_producer, native, cb)
-            if full is None:
-                raise closed_while_sending
+            taken = _lib.Producer_send(c_producer, native, cb)
+        if taken is True:
+            # Taken at once: the record is in a batch, as after Java's
+            # accumulator.append.
             self._track(future)
-            if waiting:
-                handed_over = threading.Event()
-                if _lib.Producer_drain(c_producer, handed_over.set):
-                    handed_over = None
-            if full:
-                # The buffer is full: wait (below, not as a use) until the send
-                # task frees capacity, as Java's send() blocks on buffer.memory.
-                waiter: Future[None] = Future()
-                if not _lib.Producer_on_space_available(
-                        c_producer, lambda: waiter.set_result(None)):
-                    space = waiter
-        # Both waits clear `waiting` when they end, a Ctrl+C included: left set,
-        # it would keep taking the immediate error from the callback and the
-        # future, and the tracked future would hang a later flush().
-        try:
-            if space is not None:
-                space.result()
-            if handed_over is not None:
-                handed_over.wait()
-        finally:
-            if waiting:
-                with lock:
-                    waiting = False
-                if rethrown is not None:
-                    # The record never reached the producer (Java's doSend
-                    # rethrows the error), so flush() has nothing to wait for.
-                    self._futures.discard(future)
-        if rethrown is not None:
-            raise rethrown
-        return future
+            return future
+        if taken is False:
+            raise closed_while_sending
+        if taken is None:
+            # Queued: the producer answers once it took the record (after the
+            # metadata wait, where Java's send() blocks) or refused it. The wait
+            # is not a use of the handle, so a close() meanwhile proceeds and
+            # ends it with its refusal.
+            with guard:
+                if answer is None:
+                    latch = threading.Lock()
+                    latch.acquire()
+            if latch is not None:
+                try:
+                    latch.acquire()
+                except BaseException:
+                    # A Ctrl+C: an answer that arrived meanwhile, or arrives
+                    # later, is handled as above, by whoever holds it.
+                    with guard:
+                        abandoned = True
+                        late, answer = answer, None
+                    if late is not None:
+                        if late:
+                            _lib.KafkaError_destroy(late)
+                        else:
+                            self._track(future)
+                    raise
+            taken = answer
+            if not taken:
+                self._track(future)
+                return future
+        # Refused (or not a sendable record): the error Java's send() raises;
+        # the future is not tracked, as the record is not in the producer.
+        raise from_ffi_error(taken)
 
     def flush(self) -> None:
         """Invoking this method makes all buffered records immediately available
@@ -376,7 +375,6 @@ class Producer(Generic[K, V], _ProducerState):
             _LOG.error(FLUSH_IN_CALLBACK_MESSAGE)
             raise KafkaError(message=FLUSH_IN_CALLBACK_MESSAGE)
         sent = list(self._futures)
-        self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_flush_async, cb))
         concurrent.futures.wait(sent)
 
@@ -434,23 +432,20 @@ class Producer(Generic[K, V], _ProducerState):
                     LONG_MAX_VALUE if timeout_ms is None else timeout_ms)
             timeout_ms = 0
         c_producer = self._c_producer
-        # Refuse further records and hand the accumulated ones to the Rust
-        # producer, waiting for that within the close timeout (Java's close
-        # timer covers the whole close).
-        start = time.monotonic()
+        # Refuse further records; the Rust close first hands the records still
+        # queued to the producer (producer-transactions.md §13), then waits for
+        # the records handed over, within the close timeout.
         _lib.Producer_shutdown(c_producer)
         # Whether the Rust close ran to its end; if an interrupt (Ctrl+C)
         # stopped a wait first, the close is forced before the handle is freed.
         closed = False
         try:
             if timeout_ms is None:
-                self._drain_sync(closing=True)
                 (error,) = await_payload(lambda cb: _lib.Producer_close_async(c_producer, cb))
             else:
-                self._drain_sync(timeout_ms / 1000.0, closing=True)
-                remaining_ms = max(0, timeout_ms - int((time.monotonic() - start) * 1000))
+                close_ms = timeout_ms
                 (error,) = await_payload(lambda cb: _lib.Producer_close_with_timeout_async(
-                    c_producer, remaining_ms, cb))
+                    c_producer, close_ms, cb))
             closed = True
             raise_if_error(error)
         finally:

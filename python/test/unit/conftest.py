@@ -52,9 +52,14 @@ class HeldCompletion:
 
     ``payloads`` holds the results as the C trampoline passes them, ``raised``
     what the client's callback raised back to the trampoline (which prints it
-    and drops it), and ``delivered`` is set once the callback has returned."""
+    and drops it), and ``delivered`` is set once the callback has returned. A
+    payload ``holds`` rejects is passed straight through, unrecorded: a
+    ``Producer_send`` callback first carries the producer's answer for a queued
+    record (``(None, error)``), which the send waits for, and holding it would
+    hold the send."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str,
+                 holds: Callable[[tuple[Any, ...]], bool] | None = None) -> None:
         self.submitted = threading.Event()
         self.release = threading.Event()
         self.delivered = threading.Event()
@@ -66,6 +71,9 @@ class HeldCompletion:
             *rest, cb = args
 
             def held(*payload: Any) -> None:
+                if holds is not None and not holds(payload):
+                    cb(*payload)
+                    return
                 self.payloads.append(payload)
                 self.release.wait(_HOLD_TIMEOUT)
                 try:
@@ -84,10 +92,40 @@ class HeldCompletion:
 
 
 @pytest.fixture
-def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], HeldCompletion]:
-    """``hold_completion(name)`` holds the completions of ``_lib.<name>``, whose
-    last argument is the completion callback (see :class:`HeldCompletion`)."""
-    return lambda name: HeldCompletion(monkeypatch, name)
+def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[..., HeldCompletion]:
+    """``hold_completion(name, holds=...)`` holds the completions of
+    ``_lib.<name>``, whose last argument is the completion callback (see
+    :class:`HeldCompletion`)."""
+    return lambda name, **kwargs: HeldCompletion(monkeypatch, name, **kwargs)
+
+
+class PendingCall:
+    """A call of one ``_async`` entry point of the C extension that never
+    reaches the native producer: its arguments are recorded in ``calls``,
+    ``submitted`` is set, and its completion stays pending for good.
+
+    This is how a test keeps a ``close()`` pending until the client forces it
+    (an interrupt, or a cancellation) without a broker to hold the native
+    close. Holding the close's *completion* instead (:class:`HeldCompletion`)
+    would hold the producer's dispatcher thread, and with it the forced
+    close's own completion."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        self.submitted = threading.Event()
+        self.calls: list[tuple[Any, ...]] = []
+
+        def entry(*args: Any) -> None:
+            self.calls.append(args)
+            self.submitted.set()
+
+        monkeypatch.setattr(_lib, name, entry)
+
+
+@pytest.fixture
+def pending_call(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], PendingCall]:
+    """``pending_call(name)`` leaves every call of ``_lib.<name>`` pending for
+    good (see :class:`PendingCall`)."""
+    return lambda name: PendingCall(monkeypatch, name)
 
 
 @pytest.fixture
