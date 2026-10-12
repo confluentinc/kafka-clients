@@ -607,6 +607,7 @@ impl RecordAccumulator {
         retry_backoff_max_ms: i64,
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
+        time: Arc<dyn Time>,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
@@ -620,7 +621,7 @@ impl RecordAccumulator {
             partitioner_config,
             Arc::new(Metrics::new()),
             "producer-metrics",
-            Arc::new(crate::common::utils::SystemTime),
+            time,
             buffer_pool,
             transaction_manager,
         )
@@ -847,7 +848,7 @@ impl RecordAccumulator {
         headers: &[RecordHeader],
         callback: Option<Callback>,
         max_time_to_block: i64,
-        now_ms: i64,
+        mut now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
         guard: &mut AppendGuard<'_>,
@@ -964,10 +965,10 @@ impl RecordAccumulator {
                         .await
                         .map_err(|error| AppendFailure::boxed(error, callback.take()))?,
                 );
-                // Java then refreshes `nowMs = time.milliseconds()` in case the allocation
-                // blocked. The full path keeps the caller's `now_ms`, as it did before KIP-1332,
-                // so this phase leaves its behaviour unchanged (only the incremental path, which
-                // is new, refreshes it).
+                // Update the current time in case the buffer allocation blocked above.
+                // NOTE: getting time may be expensive, so calling it under a lock
+                // should be avoided.
+                now_ms = self.time.milliseconds();
             }
 
             {
@@ -2924,6 +2925,7 @@ mod tests {
     use crate::common::record::internal::CompressionType;
     use crate::common::record::internal::DefaultRecord;
     use crate::common::record::internal::RecordBatch;
+    use crate::common::utils::MockTime;
     use std::collections::{HashMap, HashSet};
 
     const TOPIC: &str = "test";
@@ -2972,6 +2974,12 @@ mod tests {
         )
     }
 
+    /// Java's `MockTime` for the tests that pass explicit `now` values, started at 0 and
+    /// never advanced.
+    fn mock_time() -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0))
+    }
+
     fn create_test_accumulator(
         batch_size: i32,
         total_size: i64,
@@ -2987,6 +2995,7 @@ mod tests {
             1000,  // retry_backoff_max_ms
             30000, // delivery_timeout_ms
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         )
@@ -3056,6 +3065,7 @@ mod tests {
             1000,
             30000,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             Some(transaction_manager),
         )
@@ -3462,6 +3472,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -3651,6 +3662,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -3914,6 +3926,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -4002,7 +4015,12 @@ mod tests {
     async fn do_expire_batch_single(delivery_timeout_ms: i32) {
         let linger_ms = 300;
         let n1 = node1();
-        let mut now: i64 = 1_000_000; // start at a non-zero time
+        // Start at a non-zero time. Java moves its `MockTime` up to the wall clock
+        // before each append; a fixed start is enough here, as only differences
+        // between the clock readings matter.
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000_000, 0,
+        ));
         // test case assumes that the records do not fill the batch completely
         let batch_size = 1025;
 
@@ -4018,6 +4036,7 @@ mod tests {
             1000,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            Arc::clone(&time) as Arc<dyn Time>,
             pool,
             None,
         );
@@ -4031,20 +4050,20 @@ mod tests {
         // Make the batches ready due to linger. These batches are not in retry.
         for mute in [false, true] {
             accum
-                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, time.milliseconds(), &cluster)
                 .await
                 .unwrap();
             assert_eq!(
                 0,
-                accum.ready(&metadata, now).ready_nodes.len(),
+                accum.ready(&metadata, time.milliseconds()).ready_nodes.len(),
                 "No partition should be ready."
             );
 
-            now += linger_ms as i64;
-            let ready_nodes = accum.ready(&metadata, now).ready_nodes;
+            time.sleep(linger_ms as i64);
+            let ready_nodes = accum.ready(&metadata, time.milliseconds()).ready_nodes;
             assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
 
-            let expired_batches = accum.expired_batches(now);
+            let expired_batches = accum.expired_batches(time.milliseconds());
             assert_eq!(
                 0,
                 expired_batches.len(),
@@ -4059,12 +4078,12 @@ mod tests {
             }
 
             // Advance the clock to expire the batch.
-            now += delivery_timeout_ms as i64 - linger_ms as i64;
-            let expired_batches = accum.expired_batches(now);
+            time.sleep(delivery_timeout_ms as i64 - linger_ms as i64);
+            let expired_batches = accum.expired_batches(time.milliseconds());
             assert_eq!(1, expired_batches.len(), "The batch may expire when the partition is muted");
             assert_eq!(
                 0,
-                accum.ready(&metadata, now).ready_nodes.len(),
+                accum.ready(&metadata, time.milliseconds()).ready_nodes.len(),
                 "No partitions should be ready."
             );
         }
@@ -4422,6 +4441,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -4487,6 +4507,7 @@ mod tests {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             PartitionerConfig::default(),
+            mock_time(),
             pool,
             None,
         );
@@ -5135,8 +5156,18 @@ mod tests {
         let total_size: i64 = 1024 * 1024;
         let batch_size = 128;
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
-        let mut accum =
-            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+        let mut accum = RecordAccumulator::new_for_test(
+            batch_size,
+            Compression::none().build(),
+            0,
+            0,
+            0,
+            3200,
+            config,
+            mock_time(),
+            pool,
+            None,
+        );
         accum.set_mock_random_for_test(Arc::clone(&mock_random));
 
         let metadata = make_metadata_snapshot(&[node1(), node2()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
@@ -5205,8 +5236,18 @@ mod tests {
         let total_size: i64 = 1024 * 1024;
         let batch_size = 128;
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
-        let mut accum =
-            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+        let mut accum = RecordAccumulator::new_for_test(
+            batch_size,
+            Compression::none().build(),
+            0,
+            0,
+            0,
+            3200,
+            config,
+            mock_time(),
+            pool,
+            None,
+        );
         accum.set_mock_random_for_test(Arc::clone(&mock_random));
 
         let rack_node1 = Node::with_rack(0, "localhost".to_string(), 1111, Some("rack0".to_string()));
@@ -5253,8 +5294,18 @@ mod tests {
         let total_size: i64 = 1024 * 1024;
         let batch_size = 128;
         let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
-        let accum =
-            RecordAccumulator::new_for_test(batch_size, Compression::none().build(), 0, 0, 0, 3200, config, pool, None);
+        let accum = RecordAccumulator::new_for_test(
+            batch_size,
+            Compression::none().build(),
+            0,
+            0,
+            0,
+            3200,
+            config,
+            mock_time(),
+            pool,
+            None,
+        );
 
         let rack_node1 = Node::with_rack(0, "localhost".to_string(), 1111, Some("rack0".to_string()));
         let rack_node2 = Node::with_rack(1, "localhost".to_string(), 1112, Some("rack1".to_string()));
@@ -5991,6 +6042,95 @@ mod tests {
             accum.appends_in_progress.load(Ordering::Relaxed),
             0,
             "the finally's decrement must run on the error path too"
+        );
+    }
+
+    /// A batch created after `append` waited for buffer memory takes its creation time
+    /// from the clock after the wait. Java's `append` reads `time.milliseconds()` again
+    /// once `free.allocate` returns (`RecordAccumulator.java:334-337`).
+    ///
+    /// Not a translation of a Java test: `RecordAccumulatorTest` has no test for this
+    /// refresh. With the time from before the wait, the batch looked older than it was
+    /// by the time spent waiting, so it reached `delivery.timeout.ms` that much earlier
+    /// and skipped `linger.ms`.
+    #[tokio::test]
+    async fn test_batch_created_after_waiting_for_buffer_memory_uses_the_time_after_the_wait() {
+        const WAIT_MS: i64 = 5_000;
+        let batch_size = 1024;
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000, 0,
+        ));
+        let accum = Arc::new(RecordAccumulator::new_for_test(
+            batch_size,
+            Compression::none().build(),
+            0,
+            100,
+            1000,
+            i32::MAX,
+            PartitionerConfig::default(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            Arc::new(BufferPool::new_for_test(batch_size as i64, batch_size as usize)),
+            None,
+        ));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let nodes: HashSet<Node> = [node1()].into_iter().collect();
+
+        // Consume the pool's only batch, so the next append must wait in `allocate`.
+        append_one(&accum, metadata.cluster(), time.milliseconds()).await;
+
+        let send_ms = time.milliseconds();
+        let waiting = {
+            let accum = Arc::clone(&accum);
+            let cluster = metadata.cluster().clone();
+            tokio::spawn(async move {
+                accum
+                    .append(
+                        TOPIC,
+                        1,
+                        send_ms,
+                        Some(&key()),
+                        Some(&value()),
+                        &[],
+                        None,
+                        60_000,
+                        send_ms,
+                        &cluster,
+                    )
+                    .await
+                    .map_err(|failure| failure.error)
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while accum.free.queued() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the second append must wait in free.allocate");
+
+        // Time passes while the append waits, then the first batch's memory is released.
+        time.sleep(WAIT_MS);
+        for batches in accum
+            .drain(&metadata, &nodes, i32::MAX, time.milliseconds())
+            .expect("drain")
+            .values_mut()
+        {
+            for batch in batches.iter_mut() {
+                accum.deallocate(batch);
+            }
+        }
+
+        let result = waiting.await.expect("the task itself must not panic").expect("append");
+        assert!(result.new_batch_created, "the waiting append must create a new batch");
+
+        let drained = accum.drain(&metadata, &nodes, i32::MAX, time.milliseconds()).expect("drain");
+        let batches = &drained[&node1().id()];
+        assert_eq!(1, batches.len());
+        assert_eq!(1, batches[0].topic_partition.partition());
+        assert_eq!(
+            send_ms + WAIT_MS,
+            batches[0].created_ms,
+            "the batch must be created at the time after the wait, not when send() was called"
         );
     }
 

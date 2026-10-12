@@ -2740,6 +2740,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig::default(),
+            Arc::clone(&fx.time) as Arc<dyn Time>,
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
             None,
         );
