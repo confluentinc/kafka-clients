@@ -79,15 +79,22 @@ pub(crate) struct FfiValue {
     destroy: Option<unsafe fn(*mut c_void)>,
 }
 
-// SAFETY: the pointer is either a boxed Rust value (owned here, `Send` by the
-// bound on `owned`) or an opaque pointer C supplied and keeps alive; the struct
-// never dereferences it.
+// SAFETY: the struct never dereferences `ptr`; moving it to another thread only
+// moves where `Drop` may run `destroy`. The pointer is one of three things:
+// - a boxed Rust value (`owned`), which may be freed on any thread because `T` is
+//   `Send` by the bound on `owned`;
+// - a Rust-made C handle (`handle`), whose caller guarantees, per `handle`'s doc,
+//   that it may be freed from any thread;
+// - an opaque pointer C supplied and keeps alive (`borrowed`, `null`), never freed
+//   here.
 unsafe impl Send for FfiValue {}
 // SAFETY: a shared `&FfiValue` only copies `ptr` out (`ptr()`) and never
 // dereferences it; `destroy` is used only by `Drop`, through `&mut self`. What
-// C reads through the pointer, possibly from several threads, is a value boxed
-// by `owned`, reached only from `map_future`, whose `T` is `Sync`, a C handle
-// whose accessors only read it, or C's own pointee.
+// C reads through the pointer, possibly from several threads, is one of these:
+// - a value boxed by `owned`, reached only from `map_future`, whose `T` is `Sync`;
+// - a C handle made by `handle`, whose caller guarantees, per `handle`'s doc,
+//   that its accessors may run from several threads at once;
+// - C's own pointee.
 unsafe impl Sync for FfiValue {}
 
 impl FfiValue {
@@ -101,6 +108,12 @@ impl FfiValue {
 
     /// Wraps an owned C handle (a `<Type>_t *` from one of the `box_*`
     /// helpers), freed with the handle through its `_destroy`.
+    ///
+    /// The caller guarantees that `destroy` frees exactly `ptr`: it is the
+    /// destructor paired with the helper that made `ptr` (a `box_*` helper and
+    /// its `_destroy`, `into_c_string` and `destroy_string_element`). It also
+    /// guarantees that the handle may be freed from any thread, and read
+    /// through its accessors from several threads at once.
     pub(crate) fn handle(ptr: *mut c_void, destroy: unsafe fn(*mut c_void)) -> Arc<Self> {
         Arc::new(Self { ptr, destroy: Some(destroy) })
     }
@@ -126,9 +139,11 @@ impl Drop for FfiValue {
         if let Some(destroy) = self.destroy
             && !self.ptr.is_null()
         {
-            // SAFETY: `ptr` came from `Box::into_raw` of the type `destroy` was
-            // instantiated for, and this is the only drop of it (the `Arc`
-            // sharing this value has just reached zero).
+            // SAFETY: `ptr` is non-null (checked above) and is the pointer `destroy` was
+            // paired with at construction. For `owned` that is a `Box::into_raw::<T>`
+            // paired with `destroy_boxed::<T>`. For `handle` it is a handle paired with
+            // the destructor that frees it, which `handle`'s caller guarantees. This is
+            // the only drop of it, since the last `Arc` sharing this value has just gone.
             unsafe { destroy(self.ptr) };
         }
     }
@@ -148,6 +163,10 @@ where
 /// Maps a typed future to the C handle `boxer` builds from its value when it
 /// resolves, freed with `destroy` (the handle type's `_destroy`) together with
 /// the future's value.
+///
+/// The caller gives each handle `boxer` makes the guarantees
+/// [`FfiValue::handle`] requires: `destroy` frees exactly that handle, and the
+/// handle may be freed and read from any thread.
 pub(crate) fn map_future_handle<T, F>(future: &KafkaFuture<T>, boxer: F, destroy: unsafe fn(*mut c_void)) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,
