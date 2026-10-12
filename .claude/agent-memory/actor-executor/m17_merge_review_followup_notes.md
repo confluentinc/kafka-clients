@@ -1,13 +1,14 @@
 ---
-name: m15-merge-review-followup
+name: m17-merge-review-followup
 description: Merging master's rust/ restructure into a long-lived branch (stranded new dirs, a pre-move root target/ is not ignored, rename list, auto-merged files still break); cargo xtask lint without kafka/ (decomposed, then run in full via a stand-in); a Public-list class in an unsupported package must stay crate-private; fmt::from_fn for nested redacted Debug; sweep a defect class by type containment
 metadata:
   type: project
 ---
 
-Round 4 of Milestone 15 (2026-10-02, Actor 85): `origin/master` `4eb87db1` merged into
+Round 4 of Milestone 17, numbered 15 until 2026-10-12 (2026-10-02, Actor 85):
+`origin/master` `4eb87db1` merged into
 `fix/password-type-redaction` (merge `091f6f9d`), then the pull-request review answered
-(fixup `21be3984`, docs `3455a5c0`). See [[m15-password-redaction]].
+(fixup `21be3984`, docs `3455a5c0`). See [[m17-password-redaction]].
 
 **Merging across the `rust/` restructure (master #210).**
 - git pairs every file the branch MODIFIED with its new `rust/...` path, but a directory the

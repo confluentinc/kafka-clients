@@ -1,11 +1,12 @@
 ---
-name: review-m15-password-redaction
-description: M15 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); r5 CLOSED clean (pub(crate) mod fix); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges; compiler-mutant proof for "no public signature names X"
+name: review-m17-password-redaction
+description: M17 Password/secret-redaction review (Critic 85): P1 CLOSED r2, P2 CLOSED r3, r4 (master merge) found 1 blocker — Password pub in an unsupported package fails check-public-audience (Public list alone is not enough); r5 CLOSED clean (pub(crate) mod fix); raw-map Debug = key set only; {:?} log sinks; Rust-only holder must mask like the Java class it feeds; +/- parity diff for merges; compiler-mutant proof for "no public signature names X"
 metadata:
   type: project
 ---
 
-Critic 85 reviewed M15 (Password type + Debug redaction, 2 commits). Result: 1 in-scope
+Critic 85 reviewed M17, numbered 15 until 2026-10-12 (Password type + Debug redaction,
+2 commits). Result: 1 in-scope
 Behavior Mismatch, plus 12 out-of-scope Phase-2 candidates. Round 2 (fixup `868ea49d`,
 key-set rendering, predicates deleted) closed with 0 issues; the plan was left describing the
 superseded by-key design, which I flagged for the Manager's handoff rather than as an Actor issue. The rest of the phase was
@@ -57,7 +58,7 @@ the fields the input *can set*. There were eight `Option<Password>` fields but o
 
 **Lesson 5: an asymmetry that predates the milestone is a note, not the phase's defect.**
 - The SCRAM and IncrementalAlterConfigs request `Display` renders counts only, while Java
-  renders `maskData(data)`. It came from `3e84b9bd` (PR #127), before M15.
+  renders `maskData(data)`. It came from `3e84b9bd` (PR #127), before M17.
 - The approved plan row said "delegate Debug to the existing Display". The Display hides
   more than Java, so it leaks nothing.
 - **Why:** a Behavior Mismatch filed against the phase would ask the Actor to go beyond the

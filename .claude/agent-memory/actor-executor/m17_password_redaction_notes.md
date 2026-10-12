@@ -1,11 +1,12 @@
 ---
-name: m15-password-redaction
-description: M15 Password/Debug redaction (Actor 85, Phases 1-2) — Vec<u8> Debug teeth, raw maps render as key sets, file-level allow(dead_code) defeats dead-code teeth, log lines can't be captured in lib tests, verify without the kafka/ submodule
+name: m17-password-redaction
+description: M17 Password/Debug redaction (Actor 85, Phases 1-2) — Vec<u8> Debug teeth, raw maps render as key sets, file-level allow(dead_code) defeats dead-code teeth, log lines can't be captured in lib tests, verify without the kafka/ submodule
 metadata:
   type: project
 ---
 
-Milestone 15 (branch `fix/password-type-redaction`). Phase 1 (2026-09-29): `Password`
+Milestone 17, numbered 15 until 2026-10-12, which its commit subjects still show (branch
+`fix/password-type-redaction`). Phase 1 (2026-09-29): `Password`
 type, typed SSL/SASL secret fields, hand-written/delegating `Debug` on ProducerConfig,
 DelegationToken + six wrappers, UserScramCredentialUpsertion. Phase 2 (2026-09-30)
 closed the adjacent leaks Phase 1 had only reported: the NetworkClient cancel log,
@@ -57,7 +58,7 @@ options build renders it (`"Redacted"` for a sensitive ConfigEntry value, `"REDA
 + empty hmac for CreateDelegationTokenResponse) — never its length.
 Phase 2's item list missed the sibling `DescribeDelegationTokenResponseOptions`. The
 pull-request review caught it, and round 4 fixed it (2026-10-02). After fixing one instance,
-sweep every struct holding the secret-bearing type; see [[m15-merge-review-followup]].
+sweep every struct holding the secret-bearing type; see [[m17-merge-review-followup]].
 
 **Verify without the kafka/ submodule:** `make verify` = build (its `build-c` runs
 `git submodule update`) + format-check + lint + `test-rust-all-features`

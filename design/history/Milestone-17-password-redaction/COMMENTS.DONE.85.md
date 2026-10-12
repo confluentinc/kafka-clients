@@ -159,7 +159,7 @@ Java references point to Apache Kafka at `26b251a451ce941d3d7a55e6487bcb7f16b5ad
   - Master `4eb87db1` gives the same counts, except `check-java-name`'s 8373. The branch's five more are `Password`'s three markers, its file and the `pub use` in `types/mod.rs`, which that rule checks although they are crate-private.
   - With only the module change, `cargo doc` fails with exactly the five link errors.
 
-The entries below are round 6: the pull-request review, relayed by the Manager on 2026-10-12. Their line numbers are at `384b9c2a`, the user's merge of `origin/master` `ca5d4f3f`.
+The entries below are round 6: the pull-request review, relayed by the Manager on 2026-10-12. Their line numbers are at `384b9c2a`, the user's merge of `origin/master` `ca5d4f3f`. Their paths are as item 8 renamed them, except in item 8's own entry, which quotes the review.
 
 ## Issue: `ConfigEntry`, `ConfigSynonym` and `AlterConfigOp` `Display` claim to mirror Java's `toString()` but print Rust `Debug` names
 - **File**: `rust/src/admin/config_entry.rs:523-547` (`impl Display for ConfigEntry`), `:172-182`
@@ -362,7 +362,7 @@ The entries below are round 6: the pull-request review, relayed by the Manager o
 - The milestone keeps the number 15 in this commit; item 8 renumbers it.
 
 ## Issue: agent memory — one machine's setup in a public repo; the `--no-verify` guidance must require the user's OK
-- **File**: `.claude/agent-memory/actor-executor/m15_merge_review_followup_notes.md:20-23` and
+- **File**: `.claude/agent-memory/actor-executor/m17_merge_review_followup_notes.md:20-23` and
   `:116-128`; `.claude/agent-memory/kafka-critic/review_lint_java_rules_repro.md:27-32`;
   `.claude/agent-memory/actor-executor/commit_hook_timeout.md`,
   `.claude/agent-memory/actor-executor/workflow_docker_wedged_no_verify.md`, and their index lines
@@ -391,6 +391,77 @@ The entries below are round 6: the pull-request review, relayed by the Manager o
   - The dated count of orphaned containers and volumes is replaced by a generic description.
   - The two `MEMORY.md` index lines say the same, and the two notes that pointed at the bypass (`python_bindings_local_build_test_macos.md`, `python_soak_client_notes.md`) now point at the rule.
   - `python_bindings_local_build_test_macos.md` also drops its one-machine wording about the Docker multilanguage harness: "(avoid — it has wedged this machine)" now reads "(avoid running it locally: it can wedge Docker)".
-- `9a99cdea`: `m15_merge_review_followup_notes.md` drops the cache size, the `.git/info/exclude` advice, the zsh and BSD shell-gotcha list and the "Attribution" paragraph. It keeps the portable fact: after the `rust/` move, a pre-move root `target/` is not ignored.
+- `9a99cdea`: `m17_merge_review_followup_notes.md` drops the cache size, the `.git/info/exclude` advice, the zsh and BSD shell-gotcha list and the "Attribution" paragraph. It keeps the portable fact: after the `rust/` move, a pre-move root `target/` is not ignored.
 - `9bbd226a`: `kafka-critic/review_lint_java_rules_repro.md` drops its "Shell traps hit while doing this" list, which `afbef61f` added and `3e444252` extended. The recipe and its round-5 section are unchanged.
 - The user's decisions on the hook (2026-10-12) are in plan §13.4, and §13.5 records how each commit of this round was verified. Seven older memory files still describe one machine; plan §13.3 lists them as a follow-up.
+
+## Issue: stale claims in the PLAN, `COMMENTS.DONE.85.md` and the Critic's final-review record
+- **File**: `design/history/Milestone-17-password-redaction/PLAN.md:545-546` and §12 (`:499-508`);
+  `COMMENTS.DONE.85.md:55`; `critic-85-final-review.md:5`.
+- **Origin**: PR #220 thread 4246667939 (pranavrth).
+- **Severity**: Documentation.
+- **Description**:
+  - `PLAN.md:546` and `COMMENTS.DONE.85.md:55` say `DescribeDelegationTokenResponseOptions` "is public".
+    `common::requests` is `pub(crate)` (`rust/src/common/mod.rs:59`) since #209 (`383f3d30`), and #209
+    was already in the branch when round 4 wrote that: it came in with merge `091f6f9d` (master
+    `4eb87db1`). So users could never reach the type from this branch, and the leak was crate-internal.
+  - PLAN §12 describes one merge of master and says `4eb87db1` "was merged into the branch at
+    `79db2f0f`". The branch has three merges of master:
+    - `79db2f0f`: master `010d0620` into `58622a55`;
+    - `091f6f9d`: master `4eb87db1` into `79db2f0f`;
+    - `384b9c2a`: master `ca5d4f3f` into `3e444252`, made by the user on 2026-10-12. It brought #206,
+      #212, #205, #207, #184 and #187.
+  - `critic-85-final-review.md:5` says "The one in-scope issue was resolved … No in-scope issue is open."
+    `COMMENTS.DONE.85.md` now lists three resolved issues, two of them from round 4.
+- **Expected**:
+  - Correct each claim.
+  - In the Critic's record, add a dated note listing the later rounds' issues instead of rewriting the
+    record.
+  - Record round 6 (this review) in the PLAN as a new section after §12. It must cover each item's fix,
+    the renumbering, the follow-ups from items 1 and 6, and the `--no-verify` decision.
+- **Actual**: as described.
+
+**Resolved in `fc0d2a82`** (a fixup of `3455a5c0`, which wrote the plan's §12 and the round-4 entry above on `DescribeDelegationTokenResponseOptions`; `a963fda2` wrote the Critic's line). Each claim is corrected, and round 6 is recorded:
+- Plan §12 lists the branch's three merges of `master` in a table: the date, where `master` was, what it was merged into and the PRs it brought in. §12.1 says that `091f6f9d` merged `master` into the branch whose tip was then the first merge, `79db2f0f`.
+- Plan §12.2 and that round-4 entry no longer call `DescribeDelegationTokenResponseOptions` public. It was crate-internal: `common::requests` has been `pub(crate)` (`rust/src/common/mod.rs:59`) since #209 (`383f3d30`), which came into the branch with merge `091f6f9d`, before round 4 wrote that. Each correction is marked as one.
+- `critic-85-final-review.md` gains a dated note after its round-1 summary line, listing the later rounds' issues. The record itself is not rewritten.
+- Plan §13 records round 6: each item's fix and commit, the renumbering, the follow-ups (from items 1, 6 and 11, and a document from `master` that still advises `--no-verify`), the user's decisions on the pre-commit hook, and how each commit of this round was verified.
+- This file gains the round-6 entries of items 1–7, 9 and 11, each with its resolution. Item 4's entry names both of its commits, and item 11's all three. The entries of items 10 and 8 came with item 8's commit, once this commit had a SHA.
+- Docs-only, so there is no test to teeth-check.
+
+## Issue: after the merge there are two "Milestone 15" headings; renumber this milestone to 17
+- **File**: `design/history/MILESTONES.md:71` (this milestone) and `:75` (master's test-parity
+  Milestone 15, #206). Master also has Milestone 16 (`:79`, #187).
+- **Origin**: PR #220 thread 4246667924 (pranavrth).
+- **Severity**: Documentation.
+- **Expected**:
+  - `git mv design/history/Milestone-15-password-redaction design/history/Milestone-17-password-redaction`.
+  - `MILESTONES.md`: the heading becomes `## Milestone 17`, the entry moves after `## Milestone 16`, and
+    its link points at the new folder. Do not touch master's Milestone 15 and 16 entries. Keep this PR's
+    `## Milestone 14` entry.
+  - `design/current/status.md`: "Milestone 15" becomes 17 in the current-state block and in the title
+    (`Milestones 1–17 complete`), and the PLAN link is updated. Add one sentence pointing to
+    `MILESTONES.md` for Milestones 15 and 16, so the block does not skip them silently.
+  - In the renamed folder (`PLAN.md`, `COMMENTS.DONE.85.md`, `critic-85-final-review.md`), rename
+    "Milestone 15" to "Milestone 17" wherever it names this milestone. Leave quoted commit subjects
+    (`fix(M15): …`) unchanged, since they are history. Add one line to the PLAN saying the milestone was
+    renumbered from 15 to 17 on 2026-10-12 because #206 took 15, so `M15` in commit subjects means this
+    milestone.
+  - Agent memory: `git mv` `actor-executor/m15_password_redaction_notes.md`,
+    `actor-executor/m15_merge_review_followup_notes.md` and `kafka-critic/review_m15_password_redaction.md`
+    to their `m17` names. Update their `name:` slugs, every `[[…]]` link to them, both `MEMORY.md`
+    index lines, and the M15 mentions in `workflow_teeth_check_mtime.md` and `review_lint_java_rules_repro.md`.
+  - Verify: `git grep -n 'Milestone-15-password\|m15_\|m15-'` prints nothing. `git grep -n 'Milestone 15\|M15'`
+    hits only master's test-parity milestone, quoted commit subjects and the renumbering note.
+  - Use a plain `docs:` commit, not a fixup: no earlier commit is wrong, because master's #206 took 15
+    after this branch had used it.
+- **Actual**: two `## Milestone 15` headings.
+
+**Resolved in** the plain `docs:` commit after `fc0d2a82`, which adds this entry. It is not a fixup: no earlier commit is wrong, because `master`'s #206 took the number 15 after this branch had used it.
+- `design/history/Milestone-15-password-redaction` is now `design/history/Milestone-17-password-redaction`. The milestone's three agent-memory notes have their `m17` names, and their `name:` slugs, their descriptions, every `[[…]]` link to them and their index lines in both `MEMORY.md` files follow. Each note now says that the milestone was numbered 15 until 2026-10-12.
+- `MILESTONES.md`: the entry is `## Milestone 17`, after `master`'s Milestone 16, and links the new folder. `master`'s Milestones 15 and 16 and this branch's Milestone 14 are unchanged.
+- `status.md`: the title says `Milestones 1–17 complete`. The current-state block, now dated 2026-10-12, names Milestone 17 and links the new folder, and a sentence says that Milestones 15 and 16 came from `master` and points to `MILESTONES.md` for every milestone.
+- In this folder, "Milestone 15" and `M15` became 17 wherever they named this milestone. The plan gains a dated line at its top: the milestone was renumbered from 15 to 17 because #206 took 15, so `M15` in this branch's commit subjects means this milestone. The Critic's record says in its round-6 note that this item renamed it too.
+- The `M15` mentions in `workflow_teeth_check_mtime.md` and `review_lint_java_rules_repro.md` are now `M17`.
+- Checked: `git grep -n 'Milestone-15-password\|m15_\|m15-'` prints only this entry, which quotes the review. `git grep -n 'Milestone 15\|M15'` hits only `master`'s Milestone 15 heading, this entry and the plan's renumbering lines.
+- Docs-only, so there is no test to teeth-check.

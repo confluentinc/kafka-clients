@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Without `kafka/`, `cargo xtask lint` cannot run three of the six `lint-custom` rules. It reports them as "cannot run" and **stops before** doc hygiene, module-path hygiene and clippy. So a branch can look lint-clean locally while CI's Verify Rust job, which runs `cargo xtask fetch-java-refs` first, fails. This happened in M15 round 4 (see [[review-m15-password-redaction]]).
+Without `kafka/`, `cargo xtask lint` cannot run three of the six `lint-custom` rules. It reports them as "cannot run" and **stops before** doc hygiene, module-path hygiene and clippy. So a branch can look lint-clean locally while CI's Verify Rust job, which runs `cargo xtask fetch-java-refs` first, fails. This happened in M17 round 4 (see [[review-m17-password-redaction]]).
 
 **What the rules read.**
 - The working tree's `../kafka/clients/src/{main,test}/java` (the `JavaIndex`).
@@ -24,12 +24,12 @@ Without `kafka/`, `cargo xtask lint` cannot run three of the six `lint-custom` r
    - The **master control run** is what turns "fails" into "this branch introduced it".
 6. Trial a fix. Edit a third copy, then run the full `xtask lint` there, now reachable past lint-custom, plus `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`. This is CI's separate doc-check job.
 
-**Re-running in a later round (M15 round 5).**
+**Re-running in a later round (M17 round 5).**
 - The stand-in is an ordinary git repo: within a session, symlink it into fresh `git archive` copies instead of
   rebuilding it. Across sessions the scratchpad may be gone; rebuild by the recipe.
 - Cost once the stand-in exists: xtask build about 3 s with its own `CARGO_TARGET_DIR`, `lint-custom` about 8 s per copy.
 - Always pair HEAD with the master control run, and attribute any count delta by deleting the new module in a copy
-  (see [[review-m15-password-redaction]] Lesson 13).
+  (see [[review-m17-password-redaction]] Lesson 13).
 - If the brief scopes the re-run to `lint-custom` only, say so in the report and argue module-path hygiene from its
   inputs: it is textual (parent `use` re-exports vs `::<file_module>::<Name>` paths), so unchanged `use` lines and no
   `::<file_module>::` path mean an unchanged result.

@@ -17,6 +17,8 @@ The one in-scope issue was resolved in `868ea49d` and moved to `COMMENTS.DONE.85
 >   `ConfigTest.shouldImplementToStringProperly`; the doc of the `SaslConfigs` `password` field; the
 >   renumbering of this milestone; and corrections to the status pages, the plan and these records, and
 >   the agent memory. Plan §13 lists their commits.
+> - Item 8 of round 6 renumbered this milestone from 15 to 17, in this record too: the plan's path in
+>   round 2's notes, and two mentions in round 4's "Verified correct".
 
 ## Out of phase scope — candidates for Phase 2 (not to be fixed in this phase)
 
@@ -91,7 +93,7 @@ No new issue. No `## Issue` entry is open in this file.
   - The test comment says "`[hidden]` comes from the seven typed `Password` fields only". The DONE note says "once per typed `Password` field", and the commit message says "(the typed Password fields)".
   - Both read as if `ProducerConfig` had exactly seven typed `Password` fields. It has eight, and the props can set seven of them (see above).
   - The assertion itself is correct, so this does not need a fixup.
-- **For the Manager's §9.4 handoff.** `design/history/Milestone-15-password-redaction/PLAN.md` still describes the by-key design that was replaced:
+- **For the Manager's §9.4 handoff.** `design/history/Milestone-17-password-redaction/PLAN.md` still describes the by-key design that was replaced:
   - §4.3 (its title and the predicates), §5, §6 step 3, §7.2, §8 item 7 and §9.3 describe the `is_password_config` predicates.
   - §10.2 still says "The by-key form is closer to Java's `logAll()` behaviour", which round 1 refuted.
   - A future reviewer checking the branch against the plan would report the missing predicates as undelivered.
@@ -252,13 +254,13 @@ None is in Phase 2 scope, and none leaks a secret. All three are notes for later
 
 ### Verified correct
 - **The merge.**
-  - Every Milestone 15 redaction survived it, by a per-file `+`/`-` parity diff of the milestone delta before and
+  - Every Milestone 17 redaction survived it, by a per-file `+`/`-` parity diff of the milestone delta before and
     after.
   - No master hunk was reverted.
   - The renamed-name touch-ups in cleanly merged files are minimal and correct.
 - **`ProducerConfig`'s hand-written `Debug`** destructures all of master's fields.
 - **The fixup** is faithful to `DescribeDelegationTokenResponse.java:131-140`, and its test is non-vacuous.
-- **The docs** carry master's text plus the M15 notes.
+- **The docs** carry master's text plus the M17 notes.
 - **No internal identifiers** appear in the four commits.
 - **Local results.**
   - `cargo test --all-features -- --skip __grpc`: 4756 passed.

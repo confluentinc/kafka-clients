@@ -1,4 +1,4 @@
-# Milestone 15 — `Password` type and secret redaction
+# Milestone 17 — `Password` type and secret redaction
 
 **Status:** COMPLETE (2026-09-29) on the branch below; the user opens the PR. Phase 1 done via
 Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` after one Critic finding
@@ -8,6 +8,9 @@ answered (§12) 2026-10-02** (merge `091f6f9d`, fixup `21be3984`, Actor 85; the 
 its pull request is open). **Critic 85's round-4 blocker fixed (§12.4) 2026-10-02:** `Password` is
 crate-private (fixup `3d11391f`). **Round 6, the pull-request review, answered (§13) 2026-10-12**
 (Actor 85), after the user's merge of `master` (`384b9c2a`).
+**Renumbered 2026-10-12:** this milestone was renumbered from 15 to 17, because `master`'s #206 took
+the number 15 (and #187 took 16). `M15` in this branch's commit subjects means this milestone
+(§13.2, item 8).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -514,7 +517,7 @@ That merge, `091f6f9d`, is the second of the branch's three merges of `master`. 
 ### 12.1 Merge of `master` (`091f6f9d`)
 
 `origin/master` at `4eb87db1` was merged into the branch, whose tip was then the first merge, `79db2f0f`.
-Master's changes are kept, and so is every Milestone 15 redaction. The merge commit's body lists each
+Master's changes are kept, and so is every Milestone 17 redaction. The merge commit's body lists each
 conflicted file and its resolution.
 
 - **§1–§11 predate the merge and are left as written**, except §5's `types` line, which §12.4 amends.
@@ -717,8 +720,8 @@ commit bodies list the mutations.
   their redacting `Display`. `UserScramCredentialUpsertion` has no `Display`, as Java has no `toString()`
   there, and hides its salt and password in a hand-written `Debug`. Both files now count three Rust-only
   options types, and call `password` what it is: the Rust-only `SaslConfigs` field, not a config key.
-- **Item 10** (the commit that adds this section, a fixup of `3455a5c0`) corrects this plan,
-  `COMMENTS.DONE.85.md` and the Critic's record:
+- **Item 10** (`fc0d2a82`, the commit that added this section, a fixup of `3455a5c0`) corrects this
+  plan, `COMMENTS.DONE.85.md` and the Critic's record:
   - §12 now lists the branch's three merges of `master`. It used to describe only `091f6f9d`.
   - §12.2 and `COMMENTS.DONE.85.md` called `DescribeDelegationTokenResponseOptions` public. It was
     crate-internal: `common::requests` has been `pub(crate)` (`rust/src/common/mod.rs:59`) since #209
@@ -729,8 +732,12 @@ commit bodies list the mutations.
   The agent memory drops what described one machine or person: a cache size, local exclude advice, two
   lists of shell traps, and one session's attribution note. The two notes on the pre-commit hook now
   forbid `--no-verify` without the user's OK (§13.4).
-- **Item 8** (the plain `docs:` commit that follows the one adding this section) renumbers the milestone
-  from 15 to 17.
+- **Item 8** (the plain `docs:` commit that follows `fc0d2a82`) renumbers the milestone from 15 to 17.
+  It renames this directory to `Milestone-17-password-redaction` and the milestone's three
+  agent-memory notes to their `m17` names, moves the `MILESTONES.md` entry after master's
+  Milestone 16, and updates `status.md`, this plan's title and the records in this directory. The
+  branch's commit subjects keep `M15`: they are history, and the line at the top of this plan says
+  what it means.
 
 ### 13.3 Follow-ups, not done here
 
@@ -812,8 +819,8 @@ verified.
     link the change touches resolves.
 - **The commits verified that way**, in order: `e42bb1ed` (item 3), `fd48956e` (item 4), `a8cf51fe`
   (item 5), `a20fa3cb` (item 6), `937ea026` (item 4's doc links, which item 7's doc check found),
-  `937dad94` (item 7), `4f58998c` (item 9), `ce1140d8`, `9a99cdea` and `9bbd226a` (item 11), the commit
-  that adds this section (item 10) and the plain `docs:` commit that follows it (item 8).
+  `937dad94` (item 7), `4f58998c` (item 9), `ce1140d8`, `9a99cdea` and `9bbd226a` (item 11), `fc0d2a82`
+  (item 10, which added this section) and the plain `docs:` commit that follows it (item 8).
 - **The full gate runs once on the final tree, after the renumbering commit:** `make verify-sandbox`;
   `cargo test --all-features --lib` from `rust/`, because the hook runs none of the crate's unit
   tests; `make doc-check`, which the hook does not run and CI runs as a job of its own;

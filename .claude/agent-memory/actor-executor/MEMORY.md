@@ -178,5 +178,5 @@
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
 - [Docker wedged → stop and ask](workflow_docker_wedged_no_verify.md) — hook needs Docker; never bypass it alone: ask the user (via the Manager) and list the checks owed
 - [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
-- [M15 Password redaction](m15_password_redaction_notes.md) — Vec<u8> Debug teeth; raw maps = key sets; file allow(dead_code) kills dead-code teeth
-- [M15 merge + review](m15_merge_review_followup_notes.md) — rust/ move strands new dirs; Java lint rules via stand-in; unsupported pkg → pub(crate)
+- [M17 Password redaction](m17_password_redaction_notes.md) — Vec<u8> Debug teeth; raw maps = key sets; file allow(dead_code) kills dead-code teeth
+- [M17 merge + review](m17_merge_review_followup_notes.md) — rust/ move strands new dirs; Java lint rules via stand-in; unsupported pkg → pub(crate)

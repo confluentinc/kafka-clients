@@ -31,7 +31,7 @@ as unchanged, so the mutation silently does nothing and the teeth run reports
 **Clear `__pycache__` before every run** in any Python teeth harness. See
 [[m11_bindings_b6_notes]].
 
-## `deny(warnings)` turns a mutation into a silent compile failure (M15 fix cycle)
+## `deny(warnings)` turns a mutation into a silent compile failure (M17 fix cycle)
 
 `src/lib.rs:16` is `#![deny(warnings)]`. A mutation that stops using an import
 (e.g. swapping a `BTreeSet` for a `BTreeMap`) fails to COMPILE with
@@ -40,13 +40,13 @@ detects compile failure by grepping `error[` reports "compiled, test not red",
 which reads as a toothless test. **How to apply:** detect `could not compile`,
 keep every import used inside the mutation (`let _: BTreeSet<&str> = BTreeSet::new();`),
 and print the panic line of each red run to prove it hit the intended assertion.
-See [[m15-password-redaction]].
+See [[m17-password-redaction]].
 
-## An exact-rendering assertion masks the assertions after it (M15 review follow-up)
+## An exact-rendering assertion masks the assertions after it (M17 review follow-up)
 
 A test that first pins the exact `{:?}` string, then checks "secret absent" and "field
 present", goes red at the exact-string assertion for EVERY mutation. That run proves nothing
 about the specific assertions behind it. To show each one has teeth, re-run the mutations with
 the exact assertion (and any other catch-all) temporarily removed. Confirm that each mutation
 now fails at its own message ("token id leaked", "owner missing"), and report both runs. See
-[[m15-merge-review-followup]].
+[[m17-merge-review-followup]].
