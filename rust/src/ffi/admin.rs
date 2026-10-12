@@ -176,9 +176,10 @@ use crate::consumer::OffsetAndMetadata;
 
 use super::common::{
     self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
+    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t, spawn_callback_task,
 };
 use super::consumer::kafka_common_Node_t;
+use super::ffi_guard;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -259,6 +260,13 @@ fn build_admin_handle(
 ///
 /// `admin` must be non-null and created by an admin-client constructor.
 unsafe fn handle_ref(admin: *const kafka_admin_AdminClient_t) -> &'static AdminHandle {
+    // SAFETY: Per this helper's `# Safety`, `admin` is non-null and was created by an
+    // admin-client constructor, i.e. it is the `Box<AdminHandle>` leaked by `Box::into_raw`
+    // in `build_admin_handle` and freed only by `kafka_admin_AdminClient_destroy`, so the
+    // pointer is aligned and points at a live `AdminHandle`. The `'static` lifetime is
+    // nominal: each caller may use the reference only while the C caller guarantees the
+    // handle is alive, which for every caller except `admin_async_void_op` means the
+    // duration of its own synchronous call.
     unsafe { &*(admin as *const AdminHandle) }
 }
 
@@ -295,6 +303,12 @@ pub struct kafka_admin_AdminClientProperties_t {
 ///
 /// `props` must be a valid handle from an `AdminClientProperties` constructor.
 unsafe fn properties_ref(props: *const kafka_admin_AdminClientProperties_t) -> &'static HashMap<String, String> {
+    // SAFETY: Per this helper's `# Safety`, `props` is a valid handle from an
+    // `AdminClientProperties` constructor, i.e. the `Box<HashMap<String, String>>` leaked
+    // by `Box::into_raw` in `kafka_admin_AdminClientProperties_new` / `_from_configs` and
+    // freed only by `kafka_admin_AdminClientProperties_destroy`, so it is non-null, aligned
+    // and live; callers use the reference only for the duration of their own synchronous
+    // call.
     unsafe { &*(props as *const HashMap<String, String>) }
 }
 
@@ -304,6 +318,14 @@ unsafe fn properties_ref(props: *const kafka_admin_AdminClientProperties_t) -> &
 ///
 /// `props` must be a valid handle from an `AdminClientProperties` constructor.
 unsafe fn properties_mut(props: *mut kafka_admin_AdminClientProperties_t) -> &'static mut HashMap<String, String> {
+    // SAFETY: Per this helper's `# Safety`, `props` is a valid handle from an
+    // `AdminClientProperties` constructor (the `Box<HashMap<String, String>>` leaked by
+    // `Box::into_raw` in `kafka_admin_AdminClientProperties_new` / `_from_configs`, freed
+    // only by `kafka_admin_AdminClientProperties_destroy`), so it is non-null, aligned and
+    // live. Exclusivity of the `&mut` rests on the C caller not using the properties handle
+    // from another thread during the call: it is an opaque single-owner builder with no
+    // thread-safety claim, and the sole caller (`kafka_admin_AdminClientProperties_put`)
+    // uses the reference only for one `insert` within its own call.
     unsafe { &mut *(props as *mut HashMap<String, String>) }
 }
 
@@ -313,6 +335,7 @@ unsafe fn properties_mut(props: *mut kafka_admin_AdminClientProperties_t) -> &'s
 ///
 /// A non-null opaque properties handle. The caller must free it with
 /// [`kafka_admin_AdminClientProperties_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AdminClientProperties_new() -> *mut kafka_admin_AdminClientProperties_t {
     let map: HashMap<String, String> = HashMap::new();
@@ -335,6 +358,7 @@ pub extern "C" fn kafka_admin_AdminClientProperties_new() -> *mut kafka_admin_Ad
 ///
 /// `configs` must be NULL or point to a NULL-terminated array of valid,
 /// null-terminated C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_from_configs(
     configs: *const *const c_char,
@@ -345,15 +369,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_from_configs(
     let mut map: HashMap<String, String> = HashMap::new();
     let mut i = 0usize;
     loop {
+        // SAFETY: `configs` is non-null (checked above) and, per this function's `#
+        // Safety`, points to a NULL-terminated array of valid C strings. The loop advances
+        // `i` by two from zero and every key and value read so far was non-null (a NULL key
+        // breaks the loop, a NULL value returns early), so the terminator has not been
+        // passed yet and element `i` lies within the array.
         let key_ptr = unsafe { *configs.add(i) };
         if key_ptr.is_null() {
             break;
         }
+        // SAFETY: `key_ptr`, the element at `i`, is non-null (checked above), so the NULL
+        // terminator that this function's `# Safety` promises for `configs` lies at index
+        // `i + 1` or later; element `i + 1` is therefore within the array, and a NULL read
+        // there is handled by returning null.
         let val_ptr = unsafe { *configs.add(i + 1) };
         if val_ptr.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `key_ptr` is non-null (checked above) and, per this function's `#
+        // Safety`, every element of `configs` before the terminator is a valid,
+        // null-terminated C string; `CStr::from_ptr` borrows it only for the
+        // `to_string_lossy` copy made in this call.
         let key = unsafe { CStr::from_ptr(key_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `val_ptr` is non-null (checked above) and, per this function's `#
+        // Safety`, every element of `configs` before the terminator is a valid,
+        // null-terminated C string; `CStr::from_ptr` borrows it only for the
+        // `to_string_lossy` copy made in this call.
         let val = unsafe { CStr::from_ptr(val_ptr) }.to_string_lossy().to_string();
         map.insert(key, val);
         i += 2;
@@ -367,6 +408,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_from_configs(
 /// # Safety
 ///
 /// `props` must be a valid handle; `key` and `value` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_put(
     props: *mut kafka_admin_AdminClientProperties_t,
@@ -376,8 +418,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_put(
     if props.is_null() || key.is_null() || value.is_null() {
         return;
     }
+    // SAFETY: `key` is non-null (checked above together with `props` and `value`) and, per
+    // this function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
     let map = unsafe { properties_mut(props) };
+    // SAFETY: `value` is non-null (checked above together with `props` and `key`) and, per
+    // this function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
     let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    // SAFETY: `properties_mut` requires a valid `AdminClientProperties` handle; `props` is
+    // non-null (checked above) and, per this function's `# Safety`, a valid handle, i.e.
+    // the map leaked by `Box::into_raw` in `kafka_admin_AdminClientProperties_new` /
+    // `_from_configs`. The `&mut HashMap` is used only for this one `insert` within the
+    // call; its exclusivity rests on the C caller not using the same properties handle from
+    // another thread meanwhile, as for every builder handle in this module (none carries a
+    // thread-safety claim).
     let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
     map.insert(k, v);
 }
@@ -388,9 +443,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_put(
 ///
 /// `props` must be null or a valid handle from an `AdminClientProperties`
 /// constructor. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut kafka_admin_AdminClientProperties_t) {
     if !props.is_null() {
+        // SAFETY: `props` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid handle from an `AdminClientProperties` constructor, i.e. the
+        // `Box<HashMap<String, String>>` leaked by `Box::into_raw` in
+        // `kafka_admin_AdminClientProperties_new` / `_from_configs`. This is the single,
+        // final use: the contract states the pointer is invalid after this call and no
+        // other function frees it.
         unsafe {
             drop(Box::from_raw(props as *mut HashMap<String, String>));
         }
@@ -420,6 +482,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut k
 /// # Safety
 ///
 /// `props` must be a valid, non-null properties handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_new(
     props: *const kafka_admin_AdminClientProperties_t,
@@ -428,15 +491,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
     init_default_logger();
     if props.is_null() {
         if !out_error.is_null() {
+            // SAFETY: `out_error` is non-null (checked above) and, per this function's
+            // documentation of `out_error` (null if the caller does not need error details,
+            // otherwise a location for the error handle), it is writable; exactly one
+            // element is written, a fresh handle from `box_error` whose ownership passes to
+            // the C caller.
             unsafe { *out_error = box_error(Error::local_illegal_argument("properties handle must not be null")) };
         }
         return std::ptr::null_mut();
     }
+    // SAFETY: `properties_ref` requires a valid `AdminClientProperties` handle; `props` is
+    // non-null (checked above) and, per this function's `# Safety`, a valid, non-null
+    // properties handle, i.e. the map leaked by `Box::into_raw` in
+    // `kafka_admin_AdminClientProperties_new` / `_from_configs`. The reference is used only
+    // to build the `AdminClientConfig` within this call, during which the C caller keeps
+    // the handle alive and retains ownership of it.
     let map = unsafe { properties_ref(props) };
     let config = match AdminClientConfig::new(map) {
         Ok(c) => c,
         Err(e) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above) and, per this function's
+                // documentation of `out_error` (null if the caller does not need error
+                // details, otherwise a location for the error handle), it is writable;
+                // exactly one element is written, a fresh handle from `box_error` whose
+                // ownership passes to the C caller.
                 unsafe { *out_error = box_error(e) };
             }
             return std::ptr::null_mut();
@@ -447,6 +526,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
         Ok(rt) => rt,
         Err(e) => {
             if !out_error.is_null() {
+                // SAFETY: `out_error` is non-null (checked above) and, per this function's
+                // documentation of `out_error` (null if the caller does not need error
+                // details, otherwise a location for the error handle), it is writable;
+                // exactly one element is written, a fresh handle from `box_error` whose
+                // ownership passes to the C caller.
                 unsafe {
                     *out_error = box_error(Error::local_illegal_state(format!(
                         "failed to create tokio runtime for AdminClient: {e}"
@@ -465,6 +549,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
             Ok(a) => Box::new(a) as Box<dyn Admin>,
             Err(e) => {
                 if !out_error.is_null() {
+                    // SAFETY: `out_error` is non-null (checked above) and, per this
+                    // function's documentation of `out_error` (null if the caller does not
+                    // need error details, otherwise a location for the error handle), it is
+                    // writable; exactly one element is written, a fresh handle from
+                    // `box_error` whose ownership passes to the C caller.
                     unsafe { *out_error = box_error(e) };
                 }
                 return std::ptr::null_mut();
@@ -473,6 +562,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
     };
 
     if !out_error.is_null() {
+        // SAFETY: `out_error` is non-null (checked above) and, per this function's
+        // documentation of `out_error` (null if the caller does not need error details,
+        // otherwise a location for the error handle), it is writable; exactly one element
+        // is written, a fresh handle from `box_error` whose ownership passes to the C
+        // caller.
         unsafe { *out_error = std::ptr::null_mut() };
     }
     build_admin_handle(AdminKind::Kafka(admin), runtime, false)
@@ -506,6 +600,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
 /// so there is one source of truth for the bound rather than a check here that
 /// could drift from the core's.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
@@ -533,18 +628,33 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 /// # Safety
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
-/// After this call the pointer is invalid.
+/// After this call the pointer is invalid. No `_async` operation on the handle
+/// may still be in flight: the `close_async` awaiter task borrows the client
+/// until its callback has fired, and this function does not wait for it, so it
+/// must only be called once every pending callback has been delivered.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_destroy(admin: *mut kafka_admin_AdminClient_t) {
     if admin.is_null() {
         return;
     }
+    // SAFETY: `admin` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid handle from an admin-client constructor, i.e. the `Box<AdminHandle>` leaked by
+    // `Box::into_raw` in `build_admin_handle`. This is the single, final use: the contract
+    // states the pointer is invalid after this call and no other function frees it. The
+    // reclaimed handle is torn down in order (runtime, client, completion channel);
+    // `runtime.shutdown_background()` does not wait for an awaiter task that is already
+    // mid-poll, so the documented C precondition that no `_async` operation is in flight
+    // while destroying is what keeps `drop(kind)` from racing the `close_async` awaiter
+    // spawned by `admin_async_void_op`.
     let handle = unsafe { Box::from_raw(admin as *mut AdminHandle) };
     let AdminHandle { kind, runtime, completion_tx, dispatcher, .. } = *handle;
 
-    // 1. Shut down the runtime first. This cancels any in-flight `_async`
-    //    awaiter task that borrows the admin client, so it is no longer
-    //    referenced when we drop it next.
+    // 1. Shut down the runtime first. `shutdown_background` drops every awaiter
+    //    task that is not being polled at this instant and does not wait for one
+    //    that is, which is why the `# Safety` contract requires that no `_async`
+    //    operation is still in flight: the `close_async` awaiter borrows the
+    //    admin client that is dropped next.
     runtime.shutdown_background();
     // 2. Drop the admin client.
     drop(kind);
@@ -578,11 +688,17 @@ fn close_with_timeout(timeout_ms: i64) -> Duration {
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_close(admin: *const kafka_admin_AdminClient_t, timeout_ms: i64) {
     if admin.is_null() {
         return;
     }
+    // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
+    // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
+    // handle. `h` is used only for the duration of this synchronous `block_on`, during
+    // which the C caller keeps the handle alive (it is freed only by
+    // `kafka_admin_AdminClient_destroy`).
     let h = unsafe { handle_ref(admin) };
     let timeout = close_with_timeout(timeout_ms);
     h.runtime.block_on(h.admin().close_with_timeout(timeout));
@@ -617,6 +733,18 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+/// The handle must not be destroyed until `callback` has fired: the awaiter task
+/// borrows the client until then. `callback` must be a valid function pointer
+/// and `user_data` must stay valid until the callback has run.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -625,6 +753,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
     user_data: *mut c_void,
 ) {
     let timeout = close_with_timeout(timeout_ms);
+    // SAFETY: `admin_async_void_op` has the same `# Safety` requirement as this function
+    // (`admin` must be a valid handle from an admin-client constructor), which the C caller
+    // upholds; the arguments are forwarded unchanged, and the helper null-checks `admin`
+    // itself, firing `callback` inline for a NULL handle. `callback` was supplied by the C
+    // caller along with `user_data`, and the helper fires it exactly once with a null or
+    // freshly boxed error handle the callback owns. The `close_with_timeout` future borrows
+    // the admin client from a spawned task, so the handle must not be destroyed before the
+    // callback fires, which is the C precondition documented on
+    // `kafka_admin_AdminClient_destroy`.
     unsafe {
         admin_async_void_op(admin, callback, user_data, move |a| async move {
             a.close_with_timeout(timeout).await;
@@ -665,6 +802,12 @@ unsafe fn admin_async_void_op<F, Fut>(
     let target = OperationCallbackTarget { callback, user_data };
     if admin.is_null() {
         // Honor the callback obligation even for a null handle.
+        // SAFETY: `callback` was supplied by the C caller along with `user_data` (bundled
+        // in `target`); for a NULL `admin` it fires here synchronously on the calling
+        // thread, exactly as the module's *Callback thread* section documents, and the
+        // function returns immediately without spawning, so this is the single invocation.
+        // `box_error(..)` is a fresh handle whose ownership passes to the callback, and
+        // `user_data` is valid per the caller's contract.
         unsafe {
             (target.callback)(
                 box_error(Error::local_illegal_argument("admin handle must not be null")),
@@ -673,18 +816,36 @@ unsafe fn admin_async_void_op<F, Fut>(
         };
         return;
     }
+    // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
+    // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
+    // handle. `h` itself is used only within this call (cloning `completion_tx`, resolving
+    // `h.admin()`, spawning on `runtime_handle`), but the `&'static dyn Admin` derived from
+    // it (`client`) is captured by the spawned task and used until `op(client)` completes.
+    // No join registry or `Arc` keeps the client alive for that task: the keep-alive is the
+    // C precondition documented on `kafka_admin_AdminClient_destroy` that the handle is not
+    // destroyed while an `_async` operation is in flight, together with
+    // `runtime.shutdown_background()` cancelling awaiter tasks that are not currently being
+    // polled.
     let h = unsafe { handle_ref(admin) };
     let tx = h.completion_tx.clone();
     // `&'static dyn Admin` is `Send` because `Admin: Send + Sync`; resolving it
     // here keeps the (non-`Sync`) handle itself out of the spawned task.
     let client: &'static dyn Admin = h.admin();
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let target = target;
         let error = match op(client).await {
             Ok(()) => std::ptr::null_mut(),
             Err(e) => box_error(e),
         };
         let completion = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
+        // SAFETY: `OperationCompletion::fire` must be called exactly once, on the
+        // dispatcher thread: `completion` is moved into this `FnOnce` job, which
+        // `enqueue_or_run_inline` either hands to the dispatcher thread or, if the
+        // dispatcher's receiver is gone, runs once inline on this tokio worker (the third
+        // thread the module's *Callback thread* section documents), so it fires exactly
+        // once. The raw pointers are owned handles moved to the dispatcher thread (`error`
+        // is null or a fresh `box_error` handle the callee owns); the C user is responsible
+        // for the thread-safety of `user_data`.
         let job: CompletionJob = Box::new(move || unsafe { completion.fire() });
         enqueue_or_run_inline(&tx, job);
     });
@@ -748,6 +909,13 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
         complete(Err(Error::local_illegal_argument("admin handle must not be null")), user_data);
         return;
     }
+    // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
+    // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
+    // handle. `h` is used only within this synchronous call (entering the runtime, running
+    // `submit(h.admin())` on the calling thread, cloning `completion_tx` and spawning) and
+    // nothing derived from it escapes: `submit` takes `&dyn Admin` for an anonymous
+    // lifetime and must return a `'static` future, so the spawned task captures only that
+    // future, the owned sender clone `tx`, `ud` and `complete`.
     let h = unsafe { handle_ref(admin) };
     // Scoped so the runtime `EnterGuard` is dropped before we spawn.
     let submitted = {
@@ -765,7 +933,7 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
     };
     let tx = h.completion_tx.clone();
     let ud = SendUserData(user_data);
-    h.runtime_handle.spawn(async move {
+    spawn_callback_task(&h.runtime_handle, async move {
         let ud = ud;
         let result = future.await;
         let job: CompletionJob = Box::new(move || complete(result, ud.into_ptr()));
@@ -790,6 +958,10 @@ unsafe fn admin_async_value_op<T, S, C>(
     S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
     C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
+    // SAFETY: `admin_async_future_op` has the same `# Safety` requirement as this function
+    // (`admin` must be a valid handle from an admin-client constructor), which the caller
+    // upholds; `admin`, `user_data` and `complete` are forwarded unchanged, and `submit` is
+    // only wrapped so the returned `KafkaFuture` is awaited through `get()`.
     unsafe {
         admin_async_future_op(
             admin,
@@ -819,6 +991,11 @@ where
     if admin.is_null() {
         return Err(Error::local_illegal_argument("admin handle must not be null"));
     }
+    // SAFETY: `handle_ref` requires a non-null handle from an admin-client constructor;
+    // `admin` is non-null (checked above) and, per this function's `# Safety`, such a
+    // handle. `h` is used only for the duration of this synchronous call (`enter`,
+    // `submit(h.admin())`, `block_on`), during which the C caller keeps the handle alive;
+    // the future `submit` returns is consumed by `block_on` before this call returns.
     let h = unsafe { handle_ref(admin) };
     // Scoped so the runtime `EnterGuard` is dropped before `block_on`.
     let future = {
@@ -839,6 +1016,10 @@ where
     T: Clone + Send + Sync + 'static,
     S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
 {
+    // SAFETY: `admin_sync_future_op` has the same `# Safety` requirement as this function
+    // (`admin` must be a valid handle from an admin-client constructor), which the caller
+    // upholds; `admin` is forwarded unchanged, and `submit` is only wrapped so the returned
+    // `KafkaFuture` is awaited through `get()`.
     unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
 }
 
@@ -893,10 +1074,16 @@ unsafe fn read_strings(strings: *const *const c_char, count: i32) -> Vec<String>
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `strings` is non-null (checked above) and, per this helper's `# Safety`,
+        // has `count` entries; `i < n` where `n = count.max(0)`, so a negative `count`
+        // reads nothing and every read stays inside the caller's array.
         let ptr = unsafe { *strings.add(i) };
         if ptr.is_null() {
             continue;
         }
+        // SAFETY: `ptr` is non-null (checked above; NULL entries are skipped) and, per this
+        // helper's `# Safety`, each non-null entry of `strings` is a valid C string; it is
+        // borrowed only for the `to_string_lossy` copy made in this call.
         out.push(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string());
     }
     out
@@ -921,10 +1108,17 @@ unsafe fn read_uuids(ids: *const *const c_char, count: i32) -> Result<Vec<Uuid>,
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `ids` is non-null (checked above) and, per this helper's `# Safety`, has
+        // `count` entries; `i < n` where `n = count.max(0)`, so a negative `count` reads
+        // nothing and every read stays inside the caller's array.
         let ptr = unsafe { *ids.add(i) };
         if ptr.is_null() {
             return Err(Error::local_illegal_argument(format!("topic id at index {i} must not be null")));
         }
+        // SAFETY: `ptr` is non-null (checked above; a NULL entry is reported as
+        // `LocalIllegalArgument` instead of being dereferenced) and, per this helper's `#
+        // Safety`, each non-null entry of `ids` is a valid C string; it is borrowed only
+        // for the parse performed in this call.
         let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
         let uuid = Uuid::from_string(&text)
             .map_err(|e| Error::local_illegal_argument(format!("invalid topic id `{text}` at index {i}: {e}")))?;
@@ -1040,6 +1234,10 @@ impl NewTopicBuilder {
 ///
 /// `topic` must be a valid handle from [`kafka_admin_NewTopic_new`].
 unsafe fn new_topic_ref(topic: *const kafka_admin_NewTopic_t) -> &'static NewTopicBuilder {
+    // SAFETY: Per this helper's `# Safety`, `topic` is a valid handle from
+    // `kafka_admin_NewTopic_new`, i.e. the `Box<NewTopicBuilder>` leaked by `Box::into_raw`
+    // there and freed only by `kafka_admin_NewTopic_destroy`, so it is non-null, aligned
+    // and live; callers use the reference only within their own synchronous call.
     unsafe { &*(topic as *const NewTopicBuilder) }
 }
 
@@ -1049,6 +1247,12 @@ unsafe fn new_topic_ref(topic: *const kafka_admin_NewTopic_t) -> &'static NewTop
 ///
 /// `topic` must be a valid handle from [`kafka_admin_NewTopic_new`].
 unsafe fn new_topic_mut(topic: *mut kafka_admin_NewTopic_t) -> &'static mut NewTopicBuilder {
+    // SAFETY: Per this helper's `# Safety`, `topic` is a valid handle from
+    // `kafka_admin_NewTopic_new` (the `Box<NewTopicBuilder>` leaked by `Box::into_raw`
+    // there, freed only by `kafka_admin_NewTopic_destroy`), so it is non-null, aligned and
+    // live. Exclusivity of the `&mut` rests on the C caller not using the builder handle
+    // from another thread during the call: it is an opaque single-owner builder with no
+    // thread-safety claim, and callers use the reference only within their own call.
     unsafe { &mut *(topic as *mut NewTopicBuilder) }
 }
 
@@ -1067,6 +1271,7 @@ unsafe fn new_topic_mut(topic: *mut kafka_admin_NewTopic_t) -> &'static mut NewT
 /// # Safety
 ///
 /// `name` must be NULL or a valid, null-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_new(
     name: *const c_char,
@@ -1077,6 +1282,9 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
         return std::ptr::null_mut();
     }
     let builder = NewTopicBuilder {
+        // SAFETY: `name` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid, null-terminated C string; it is borrowed only for the `to_string_lossy`
+        // copy made in this call.
         name: unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string(),
         num_partitions: if num_partitions < 0 { None } else { Some(num_partitions) },
         replication_factor: if replication_factor < 0 {
@@ -1096,6 +1304,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 /// # Safety
 ///
 /// `topic` must be a valid handle; `key` and `value` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     topic: *mut kafka_admin_NewTopic_t,
@@ -1105,8 +1314,19 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     if topic.is_null() || key.is_null() || value.is_null() {
         return;
     }
+    // SAFETY: `key` is non-null (checked above together with `topic` and `value`) and, per
+    // this function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
     let builder = unsafe { new_topic_mut(topic) };
+    // SAFETY: `value` is non-null (checked above together with `topic` and `key`) and, per
+    // this function's `# Safety`, a valid C string; it is borrowed only for the
+    // `to_string_lossy` copy made in this call.
     let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    // SAFETY: `new_topic_mut` requires a valid handle from `kafka_admin_NewTopic_new`;
+    // `topic` is non-null (checked above) and, per this function's `# Safety`, a valid
+    // handle. The `&mut NewTopicBuilder` is used only for this one config insertion within
+    // the call; its exclusivity rests on the C caller not using the same builder from
+    // another thread meanwhile (builder handles carry no thread-safety claim).
     let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
     builder.configs.insert(k, v);
 }
@@ -1121,6 +1341,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
 /// # Safety
 ///
 /// `topic` must be a valid handle; `broker_ids` must have `count` valid entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_replicas_assignment(
     topic: *mut kafka_admin_NewTopic_t,
@@ -1131,10 +1352,18 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_replicas_assignment(
     if topic.is_null() || broker_ids.is_null() {
         return;
     }
+    // SAFETY: `broker_ids` is non-null (checked above together with `topic`) and, per this
+    // function's `# Safety`, has `count` valid entries; the loop bound is `count.max(0)`,
+    // so a negative `count` reads nothing and every read stays inside the caller's array.
     let builder = unsafe { new_topic_mut(topic) };
     let n = count.max(0) as usize;
     let mut replicas = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `new_topic_mut` requires a valid handle from `kafka_admin_NewTopic_new`;
+        // `topic` is non-null (checked above) and, per this function's `# Safety`, a valid
+        // handle. The `&mut NewTopicBuilder` is used only to record the assignment within
+        // this call; its exclusivity rests on the C caller not using the same builder from
+        // another thread meanwhile (builder handles carry no thread-safety claim).
         replicas.push(unsafe { *broker_ids.add(i) });
     }
     builder.replicas_assignments.insert(partition, replicas);
@@ -1146,9 +1375,14 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_replicas_assignment(
 ///
 /// `topic` must be null or a valid handle from [`kafka_admin_NewTopic_new`].
 /// After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_destroy(topic: *mut kafka_admin_NewTopic_t) {
     if !topic.is_null() {
+        // SAFETY: `topic` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid handle from `kafka_admin_NewTopic_new`, i.e. the `Box<NewTopicBuilder>`
+        // leaked by `Box::into_raw` there. This is the single, final use: the contract
+        // states the pointer is invalid after this call and no other function frees it.
         unsafe { drop(Box::from_raw(topic as *mut NewTopicBuilder)) };
     }
 }
@@ -1166,10 +1400,18 @@ unsafe fn read_new_topics(topics: *const *const kafka_admin_NewTopic_t, count: i
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `topics` is non-null (checked above) and, per this helper's `# Safety`,
+        // has `count` entries; `i` ranges over `0..count.max(0)`, so a negative `count`
+        // reads nothing and every read stays inside the caller's array.
         let ptr = unsafe { *topics.add(i) };
         if ptr.is_null() {
             continue;
         }
+        // SAFETY: `new_topic_ref` requires a valid `kafka_admin_NewTopic_new` handle; `ptr`
+        // is non-null (checked above; NULL entries are skipped) and, per this helper's `#
+        // Safety`, each non-null entry of `topics` is a valid handle. The reference is used
+        // only for this `build()` call, which copies the builder's state out; the C caller
+        // retains ownership of the handle.
         out.push(unsafe { new_topic_ref(ptr) }.build());
     }
     out
@@ -1231,6 +1473,11 @@ impl NewPartitionsBuilder {
 ///
 /// `partitions` must be a valid handle from [`kafka_admin_NewPartitions_new`].
 unsafe fn new_partitions_ref(partitions: *const kafka_admin_NewPartitions_t) -> &'static NewPartitionsBuilder {
+    // SAFETY: Per this helper's `# Safety`, `partitions` is a valid handle from
+    // `kafka_admin_NewPartitions_new`, i.e. the `Box<NewPartitionsBuilder>` leaked by
+    // `Box::into_raw` there and freed only by `kafka_admin_NewPartitions_destroy`, so it is
+    // non-null, aligned and live; callers use the reference only within their own
+    // synchronous call.
     unsafe { &*(partitions as *const NewPartitionsBuilder) }
 }
 
@@ -1240,6 +1487,13 @@ unsafe fn new_partitions_ref(partitions: *const kafka_admin_NewPartitions_t) -> 
 ///
 /// `partitions` must be a valid handle from [`kafka_admin_NewPartitions_new`].
 unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'static mut NewPartitionsBuilder {
+    // SAFETY: Per this helper's `# Safety`, `partitions` is a valid handle from
+    // `kafka_admin_NewPartitions_new` (the `Box<NewPartitionsBuilder>` leaked by
+    // `Box::into_raw` there, freed only by `kafka_admin_NewPartitions_destroy`), so it is
+    // non-null, aligned and live. Exclusivity of the `&mut` rests on the C caller not using
+    // the builder handle from another thread during the call: it is an opaque single-owner
+    // builder with no thread-safety claim, and callers use the reference only within their
+    // own call.
     unsafe { &mut *(partitions as *mut NewPartitionsBuilder) }
 }
 
@@ -1267,6 +1521,7 @@ unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'
 /// # Returns
 ///
 /// A non-null handle. Free it with [`kafka_admin_NewPartitions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_NewPartitions_new(
     total_count: i32,
@@ -1294,6 +1549,7 @@ pub extern "C" fn kafka_admin_NewPartitions_new(
 ///
 /// `partitions` must be a valid handle; `broker_ids` must have `count` valid
 /// entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
     partitions: *mut kafka_admin_NewPartitions_t,
@@ -1303,10 +1559,20 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
     if partitions.is_null() || broker_ids.is_null() {
         return;
     }
+    // SAFETY: `broker_ids` is non-null (checked above together with `partitions`) and, per
+    // this function's `# Safety`, has `count` valid entries; the loop bound is
+    // `count.max(0)`, so a negative `count` reads nothing and every read stays inside the
+    // caller's array.
     let builder = unsafe { new_partitions_mut(partitions) };
     let n = count.max(0) as usize;
     let mut replicas = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `new_partitions_mut` requires a valid handle from
+        // `kafka_admin_NewPartitions_new`; `partitions` is non-null (checked above) and,
+        // per this function's `# Safety`, a valid handle. The `&mut NewPartitionsBuilder`
+        // is used only to append this assignment within the call; its exclusivity rests on
+        // the C caller not using the same builder from another thread meanwhile (builder
+        // handles carry no thread-safety claim).
         replicas.push(unsafe { *broker_ids.add(i) });
     }
     builder.has_assignments = true;
@@ -1319,9 +1585,15 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
 ///
 /// `partitions` must be null or a valid handle from
 /// [`kafka_admin_NewPartitions_new`]. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_destroy(partitions: *mut kafka_admin_NewPartitions_t) {
     if !partitions.is_null() {
+        // SAFETY: `partitions` is non-null (checked above) and, per this function's `#
+        // Safety`, a valid handle from `kafka_admin_NewPartitions_new`, i.e. the
+        // `Box<NewPartitionsBuilder>` leaked by `Box::into_raw` there. This is the single,
+        // final use: the contract states the pointer is invalid after this call and no
+        // other function frees it.
         unsafe { drop(Box::from_raw(partitions as *mut NewPartitionsBuilder)) };
     }
 }
@@ -1347,12 +1619,29 @@ unsafe fn read_new_partitions(
         return out;
     }
     for i in 0..count.max(0) as usize {
+        // SAFETY: `topics` and `new_partitions` are both non-null (checked above) and, per
+        // this helper's `# Safety`, each has `count` entries; `i` ranges over
+        // `0..count.max(0)`, so a negative `count` reads nothing and the read of `topics`
+        // stays inside the caller's array.
         let name_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `new_partitions` and `topics` are both non-null (checked above) and, per
+        // this helper's `# Safety`, each has `count` entries; `i` ranges over
+        // `0..count.max(0)`, so the read of `new_partitions` stays inside the caller's
+        // array.
         let spec_ptr = unsafe { *new_partitions.add(i) };
         if name_ptr.is_null() || spec_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` is non-null (checked above; a pair with a NULL side is
+        // skipped) and, per this helper's `# Safety`, each non-null entry of `topics` is
+        // valid, i.e. a C string; it is borrowed only for the `to_string_lossy` copy made
+        // in this call.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `new_partitions_ref` requires a valid `kafka_admin_NewPartitions_new`
+        // handle; `spec_ptr` is non-null (checked above; a pair with a NULL side is
+        // skipped) and, per this helper's `# Safety`, each non-null entry of
+        // `new_partitions` is a valid handle. The reference is used only for this `build()`
+        // call; the C caller retains ownership of the handle.
         out.insert(name, unsafe { new_partitions_ref(spec_ptr) }.build());
     }
     out
@@ -1380,12 +1669,26 @@ unsafe fn read_records_to_delete(
         return out;
     }
     for i in 0..count.max(0) as usize {
+        // SAFETY: `topics`, `partitions` and `before_offsets` are all non-null (checked
+        // above) and, per this helper's `# Safety`, each has `count` entries; `i` ranges
+        // over `0..count.max(0)`, so a negative `count` reads nothing and the read of
+        // `topics` stays inside the caller's array.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` is non-null (checked above; an entry with a NULL topic is
+        // skipped) and, per this helper's `# Safety`, each non-null entry of `topics` is a
+        // valid C string; it is borrowed only for the `to_string_lossy` copy made in this
+        // call.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` is non-null (checked above) and, per this helper's `#
+        // Safety`, has `count` entries; `i < count.max(0)`, so the read stays inside the
+        // caller's array.
         let partition = unsafe { *partitions.add(i) };
+        // SAFETY: `before_offsets` is non-null (checked above) and, per this helper's `#
+        // Safety`, has `count` entries; `i < count.max(0)`, so the read stays inside the
+        // caller's array.
         let offset = unsafe { *before_offsets.add(i) };
         out.insert(
             TopicPartition::new(name, partition),
@@ -1538,6 +1841,11 @@ impl ConfigInner {
 ///
 /// `config` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn config_ref(config: *const kafka_admin_Config_t) -> &'static ConfigInner {
+    // SAFETY: Per this helper's `# Safety`, `config` is a non-null borrowed pointer from a
+    // result-handle getter, i.e. it points at a `ConfigInner` stored in a result handle's
+    // values vec, which is never resized after the handle is built, so it stays valid until
+    // that result handle is destroyed; callers use the reference only within their own
+    // synchronous getter call.
     unsafe { &*(config as *const ConfigInner) }
 }
 
@@ -1548,6 +1856,11 @@ unsafe fn config_ref(config: *const kafka_admin_Config_t) -> &'static ConfigInne
 /// `entry` must be a non-null borrowed pointer from a [`kafka_admin_Config_t`]
 /// getter.
 unsafe fn config_entry_ref(entry: *const kafka_admin_ConfigEntry_t) -> &'static ConfigEntryC {
+    // SAFETY: Per this helper's `# Safety`, `entry` is a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, i.e. it points at a `ConfigEntryC` inside a
+    // `ConfigInner`'s entries vec, owned by a result handle and never resized after the
+    // handle is built, so it stays valid until that result handle is destroyed; callers use
+    // the reference only within their own synchronous getter call.
     unsafe { &*(entry as *const ConfigEntryC) }
 }
 
@@ -1556,8 +1869,14 @@ unsafe fn config_entry_ref(entry: *const kafka_admin_ConfigEntry_t) -> &'static 
 /// # Safety
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_entry_count(config: *const kafka_admin_Config_t) -> i32 {
+    // SAFETY: `config_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `config` (there is no in-body
+    // null check, so the C caller's contract is the sole source); the reference is used
+    // only for this `len()` within the call, during which the owning result handle is
+    // alive.
     unsafe { config_ref(config) }.entries.len() as i32
 }
 
@@ -1567,6 +1886,7 @@ pub unsafe extern "C" fn kafka_admin_Config_entry_count(config: *const kafka_adm
 /// # Safety
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_get_entry(
     config: *const kafka_admin_Config_t,
@@ -1575,6 +1895,11 @@ pub unsafe extern "C" fn kafka_admin_Config_get_entry(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `config_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `config` (no in-body null
+    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
+    // returned entry pointer borrows the `ConfigInner`'s entries vec, owned by the result
+    // handle and valid until it is destroyed.
     match unsafe { config_ref(config) }.entries.get(index as usize) {
         Some(entry) => entry as *const ConfigEntryC as *const kafka_admin_ConfigEntry_t,
         None => std::ptr::null(),
@@ -1588,6 +1913,7 @@ pub unsafe extern "C" fn kafka_admin_Config_get_entry(
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter; `name`
 /// must be null or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_find_entry(
     config: *const kafka_admin_Config_t,
@@ -1596,7 +1922,14 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
     if name.is_null() {
         return std::ptr::null();
     }
+    // SAFETY: `name` is non-null (checked above) and, per this function's `# Safety`, null
+    // or a valid C string; it is borrowed only for the comparison performed in this call.
     let wanted = unsafe { CStr::from_ptr(name) };
+    // SAFETY: `config_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `config` (no in-body null
+    // check); the reference is used only for the lookup within this call, and the returned
+    // entry pointer borrows storage owned by the result handle, valid until it is
+    // destroyed.
     match unsafe { config_ref(config) }
         .entries
         .iter()
@@ -1612,8 +1945,14 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     unsafe { config_entry_ref(entry) }.name_c.as_ptr()
 }
 
@@ -1623,8 +1962,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     match &unsafe { config_entry_ref(entry) }.value_c {
         Some(value) => value.as_ptr(),
         None => std::ptr::null(),
@@ -1640,8 +1985,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { config_entry_ref(entry) }.source_c.as_ptr()
 }
 
@@ -1650,8 +2001,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admi
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { config_entry_ref(entry) }.is_default
 }
 
@@ -1660,8 +2017,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { config_entry_ref(entry) }.is_sensitive
 }
 
@@ -1670,8 +2033,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafk
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafka_admin_ConfigEntry_t) -> bool {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { config_entry_ref(entry) }.is_read_only
 }
 
@@ -1684,8 +2053,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
 }
 
@@ -1695,10 +2070,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
     entry: *const kafka_admin_ConfigEntry_t,
 ) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     match &unsafe { config_entry_ref(entry) }.documentation_c {
         Some(doc) => doc.as_ptr(),
         None => std::ptr::null(),
@@ -1710,8 +2091,14 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_count(entry: *const kafka_admin_ConfigEntry_t) -> i32 {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for this `len()` within the call, during which the owning result handle
+    // is alive.
     unsafe { config_entry_ref(entry) }.synonyms.len() as i32
 }
 
@@ -1721,11 +2108,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_count(entry: *const kaf
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_name(
     entry: *const kafka_admin_ConfigEntry_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // synonym `CString` owned by the result handle, valid until that handle is destroyed.
     match synonym_at(unsafe { config_entry_ref(entry) }, index) {
         Some(synonym) => synonym.name_c.as_ptr(),
         None => std::ptr::null(),
@@ -1738,11 +2131,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_name(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_value(
     entry: *const kafka_admin_ConfigEntry_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, and the returned string pointer borrows a
+    // synonym `CString` owned by the result handle, valid until that handle is destroyed.
     match synonym_at(unsafe { config_entry_ref(entry) }, index) {
         Some(synonym) => match &synonym.value_c {
             Some(value) => value.as_ptr(),
@@ -1758,11 +2157,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_value(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_source(
     entry: *const kafka_admin_ConfigEntry_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `config_entry_ref` requires a non-null borrowed pointer from a
+    // `kafka_admin_Config_t` getter, which this function's `# Safety` requires of `entry`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for the duration of this call, during which the owning result handle is
+    // alive.
     match synonym_at(unsafe { config_entry_ref(entry) }, index) {
         Some(synonym) => synonym.source_c.as_ptr(),
         None => std::ptr::null(),
@@ -1827,6 +2232,11 @@ impl TopicMetadataAndConfigInner {
 ///
 /// `mc` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn metadata_ref(mc: *const kafka_admin_TopicMetadataAndConfig_t) -> &'static TopicMetadataAndConfigInner {
+    // SAFETY: Per this helper's `# Safety`, `mc` is a non-null borrowed pointer from a
+    // result-handle getter, i.e. it points at a `TopicMetadataAndConfigInner` stored in a
+    // `CreateTopicsResult` handle's values vec, never resized after the handle is built, so
+    // it stays valid until that handle is destroyed; callers use the reference only within
+    // their own synchronous getter call.
     unsafe { &*(mc as *const TopicMetadataAndConfigInner) }
 }
 
@@ -1842,10 +2252,16 @@ unsafe fn metadata_ref(mc: *const kafka_admin_TopicMetadataAndConfig_t) -> &'sta
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows the `ErrorInner` owned
+    // by the result handle (not to be destroyed), valid until that handle is destroyed.
     error_ptr(unsafe { metadata_ref(mc) }.error.as_ref())
 }
 
@@ -1856,10 +2272,16 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> *const c_char {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a `CString` owned by
+    // the result handle, valid until that handle is destroyed.
     unsafe { metadata_ref(mc) }.topic_id_c.as_ptr()
 }
 
@@ -1868,10 +2290,15 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, during which the owning `CreateTopicsResult` handle is alive.
     unsafe { metadata_ref(mc) }.num_partitions
 }
 
@@ -1880,10 +2307,15 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, during which the owning `CreateTopicsResult` handle is alive.
     unsafe { metadata_ref(mc) }.replication_factor
 }
 
@@ -1893,10 +2325,16 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the owning `CreateTopicsResult` handle is
+    // alive.
     unsafe { metadata_ref(mc) }.configs.len() as i32
 }
 
@@ -1906,11 +2344,17 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_name(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a config-entry
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     match config_entry_at(unsafe { metadata_ref(mc) }, index) {
         Some(entry) => entry.name_c.as_ptr(),
         None => std::ptr::null(),
@@ -1924,11 +2368,17 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_name(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_value(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a config-entry
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     match config_entry_at(unsafe { metadata_ref(mc) }, index).and_then(|e| e.value_c.as_ref()) {
         Some(value) => value.as_ptr(),
         None => std::ptr::null(),
@@ -1941,11 +2391,16 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_value(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_default(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
     index: i32,
 ) -> bool {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, during which the owning `CreateTopicsResult` handle is alive.
     config_entry_at(unsafe { metadata_ref(mc) }, index).is_some_and(|e| e.is_default)
 }
 
@@ -1955,11 +2410,16 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_default(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_sensitive(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
     index: i32,
 ) -> bool {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, during which the owning `CreateTopicsResult` handle is alive.
     config_entry_at(unsafe { metadata_ref(mc) }, index).is_some_and(|e| e.is_sensitive)
 }
 
@@ -1969,11 +2429,16 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_sensitive(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_read_only(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
     index: i32,
 ) -> bool {
+    // SAFETY: `metadata_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `mc` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, during which the owning `CreateTopicsResult` handle is alive.
     config_entry_at(unsafe { metadata_ref(mc) }, index).is_some_and(|e| e.is_read_only)
 }
 
@@ -2025,6 +2490,11 @@ impl TopicPartitionInfoInner {
 ///
 /// `info` must be a non-null borrowed pointer from a `TopicDescription` getter.
 unsafe fn partition_info_ref(info: *const kafka_common_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
+    // SAFETY: Per this helper's `# Safety`, `info` is a non-null borrowed pointer from a
+    // `TopicDescription` getter, i.e. it points at a `TopicPartitionInfoInner` inside a
+    // `TopicDescriptionInner`'s partitions vec, owned by a `DescribeTopicsResult` handle
+    // and never resized after the handle is built, so it stays valid until that handle is
+    // destroyed; callers use the reference only within their own synchronous getter call.
     unsafe { &*(info as *const TopicPartitionInfoInner) }
 }
 
@@ -2045,10 +2515,16 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, during which the owning result handle is
+    // alive.
     unsafe { partition_info_ref(info) }.partition
 }
 
@@ -2057,10 +2533,17 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, and the returned `kafka_common_Node_t`
+    // pointer borrows a `Node` owned by the inner, valid until the owning result handle is
+    // destroyed.
     match unsafe { partition_info_ref(info) }.leader.as_ref() {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
         None => std::ptr::null(),
@@ -2072,10 +2555,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica_count(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this `len()` within the call, during which the owning result handle is
+    // alive.
     unsafe { partition_info_ref(info) }.replicas.len() as i32
 }
 
@@ -2084,11 +2573,18 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica(
     info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, and the returned `kafka_common_Node_t`
+    // pointer borrows a `Node` in the inner's replicas vec, valid until the owning result
+    // handle is destroyed.
     node_at(&unsafe { partition_info_ref(info) }.replicas, index)
 }
 
@@ -2097,10 +2593,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr_count(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this `len()` within the call, during which the owning result handle is
+    // alive.
     unsafe { partition_info_ref(info) }.isr.len() as i32
 }
 
@@ -2109,11 +2611,18 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
     info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, and the returned `kafka_common_Node_t`
+    // pointer borrows a `Node` in the inner's isr vec, valid until the owning result handle
+    // is destroyed.
     node_at(&unsafe { partition_info_ref(info) }.isr, index)
 }
 
@@ -2124,10 +2633,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr_count(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this count within the call, during which the owning result handle is
+    // alive.
     unsafe { partition_info_ref(info) }
         .elr
         .as_ref()
@@ -2140,10 +2655,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_elr(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> bool {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this presence test within the call, during which the owning result
+    // handle is alive.
     unsafe { partition_info_ref(info) }.elr.is_some()
 }
 
@@ -2153,11 +2674,18 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_elr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
     info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, and the returned `kafka_common_Node_t`
+    // pointer borrows a `Node` in the inner's elr vec, valid until the owning result handle
+    // is destroyed.
     match unsafe { partition_info_ref(info) }.elr.as_ref() {
         Some(nodes) => node_at(nodes, index),
         None => std::ptr::null(),
@@ -2172,10 +2700,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr_count(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this count within the call, during which the owning result handle is
+    // alive.
     unsafe { partition_info_ref(info) }
         .last_known_elr
         .as_ref()
@@ -2188,10 +2722,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_last_known_elr(
     info: *const kafka_common_TopicPartitionInfo_t,
 ) -> bool {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for this presence test within the call, during which the owning result
+    // handle is alive.
     unsafe { partition_info_ref(info) }.last_known_elr.is_some()
 }
 
@@ -2201,11 +2741,18 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_last_known_elr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
     info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `partition_info_ref` requires a non-null borrowed pointer from a
+    // `TopicDescription` getter, which this function's `# Safety` requires of `info` (no
+    // in-body null check, so the C caller's contract is the sole source); the reference is
+    // used only for the duration of this call, and the returned `kafka_common_Node_t`
+    // pointer borrows a `Node` in the inner's last-known-elr vec, valid until the owning
+    // result handle is destroyed.
     match unsafe { partition_info_ref(info) }.last_known_elr.as_ref() {
         Some(nodes) => node_at(nodes, index),
         None => std::ptr::null(),
@@ -2249,6 +2796,11 @@ impl TopicDescriptionInner {
 ///
 /// `description` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn description_ref(description: *const kafka_admin_TopicDescription_t) -> &'static TopicDescriptionInner {
+    // SAFETY: Per this helper's `# Safety`, `description` is a non-null borrowed pointer
+    // from a result-handle getter, i.e. it points at a `TopicDescriptionInner` stored in a
+    // `DescribeTopicsResult` handle's values vec, never resized after the handle is built,
+    // so it stays valid until that handle is destroyed; callers use the reference only
+    // within their own synchronous getter call.
     unsafe { &*(description as *const TopicDescriptionInner) }
 }
 
@@ -2257,10 +2809,16 @@ unsafe fn description_ref(description: *const kafka_admin_TopicDescription_t) ->
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     description: *const kafka_admin_TopicDescription_t,
 ) -> *const c_char {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned string pointer borrows the name `CString`
+    // owned by the result handle, valid until that handle is destroyed.
     unsafe { description_ref(description) }.name_c.as_ptr()
 }
 
@@ -2269,10 +2827,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     description: *const kafka_admin_TopicDescription_t,
 ) -> *const c_char {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned string pointer borrows the topic-id
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     unsafe { description_ref(description) }.topic_id_c.as_ptr()
 }
 
@@ -2281,10 +2845,15 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(
     description: *const kafka_admin_TopicDescription_t,
 ) -> bool {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, during which the owning result handle is alive.
     unsafe { description_ref(description) }.internal
 }
 
@@ -2293,10 +2862,15 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
     description: *const kafka_admin_TopicDescription_t,
 ) -> i32 {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this `len()` within the call, during which the owning result handle is alive.
     unsafe { description_ref(description) }.partitions.len() as i32
 }
 
@@ -2305,6 +2879,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     description: *const kafka_admin_TopicDescription_t,
@@ -2313,6 +2888,11 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
+    // returned pointer borrows a `TopicPartitionInfoInner` in the inner's partitions vec,
+    // owned by the result handle and valid until it is destroyed.
     match unsafe { description_ref(description) }.partitions.get(index as usize) {
         Some(info) => info as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t,
         None => std::ptr::null(),
@@ -2328,10 +2908,15 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation_count(
     description: *const kafka_admin_TopicDescription_t,
 ) -> i32 {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this count within the call, during which the owning result handle is alive.
     authorized_operation_count(unsafe { description_ref(description) }.authorized_operations.as_deref())
 }
 
@@ -2342,10 +2927,15 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation_count
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_has_authorized_operations(
     description: *const kafka_admin_TopicDescription_t,
 ) -> bool {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this presence test within the call, during which the owning result handle is alive.
     unsafe { description_ref(description) }.authorized_operations.is_some()
 }
 
@@ -2359,11 +2949,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_has_authorized_operations(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
     description: *const kafka_admin_TopicDescription_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `description_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `description` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this indexed read within the call, during which the owning result handle is alive.
     authorized_operation_at(unsafe { description_ref(description) }.authorized_operations.as_deref(), index)
 }
 
@@ -2396,6 +2991,11 @@ impl TopicListingInner {
 ///
 /// `listing` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn listing_ref(listing: *const kafka_admin_TopicListing_t) -> &'static TopicListingInner {
+    // SAFETY: Per this helper's `# Safety`, `listing` is a non-null borrowed pointer from a
+    // result-handle getter, i.e. it points at a `TopicListingInner` stored in a
+    // `ListTopicsResult` handle's values vec, never resized after the handle is built, so
+    // it stays valid until that handle is destroyed; callers use the reference only within
+    // their own synchronous getter call.
     unsafe { &*(listing as *const TopicListingInner) }
 }
 
@@ -2404,8 +3004,14 @@ unsafe fn listing_ref(listing: *const kafka_admin_TopicListing_t) -> &'static To
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_admin_TopicListing_t) -> *const c_char {
+    // SAFETY: `listing_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `listing` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned string pointer borrows the name `CString`
+    // owned by the result handle, valid until that handle is destroyed.
     unsafe { listing_ref(listing) }.name_c.as_ptr()
 }
 
@@ -2414,10 +3020,16 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_adm
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
     listing: *const kafka_admin_TopicListing_t,
 ) -> *const c_char {
+    // SAFETY: `listing_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `listing` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, and the returned string pointer borrows the topic-id
+    // `CString` owned by the result handle, valid until that handle is destroyed.
     unsafe { listing_ref(listing) }.topic_id_c.as_ptr()
 }
 
@@ -2426,8 +3038,13 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(listing: *const kafka_admin_TopicListing_t) -> bool {
+    // SAFETY: `listing_ref` requires a non-null borrowed pointer from a result-handle
+    // getter, which this function's `# Safety` requires of `listing` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // the duration of this call, during which the owning result handle is alive.
     unsafe { listing_ref(listing) }.internal
 }
 
@@ -2485,6 +3102,12 @@ fn box_create_topics_result(
 unsafe fn create_topics_result_ref(
     result: *const kafka_admin_CreateTopicsResult_t,
 ) -> &'static CreateTopicsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `create_topics` call, i.e. the `Box<CreateTopicsResultInner>` leaked by
+    // `Box::into_raw` in `box_create_topics_result` and freed only by
+    // `kafka_admin_CreateTopicsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const CreateTopicsResultInner) }
 }
 
@@ -2493,8 +3116,13 @@ unsafe fn create_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_count(result: *const kafka_admin_CreateTopicsResult_t) -> i32 {
+    // SAFETY: `create_topics_result_ref` requires a non-null `create_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
     unsafe { create_topics_result_ref(result) }.keys.len() as i32
 }
 
@@ -2504,11 +3132,17 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_key(
     result: *const kafka_admin_CreateTopicsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `create_topics_result_ref` requires a non-null `create_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned string pointer borrows a key `CString` owned by the
+    // handle, valid until `kafka_admin_CreateTopicsResult_destroy`.
     cstring_at(&unsafe { create_topics_result_ref(result) }.keys, index)
 }
 
@@ -2519,6 +3153,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
     result: *const kafka_admin_CreateTopicsResult_t,
@@ -2527,6 +3162,11 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `create_topics_result_ref` requires a non-null `create_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned pointer borrows a `TopicMetadataAndConfigInner` in the
+    // handle's values vec, valid until `kafka_admin_CreateTopicsResult_destroy`.
     match unsafe { create_topics_result_ref(result) }.values.get(index as usize) {
         Some(Some(metadata)) => {
             metadata as *const TopicMetadataAndConfigInner as *const kafka_admin_TopicMetadataAndConfig_t
@@ -2544,6 +3184,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
     result: *const kafka_admin_CreateTopicsResult_t,
@@ -2552,6 +3193,11 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `create_topics_result_ref` requires a non-null `create_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error pointer borrows an `ErrorInner` owned by the
+    // handle (not to be destroyed), valid until `kafka_admin_CreateTopicsResult_destroy`.
     match unsafe { create_topics_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -2564,9 +3210,15 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(result: *mut kafka_admin_CreateTopicsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `create_topics` result handle, i.e. the `Box<CreateTopicsResultInner>`
+        // leaked by `Box::into_raw` in `box_create_topics_result`. This is the single,
+        // final use: the contract states the handle and every borrowed sub-handle are
+        // invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut CreateTopicsResultInner)) };
     }
 }
@@ -2611,6 +3263,12 @@ fn box_delete_topics_result<K: Ord>(
 unsafe fn delete_topics_result_ref(
     result: *const kafka_admin_DeleteTopicsResult_t,
 ) -> &'static DeleteTopicsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `delete_topics` call, i.e. the `Box<DeleteTopicsResultInner>` leaked by
+    // `Box::into_raw` in `box_delete_topics_result` and freed only by
+    // `kafka_admin_DeleteTopicsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const DeleteTopicsResultInner) }
 }
 
@@ -2619,8 +3277,13 @@ unsafe fn delete_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_count(result: *const kafka_admin_DeleteTopicsResult_t) -> i32 {
+    // SAFETY: `delete_topics_result_ref` requires a non-null `delete_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
     unsafe { delete_topics_result_ref(result) }.keys.len() as i32
 }
 
@@ -2631,11 +3294,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_key(
     result: *const kafka_admin_DeleteTopicsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `delete_topics_result_ref` requires a non-null `delete_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned string pointer borrows a key `CString` owned by the
+    // handle, valid until `kafka_admin_DeleteTopicsResult_destroy`.
     cstring_at(&unsafe { delete_topics_result_ref(result) }.keys, index)
 }
 
@@ -2648,6 +3317,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
     result: *const kafka_admin_DeleteTopicsResult_t,
@@ -2656,6 +3326,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `delete_topics_result_ref` requires a non-null `delete_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned error pointer borrows an `ErrorInner` owned by the
+    // handle (not to be destroyed), valid until `kafka_admin_DeleteTopicsResult_destroy`.
     match unsafe { delete_topics_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -2667,9 +3342,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_destroy(result: *mut kafka_admin_DeleteTopicsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `delete_topics` result handle, i.e. the `Box<DeleteTopicsResultInner>`
+        // leaked by `Box::into_raw` in `box_delete_topics_result`. This is the single,
+        // final use: the contract states the handle and every borrowed sub-handle are
+        // invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DeleteTopicsResultInner)) };
     }
 }
@@ -2708,6 +3389,11 @@ fn box_list_topics_result(listings: HashMap<String, TopicListing>) -> *mut kafka
 ///
 /// `result` must be a non-null handle from a `list_topics` call.
 unsafe fn list_topics_result_ref(result: *const kafka_admin_ListTopicsResult_t) -> &'static ListTopicsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_topics` call, i.e. the `Box<ListTopicsResultInner>` leaked by `Box::into_raw`
+    // in `box_list_topics_result` and freed only by `kafka_admin_ListTopicsResult_destroy`,
+    // so it is aligned and live; callers use the reference only within their own
+    // synchronous getter call, during which the C caller keeps the handle alive.
     unsafe { &*(result as *const ListTopicsResultInner) }
 }
 
@@ -2716,8 +3402,13 @@ unsafe fn list_topics_result_ref(result: *const kafka_admin_ListTopicsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_count(result: *const kafka_admin_ListTopicsResult_t) -> i32 {
+    // SAFETY: `list_topics_result_ref` requires a non-null `list_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for this `len()`
+    // within the call, during which the C caller keeps the handle alive.
     unsafe { list_topics_result_ref(result) }.keys.len() as i32
 }
 
@@ -2727,11 +3418,17 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_key(
     result: *const kafka_admin_ListTopicsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_topics_result_ref` requires a non-null `list_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned string pointer borrows a key `CString` owned by the
+    // handle, valid until `kafka_admin_ListTopicsResult_destroy`.
     cstring_at(&unsafe { list_topics_result_ref(result) }.keys, index)
 }
 
@@ -2740,6 +3437,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_value(
     result: *const kafka_admin_ListTopicsResult_t,
@@ -2748,6 +3446,11 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_topics_result_ref` requires a non-null `list_topics` result handle,
+    // which this function's `# Safety` requires of `result` (no in-body null check, so the
+    // C caller's contract is the sole source); the reference is used only for the duration
+    // of this call, and the returned pointer borrows a `TopicListingInner` in the handle's
+    // values vec, valid until `kafka_admin_ListTopicsResult_destroy`.
     match unsafe { list_topics_result_ref(result) }.values.get(index as usize) {
         Some(listing) => listing as *const TopicListingInner as *const kafka_admin_TopicListing_t,
         None => std::ptr::null(),
@@ -2759,9 +3462,15 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(result: *mut kafka_admin_ListTopicsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_topics` result handle, i.e. the `Box<ListTopicsResultInner>` leaked
+        // by `Box::into_raw` in `box_list_topics_result`. This is the single, final use:
+        // the contract states the handle and every borrowed sub-handle are invalid
+        // afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut ListTopicsResultInner)) };
     }
 }
@@ -2814,6 +3523,12 @@ fn box_describe_topics_result<K: Ord>(
 unsafe fn describe_topics_result_ref(
     result: *const kafka_admin_DescribeTopicsResult_t,
 ) -> &'static DescribeTopicsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_topics_with_topics` call, i.e. the `Box<DescribeTopicsResultInner>` leaked
+    // by `Box::into_raw` in `box_describe_topics_result` and freed only by
+    // `kafka_admin_DescribeTopicsResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeTopicsResultInner) }
 }
 
@@ -2822,10 +3537,15 @@ unsafe fn describe_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_count(
     result: *const kafka_admin_DescribeTopicsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_topics_result_ref` requires a non-null `describe_topics` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { describe_topics_result_ref(result) }.keys.len() as i32
 }
 
@@ -2836,11 +3556,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_key(
     result: *const kafka_admin_DescribeTopicsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_topics_result_ref` requires a non-null `describe_topics` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a key `CString` owned
+    // by the handle, valid until `kafka_admin_DescribeTopicsResult_destroy`.
     cstring_at(&unsafe { describe_topics_result_ref(result) }.keys, index)
 }
 
@@ -2851,6 +3577,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2859,6 +3586,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_topics_result_ref` requires a non-null `describe_topics` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned pointer borrows a `TopicDescriptionInner` in
+    // the handle's values vec, valid until `kafka_admin_DescribeTopicsResult_destroy`.
     match unsafe { describe_topics_result_ref(result) }.values.get(index as usize) {
         Some(Some(description)) => description as *const TopicDescriptionInner as *const kafka_admin_TopicDescription_t,
         _ => std::ptr::null(),
@@ -2871,6 +3603,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2879,6 +3612,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_topics_result_ref` requires a non-null `describe_topics` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows an `ErrorInner` owned
+    // by the handle (not to be destroyed), valid until
+    // `kafka_admin_DescribeTopicsResult_destroy`.
     match unsafe { describe_topics_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -2890,9 +3629,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(result: *mut kafka_admin_DescribeTopicsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_topics` result handle, i.e. the
+        // `Box<DescribeTopicsResultInner>` leaked by `Box::into_raw` in
+        // `box_describe_topics_result`. This is the single, final use: the contract states
+        // the handle and every borrowed sub-handle are invalid afterwards, and no other
+        // function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeTopicsResultInner)) };
     }
 }
@@ -2934,6 +3680,12 @@ fn box_create_partitions_result(
 unsafe fn create_partitions_result_ref(
     result: *const kafka_admin_CreatePartitionsResult_t,
 ) -> &'static CreatePartitionsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `create_partitions` call, i.e. the `Box<CreatePartitionsResultInner>` leaked by
+    // `Box::into_raw` in `box_create_partitions_result` and freed only by
+    // `kafka_admin_CreatePartitionsResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const CreatePartitionsResultInner) }
 }
 
@@ -2942,10 +3694,15 @@ unsafe fn create_partitions_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
     result: *const kafka_admin_CreatePartitionsResult_t,
 ) -> i32 {
+    // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { create_partitions_result_ref(result) }.keys.len() as i32
 }
 
@@ -2955,11 +3712,17 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
     result: *const kafka_admin_CreatePartitionsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a key `CString` owned
+    // by the handle, valid until `kafka_admin_CreatePartitionsResult_destroy`.
     cstring_at(&unsafe { create_partitions_result_ref(result) }.keys, index)
 }
 
@@ -2973,6 +3736,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
     result: *const kafka_admin_CreatePartitionsResult_t,
@@ -2981,6 +3745,12 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `create_partitions_result_ref` requires a non-null `create_partitions` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows an `ErrorInner` owned
+    // by the handle (not to be destroyed), valid until
+    // `kafka_admin_CreatePartitionsResult_destroy`.
     match unsafe { create_partitions_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -2992,9 +3762,16 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_destroy(result: *mut kafka_admin_CreatePartitionsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `create_partitions` result handle, i.e. the
+        // `Box<CreatePartitionsResultInner>` leaked by `Box::into_raw` in
+        // `box_create_partitions_result`. This is the single, final use: the contract
+        // states the handle and every borrowed sub-handle are invalid afterwards, and no
+        // other function frees it.
         unsafe { drop(Box::from_raw(result as *mut CreatePartitionsResultInner)) };
     }
 }
@@ -3067,6 +3844,12 @@ fn box_delete_records_result(
 unsafe fn delete_records_result_ref(
     result: *const kafka_admin_DeleteRecordsResult_t,
 ) -> &'static DeleteRecordsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `delete_records` call, i.e. the `Box<DeleteRecordsResultInner>` leaked by
+    // `Box::into_raw` in `box_delete_records_result` and freed only by
+    // `kafka_admin_DeleteRecordsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const DeleteRecordsResultInner) }
 }
 
@@ -3075,10 +3858,15 @@ unsafe fn delete_records_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
     result: *const kafka_admin_DeleteRecordsResult_t,
 ) -> i32 {
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { delete_records_result_ref(result) }.topics.len() as i32
 }
 
@@ -3088,11 +3876,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
     result: *const kafka_admin_DeleteRecordsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows a topic `CString`
+    // owned by the handle, valid until `kafka_admin_DeleteRecordsResult_destroy`.
     cstring_at(&unsafe { delete_records_result_ref(result) }.topics, index)
 }
 
@@ -3101,6 +3895,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3109,6 +3904,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // indexed read within the call, during which the C caller keeps the handle alive.
     unsafe { delete_records_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -3123,6 +3922,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3131,6 +3931,10 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
     if index < 0 {
         return UNKNOWN_LOW_WATERMARK;
     }
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // indexed read within the call, during which the C caller keeps the handle alive.
     unsafe { delete_records_result_ref(result) }
         .low_watermarks
         .get(index as usize)
@@ -3144,6 +3948,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3152,6 +3957,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `delete_records_result_ref` requires a non-null `delete_records` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows an `ErrorInner` owned
+    // by the handle (not to be destroyed), valid until
+    // `kafka_admin_DeleteRecordsResult_destroy`.
     match unsafe { delete_records_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -3163,9 +3974,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut kafka_admin_DeleteRecordsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `delete_records` result handle, i.e. the `Box<DeleteRecordsResultInner>`
+        // leaked by `Box::into_raw` in `box_delete_records_result`. This is the single,
+        // final use: the contract states the handle and every borrowed sub-handle are
+        // invalid afterwards, and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut DeleteRecordsResultInner)) };
     }
 }
@@ -3305,6 +4122,11 @@ unsafe fn finish_sync<T, R>(
     match outcome {
         Ok(value) => {
             if !out_result.is_null() {
+                // SAFETY: `out_result` is non-null (checked above) and, per this helper's
+                // `# Safety`, null or a valid, writable pointer, so exactly one `*mut`
+                // element is written: the fresh handle `box_result(value)` returns from
+                // `Box::into_raw`, whose ownership passes to the C caller (freed with the
+                // matching `_destroy`).
                 unsafe { *out_result = box_result(value) };
             }
             std::ptr::null_mut()
@@ -3353,6 +4175,7 @@ fn create_topics_options(timeout_ms: i32, validate_only: bool, retry_on_quota_vi
 ///
 /// `admin` must be a valid handle; `topics` must have `count` valid entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3363,9 +4186,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_CreateTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_new_topics` requires `topics` to be null or have `count` entries, each
+    // NULL or a valid `NewTopic` handle; per this function's `# Safety` `topics` has
+    // `count` valid entries (the helper additionally tolerates a NULL array, skips NULL
+    // entries and clamps a negative `count` to zero). Each handle is borrowed only for
+    // `build()`; the C caller retains ownership of them.
     let new_topics = unsafe { read_new_topics(topics, count) };
     let options = create_topics_options(timeout_ms, validate_only, retry_on_quota_violation);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `new_topics`
+    // only there, and the helper uses the handle only until `block_on` returns within this
+    // call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_topics(a, &new_topics, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `CreateTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_create_topics_result) }
 }
 
@@ -3397,6 +4235,15 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topics` must have `count` valid entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3408,8 +4255,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
     callback: kafka_admin_AdminClient_create_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_new_topics` requires `topics` to be null or have `count` entries, each
+    // NULL or a valid `NewTopic` handle; per this function's `# Safety` `topics` has
+    // `count` valid entries (the helper additionally tolerates a NULL array, skips NULL
+    // entries and clamps a negative `count` to zero). Each handle is borrowed only for
+    // `build()`, which completes before this function returns; the C caller retains
+    // ownership of them.
     let new_topics = unsafe { read_new_topics(topics, count) };
     let options = create_topics_options(timeout_ms, validate_only, retry_on_quota_violation);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (borrowing `new_topics`
+    // only there), and the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `CreateTopicsResult` handle and the `box_error` handle passed to it is non-null, both
+    // are freshly built and owned by the callee, and `user_data` is valid until the
+    // callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3462,6 +4326,7 @@ pub type kafka_admin_AdminClient_delete_topics_callback_t =
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3471,10 +4336,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_DeleteTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string; per this function's `# Safety` `names` has `count` valid C
+    // strings (the helper additionally tolerates a NULL array, skips NULL entries and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made in
+    // this call.
     let topic_names = unsafe { read_strings(names, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, as this function's `# Safety` requires of the C caller
+        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
+        // The `submit` closure runs on the calling thread inside the helper, consuming the
+        // owned `topic_names`, and the helper uses the handle only until `block_on` returns
+        // within this call.
         unsafe { admin_sync_value_op(admin, move |a| submit_delete_topics_by_names(a, topic_names, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DeleteTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, |o| box_delete_topics_result(o, String::clone)) }
 }
 
@@ -3498,6 +4378,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3508,8 +4397,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
     callback: kafka_admin_AdminClient_delete_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string; per this function's `# Safety` `names` has `count` valid C
+    // strings (the helper additionally tolerates a NULL array, skips NULL entries and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made
+    // before this function returns.
     let topic_names = unsafe { read_strings(names, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (consuming the owned
+    // `topic_names`), and the completion closure runs exactly once, normally on the
+    // dispatcher thread, inline on the calling thread when `admin` is NULL, or on a tokio
+    // worker if the dispatcher queue is unreachable, as this function's documentation
+    // states. `callback` was supplied by the C caller along with `user_data`; exactly one
+    // of the `DeleteTopicsResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3538,6 +4443,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C
 /// strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
     admin: *const kafka_admin_AdminClient_t,
@@ -3547,12 +4453,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_DeleteTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_uuids` requires `topic_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety` `topic_ids` has `count`
+    // valid C strings (the helper additionally tolerates a NULL array, clamps a negative
+    // `count` to zero, and reports a NULL or unparseable id as an illegal-argument error,
+    // which is returned to the caller here). Each string is borrowed only for the parse
+    // made in this call.
     let ids = match unsafe { read_uuids(topic_ids, count) } {
         Ok(ids) => ids,
         Err(e) => return box_error(e),
     };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, consuming the owned
+    // `ids`, and the helper uses the handle only until `block_on` returns within this call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_delete_topics_by_ids(a, ids, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DeleteTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, |o| box_delete_topics_result(o, Uuid::to_string)) }
 }
 
@@ -3577,6 +4498,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3587,8 +4517,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
     callback: kafka_admin_AdminClient_delete_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_uuids` requires `topic_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety` `topic_ids` has `count`
+    // valid C strings (the helper additionally tolerates a NULL array, clamps a negative
+    // `count` to zero, and reports a NULL or unparseable id as an illegal-argument error,
+    // kept in `parsed` so the callback can deliver it). Each string is borrowed only for
+    // the parse made before this function returns.
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread, and `parsed?` turns a
+    // `read_uuids` error into an `Err` from `submit`, which the helper also delivers
+    // inline; so the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread for a NULL `admin` or a bad topic id, or on a
+    // tokio worker if the dispatcher queue is unreachable, as this function's documentation
+    // states. `callback` was supplied by the C caller along with `user_data`; exactly one
+    // of the `DeleteTopicsResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3631,6 +4579,7 @@ pub type kafka_admin_AdminClient_list_topics_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3642,7 +4591,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_list_internal(list_internal);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, as this function's `# Safety` requires of the C caller
+        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
+        // The `submit` closure runs on the calling thread inside the helper and captures
+        // only the owned `options`, and the helper uses the handle only until `block_on`
+        // returns within this call.
         unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_topics_with_options(options).names_to_listings())) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `ListTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_list_topics_result) }
 }
 
@@ -3666,6 +4625,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3677,6 +4645,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
     let options = ListTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_list_internal(list_internal);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread and captures only the owned
+    // `options`; the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `ListTopicsResult` handle and the `box_error` handle passed to it is non-null, both
+    // are freshly built and owned by the callee, and `user_data` is valid until the
+    // callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3735,6 +4714,7 @@ pub type kafka_admin_AdminClient_describe_topics_callback_t =
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3745,10 +4725,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     partition_size_limit_per_response: i32,
     out_result: *mut *mut kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string; per this function's `# Safety` `names` has `count` valid C
+    // strings (the helper additionally tolerates a NULL array, skips NULL entries and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made in
+    // this call.
     let topic_names = unsafe { read_strings(names, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, as this function's `# Safety` requires of the C caller
+        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
+        // The `submit` closure runs on the calling thread inside the helper, consuming the
+        // owned `topic_names`, and the helper uses the handle only until `block_on` returns
+        // within this call.
         unsafe { admin_sync_value_op(admin, move |a| submit_describe_topics_by_names(a, topic_names, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, |o| box_describe_topics_result(o, String::clone)) }
 }
 
@@ -3772,6 +4767,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3783,8 +4787,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
     callback: kafka_admin_AdminClient_describe_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string; per this function's `# Safety` `names` has `count` valid C
+    // strings (the helper additionally tolerates a NULL array, skips NULL entries and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made
+    // before this function returns.
     let topic_names = unsafe { read_strings(names, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (consuming the owned
+    // `topic_names`), and the completion closure runs exactly once, normally on the
+    // dispatcher thread, inline on the calling thread when `admin` is NULL, or on a tokio
+    // worker if the dispatcher queue is unreachable, as this function's documentation
+    // states. `callback` was supplied by the C caller along with `user_data`; exactly one
+    // of the `DescribeTopicsResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3813,6 +4833,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C
 /// strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
     admin: *const kafka_admin_AdminClient_t,
@@ -3823,12 +4844,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
     partition_size_limit_per_response: i32,
     out_result: *mut *mut kafka_admin_DescribeTopicsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_uuids` requires `topic_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety` `topic_ids` has `count`
+    // valid C strings (the helper additionally tolerates a NULL array, clamps a negative
+    // `count` to zero, and reports a NULL or unparseable id as an illegal-argument error,
+    // which is returned to the caller here). Each string is borrowed only for the parse
+    // made in this call.
     let ids = match unsafe { read_uuids(topic_ids, count) } {
         Ok(ids) => ids,
         Err(e) => return box_error(e),
     };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, consuming the owned
+    // `ids`, and the helper uses the handle only until `block_on` returns within this call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_topics_by_ids(a, ids, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeTopicsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, |o| box_describe_topics_result(o, Uuid::to_string)) }
 }
 
@@ -3853,6 +4889,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3864,8 +4909,26 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
     callback: kafka_admin_AdminClient_describe_topics_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_uuids` requires `topic_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety` `topic_ids` has `count`
+    // valid C strings (the helper additionally tolerates a NULL array, clamps a negative
+    // `count` to zero, and reports a NULL or unparseable id as an illegal-argument error,
+    // kept in `parsed` so the callback can deliver it). Each string is borrowed only for
+    // the parse made before this function returns.
     let parsed = unsafe { read_uuids(topic_ids, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread, and `parsed?` turns a
+    // `read_uuids` error into an `Err` from `submit`, which the helper also delivers
+    // inline; so the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread for a NULL `admin` or a bad topic id, or on a
+    // tokio worker if the dispatcher queue is unreachable, as this function's documentation
+    // states. `callback` was supplied by the C caller along with `user_data`; exactly one
+    // of the `DescribeTopicsResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -3937,6 +5000,7 @@ pub type kafka_admin_AdminClient_create_partitions_callback_t =
 ///
 /// `admin` must be a valid handle; `topics` and `new_partitions` must have
 /// `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     admin: *const kafka_admin_AdminClient_t,
@@ -3948,9 +5012,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_CreatePartitionsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_new_partitions` requires `topics` and `new_partitions` to be null or
+    // have `count` entries each, every entry NULL or valid; per this function's `# Safety`
+    // both arrays have `count` valid entries (the helper additionally tolerates NULL
+    // arrays, skips a pair with a NULL side and clamps a negative `count` to zero). Each
+    // string is copied and each `NewPartitions` handle borrowed only for `build()` within
+    // this call; the C caller retains ownership of the handles.
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `specs` only
+    // there, and the helper uses the handle only until `block_on` returns within this call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_partitions(a, &specs, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `CreatePartitionsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_create_partitions_result) }
 }
 
@@ -3975,6 +5054,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 ///
 /// `admin` must be a valid handle; `topics` and `new_partitions` must have
 /// `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3987,8 +5075,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
     callback: kafka_admin_AdminClient_create_partitions_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_new_partitions` requires `topics` and `new_partitions` to be null or
+    // have `count` entries each, every entry NULL or valid; per this function's `# Safety`
+    // both arrays have `count` valid entries (the helper additionally tolerates NULL
+    // arrays, skips a pair with a NULL side and clamps a negative `count` to zero). Each
+    // string is copied and each `NewPartitions` handle borrowed only for `build()` before
+    // this function returns; the C caller retains ownership of the handles.
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (borrowing `specs` only
+    // there), and the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `CreatePartitionsResult` handle and the `box_error` handle passed to it is non-null,
+    // both are freshly built and owned by the callee, and `user_data` is valid until the
+    // callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -4045,6 +5150,7 @@ pub type kafka_admin_AdminClient_delete_records_callback_t =
 ///
 /// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
 /// must have `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     admin: *const kafka_admin_AdminClient_t,
@@ -4055,9 +5161,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteRecordsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_records_to_delete` requires `topics`, `partitions` and `before_offsets`
+    // to be null or have `count` entries each, every `topics` entry NULL or a valid C
+    // string; per this function's `# Safety` all three arrays have `count` valid entries
+    // (the helper additionally tolerates NULL arrays, skips an entry with a NULL topic and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made in
+    // this call.
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
     let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `records`
+    // only there, and the helper uses the handle only until `block_on` returns within this
+    // call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_records(a, &records, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DeleteRecordsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_delete_records_result) }
 }
 
@@ -4082,6 +5204,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 ///
 /// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
 /// must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -4093,8 +5224,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     callback: kafka_admin_AdminClient_delete_records_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_records_to_delete` requires `topics`, `partitions` and `before_offsets`
+    // to be null or have `count` entries each, every `topics` entry NULL or a valid C
+    // string; per this function's `# Safety` all three arrays have `count` valid entries
+    // (the helper additionally tolerates NULL arrays, skips an entry with a NULL topic and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made
+    // before this function returns.
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
     let options = DeleteRecordsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (borrowing `records` only
+    // there), and the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `DeleteRecordsResult` handle and the `box_error` handle passed to it is non-null,
+    // both are freshly built and owned by the callee, and `user_data` is valid until the
+    // callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -4127,6 +5275,9 @@ unsafe fn read_i32s(values: *const i32, count: i32) -> Vec<i32> {
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `values` is non-null (checked above) and, per this helper's `# Safety`,
+        // has `count` readable entries; `i < n` where `n = count.max(0)`, so a negative
+        // `count` reads nothing and every read stays inside the caller's array.
         out.push(unsafe { *values.add(i) });
     }
     out
@@ -4154,11 +5305,21 @@ unsafe fn read_config_resources(
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `names` and `type_codes` are both non-null (checked above) and, per this
+        // helper's `# Safety`, each has `count` readable entries; `i < n` where `n =
+        // count.max(0)`, so a negative `count` reads nothing and the read of `names` stays
+        // inside the caller's array.
         let name_ptr = unsafe { *names.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` is non-null (checked above; NULL names are skipped) and, per
+        // this helper's `# Safety`, every non-null `names` entry is a valid C string; it is
+        // borrowed only for the `to_string_lossy` copy made in this call.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `type_codes` is non-null (checked above) and, per this helper's `#
+        // Safety`, has `count` readable entries; `i < count.max(0)`, so the read stays
+        // inside the caller's array, and the value only feeds `enum_code_or_unknown`.
         let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
         out.push(ConfigResource::new(resource_type, name));
     }
@@ -4184,11 +5345,23 @@ unsafe fn read_replicas(
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `topics`, `partitions` and `broker_ids` are all non-null (checked above)
+        // and, per this helper's `# Safety`, each has `count` readable entries; `i < n`
+        // where `n = count.max(0)`, so a negative `count` reads nothing and the read of
+        // `topics` stays inside the caller's array.
         let topic_ptr = unsafe { *topics.add(i) };
         if topic_ptr.is_null() {
             continue;
         }
+        // SAFETY: `topic_ptr` is non-null (checked above; entries with a NULL topic are
+        // skipped) and, per this helper's `# Safety`, every non-null `topics` entry is a
+        // valid C string; it is borrowed only for the `to_string_lossy` copy made in this
+        // call.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` and `broker_ids` are both non-null (checked above) and, per
+        // this helper's `# Safety`, each has `count` readable entries; `i < count.max(0)`,
+        // so both reads (`*partitions.add(i)` and `*broker_ids.add(i)`) stay inside the
+        // caller's arrays.
         out.push(TopicPartitionReplica::new(topic, unsafe { *partitions.add(i) }, unsafe {
             *broker_ids.add(i)
         }));
@@ -4214,7 +5387,8 @@ unsafe fn read_replicas(
 ///
 /// # Safety
 ///
-/// Every array must be null or have `count` readable entries.
+/// Every array must be null or have `count` readable entries; every non-null
+/// resource name, config name and config value must be a valid C string.
 unsafe fn read_alter_config_ops(
     resource_type_codes: *const i32,
     resource_names: *const *const c_char,
@@ -4229,11 +5403,24 @@ unsafe fn read_alter_config_ops(
         return Ok(out);
     }
     for i in 0..n {
+        // SAFETY: `resource_names` is non-null (checked above together with
+        // `resource_type_codes`, `config_names` and `op_type_codes`) and, per this helper's
+        // `# Safety`, has `count` readable entries; `i < n` where `n = count.max(0)`, so a
+        // negative `count` reads nothing and the read stays inside the caller's array.
         let resource_name_ptr = unsafe { *resource_names.add(i) };
+        // SAFETY: `config_names` is non-null (checked above together with
+        // `resource_type_codes`, `resource_names` and `op_type_codes`) and, per this
+        // helper's `# Safety`, has `count` readable entries; `i < n` where `n =
+        // count.max(0)`, so the read stays inside the caller's array.
         let config_name_ptr = unsafe { *config_names.add(i) };
         if resource_name_ptr.is_null() || config_name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `op_type_codes` is non-null (checked above together with
+        // `resource_type_codes`, `resource_names` and `config_names`) and, per this
+        // helper's `# Safety`, has `count` readable entries; `i < count.max(0)`, so the
+        // read stays inside the caller's array, and an unrecognised code is rejected with
+        // `LocalIllegalArgument` rather than folded onto a valid op.
         let op_code = unsafe { *op_type_codes.add(i) };
         // `OpType` has no UNKNOWN member, so a code that does not narrow to an
         // `int8_t` is rejected rather than folded onto a valid op (see
@@ -4241,16 +5428,45 @@ unsafe fn read_alter_config_ops(
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
+        // SAFETY: `resource_type_codes` is non-null (checked above together with
+        // `resource_names`, `config_names` and `op_type_codes`) and, per this helper's `#
+        // Safety`, has `count` readable entries; `i < count.max(0)`, so the read stays
+        // inside the caller's array, and the value only feeds `enum_code_or_unknown`.
         let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        // SAFETY: `resource_name_ptr` is non-null (checked above; rows with a NULL resource
+        // or config name are skipped) and is a valid C string: this helper's `# Safety`
+        // requires `count` readable entries, and both callers
+        // (`kafka_admin_AdminClient_incremental_alter_configs` and its `_async` twin)
+        // require per their own `# Safety` that every input array has `count` valid
+        // entries, i.e. each non-null name is a C string. It is borrowed only for the
+        // `to_string_lossy` copy made in this call.
         let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `config_name_ptr` is non-null (checked above; rows with a NULL resource
+        // or config name are skipped) and is a valid C string: this helper's `# Safety`
+        // requires `count` readable entries, and both callers
+        // (`kafka_admin_AdminClient_incremental_alter_configs` and its `_async` twin)
+        // require per their own `# Safety` that every input array has `count` valid
+        // entries, i.e. each non-null name is a C string. It is borrowed only for the
+        // `to_string_lossy` copy made in this call.
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
             None
         } else {
+            // SAFETY: `config_values` is non-null (checked above; it is the one array the
+            // early return does not cover, so it has its own check) and, per this helper's
+            // `# Safety`, has `count` readable entries; `i < count.max(0)`, so the read
+            // stays inside the caller's array. A NULL entry is meaningful (Java's null
+            // value) and is handled, not dereferenced.
             let value_ptr = unsafe { *config_values.add(i) };
             if value_ptr.is_null() {
                 None
             } else {
+                // SAFETY: `value_ptr` is non-null (checked above) and is a valid C string:
+                // this helper's `# Safety` requires `count` readable entries, and both
+                // callers (`kafka_admin_AdminClient_incremental_alter_configs` and its
+                // `_async` twin) require per their own `# Safety` that every input array
+                // has `count` valid entries, i.e. each non-null value is a C string. It is
+                // borrowed only for the `to_string_lossy` copy made in this call.
                 Some(unsafe { CStr::from_ptr(value_ptr) }.to_string_lossy().to_string())
             }
         };
@@ -4358,6 +5574,12 @@ impl LogDirDescriptionInner {
 /// `description` must be a non-null borrowed pointer from a
 /// [`kafka_admin_LogDirDescriptionMap_t`] getter.
 unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'static LogDirDescriptionInner {
+    // SAFETY: Per this helper's `# Safety`, `description` is a non-null borrowed pointer
+    // from a `kafka_admin_LogDirDescriptionMap_t` getter, i.e. it points at a
+    // `LogDirDescriptionInner` inside a `LogDirDescriptionMapInner`'s descriptions vec,
+    // owned by a `DescribeLogDirsResult` handle and never resized after the handle is
+    // built, so it stays valid until that handle is destroyed; callers use the reference
+    // only within their own synchronous getter call.
     unsafe { &*(description as *const LogDirDescriptionInner) }
 }
 
@@ -4370,10 +5592,17 @@ unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned error pointer borrows the `ErrorInner` the
+    // log dir owns (not to be destroyed), valid until the owning `DescribeLogDirsResult`
+    // handle is destroyed.
     error_ptr(unsafe { log_dir_ref(description) }.error.as_ref())
 }
 
@@ -4383,10 +5612,16 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this
+    // field read within the call, during which the owning `DescribeLogDirsResult` handle is
+    // alive.
     unsafe { log_dir_ref(description) }.total_bytes
 }
 
@@ -4396,10 +5631,16 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this
+    // field read within the call, during which the owning `DescribeLogDirsResult` handle is
+    // alive.
     unsafe { log_dir_ref(description) }.usable_bytes
 }
 
@@ -4408,10 +5649,16 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_count(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i32 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the owning `DescribeLogDirsResult` handle is
+    // alive.
     unsafe { log_dir_ref(description) }.replicas.len() as i32
 }
 
@@ -4421,11 +5668,18 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_topic(
     description: *const kafka_admin_LogDirDescription_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); `replica_info_at` bounds-checks `index`,
+    // the reference is used only for the duration of this call, and the returned string
+    // pointer borrows a `ReplicaInfoC` `CString` owned by the `DescribeLogDirsResult`
+    // handle, valid until it is destroyed.
     match replica_info_at(unsafe { log_dir_ref(description) }, index) {
         Some(replica) => replica.topic_c.as_ptr(),
         None => std::ptr::null(),
@@ -4437,11 +5691,17 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_topic(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_partition(
     description: *const kafka_admin_LogDirDescription_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); `replica_info_at` bounds-checks `index`,
+    // and the reference is used only for this field read within the call, during which the
+    // owning `DescribeLogDirsResult` handle is alive.
     match replica_info_at(unsafe { log_dir_ref(description) }, index) {
         Some(replica) => replica.partition,
         None => -1,
@@ -4454,11 +5714,17 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_partition(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_size(
     description: *const kafka_admin_LogDirDescription_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); `replica_info_at` bounds-checks `index`,
+    // and the reference is used only for this field read within the call, during which the
+    // owning `DescribeLogDirsResult` handle is alive.
     match replica_info_at(unsafe { log_dir_ref(description) }, index) {
         Some(replica) => replica.size,
         None => -1,
@@ -4470,11 +5736,17 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_size(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_offset_lag(
     description: *const kafka_admin_LogDirDescription_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); `replica_info_at` bounds-checks `index`,
+    // and the reference is used only for this field read within the call, during which the
+    // owning `DescribeLogDirsResult` handle is alive.
     match replica_info_at(unsafe { log_dir_ref(description) }, index) {
         Some(replica) => replica.offset_lag,
         None => -1,
@@ -4487,11 +5759,17 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_offset_lag(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_is_future(
     description: *const kafka_admin_LogDirDescription_t,
     index: i32,
 ) -> bool {
+    // SAFETY: `log_dir_ref` requires a non-null borrowed pointer from a log-dir map getter,
+    // which this function's `# Safety` requires of `description` (no in-body null check, so
+    // the C caller's contract is the sole source); `replica_info_at` bounds-checks `index`,
+    // and the reference is used only for this field read within the call, during which the
+    // owning `DescribeLogDirsResult` handle is alive.
     match replica_info_at(unsafe { log_dir_ref(description) }, index) {
         Some(replica) => replica.is_future,
         None => false,
@@ -4539,6 +5817,11 @@ impl LogDirDescriptionMapInner {
 /// `map` must be a non-null borrowed pointer from a `describe_log_dirs` result
 /// getter.
 unsafe fn log_dir_map_ref(map: *const kafka_admin_LogDirDescriptionMap_t) -> &'static LogDirDescriptionMapInner {
+    // SAFETY: Per this helper's `# Safety`, `map` is a non-null borrowed pointer from a
+    // `describe_log_dirs` result getter, i.e. it points at a `LogDirDescriptionMapInner`
+    // stored in a `DescribeLogDirsResult` handle's values vec, never resized after the
+    // handle is built, so it stays valid until that handle is destroyed; callers use the
+    // reference only within their own synchronous getter call.
     unsafe { &*(map as *const LogDirDescriptionMapInner) }
 }
 
@@ -4548,8 +5831,14 @@ unsafe fn log_dir_map_ref(map: *const kafka_admin_LogDirDescriptionMap_t) -> &'s
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_count(map: *const kafka_admin_LogDirDescriptionMap_t) -> i32 {
+    // SAFETY: `log_dir_map_ref` requires a non-null borrowed pointer from a
+    // `describe_log_dirs` result getter, which this function's `# Safety` requires of `map`
+    // (no in-body null check, so the C caller's contract is the sole source); the reference
+    // is used only for this `len()` within the call, during which the owning
+    // `DescribeLogDirsResult` handle is alive.
     unsafe { log_dir_map_ref(map) }.log_dirs.len() as i32
 }
 
@@ -4560,11 +5849,18 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_count(map: *const kafk
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_key(
     map: *const kafka_admin_LogDirDescriptionMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `log_dir_map_ref` requires a non-null borrowed pointer from a
+    // `describe_log_dirs` result getter, which this function's `# Safety` requires of `map`
+    // (no in-body null check, so the C caller's contract is the sole source); `cstring_at`
+    // bounds-checks `index`, the reference is used only for the duration of this call, and
+    // the returned string pointer borrows a log-dir path `CString` owned by the
+    // `DescribeLogDirsResult` handle, valid until it is destroyed.
     cstring_at(&unsafe { log_dir_map_ref(map) }.log_dirs, index)
 }
 
@@ -4575,6 +5871,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_key(
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
     map: *const kafka_admin_LogDirDescriptionMap_t,
@@ -4583,6 +5880,12 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `log_dir_map_ref` requires a non-null borrowed pointer from a
+    // `describe_log_dirs` result getter, which this function's `# Safety` requires of `map`
+    // (no in-body null check); `index` is non-negative (checked above) and bounds-checked
+    // by `get`. The returned pointer borrows a `LogDirDescriptionInner` in the map's
+    // descriptions vec, owned by the `DescribeLogDirsResult` handle and valid until it is
+    // destroyed.
     match unsafe { log_dir_map_ref(map) }.descriptions.get(index as usize) {
         Some(description) => description as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t,
         None => std::ptr::null(),
@@ -4623,6 +5926,11 @@ impl ReplicaLogDirInfoInner {
 ///
 /// `info` must be a non-null borrowed pointer from a result-handle getter.
 unsafe fn replica_log_dir_info_ref(info: *const kafka_admin_ReplicaLogDirInfo_t) -> &'static ReplicaLogDirInfoInner {
+    // SAFETY: Per this helper's `# Safety`, `info` is a non-null borrowed pointer from a
+    // result-handle getter, i.e. it points at a `ReplicaLogDirInfoInner` stored in the
+    // owning `describe_replica_log_dirs` result handle's values vec, never resized after
+    // the handle is built, so it stays valid until that handle is destroyed; callers use
+    // the reference only within their own synchronous getter call.
     unsafe { &*(info as *const ReplicaLogDirInfoInner) }
 }
 
@@ -4632,10 +5940,17 @@ unsafe fn replica_log_dir_info_ref(info: *const kafka_admin_ReplicaLogDirInfo_t)
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> *const c_char {
+    // SAFETY: `replica_log_dir_info_ref` requires a non-null borrowed pointer from a
+    // result-handle getter, which this function's `# Safety` requires of `info` (no in-body
+    // null check, so the C caller's contract is the sole source); the reference is used
+    // only for the duration of this call, and the returned string pointer borrows the
+    // current-log-dir `CString` owned by the result handle, valid until that handle is
+    // destroyed.
     match &unsafe { replica_log_dir_info_ref(info) }.current_log_dir_c {
         Some(dir) => dir.as_ptr(),
         None => std::ptr::null(),
@@ -4648,10 +5963,16 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> i64 {
+    // SAFETY: `replica_log_dir_info_ref` requires a non-null borrowed pointer from a
+    // result-handle getter, which this function's `# Safety` requires of `info` (no in-body
+    // null check, so the C caller's contract is the sole source); the reference is used
+    // only for this field read within the call, during which the owning result handle is
+    // alive.
     unsafe { replica_log_dir_info_ref(info) }.current_offset_lag
 }
 
@@ -4661,10 +5982,17 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_la
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> *const c_char {
+    // SAFETY: `replica_log_dir_info_ref` requires a non-null borrowed pointer from a
+    // result-handle getter, which this function's `# Safety` requires of `info` (no in-body
+    // null check, so the C caller's contract is the sole source); the reference is used
+    // only for the duration of this call, and the returned string pointer borrows the
+    // future-log-dir `CString` owned by the result handle, valid until that handle is
+    // destroyed.
     match &unsafe { replica_log_dir_info_ref(info) }.future_log_dir_c {
         Some(dir) => dir.as_ptr(),
         None => std::ptr::null(),
@@ -4676,10 +6004,16 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> i64 {
+    // SAFETY: `replica_log_dir_info_ref` requires a non-null borrowed pointer from a
+    // result-handle getter, which this function's `# Safety` requires of `info` (no in-body
+    // null check, so the C caller's contract is the sole source); the reference is used
+    // only for this field read within the call, during which the owning result handle is
+    // alive.
     unsafe { replica_log_dir_info_ref(info) }.future_offset_lag
 }
 
@@ -4741,6 +6075,12 @@ fn box_describe_cluster_result(outcome: DescribeClusterOutcome) -> *mut kafka_ad
 unsafe fn describe_cluster_result_ref(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> &'static DescribeClusterResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_cluster` call, i.e. the `Box<DescribeClusterResultInner>` leaked by
+    // `Box::into_raw` in `box_describe_cluster_result` and freed only by
+    // `kafka_admin_DescribeClusterResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeClusterResultInner) }
 }
 
@@ -4749,10 +6089,17 @@ unsafe fn describe_cluster_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const c_char {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned string pointer borrows the cluster-id
+    // `CString` owned by the handle, valid until
+    // `kafka_admin_DescribeClusterResult_destroy`.
     unsafe { describe_cluster_result_ref(result) }.cluster_id_c.as_ptr()
 }
 
@@ -4761,10 +6108,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> i32 {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { describe_cluster_result_ref(result) }.nodes.len() as i32
 }
 
@@ -4774,11 +6126,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); `node_at` bounds-checks `index`, the
+    // reference is used only for the duration of this call, and the returned
+    // `kafka_common_Node_t` pointer borrows a `Node` in the handle's nodes vec, valid until
+    // `kafka_admin_DescribeClusterResult_destroy`.
     node_at(&unsafe { describe_cluster_result_ref(result) }.nodes, index)
 }
 
@@ -4788,10 +6147,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for the
+    // duration of this call, and the returned `kafka_common_Node_t` pointer borrows the
+    // controller `Node` owned by the handle, valid until
+    // `kafka_admin_DescribeClusterResult_destroy`.
     match &unsafe { describe_cluster_result_ref(result) }.controller {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
         None => std::ptr::null(),
@@ -4807,10 +6173,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_count(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> i32 {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // count within the call, during which the C caller keeps the handle alive.
     authorized_operation_count(unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref())
 }
 
@@ -4821,10 +6192,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operations(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> bool {
+    // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // presence test within the call, during which the C caller keeps the handle alive.
     unsafe { describe_cluster_result_ref(result) }.authorized_operations.is_some()
 }
 
@@ -4834,12 +6210,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operat
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> i32 {
     authorized_operation_at(
+        // SAFETY: `describe_cluster_result_ref` requires a non-null `describe_cluster`
+        // result handle, which this function's `# Safety` requires of `result` (no in-body
+        // null check, so the C caller's contract is the sole source);
+        // `authorized_operation_at` bounds-checks `index`, and the reference is used only
+        // for this indexed read within the call, during which the C caller keeps the handle
+        // alive.
         unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref(),
         index,
     )
@@ -4851,9 +6234,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(result: *mut kafka_admin_DescribeClusterResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_cluster` result handle, i.e. the
+        // `Box<DescribeClusterResultInner>` leaked by `Box::into_raw` in
+        // `box_describe_cluster_result`. This is the single, final use: the contract states
+        // the handle and every borrowed sub-handle are invalid afterwards, and no other
+        // function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeClusterResultInner)) };
     }
 }
@@ -4926,6 +6316,7 @@ pub type kafka_admin_AdminClient_describe_cluster_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     admin: *const kafka_admin_AdminClient_t,
@@ -4935,7 +6326,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     out_result: *mut *mut kafka_admin_DescribeClusterResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
+    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error).
+    // `submit_describe_cluster` runs on the calling thread inside the helper and returns a
+    // future over the four attribute `KafkaFuture`s that borrows nothing from the handle,
+    // and `block_on` consumes it before this call returns.
     let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_cluster(a, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeClusterResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_describe_cluster_result) }
 }
 
@@ -4959,6 +6360,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -4969,6 +6379,18 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
     user_data: *mut c_void,
 ) {
     let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
+    // SAFETY: `admin_async_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error.
+    // `submit_describe_cluster` runs synchronously on the calling thread and returns a
+    // `'static + Send` future over the four attribute `KafkaFuture`s, so no borrow of the
+    // handle reaches the spawned task; the completion closure runs exactly once, normally
+    // on the dispatcher thread, inline on the calling thread when `admin` is NULL, or on a
+    // tokio worker if the dispatcher queue is unreachable, as this function's documentation
+    // states. `callback` was supplied by the C caller along with `user_data`; exactly one
+    // of the `DescribeClusterResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_future_op(
             admin,
@@ -5045,6 +6467,12 @@ fn box_describe_configs_result(outcomes: DescribeConfigsOutcomes) -> *mut kafka_
 unsafe fn describe_configs_result_ref(
     result: *const kafka_admin_DescribeConfigsResult_t,
 ) -> &'static DescribeConfigsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_configs` call, i.e. the `Box<DescribeConfigsResultInner>` leaked by
+    // `Box::into_raw` in `box_describe_configs_result` and freed only by
+    // `kafka_admin_DescribeConfigsResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeConfigsResultInner) }
 }
 
@@ -5053,10 +6481,15 @@ unsafe fn describe_configs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
     result: *const kafka_admin_DescribeConfigsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { describe_configs_result_ref(result) }.key_names.len() as i32
 }
 
@@ -5066,6 +6499,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5074,6 +6508,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); `index` is non-negative (checked
+    // above) and bounds-checked by `get`, and the reference is used only for this copied
+    // read within the call.
     unsafe { describe_configs_result_ref(result) }
         .key_types
         .get(index as usize)
@@ -5087,11 +6526,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
     result: *const kafka_admin_DescribeConfigsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); `cstring_at` bounds-checks `index`,
+    // the reference is used only for the duration of this call, and the returned string
+    // pointer borrows a key `CString` owned by the handle, valid until
+    // `kafka_admin_DescribeConfigsResult_destroy`.
     cstring_at(&unsafe { describe_configs_result_ref(result) }.key_names, index)
 }
 
@@ -5102,6 +6548,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5110,6 +6557,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
+    // returned pointer borrows a `ConfigInner` in the handle's values vec, valid until
+    // `kafka_admin_DescribeConfigsResult_destroy`.
     match unsafe { describe_configs_result_ref(result) }.values.get(index as usize) {
         Some(Some(config)) => config as *const ConfigInner as *const kafka_admin_Config_t,
         _ => std::ptr::null(),
@@ -5122,6 +6574,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5130,6 +6583,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_configs_result_ref` requires a non-null `describe_configs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
+    // returned error pointer borrows an `ErrorInner` owned by the handle (not to be
+    // destroyed), valid until `kafka_admin_DescribeConfigsResult_destroy`.
     match unsafe { describe_configs_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -5142,9 +6600,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(result: *mut kafka_admin_DescribeConfigsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_configs` result handle, i.e. the
+        // `Box<DescribeConfigsResultInner>` leaked by `Box::into_raw` in
+        // `box_describe_configs_result`. This is the single, final use: the contract states
+        // the handle and every borrowed sub-handle are invalid afterwards, and no other
+        // function frees it.
         unsafe { drop(Box::from_raw(result as *mut DescribeConfigsResultInner)) };
     }
 }
@@ -5207,6 +6672,7 @@ pub type kafka_admin_AdminClient_describe_configs_callback_t =
 ///
 /// `admin` must be a valid handle; `resource_types` and `resource_names` must
 /// have `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     admin: *const kafka_admin_AdminClient_t,
@@ -5218,9 +6684,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     include_documentation: bool,
     out_result: *mut *mut kafka_admin_DescribeConfigsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_config_resources` requires `type_codes` and `names` to be null or have
+    // `count` readable entries each, every name NULL or a valid C string; per this
+    // function's `# Safety` `resource_types` and `resource_names` have `count` valid
+    // entries each (the helper additionally tolerates NULL arrays, skips NULL names and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made in
+    // this call.
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires of the C caller (the
+    // helper additionally turns a NULL `admin` into an illegal-argument error). The
+    // `submit` closure runs on the calling thread inside the helper, borrowing `resources`
+    // only there, and the helper uses the handle only until `block_on` returns within this
+    // call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_configs(a, &resources, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `DescribeConfigsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_describe_configs_result) }
 }
 
@@ -5245,6 +6727,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
 ///
 /// `admin` must be a valid handle; `resource_types` and `resource_names` must
 /// have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5257,8 +6748,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     callback: kafka_admin_AdminClient_describe_configs_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_config_resources` requires `type_codes` and `names` to be null or have
+    // `count` readable entries each, every name NULL or a valid C string; per this
+    // function's `# Safety` `resource_types` and `resource_names` have `count` valid
+    // entries each (the helper additionally tolerates NULL arrays, skips NULL names and
+    // clamps a negative `count` to zero). Each string is borrowed only for the copy made
+    // before this function returns.
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (borrowing `resources` only
+    // there), and the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `DescribeConfigsResult` handle and the `box_error` handle passed to it is non-null,
+    // both are freshly built and owned by the callee, and `user_data` is valid until the
+    // callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -5322,6 +6830,12 @@ fn box_alter_configs_result(outcomes: AlterConfigsOutcomes) -> *mut kafka_admin_
 unsafe fn alter_configs_result_ref(
     result: *const kafka_admin_AlterConfigsResult_t,
 ) -> &'static AlterConfigsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `incremental_alter_configs` call, i.e. the `Box<AlterConfigsResultInner>` leaked by
+    // `Box::into_raw` in `box_alter_configs_result` and freed only by
+    // `kafka_admin_AlterConfigsResult_destroy`, so it is aligned and live; callers use the
+    // reference only within their own synchronous getter call, during which the C caller
+    // keeps the handle alive.
     unsafe { &*(result as *const AlterConfigsResultInner) }
 }
 
@@ -5330,8 +6844,13 @@ unsafe fn alter_configs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kafka_admin_AlterConfigsResult_t) -> i32 {
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); the reference is used only for
+    // this `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { alter_configs_result_ref(result) }.key_names.len() as i32
 }
 
@@ -5341,6 +6860,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
     result: *const kafka_admin_AlterConfigsResult_t,
@@ -5349,6 +6869,11 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); `index` is non-negative
+    // (checked above) and bounds-checked by `get`, and the reference is used only for this
+    // copied read within the call.
     unsafe { alter_configs_result_ref(result) }
         .key_types
         .get(index as usize)
@@ -5362,11 +6887,18 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
     result: *const kafka_admin_AlterConfigsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check, so the C caller's contract is the sole source); `cstring_at` bounds-checks
+    // `index`, the reference is used only for the duration of this call, and the returned
+    // string pointer borrows a key `CString` owned by the handle, valid until
+    // `kafka_admin_AlterConfigsResult_destroy`.
     cstring_at(&unsafe { alter_configs_result_ref(result) }.key_names, index)
 }
 
@@ -5379,6 +6911,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
     result: *const kafka_admin_AlterConfigsResult_t,
@@ -5387,6 +6920,11 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `alter_configs_result_ref` requires a non-null `incremental_alter_configs`
+    // result handle, which this function's `# Safety` requires of `result` (no in-body null
+    // check); `index` is non-negative (checked above) and bounds-checked by `get`. The
+    // returned error pointer borrows an `ErrorInner` owned by the handle (not to be
+    // destroyed), valid until `kafka_admin_AlterConfigsResult_destroy`.
     match unsafe { alter_configs_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -5399,9 +6937,15 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_destroy(result: *mut kafka_admin_AlterConfigsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `incremental_alter_configs` result handle, i.e. the
+        // `Box<AlterConfigsResultInner>` leaked by `Box::into_raw` in
+        // `box_alter_configs_result`. This is the single, final use: the contract states
+        // the handle is invalid afterwards and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut AlterConfigsResultInner)) };
     }
 }
@@ -5457,6 +7001,7 @@ pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     admin: *const kafka_admin_AdminClient_t,
@@ -5470,6 +7015,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     validate_only: bool,
     out_result: *mut *mut kafka_admin_AlterConfigsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_alter_config_ops` requires every array to be null or have `count`
+    // readable entries; per this function's `# Safety` every input array has `count` valid
+    // entries, so each non-null name or value is a C string, and the helper additionally
+    // tolerates NULL arrays, skips rows with a NULL resource or config name, treats a NULL
+    // value as Java's null, clamps a negative `count` to zero and reports an unknown
+    // op-type code as an error, which is returned to the caller here. Each string is
+    // borrowed only for the copy made in this call.
     let configs = match unsafe {
         read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count)
     } {
@@ -5480,7 +7032,17 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_validate_only(validate_only);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, as this function's `# Safety` requires of the C caller
+        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
+        // The `submit` closure runs on the calling thread inside the helper, borrowing
+        // `configs` only there, and the helper uses the handle only until `block_on`
+        // returns within this call.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_incremental_alter_configs(a, &configs, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `AlterConfigsResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_alter_configs_result) }
 }
 
@@ -5506,6 +7068,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5521,10 +7092,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
     user_data: *mut c_void,
 ) {
     let parsed =
+        // SAFETY: `read_alter_config_ops` requires every array to be null or have `count`
+        // readable entries; per this function's `# Safety` every input array has `count`
+        // valid entries, so each non-null name or value is a C string, and the helper
+        // additionally tolerates NULL arrays, skips rows with a NULL resource or config
+        // name, treats a NULL value as Java's null, clamps a negative `count` to zero and
+        // reports an unknown op-type code as an error, kept in `parsed` so the callback can
+        // deliver it. Each string is borrowed only for the copy made before this function
+        // returns.
         unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
     let options = AlterConfigsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_validate_only(validate_only);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread, and `&parsed?` turns a
+    // `read_alter_config_ops` error into an `Err` from `submit`, which the helper also
+    // delivers inline; so the completion closure runs exactly once, normally on the
+    // dispatcher thread, inline on the calling thread for a NULL `admin` or an unknown
+    // op-type code, or on a tokio worker if the dispatcher queue is unreachable, as this
+    // function's documentation states. `callback` was supplied by the C caller along with
+    // `user_data`; exactly one of the `AlterConfigsResult` handle and the `box_error`
+    // handle passed to it is non-null, both are freshly built and owned by the callee, and
+    // `user_data` is valid until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -5589,6 +7180,12 @@ fn box_list_config_resources_result(resources: Vec<ConfigResource>) -> *mut kafk
 unsafe fn list_config_resources_result_ref(
     result: *const kafka_admin_ListConfigResourcesResult_t,
 ) -> &'static ListConfigResourcesResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_config_resources` call, i.e. the `Box<ListConfigResourcesResultInner>` leaked
+    // by `Box::into_raw` in `box_list_config_resources_result` and freed only by
+    // `kafka_admin_ListConfigResourcesResult_destroy`, so it is aligned and live; callers
+    // use the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const ListConfigResourcesResultInner) }
 }
 
@@ -5597,10 +7194,16 @@ unsafe fn list_config_resources_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
     result: *const kafka_admin_ListConfigResourcesResult_t,
 ) -> i32 {
+    // SAFETY: `list_config_resources_result_ref` requires a non-null
+    // `list_config_resources` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source); the
+    // reference is used only for this `len()` within the call, during which the C caller
+    // keeps the handle alive.
     unsafe { list_config_resources_result_ref(result) }.names.len() as i32
 }
 
@@ -5610,6 +7213,7 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
     result: *const kafka_admin_ListConfigResourcesResult_t,
@@ -5618,6 +7222,11 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `list_config_resources_result_ref` requires a non-null
+    // `list_config_resources` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source);
+    // `index` is non-negative (checked above) and bounds-checked by `get`, and the
+    // reference is used only for this copied read within the call.
     unsafe { list_config_resources_result_ref(result) }
         .types
         .get(index as usize)
@@ -5631,11 +7240,18 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
     result: *const kafka_admin_ListConfigResourcesResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_config_resources_result_ref` requires a non-null
+    // `list_config_resources` result handle, which this function's `# Safety` requires of
+    // `result` (no in-body null check, so the C caller's contract is the sole source);
+    // `cstring_at` bounds-checks `index`, the reference is used only for the duration of
+    // this call, and the returned string pointer borrows a name `CString` owned by the
+    // handle, valid until `kafka_admin_ListConfigResourcesResult_destroy`.
     cstring_at(&unsafe { list_config_resources_result_ref(result) }.names, index)
 }
 
@@ -5644,11 +7260,17 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
     result: *mut kafka_admin_ListConfigResourcesResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_config_resources` result handle, i.e. the
+        // `Box<ListConfigResourcesResultInner>` leaked by `Box::into_raw` in
+        // `box_list_config_resources_result`. This is the single, final use: the contract
+        // states the handle is invalid afterwards and no other function frees it.
         unsafe { drop(Box::from_raw(result as *mut ListConfigResourcesResultInner)) };
     }
 }
@@ -5675,6 +7297,7 @@ pub type kafka_admin_AdminClient_list_config_resources_callback_t =
 ///
 /// `admin` must be a valid handle; `resource_types` must be null or have `count`
 /// readable entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     admin: *const kafka_admin_AdminClient_t,
@@ -5683,10 +7306,24 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListConfigResourcesResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_config_resource_types` requires `type_codes` to be null or have `count`
+    // readable entries, which is exactly what this function's `# Safety` promises for
+    // `resource_types` (null or `count` readable entries); the helper also clamps a
+    // negative `count` to zero, and the values are copied out within this call.
     let types = unsafe { read_config_resource_types(resource_types, count) };
     let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, as this function's `# Safety` requires of the C caller
+        // (the helper additionally turns a NULL `admin` into an illegal-argument error).
+        // The `submit` closure runs on the calling thread inside the helper, borrowing
+        // `types` only there, and the helper uses the handle only until `block_on` returns
+        // within this call.
         unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources_with_options(&types, options).all())) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which is exactly what this function's `# Safety` promises (`out_result` must be null
+    // or writable); it null-checks before writing exactly one freshly boxed
+    // `ListConfigResourcesResult` handle, whose ownership passes to the C caller.
     unsafe { finish_sync(outcome, out_result, box_list_config_resources_result) }
 }
 
@@ -5711,6 +7348,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
 ///
 /// `admin` must be a valid handle; `resource_types` must be null or have `count`
 /// readable entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5720,8 +7366,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
     callback: kafka_admin_AdminClient_list_config_resources_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_config_resource_types` requires `type_codes` to be null or have `count`
+    // readable entries, which is exactly what this function's `# Safety` promises for
+    // `resource_types` (null or `count` readable entries); the helper also clamps a
+    // negative `count` to zero, and the values are copied out before this function returns.
     let types = unsafe { read_config_resource_types(resource_types, count) };
     let options = ListConfigResourcesOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, as this function's `# Safety` requires; the helper
+    // null-checks `admin` itself and on NULL fires `callback` inline with an error. The
+    // `submit` closure runs synchronously on the calling thread (borrowing `types` only
+    // there), and the completion closure runs exactly once, normally on the dispatcher
+    // thread, inline on the calling thread when `admin` is NULL, or on a tokio worker if
+    // the dispatcher queue is unreachable, as this function's documentation states.
+    // `callback` was supplied by the C caller along with `user_data`; exactly one of the
+    // `ListConfigResourcesResult` handle and the `box_error` handle passed to it is
+    // non-null, both are freshly built and owned by the callee, and `user_data` is valid
+    // until the callback fires per the caller's contract.
     unsafe {
         admin_async_value_op(
             admin,
@@ -5745,6 +7406,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
 ///
 /// `type_codes` must be null or have `count` readable entries.
 unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<config_resource::Type> {
+    // SAFETY: `read_i32s` requires `values` to be null or have `count` readable entries,
+    // the same `# Safety` requirement this helper places on `type_codes`, which the caller
+    // upholds; `type_codes` and `count` are forwarded unchanged.
     unsafe { read_i32s(type_codes, count) }
         .into_iter()
         .map(|code| config_resource::Type::for_id(enum_code_or_unknown(code)))
@@ -5802,6 +7466,12 @@ fn box_describe_log_dirs_result(outcomes: DescribeLogDirsOutcomes) -> *mut kafka
 unsafe fn describe_log_dirs_result_ref(
     result: *const kafka_admin_DescribeLogDirsResult_t,
 ) -> &'static DescribeLogDirsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_log_dirs` call, i.e. the `Box<DescribeLogDirsResultInner>` leaked by
+    // `Box::into_raw` in `box_describe_log_dirs_result` and freed only by
+    // `kafka_admin_DescribeLogDirsResult_destroy`, so it is aligned and live; callers use
+    // the reference only within their own synchronous getter call, during which the C
+    // caller keeps the handle alive.
     unsafe { &*(result as *const DescribeLogDirsResultInner) }
 }
 
@@ -5810,10 +7480,15 @@ unsafe fn describe_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
     result: *const kafka_admin_DescribeLogDirsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null `describe_log_dirs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); the reference is used only for this
+    // `len()` within the call, during which the C caller keeps the handle alive.
     unsafe { describe_log_dirs_result_ref(result) }.brokers.len() as i32
 }
 
@@ -5823,6 +7498,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -5831,6 +7507,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null `describe_log_dirs` result
+    // handle, which this function's `# Safety` requires of `result` (no in-body null check,
+    // so the C caller's contract is the sole source); `index` is non-negative (checked
+    // above) and bounds-checked by `get`, and the reference is used only for this copied
+    // read within the call.
     unsafe { describe_log_dirs_result_ref(result) }
         .brokers
         .get(index as usize)
@@ -5845,6 +7526,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -5853,6 +7535,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_log_dirs_result` and not yet passed to
+    // `kafka_admin_DescribeLogDirsResult_destroy`. The reference is used only for the
+    // duration of this synchronous call, during which the C caller keeps the handle alive;
+    // the returned `kafka_admin_LogDirDescriptionMap_t` pointer borrows from the same
+    // `DescribeLogDirsResultInner` allocation and is documented valid only until the handle
+    // is destroyed.
     match unsafe { describe_log_dirs_result_ref(result) }.values.get(index as usize) {
         Some(Some(map)) => map as *const LogDirDescriptionMapInner as *const kafka_admin_LogDirDescriptionMap_t,
         _ => std::ptr::null(),
@@ -5868,6 +7559,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -5876,6 +7568,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_log_dirs_result` and not yet passed to
+    // `kafka_admin_DescribeLogDirsResult_destroy`. The reference is used only for the
+    // duration of this synchronous call, during which the C caller keeps the handle alive;
+    // any error pointer returned borrows from the same allocation and is documented valid
+    // only until the handle is destroyed.
     match unsafe { describe_log_dirs_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -5888,9 +7588,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(result: *mut kafka_admin_DescribeLogDirsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_log_dirs` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DescribeLogDirsResultInner { .. }))` in
+        // `box_describe_log_dirs_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the borrowed sub-handles, strings and error pointers obtained from it
+        // are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DescribeLogDirsResultInner)) };
     }
 }
@@ -5936,6 +7645,7 @@ pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; `brokers` must have `count` readable entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -5944,9 +7654,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_i32s` requires `brokers` to be null or have `count` readable entries;
+    // per this function's `# Safety`, `brokers` has `count` readable entries. The helper
+    // clamps with `count.max(0)` so a negative count reads nothing, treats a NULL array as
+    // empty, and copies the ids into an owned `Vec<i32>`, so nothing borrowed from C
+    // outlives this call.
     let broker_ids = unsafe { read_i32s(brokers, count) };
     let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `broker_ids` and `options` copied out of the C arguments above.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_describe_log_dirs_result`, only on `Ok`, giving the C caller sole ownership to
+    // release via `kafka_admin_DescribeLogDirsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_describe_log_dirs_result) }
 }
 
@@ -5970,6 +7698,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `brokers` must have `count` readable entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5979,8 +7716,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     callback: kafka_admin_AdminClient_describe_log_dirs_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_i32s` requires `brokers` to be null or have `count` readable entries;
+    // per this function's `# Safety`, `brokers` has `count` readable entries. The helper
+    // clamps with `count.max(0)` so a negative count reads nothing, treats a NULL array as
+    // empty, and copies the ids into an owned `Vec<i32>` before the asynchronous work is
+    // submitted, so nothing borrowed from C outlives this call.
     let broker_ids = unsafe { read_i32s(brokers, count) };
     let options = DescribeLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_describe_log_dirs_result` and `error` by `box_error`, exactly one of them is
+    // non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -6053,6 +7810,16 @@ fn box_alter_replica_log_dirs_result(
 unsafe fn alter_replica_log_dirs_result_ref(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> &'static AlterReplicaLogDirsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `alter_replica_log_dirs` call, a requirement every caller discharges through its own
+    // `# Safety` (`result` must be a valid `alter_replica_log_dirs` result handle). Such a
+    // pointer is only ever produced by
+    // `Box::into_raw(Box::new(AlterReplicaLogDirsResultInner { .. }))` in
+    // `box_alter_replica_log_dirs_result` and cast to the opaque marker type, so casting it
+    // back yields an aligned, initialized `AlterReplicaLogDirsResultInner`. The `&'static`
+    // is used by each caller only for the duration of its synchronous call, during which
+    // the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterReplicaLogDirsResult_destroy`.
     unsafe { &*(result as *const AlterReplicaLogDirsResultInner) }
 }
 
@@ -6061,10 +7828,17 @@ unsafe fn alter_replica_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> i32 {
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
+    // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive, and only a count is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }.topics.len() as i32
 }
 
@@ -6074,11 +7848,19 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
+    // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive; the returned topic string borrows from the same allocation and is documented
+    // valid only until the handle is destroyed.
     cstring_at(&unsafe { alter_replica_log_dirs_result_ref(result) }.topics, index)
 }
 
@@ -6087,6 +7869,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6095,6 +7878,12 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
+    // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive, and only a partition number is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -6107,6 +7896,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6115,6 +7905,12 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
+    // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive, and only a broker id is copied out.
     unsafe { alter_replica_log_dirs_result_ref(result) }
         .broker_ids
         .get(index as usize)
@@ -6131,6 +7927,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6139,6 +7936,13 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `alter_replica_log_dirs_result_ref` requires a non-null handle from an
+    // `alter_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `alter_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_alter_replica_log_dirs_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive; any error pointer returned borrows from the same allocation and is documented
+    // valid only until the handle is destroyed.
     match unsafe { alter_replica_log_dirs_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -6150,11 +7954,20 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
     result: *mut kafka_admin_AlterReplicaLogDirsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `alter_replica_log_dirs` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(AlterReplicaLogDirsResultInner { .. }))` in
+        // `box_alter_replica_log_dirs_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the strings and error pointers borrowed from it are documented valid
+        // only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterReplicaLogDirsResultInner)) };
     }
 }
@@ -6179,14 +7992,41 @@ unsafe fn read_replica_assignment(
         return out;
     }
     for i in 0..n {
+        // SAFETY: `topics` is non-null (the helper returned early above if any of `topics`,
+        // `partitions`, `broker_ids` or `log_dirs` is NULL) and `i < count.max(0)`, so per
+        // this helper's `# Safety` (every array null or with `count` readable entries)
+        // `topics.add(i)` addresses a readable `*const c_char` entry; only the pointer
+        // value is copied out.
         let topic_ptr = unsafe { *topics.add(i) };
+        // SAFETY: `log_dirs` is non-null (the helper returned early above if any of
+        // `topics`, `partitions`, `broker_ids` or `log_dirs` is NULL) and `i <
+        // count.max(0)`, so per this helper's `# Safety` (every array null or with `count`
+        // readable entries) `log_dirs.add(i)` addresses a readable `*const c_char` entry;
+        // only the pointer value is copied out.
         let log_dir_ptr = unsafe { *log_dirs.add(i) };
         if topic_ptr.is_null() || log_dir_ptr.is_null() {
             continue;
         }
+        // SAFETY: `topic_ptr` was read from the readable entry `topics[i]` and is non-null
+        // (checked above). Per the `# Safety` of this helper's only callers,
+        // `kafka_admin_AdminClient_alter_replica_log_dirs` and its `_async` variant, every
+        // input array has `count` valid entries, so a non-null topic entry is a
+        // NUL-terminated C string the C caller keeps alive for the call; `CStr::from_ptr`
+        // reads it and it is copied immediately via `to_string_lossy().to_string()`.
         let topic = unsafe { CStr::from_ptr(topic_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `log_dir_ptr` was read from the readable entry `log_dirs[i]` and is
+        // non-null (checked above). Per the `# Safety` of this helper's only callers,
+        // `kafka_admin_AdminClient_alter_replica_log_dirs` and its `_async` variant, every
+        // input array has `count` valid entries, so a non-null log-dir entry is a
+        // NUL-terminated C string the C caller keeps alive for the call; `CStr::from_ptr`
+        // reads it and it is copied immediately via `to_string_lossy().to_string()`.
         let log_dir = unsafe { CStr::from_ptr(log_dir_ptr) }.to_string_lossy().to_string();
         out.insert(
+            // SAFETY: `partitions` and `broker_ids` are both non-null (the helper returned
+            // early above if any input array is NULL) and `i < count.max(0)`, so per this
+            // helper's `# Safety` (every array null or with `count` readable entries)
+            // `partitions.add(i)` and `broker_ids.add(i)` each address a readable `i32`,
+            // which is copied by value into the new `TopicPartitionReplica`.
             TopicPartitionReplica::new(topic, unsafe { *partitions.add(i) }, unsafe { *broker_ids.add(i) }),
             log_dir,
         );
@@ -6235,6 +8075,7 @@ pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -6246,10 +8087,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterReplicaLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_replica_assignment` requires every array to be null or have `count`
+    // readable entries; per this function's `# Safety`, every input array has `count` valid
+    // entries. The helper returns an empty map if any of `topics`, `partitions`,
+    // `broker_ids` or `log_dirs` is NULL, iterates only `0..count.max(0)` so a negative
+    // count reads nothing, skips rows with a NULL topic or log dir, and copies every entry
+    // into owned values, so nothing borrowed from C outlives this call.
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
     let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
+        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
+        // derives is used only on the calling thread for the duration of this blocking
+        // call, during which the C caller keeps the handle alive, and the `submit` closure
+        // captures only the owned `assignment` map and `options` built above.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_replica_log_dirs(a, &assignment, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_alter_replica_log_dirs_result`, only on `Ok`, giving the C caller sole ownership
+    // to release via `kafka_admin_AlterReplicaLogDirsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_alter_replica_log_dirs_result) }
 }
 
@@ -6274,6 +8134,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -6286,8 +8155,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     callback: kafka_admin_AdminClient_alter_replica_log_dirs_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_replica_assignment` requires every array to be null or have `count`
+    // readable entries; per this function's `# Safety`, every input array has `count` valid
+    // entries. The helper returns an empty map if any of `topics`, `partitions`,
+    // `broker_ids` or `log_dirs` is NULL, iterates only `0..count.max(0)` so a negative
+    // count reads nothing, skips rows with a NULL topic or log dir, and copies every entry
+    // into owned values before the asynchronous work is submitted, so nothing borrowed from
+    // C outlives this call.
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
     let options = AlterReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_alter_replica_log_dirs_result` and `error` by `box_error`, exactly one of them
+    // is non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -6369,6 +8260,16 @@ fn box_describe_replica_log_dirs_result(
 unsafe fn describe_replica_log_dirs_result_ref(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
 ) -> &'static DescribeReplicaLogDirsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_replica_log_dirs` call, a requirement every caller discharges through its
+    // own `# Safety` (`result` must be a valid `describe_replica_log_dirs` result handle).
+    // Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner { .. }))` in
+    // `box_describe_replica_log_dirs_result` and cast to the opaque marker type, so casting
+    // it back yields an aligned, initialized `DescribeReplicaLogDirsResultInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
     unsafe { &*(result as *const DescribeReplicaLogDirsResultInner) }
 }
 
@@ -6390,10 +8291,17 @@ unsafe fn describe_replica_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a count is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }.topics.len() as i32
 }
 
@@ -6403,11 +8311,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned topic string borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     cstring_at(&unsafe { describe_replica_log_dirs_result_ref(result) }.topics, index)
 }
 
@@ -6416,6 +8332,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6424,6 +8341,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a partition number is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -6436,6 +8359,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6444,6 +8368,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a broker id is copied out.
     unsafe { describe_replica_log_dirs_result_ref(result) }
         .broker_ids
         .get(index as usize)
@@ -6459,6 +8389,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6467,6 +8398,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned `kafka_admin_ReplicaLogDirInfo_t` pointer borrows from the
+    // same `DescribeReplicaLogDirsResultInner` allocation and is documented valid only
+    // until the handle is destroyed.
     match unsafe { describe_replica_log_dirs_result_ref(result) }
         .values
         .get(index as usize)
@@ -6482,6 +8421,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6490,6 +8430,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_replica_log_dirs_result_ref` requires a non-null handle from a
+    // `describe_replica_log_dirs` call; per this function's `# Safety`, `result` is a valid
+    // `describe_replica_log_dirs` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_replica_log_dirs_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; any error pointer returned borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     match unsafe { describe_replica_log_dirs_result_ref(result) }
         .errors
         .get(index as usize)
@@ -6505,11 +8452,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
     result: *mut kafka_admin_DescribeReplicaLogDirsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_replica_log_dirs` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DescribeReplicaLogDirsResultInner { .. }))` in
+        // `box_describe_replica_log_dirs_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the borrowed `kafka_admin_ReplicaLogDirInfo_t` pointers,
+        // strings and error pointers obtained from it are documented valid only until this
+        // call.
         unsafe { drop(Box::from_raw(result as *mut DescribeReplicaLogDirsResultInner)) };
     }
 }
@@ -6556,6 +8513,7 @@ pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -6566,10 +8524,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeReplicaLogDirsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_replicas` requires `topics`, `partitions` and `broker_ids` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, every input array has `count` valid entries. The helper
+    // returns an empty list if any array is NULL, iterates only `0..count.max(0)` so a
+    // negative count reads nothing, skips NULL topics, and copies every entry into owned
+    // `TopicPartitionReplica` values, so nothing borrowed from C outlives this call.
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
     let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
+        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
+        // derives is used only on the calling thread for the duration of this blocking
+        // call, during which the C caller keeps the handle alive, and the `submit` closure
+        // captures only the owned `replicas` and `options` built above.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_replica_log_dirs(a, &replicas, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_describe_replica_log_dirs_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_DescribeReplicaLogDirsResult_destroy`; on `Err`
+    // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
+    // owns.
     unsafe { finish_sync(outcome, out_result, box_describe_replica_log_dirs_result) }
 }
 
@@ -6594,6 +8572,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -6605,8 +8592,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async
     callback: kafka_admin_AdminClient_describe_replica_log_dirs_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_replicas` requires `topics`, `partitions` and `broker_ids` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, every input array has `count` valid entries. The helper
+    // returns an empty list if any array is NULL, iterates only `0..count.max(0)` so a
+    // negative count reads nothing, skips NULL topics, and copies every entry into owned
+    // `TopicPartitionReplica` values before the asynchronous work is submitted, so nothing
+    // borrowed from C outlives this call.
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
     let options = DescribeReplicaLogDirsOptions::new().set_timeout_ms(option_timeout(timeout_ms));
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_describe_replica_log_dirs_result` and `error` by `box_error`, exactly one of
+    // them is non-null and ownership transfers to the callee; the raw pointers are owned
+    // handles moved to the dispatcher thread; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -6679,6 +8688,18 @@ fn broker_id_at(ids: &[i32], index: i32) -> i32 {
 unsafe fn partition_reassignment_ref(
     reassignment: *const kafka_admin_PartitionReassignment_t,
 ) -> &'static PartitionReassignmentInner {
+    // SAFETY: Per this helper's `# Safety`, `reassignment` is a non-null borrowed pointer
+    // from a `list_partition_reassignments` result handle, a requirement every caller
+    // discharges through its own `# Safety` (`reassignment` must be a valid borrowed
+    // partition-reassignment pointer). Such pointers are only produced by
+    // `kafka_admin_ListPartitionReassignmentsResult_get_value`, which returns `value as
+    // *const PartitionReassignmentInner as *const kafka_admin_PartitionReassignment_t`
+    // pointing into the `values` of the owning `ListPartitionReassignmentsResultInner`, so
+    // casting back yields an aligned, initialized `PartitionReassignmentInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call; the
+    // opaque type is documented as borrowed from the owning result handle and valid until
+    // that handle is destroyed, which the C caller has not yet done while still using the
+    // pointer.
     unsafe { &*(reassignment as *const PartitionReassignmentInner) }
 }
 
@@ -6687,10 +8708,17 @@ unsafe fn partition_reassignment_ref(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a count is copied out.
     unsafe { partition_reassignment_ref(reassignment) }.replicas.len() as i32
 }
 
@@ -6699,11 +8727,19 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica_count(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, `index` is bounds-checked against the vector, and only a broker id
+    // is copied out.
     broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.replicas, index)
 }
 
@@ -6712,10 +8748,17 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a count is copied out.
     unsafe { partition_reassignment_ref(reassignment) }.adding_replicas.len() as i32
 }
 
@@ -6724,11 +8767,19 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica_count(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, `index` is bounds-checked against the vector, and only a broker id
+    // is copied out.
     broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.adding_replicas, index)
 }
 
@@ -6737,10 +8788,17 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a count is copied out.
     unsafe { partition_reassignment_ref(reassignment) }.removing_replicas.len() as i32
 }
 
@@ -6750,11 +8808,19 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica_coun
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `partition_reassignment_ref` requires a non-null borrowed pointer from a
+    // `list_partition_reassignments` result handle; per this function's `# Safety`,
+    // `reassignment` is a valid borrowed partition-reassignment pointer, i.e. one returned
+    // by `kafka_admin_ListPartitionReassignmentsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, `index` is bounds-checked against the vector, and only a broker id
+    // is copied out.
     broker_id_at(&unsafe { partition_reassignment_ref(reassignment) }.removing_replicas, index)
 }
 
@@ -6786,6 +8852,16 @@ struct ListOffsetsResultInfoInner {
 unsafe fn list_offsets_info_ref(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
 ) -> &'static ListOffsetsResultInfoInner {
+    // SAFETY: Per this helper's `# Safety`, `info` is a non-null borrowed pointer from a
+    // `list_offsets` result handle, a requirement every caller discharges through its own
+    // `# Safety` (`info` must be a valid borrowed list-offsets info pointer). Such pointers
+    // are only produced by `kafka_admin_ListOffsetsResult_get_value`, which returns `value
+    // as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t`
+    // pointing into the `values` of the owning `ListOffsetsResultInner`, so casting back
+    // yields an aligned, initialized `ListOffsetsResultInfoInner`. The `&'static` is used
+    // by each caller only for the duration of its synchronous call; the opaque type is
+    // documented as borrowed from the owning result handle and valid until that handle is
+    // destroyed, which the C caller has not yet done while still using the pointer.
     unsafe { &*(info as *const ListOffsetsResultInfoInner) }
 }
 
@@ -6794,10 +8870,17 @@ unsafe fn list_offsets_info_ref(
 /// # Safety
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
 ) -> i64 {
+    // SAFETY: `list_offsets_info_ref` requires a non-null borrowed pointer from a
+    // `list_offsets` result handle; per this function's `# Safety`, `info` is a valid
+    // borrowed list-offsets info pointer, i.e. one returned by
+    // `kafka_admin_ListOffsetsResult_get_value` on a result handle the C caller has not yet
+    // destroyed. The reference is used only for the duration of this synchronous call, and
+    // only the offset is copied out.
     unsafe { list_offsets_info_ref(info) }.info.offset()
 }
 
@@ -6808,10 +8891,17 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
 /// # Safety
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
 ) -> i64 {
+    // SAFETY: `list_offsets_info_ref` requires a non-null borrowed pointer from a
+    // `list_offsets` result handle; per this function's `# Safety`, `info` is a valid
+    // borrowed list-offsets info pointer, i.e. one returned by
+    // `kafka_admin_ListOffsetsResult_get_value` on a result handle the C caller has not yet
+    // destroyed. The reference is used only for the duration of this synchronous call, and
+    // only the timestamp is copied out.
     unsafe { list_offsets_info_ref(info) }.info.timestamp()
 }
 
@@ -6822,14 +8912,25 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
 ///
 /// `info` must be a valid borrowed list-offsets info pointer; `out_epoch` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `list_offsets_info_ref` requires a non-null borrowed pointer from a
+    // `list_offsets` result handle; per this function's `# Safety`, `info` is a valid
+    // borrowed list-offsets info pointer, i.e. one returned by
+    // `kafka_admin_ListOffsetsResult_get_value` on a result handle the C caller has not yet
+    // destroyed. The reference is used only for the duration of this synchronous call, and
+    // only the optional leader epoch is copied out.
     match unsafe { list_offsets_info_ref(info) }.info.leader_epoch() {
         Some(epoch) => {
             if !out_epoch.is_null() {
+                // SAFETY: `out_epoch` is non-null (checked above) and, per this function's
+                // `# Safety`, null or writable, so exactly one `i32` is written through it;
+                // this write happens only when the info carries a leader epoch, and
+                // `*out_epoch` is left untouched otherwise.
                 unsafe { *out_epoch = epoch };
             }
             true
@@ -6878,11 +8979,26 @@ unsafe fn read_topic_partitions(
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `topics` is non-null (the helper returned an empty result above if
+        // `topics` or `partitions` is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (`topics` and `partitions` null or with `count` readable entries each)
+        // `topics.add(i)` addresses a readable `*const c_char` entry; only the pointer
+        // value is copied out.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` was read from the readable entry `topics[i]` and is non-null
+        // (checked above); per this helper's `# Safety`, every topic is NULL or a valid C
+        // string the C caller keeps alive for the call, so `CStr::from_ptr` reads a
+        // NUL-terminated string, which is copied immediately via
+        // `to_string_lossy().to_string()`.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` is non-null (the helper returned an empty result above if
+        // `topics` or `partitions` is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (`topics` and `partitions` null or with `count` readable entries each)
+        // `partitions.add(i)` addresses a readable `i32`, which is copied by value into the
+        // new `TopicPartition`.
         out.push(TopicPartition::new(name, unsafe { *partitions.add(i) }));
     }
     out
@@ -6910,6 +9026,15 @@ unsafe fn read_optional_partition_set(
         return None;
     }
     Some(
+        // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or
+        // have `count` readable entries each, every topic NULL or a valid C string, which
+        // is exactly this helper's own `# Safety` contract; its callers
+        // (`kafka_admin_AdminClient_elect_leaders`,
+        // `kafka_admin_AdminClient_list_partition_reassignments` and their `_async`
+        // variants) promise `count` valid entries unless `all_partitions` is true, and the
+        // arrays are not read at all when `all_partitions` is true (returned `None` above).
+        // The helper treats NULL arrays as empty, iterates only `0..count.max(0)`, skips
+        // NULL topics, and copies every entry into owned `TopicPartition` values.
         unsafe { read_topic_partitions(topics, partitions, count) }
             .into_iter()
             .collect(),
@@ -6952,12 +9077,32 @@ unsafe fn read_reassignments(
         return Ok(out);
     }
     for i in 0..count.max(0) as usize {
+        // SAFETY: `topics` is non-null (the helper returned `Ok` with an empty list above
+        // if `topics`, `partitions` or `cancel` is NULL) and `i < count.max(0)`, so per
+        // this helper's `# Safety` (`topics`, `partitions`, `cancel`, `target_replicas` and
+        // `target_replica_counts` null or with `count` readable entries each)
+        // `topics.add(i)` addresses a readable `*const c_char` entry; only the pointer
+        // value is copied out.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` was read from the readable entry `topics[i]` and is non-null
+        // (checked above); per this helper's `# Safety`, every topic is NULL or a valid C
+        // string the C caller keeps alive for the call, so `CStr::from_ptr` reads a
+        // NUL-terminated string, which is copied immediately via
+        // `to_string_lossy().to_string()`.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` is non-null (the helper returned early above if `topics`,
+        // `partitions` or `cancel` is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (every named array null or with `count` readable entries)
+        // `partitions.add(i)` addresses a readable `i32`, which is copied by value into the
+        // new `TopicPartition`.
         let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        // SAFETY: `cancel` is non-null (the helper returned early above if `topics`,
+        // `partitions` or `cancel` is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (every named array null or with `count` readable entries) `cancel.add(i)`
+        // addresses a readable `bool` flag, which is copied by value.
         if unsafe { *cancel.add(i) } {
             out.insert(tp, None);
             continue;
@@ -6965,6 +9110,14 @@ unsafe fn read_reassignments(
         let replicas = if target_replicas.is_null() || target_replica_counts.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `target_replicas` and `target_replica_counts` are both non-null
+            // (checked above) and `i < count.max(0)`, so per this helper's `# Safety` they
+            // each have `count` readable entries and `target_replicas.add(i)` /
+            // `target_replica_counts.add(i)` yield the inner id array and its length; this
+            // entry is not cancelled (checked above), so per the same `# Safety` the inner
+            // array has `target_replica_counts[i]` readable `int32_t`s, which is exactly
+            // what `read_i32s` requires (it also tolerates a NULL inner array and clamps a
+            // negative length to zero). The ids are copied into an owned `Vec<i32>`.
             unsafe { read_i32s(*target_replicas.add(i), *target_replica_counts.add(i)) }
         };
         let reassignment = NewPartitionReassignment::new(replicas).map_err(|e| {
@@ -7021,13 +9174,39 @@ unsafe fn read_offset_specs(
         return Ok(out);
     }
     for i in 0..count.max(0) as usize {
+        // SAFETY: `topics` is non-null (the helper returned `Ok` with an empty list above
+        // if any of `topics`, `partitions`, `is_timestamp` or `spec_timestamps` is NULL)
+        // and `i < count.max(0)`, so per this helper's `# Safety` (the four arrays null or
+        // with `count` readable entries each) `topics.add(i)` addresses a readable `*const
+        // c_char` entry; only the pointer value is copied out.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` was read from the readable entry `topics[i]` and is non-null
+        // (checked above); per this helper's `# Safety`, every topic is NULL or a valid C
+        // string the C caller keeps alive for the call, so `CStr::from_ptr` reads a
+        // NUL-terminated string, which is copied immediately via
+        // `to_string_lossy().to_string()`.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` is non-null (the helper returned early above if any of the
+        // four input arrays is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (`topics`, `partitions`, `is_timestamp` and `spec_timestamps` null or
+        // with `count` readable entries each) `partitions.add(i)` addresses a readable
+        // `i32`, which is copied by value into the new `TopicPartition`.
         let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        // SAFETY: `spec_timestamps` is non-null (the helper returned early above if any of
+        // the four input arrays is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (`topics`, `partitions`, `is_timestamp` and `spec_timestamps` null or
+        // with `count` readable entries each) `spec_timestamps.add(i)` addresses a readable
+        // `i64`, which is copied by value.
         let value = unsafe { *spec_timestamps.add(i) };
+        // SAFETY: `is_timestamp` is non-null (the helper returned early above if any of the
+        // four input arrays is NULL) and `i < count.max(0)`, so per this helper's `#
+        // Safety` (`topics`, `partitions`, `is_timestamp` and `spec_timestamps` null or
+        // with `count` readable entries each) `is_timestamp.add(i)` addresses a readable
+        // `bool` flag, which is copied by value to choose between a timestamp spec and the
+        // predefined spec.
         let spec = if unsafe { *is_timestamp.add(i) } {
             OffsetSpec::for_timestamp(value)
         } else {
@@ -7151,6 +9330,15 @@ fn box_elect_leaders_result(outcomes: HashMap<TopicPartition, Option<Error>>) ->
 unsafe fn elect_leaders_result_ref(
     result: *const kafka_admin_ElectLeadersResult_t,
 ) -> &'static ElectLeadersResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `elect_leaders` call, a requirement every caller discharges through its own `#
+    // Safety` (`result` must be a valid `elect_leaders` result handle). Such a pointer is
+    // only ever produced by `Box::into_raw(Box::new(ElectLeadersResultInner { .. }))` in
+    // `box_elect_leaders_result` and cast to the opaque marker type, so casting it back
+    // yields an aligned, initialized `ElectLeadersResultInner`. The `&'static` is used by
+    // each caller only for the duration of its synchronous call, during which the C caller
+    // keeps the handle alive by not yet having called
+    // `kafka_admin_ElectLeadersResult_destroy`.
     unsafe { &*(result as *const ElectLeadersResultInner) }
 }
 
@@ -7159,8 +9347,14 @@ unsafe fn elect_leaders_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kafka_admin_ElectLeadersResult_t) -> i32 {
+    // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
+    // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
+    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { elect_leaders_result_ref(result) }.topics.len() as i32
 }
 
@@ -7170,11 +9364,18 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
     result: *const kafka_admin_ElectLeadersResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
+    // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
+    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; the returned topic string borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { elect_leaders_result_ref(result) }.topics, index)
 }
 
@@ -7183,6 +9384,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
     result: *const kafka_admin_ElectLeadersResult_t,
@@ -7191,6 +9393,12 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
+    // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
+    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a partition number is
+    // copied out.
     unsafe { elect_leaders_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -7205,6 +9413,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
     result: *const kafka_admin_ElectLeadersResult_t,
@@ -7213,6 +9422,12 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `elect_leaders_result_ref` requires a non-null handle from an `elect_leaders`
+    // call; per this function's `# Safety`, `result` is a valid `elect_leaders` result
+    // handle, i.e. one created by `Box::into_raw` in `box_elect_leaders_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; any error pointer returned borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     match unsafe { elect_leaders_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -7224,9 +9439,18 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kafka_admin_ElectLeadersResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `elect_leaders` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(ElectLeadersResultInner { .. }))` in
+        // `box_elect_leaders_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the strings and error pointers borrowed from it are documented valid
+        // only until this call.
         unsafe { drop(Box::from_raw(result as *mut ElectLeadersResultInner)) };
     }
 }
@@ -7276,6 +9500,17 @@ fn box_alter_partition_reassignments_result(
 unsafe fn alter_partition_reassignments_result_ref(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
 ) -> &'static AlterPartitionReassignmentsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `alter_partition_reassignments` call, a requirement every caller discharges through
+    // its own `# Safety` (`result` must be a valid `alter_partition_reassignments` result
+    // handle). Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { .. }))` in
+    // `box_alter_partition_reassignments_result` and cast to the opaque marker type, so
+    // casting it back yields an aligned, initialized
+    // `AlterPartitionReassignmentsResultInner`. The `&'static` is used by each caller only
+    // for the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called
+    // `kafka_admin_AlterPartitionReassignmentsResult_destroy`.
     unsafe { &*(result as *const AlterPartitionReassignmentsResultInner) }
 }
 
@@ -7284,10 +9519,17 @@ unsafe fn alter_partition_reassignments_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
 ) -> i32 {
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
+    // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `alter_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a count is copied out.
     unsafe { alter_partition_reassignments_result_ref(result) }.topics.len() as i32
 }
 
@@ -7297,11 +9539,19 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
+    // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `alter_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { alter_partition_reassignments_result_ref(result) }.topics, index)
 }
 
@@ -7310,6 +9560,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_partition(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7318,6 +9569,12 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
     if index < 0 {
         return -1;
     }
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
+    // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `alter_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a partition number is copied out.
     unsafe { alter_partition_reassignments_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -7331,6 +9588,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7339,6 +9597,13 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `alter_partition_reassignments_result_ref` requires a non-null handle from an
+    // `alter_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `alter_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; any error pointer returned borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     match unsafe { alter_partition_reassignments_result_ref(result) }
         .errors
         .get(index as usize)
@@ -7355,11 +9620,20 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error
 ///
 /// `result` must be null or a valid `alter_partition_reassignments` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
     result: *mut kafka_admin_AlterPartitionReassignmentsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `alter_partition_reassignments` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(AlterPartitionReassignmentsResultInner { .. }))` in
+        // `box_alter_partition_reassignments_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the strings and error pointers borrowed from it are
+        // documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterPartitionReassignmentsResultInner)) };
     }
 }
@@ -7410,6 +9684,17 @@ fn box_list_partition_reassignments_result(
 unsafe fn list_partition_reassignments_result_ref(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
 ) -> &'static ListPartitionReassignmentsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_partition_reassignments` call, a requirement every caller discharges through
+    // its own `# Safety` (`result` must be a valid `list_partition_reassignments` result
+    // handle). Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { .. }))` in
+    // `box_list_partition_reassignments_result` and cast to the opaque marker type, so
+    // casting it back yields an aligned, initialized
+    // `ListPartitionReassignmentsResultInner`. The `&'static` is used by each caller only
+    // for the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called
+    // `kafka_admin_ListPartitionReassignmentsResult_destroy`.
     unsafe { &*(result as *const ListPartitionReassignmentsResultInner) }
 }
 
@@ -7418,10 +9703,17 @@ unsafe fn list_partition_reassignments_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
 ) -> i32 {
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
+    // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `list_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a count is copied out.
     unsafe { list_partition_reassignments_result_ref(result) }.topics.len() as i32
 }
 
@@ -7431,11 +9723,19 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
+    // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `list_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { list_partition_reassignments_result_ref(result) }.topics, index)
 }
 
@@ -7444,6 +9744,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partition(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7452,6 +9753,12 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partit
     if index < 0 {
         return -1;
     }
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
+    // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `list_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a partition number is copied out.
     unsafe { list_partition_reassignments_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -7465,6 +9772,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partit
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7473,6 +9781,15 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_partition_reassignments_result_ref` requires a non-null handle from a
+    // `list_partition_reassignments` call; per this function's `# Safety`, `result` is a
+    // valid `list_partition_reassignments` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_partition_reassignments_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned
+    // `kafka_admin_PartitionReassignment_t` pointer borrows from the `values` of the same
+    // `ListPartitionReassignmentsResultInner` allocation and is documented valid only until
+    // the handle is destroyed.
     match unsafe { list_partition_reassignments_result_ref(result) }
         .values
         .get(index as usize)
@@ -7489,11 +9806,20 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
 ///
 /// `result` must be null or a valid `list_partition_reassignments` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
     result: *mut kafka_admin_ListPartitionReassignmentsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_partition_reassignments` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(ListPartitionReassignmentsResultInner { .. }))` in
+        // `box_list_partition_reassignments_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the borrowed `kafka_admin_PartitionReassignment_t` pointers
+        // and strings obtained from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut ListPartitionReassignmentsResultInner)) };
     }
 }
@@ -7549,6 +9875,15 @@ fn box_list_offsets_result(
 ///
 /// `result` must be a non-null handle from a `list_offsets` call.
 unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t) -> &'static ListOffsetsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_offsets` call, a requirement every caller discharges through its own `# Safety`
+    // (`result` must be a valid `list_offsets` result handle). Such a pointer is only ever
+    // produced by `Box::into_raw(Box::new(ListOffsetsResultInner { .. }))` in
+    // `box_list_offsets_result` and cast to the opaque marker type, so casting it back
+    // yields an aligned, initialized `ListOffsetsResultInner`. The `&'static` is used by
+    // each caller only for the duration of its synchronous call, during which the C caller
+    // keeps the handle alive by not yet having called
+    // `kafka_admin_ListOffsetsResult_destroy`.
     unsafe { &*(result as *const ListOffsetsResultInner) }
 }
 
@@ -7557,8 +9892,14 @@ unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafka_admin_ListOffsetsResult_t) -> i32 {
+    // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
+    // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { list_offsets_result_ref(result) }.topics.len() as i32
 }
 
@@ -7568,11 +9909,18 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafk
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
     result: *const kafka_admin_ListOffsetsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
+    // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; the returned topic string borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { list_offsets_result_ref(result) }.topics, index)
 }
 
@@ -7581,6 +9929,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7589,6 +9938,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
+    // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a partition number is
+    // copied out.
     unsafe { list_offsets_result_ref(result) }
         .partitions
         .get(index as usize)
@@ -7603,6 +9958,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7611,6 +9967,14 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
+    // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; the returned
+    // `kafka_admin_ListOffsetsResultInfo_t` pointer borrows from the `values` of the same
+    // `ListOffsetsResultInner` allocation and is documented valid only until the handle is
+    // destroyed.
     match unsafe { list_offsets_result_ref(result) }.values.get(index as usize) {
         Some(Some(value)) => value as *const ListOffsetsResultInfoInner as *const kafka_admin_ListOffsetsResultInfo_t,
         _ => std::ptr::null(),
@@ -7623,6 +9987,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7631,6 +9996,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_offsets_result_ref` requires a non-null handle from a `list_offsets`
+    // call; per this function's `# Safety`, `result` is a valid `list_offsets` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_offsets_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; any error pointer returned borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     match unsafe { list_offsets_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -7642,9 +10013,18 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafka_admin_ListOffsetsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_offsets` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(ListOffsetsResultInner { .. }))` in
+        // `box_list_offsets_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the borrowed `kafka_admin_ListOffsetsResultInfo_t` pointers, strings
+        // and error pointers obtained from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut ListOffsetsResultInner)) };
     }
 }
@@ -7770,6 +10150,7 @@ pub type kafka_admin_AdminClient_elect_leaders_callback_t =
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each; `out_result` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     admin: *const kafka_admin_AdminClient_t,
@@ -7781,14 +10162,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ElectLeadersResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_optional_partition_set` requires `topics` and `partitions` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, unless `all_partitions` is true they have `count` valid
+    // entries each, and when `all_partitions` is true the helper returns `None` without
+    // reading either array. Via `read_topic_partitions` it treats NULL arrays as empty,
+    // iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL topics,
+    // and copies every entry into owned `TopicPartition` values, so nothing borrowed from C
+    // outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = elect_leaders_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the by-value
+    // `election_type` code, the owned `selection` and `options` built above.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             let election_type = read_election_type(election_type)?;
             Ok(submit_elect_leaders(a, election_type, selection, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_elect_leaders_result`, only on `Ok`, giving the C caller sole ownership to
+    // release via `kafka_admin_ElectLeadersResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_elect_leaders_result) }
 }
 
@@ -7812,6 +10214,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
 ///
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -7824,8 +10235,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders_async(
     callback: kafka_admin_AdminClient_elect_leaders_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_optional_partition_set` requires `topics` and `partitions` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, unless `all_partitions` is true they have `count` valid
+    // entries each, and when `all_partitions` is true the helper returns `None` without
+    // reading either array. Via `read_topic_partitions` it treats NULL arrays as empty,
+    // iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL topics,
+    // and copies every entry into owned `TopicPartition` values before the asynchronous
+    // work is submitted, so nothing borrowed from C outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = elect_leaders_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (including an
+    // invalid `election_type` rejected by `read_election_type`). Otherwise the spawned
+    // awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_elect_leaders_result` and `error` by `box_error`, exactly one of them is
+    // non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -7918,6 +10353,7 @@ pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
 /// each; every non-cancelled `target_replicas[i]` must point at
 /// `target_replica_counts[i]` readable ids; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
     admin: *const kafka_admin_AdminClient_t,
@@ -7932,13 +10368,39 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
     out_result: *mut *mut kafka_admin_AlterPartitionReassignmentsResult_t,
 ) -> *mut kafka_common_Error_t {
     let reassignments =
+        // SAFETY: `read_reassignments` requires `topics`, `partitions`, `cancel`,
+        // `target_replicas` and `target_replica_counts` to be null or have `count` readable
+        // entries each, every topic NULL or a valid C string, and every non-cancelled
+        // `target_replicas[i]` to point at `target_replica_counts[i]` readable `int32_t`s;
+        // this function's `# Safety` promises exactly that (the five arrays have `count`
+        // valid entries each and every non-cancelled `target_replicas[i]` points at
+        // `target_replica_counts[i]` readable ids). The helper returns an empty list if
+        // `topics`, `partitions` or `cancel` is NULL, iterates only `0..count.max(0)` so a
+        // negative count reads nothing, skips NULL topics, reads an inner id array only
+        // when both outer arrays are non-null and the entry is not cancelled, and copies
+        // everything into owned `NewPartitionReassignment` values, so nothing borrowed from
+        // C outlives this call.
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `reassignments` result and `options` built above.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             Ok(submit_alter_partition_reassignments(a, &reassignments?, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_alter_partition_reassignments_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_AlterPartitionReassignmentsResult_destroy`; on
+    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
+    // caller owns.
     unsafe { finish_sync(outcome, out_result, box_alter_partition_reassignments_result) }
 }
 
@@ -7964,6 +10426,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
 /// `admin` must be a valid handle; `topics`, `partitions`, `cancel`,
 /// `target_replicas` and `target_replica_counts` must have `count` valid entries
 /// each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -7979,8 +10450,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_a
     user_data: *mut c_void,
 ) {
     let reassignments =
+        // SAFETY: `read_reassignments` requires `topics`, `partitions`, `cancel`,
+        // `target_replicas` and `target_replica_counts` to be null or have `count` readable
+        // entries each, every topic NULL or a valid C string, and every non-cancelled
+        // `target_replicas[i]` to point at `target_replica_counts[i]` readable `int32_t`s;
+        // this function's `# Safety` promises `count` valid entries in each of the five
+        // arrays, with the per-entry layout of `target_replicas` defined by the
+        // cross-referenced `kafka_admin_AdminClient_alter_partition_reassignments`
+        // contract. The helper returns an empty list if `topics`, `partitions` or `cancel`
+        // is NULL, iterates only `0..count.max(0)` so a negative count reads nothing, skips
+        // NULL topics, reads an inner id array only when both outer arrays are non-null and
+        // the entry is not cancelled, and copies everything into owned values before the
+        // asynchronous work is submitted, so nothing borrowed from C outlives this call.
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (including a
+    // `reassignments` parse error). Otherwise the spawned awaiter task captures only the
+    // `'static` future, a clone of `completion_tx`, `SendUserData(user_data)` and the
+    // completion closure, never the `&'static AdminHandle`, which is used only during this
+    // call. `callback` was supplied by the C caller along with `user_data` and fires
+    // exactly once, as the callback contract documents: on the dispatcher thread via the
+    // completion queue, inline on the calling thread for the synchronous failures, or on a
+    // tokio worker through `enqueue_or_run_inline` if the queue is already gone. `result`
+    // is freshly built by `box_alter_partition_reassignments_result` and `error` by
+    // `box_error`, exactly one of them is non-null and ownership transfers to the callee;
+    // the raw pointers are owned handles moved to the dispatcher thread; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -8044,6 +10542,7 @@ pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t =
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each; `out_result` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     admin: *const kafka_admin_AdminClient_t,
@@ -8054,10 +10553,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListPartitionReassignmentsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_optional_partition_set` requires `topics` and `partitions` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, unless `all_partitions` is true they have `count` valid
+    // entries each, and when `all_partitions` is true the helper returns `None` without
+    // reading either array. Via `read_topic_partitions` it treats NULL arrays as empty,
+    // iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL topics,
+    // and copies every entry into owned `TopicPartition` values, so nothing borrowed from C
+    // outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = list_partition_reassignments_options(timeout_ms);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
+        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
+        // derives is used only on the calling thread for the duration of this blocking
+        // call, during which the C caller keeps the handle alive, and the `submit` closure
+        // captures only the owned `selection` and `options` built above.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_list_partition_reassignments(a, selection, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_list_partition_reassignments_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_ListPartitionReassignmentsResult_destroy`; on
+    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
+    // caller owns.
     unsafe { finish_sync(outcome, out_result, box_list_partition_reassignments_result) }
 }
 
@@ -8082,6 +10603,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
 ///
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8093,8 +10623,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_as
     callback: kafka_admin_AdminClient_list_partition_reassignments_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_optional_partition_set` requires `topics` and `partitions` to be null
+    // or have `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, unless `all_partitions` is true they have `count` valid
+    // entries each, and when `all_partitions` is true the helper returns `None` without
+    // reading either array. Via `read_topic_partitions` it treats NULL arrays as empty,
+    // iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL topics,
+    // and copies every entry into owned `TopicPartition` values before the asynchronous
+    // work is submitted, so nothing borrowed from C outlives this call.
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = list_partition_reassignments_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_list_partition_reassignments_result` and `error` by `box_error`, exactly one of
+    // them is non-null and ownership transfers to the callee; the raw pointers are owned
+    // handles moved to the dispatcher thread; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -8162,6 +10715,7 @@ pub type kafka_admin_AdminClient_list_offsets_callback_t =
 /// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
 /// `spec_timestamps` must have `count` valid entries each; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -8174,12 +10728,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     isolation_level: i32,
     out_result: *mut *mut kafka_admin_ListOffsetsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_offset_specs` requires `topics`, `partitions`, `is_timestamp` and
+    // `spec_timestamps` to be null or have `count` readable entries each, every topic NULL
+    // or a valid C string; per this function's `# Safety`, those four arrays have `count`
+    // valid entries each. The helper returns an empty list if any of the four arrays is
+    // NULL, iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL
+    // topics, and copies every entry into owned `TopicPartition` / `OffsetSpec` values, so
+    // nothing borrowed from C outlives this call.
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `specs` result and the by-value `timeout_ms` and `isolation_level` arguments.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             submit_list_offsets(a, &specs?, list_offsets_options(timeout_ms, isolation_level)?)
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_list_offsets_result`, only on `Ok`, giving the C caller sole ownership to
+    // release via `kafka_admin_ListOffsetsResult_destroy`; on `Err` it leaves `*out_result`
+    // untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_list_offsets_result) }
 }
 
@@ -8204,6 +10778,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
 ///
 /// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
 /// `spec_timestamps` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8217,7 +10800,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
     callback: kafka_admin_AdminClient_list_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_offset_specs` requires `topics`, `partitions`, `is_timestamp` and
+    // `spec_timestamps` to be null or have `count` readable entries each, every topic NULL
+    // or a valid C string; per this function's `# Safety`, those four arrays have `count`
+    // valid entries each. The helper returns an empty list if any of the four arrays is
+    // NULL, iterates only `0..count.max(0)` so a negative count reads nothing, skips NULL
+    // topics, and copies every entry into owned `TopicPartition` / `OffsetSpec` values
+    // before the asynchronous work is submitted, so nothing borrowed from C outlives this
+    // call.
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (a `specs`
+    // parse error or an invalid `isolation_level`). Otherwise the spawned awaiter task
+    // captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_list_offsets_result` and `error` by `box_error`, exactly one of them is non-null
+    // and ownership transfers to the callee; the raw pointers are owned handles moved to
+    // the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -8269,6 +10876,11 @@ unsafe fn write_optional<T: Copy>(value: Option<T>, out: *mut T) -> bool {
     match value {
         Some(value) => {
             if !out.is_null() {
+                // SAFETY: `out` is non-null (checked above) and, per this helper's `#
+                // Safety`, null or writable, which every caller discharges through its own
+                // `# Safety` clause that the out-pointer must be null or writable; exactly
+                // one `T` is written through it, and only when `value` is `Some`, so `*out`
+                // is left untouched for `None`.
                 unsafe { *out = value };
             }
             true
@@ -8320,6 +10932,16 @@ impl GroupListingInner {
 /// `listing` must be a non-null borrowed pointer from a `list_groups` result
 /// getter.
 unsafe fn group_listing_ref(listing: *const kafka_admin_GroupListing_t) -> &'static GroupListingInner {
+    // SAFETY: Per this helper's `# Safety`, `listing` is a non-null borrowed pointer from a
+    // `list_groups` result getter, a requirement every caller discharges through its own `#
+    // Safety` (`listing` must be a valid borrowed group-listing pointer). Such pointers are
+    // only produced by `kafka_admin_ListGroupsResult_get_valid`, which returns `listing as
+    // *const GroupListingInner as *const kafka_admin_GroupListing_t` pointing into the
+    // owning `ListGroupsResultInner`, so casting back yields an aligned, initialized
+    // `GroupListingInner`. The `&'static` is used by each caller only for the duration of
+    // its synchronous call; the opaque type is documented as borrowed from the owning
+    // result handle and valid until that handle is destroyed, which the C caller has not
+    // yet done while still using the pointer.
     unsafe { &*(listing as *const GroupListingInner) }
 }
 
@@ -8328,10 +10950,18 @@ unsafe fn group_listing_ref(listing: *const kafka_admin_GroupListing_t) -> &'sta
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
+    // SAFETY: `group_listing_ref` requires a non-null borrowed pointer from a `list_groups`
+    // result getter; per this function's `# Safety`, `listing` is a valid borrowed
+    // group-listing pointer, i.e. one returned by `kafka_admin_ListGroupsResult_get_valid`
+    // on a result handle the C caller has not yet destroyed. The reference is used only for
+    // the duration of this synchronous call; the returned group-id string borrows from the
+    // same `ListGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { group_listing_ref(listing) }.group_id_c.as_ptr()
 }
 
@@ -8345,10 +10975,18 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
+    // SAFETY: `group_listing_ref` requires a non-null borrowed pointer from a `list_groups`
+    // result getter; per this function's `# Safety`, `listing` is a valid borrowed
+    // group-listing pointer, i.e. one returned by `kafka_admin_ListGroupsResult_get_valid`
+    // on a result handle the C caller has not yet destroyed. The reference is used only for
+    // the duration of this synchronous call; the returned group-type name borrows from the
+    // same `ListGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     optional_cstring_ptr(&unsafe { group_listing_ref(listing) }.group_type_c)
 }
 
@@ -8358,10 +10996,18 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
+    // SAFETY: `group_listing_ref` requires a non-null borrowed pointer from a `list_groups`
+    // result getter; per this function's `# Safety`, `listing` is a valid borrowed
+    // group-listing pointer, i.e. one returned by `kafka_admin_ListGroupsResult_get_valid`
+    // on a result handle the C caller has not yet destroyed. The reference is used only for
+    // the duration of this synchronous call; the returned protocol string borrows from the
+    // same `ListGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { group_listing_ref(listing) }.protocol_c.as_ptr()
 }
 
@@ -8374,10 +11020,18 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
+    // SAFETY: `group_listing_ref` requires a non-null borrowed pointer from a `list_groups`
+    // result getter; per this function's `# Safety`, `listing` is a valid borrowed
+    // group-listing pointer, i.e. one returned by `kafka_admin_ListGroupsResult_get_valid`
+    // on a result handle the C caller has not yet destroyed. The reference is used only for
+    // the duration of this synchronous call; the returned group-state name borrows from the
+    // same `ListGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     optional_cstring_ptr(&unsafe { group_listing_ref(listing) }.group_state_c)
 }
 
@@ -8387,10 +11041,16 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     listing: *const kafka_admin_GroupListing_t,
 ) -> bool {
+    // SAFETY: `group_listing_ref` requires a non-null borrowed pointer from a `list_groups`
+    // result getter; per this function's `# Safety`, `listing` is a valid borrowed
+    // group-listing pointer, i.e. one returned by `kafka_admin_ListGroupsResult_get_valid`
+    // on a result handle the C caller has not yet destroyed. The reference is used only for
+    // the duration of this synchronous call, and only a boolean is copied out.
     unsafe { group_listing_ref(listing) }.is_simple_consumer_group
 }
 
@@ -8431,6 +11091,18 @@ impl MemberAssignmentInner {
 /// `assignment` must be a non-null borrowed pointer from a `MemberDescription`
 /// getter.
 unsafe fn member_assignment_ref(assignment: *const kafka_admin_MemberAssignment_t) -> &'static MemberAssignmentInner {
+    // SAFETY: Per this helper's `# Safety`, `assignment` is a non-null borrowed pointer
+    // from a `MemberDescription` getter, a requirement every caller discharges through its
+    // own `# Safety` (`assignment` must be a valid borrowed member-assignment pointer).
+    // Such pointers are only produced by `kafka_admin_MemberDescription_assignment` and
+    // `kafka_admin_MemberDescription_target_assignment`, which return `.. as *const
+    // MemberAssignmentInner as *const kafka_admin_MemberAssignment_t` pointing into a
+    // `MemberDescriptionInner` that itself lives inside the owning group-description result
+    // handle, so casting back yields an aligned, initialized `MemberAssignmentInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call; the
+    // opaque type is documented as borrowed from the owning result handle and valid until
+    // that handle is destroyed, which the C caller has not yet done while still using the
+    // pointer.
     unsafe { &*(assignment as *const MemberAssignmentInner) }
 }
 
@@ -8439,8 +11111,16 @@ unsafe fn member_assignment_ref(assignment: *const kafka_admin_MemberAssignment_
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_count(assignment: *const kafka_admin_MemberAssignment_t) -> i32 {
+    // SAFETY: `member_assignment_ref` requires a non-null borrowed pointer from a
+    // `MemberDescription` getter; per this function's `# Safety`, `assignment` is a valid
+    // borrowed member-assignment pointer, i.e. one returned by
+    // `kafka_admin_MemberDescription_assignment` or
+    // `kafka_admin_MemberDescription_target_assignment` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call,
+    // and only a count is copied out.
     unsafe { member_assignment_ref(assignment) }.topics.len() as i32
 }
 
@@ -8450,11 +11130,20 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_count(assignment: *const k
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_topic(
     assignment: *const kafka_admin_MemberAssignment_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `member_assignment_ref` requires a non-null borrowed pointer from a
+    // `MemberDescription` getter; per this function's `# Safety`, `assignment` is a valid
+    // borrowed member-assignment pointer, i.e. one returned by
+    // `kafka_admin_MemberDescription_assignment` or
+    // `kafka_admin_MemberDescription_target_assignment` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned topic string borrows from the same owning result allocation and is
+    // documented valid only until that handle is destroyed.
     cstring_at(&unsafe { member_assignment_ref(assignment) }.topics, index)
 }
 
@@ -8463,6 +11152,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_topic(
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_partition(
     assignment: *const kafka_admin_MemberAssignment_t,
@@ -8471,6 +11161,13 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_partition(
     if index < 0 {
         return -1;
     }
+    // SAFETY: `member_assignment_ref` requires a non-null borrowed pointer from a
+    // `MemberDescription` getter; per this function's `# Safety`, `assignment` is a valid
+    // borrowed member-assignment pointer, i.e. one returned by
+    // `kafka_admin_MemberDescription_assignment` or
+    // `kafka_admin_MemberDescription_target_assignment` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call,
+    // and only a partition number is copied out.
     unsafe { member_assignment_ref(assignment) }
         .partitions
         .get(index as usize)
@@ -8524,6 +11221,18 @@ impl MemberDescriptionInner {
 /// `member` must be a non-null borrowed pointer from a group-description
 /// getter.
 unsafe fn member_description_ref(member: *const kafka_admin_MemberDescription_t) -> &'static MemberDescriptionInner {
+    // SAFETY: Per this helper's `# Safety`, `member` is a non-null borrowed pointer from a
+    // group-description getter, a requirement every caller discharges through its own `#
+    // Safety` (`member` must be a valid borrowed member-description pointer). Such pointers
+    // are only produced by `member_at`, which
+    // `kafka_admin_ConsumerGroupDescription_get_member` and
+    // `kafka_admin_ClassicGroupDescription_get_member` use to return `member as *const
+    // MemberDescriptionInner as *const kafka_admin_MemberDescription_t` pointing into the
+    // `members` of a description that lives inside the owning result handle, so casting
+    // back yields an aligned, initialized `MemberDescriptionInner`. The `&'static` is used
+    // by each caller only for the duration of its synchronous call; the opaque type is
+    // documented as borrowed from the owning result handle and valid until that handle is
+    // destroyed, which the C caller has not yet done while still using the pointer.
     unsafe { &*(member as *const MemberDescriptionInner) }
 }
 
@@ -8532,10 +11241,19 @@ unsafe fn member_description_ref(member: *const kafka_admin_MemberDescription_t)
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned consumer-id string borrows from the same owning result allocation and is
+    // documented valid only until that handle is destroyed.
     unsafe { member_description_ref(member) }.consumer_id_c.as_ptr()
 }
 
@@ -8546,10 +11264,19 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned group-instance-id string (or null) borrows from the same owning result
+    // allocation and is documented valid only until that handle is destroyed.
     optional_cstring_ptr(&unsafe { member_description_ref(member) }.group_instance_id_c)
 }
 
@@ -8559,10 +11286,19 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned rack-id string (or null) borrows from the same owning result allocation
+    // and is documented valid only until that handle is destroyed.
     optional_cstring_ptr(&unsafe { member_description_ref(member) }.rack_id_c)
 }
 
@@ -8571,10 +11307,19 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned client-id string borrows from the same owning result allocation and is
+    // documented valid only until that handle is destroyed.
     unsafe { member_description_ref(member) }.client_id_c.as_ptr()
 }
 
@@ -8583,10 +11328,19 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only for the duration of this synchronous call;
+    // the returned host string borrows from the same owning result allocation and is
+    // documented valid only until that handle is destroyed.
     unsafe { member_description_ref(member) }.host_c.as_ptr()
 }
 
@@ -8597,10 +11351,20 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const kafka_admin_MemberAssignment_t {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only to take the address of the `assignment`
+    // field, which lives inside the same owning result allocation; the returned
+    // `kafka_admin_MemberAssignment_t` pointer is documented as borrowed and valid only
+    // until that handle is destroyed.
     &unsafe { member_description_ref(member) }.assignment as *const MemberAssignmentInner
         as *const kafka_admin_MemberAssignment_t
 }
@@ -8613,10 +11377,20 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const kafka_admin_MemberAssignment_t {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer, i.e. one returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive. The reference is used only to take the address of the optional
+    // `target_assignment` field, which lives inside the same owning result allocation; the
+    // returned `kafka_admin_MemberAssignment_t` pointer (or null) is documented as borrowed
+    // and valid only until that handle is destroyed.
     match &unsafe { member_description_ref(member) }.target_assignment {
         Some(assignment) => assignment as *const MemberAssignmentInner as *const kafka_admin_MemberAssignment_t,
         None => std::ptr::null(),
@@ -8630,11 +11404,21 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
 ///
 /// `member` must be a valid borrowed member-description pointer; `out_epoch`
 /// must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
     member: *const kafka_admin_MemberDescription_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive, and the reference is used only for the duration of this synchronous call
+    // to copy out `member_epoch`. `write_optional` requires `out_epoch` to be null or
+    // writable, which the same `# Safety` promises; it null-checks `out_epoch` and writes
+    // exactly one `i32` through it, only when the epoch is present.
     unsafe { write_optional(member_description_ref(member).member_epoch, out_epoch) }
 }
 
@@ -8646,11 +11430,21 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 ///
 /// `member` must be a valid borrowed member-description pointer;
 /// `out_upgraded` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(
     member: *const kafka_admin_MemberDescription_t,
     out_upgraded: *mut bool,
 ) -> bool {
+    // SAFETY: `member_description_ref` requires a non-null borrowed pointer from a
+    // group-description getter; per this function's `# Safety`, `member` is a valid
+    // borrowed member-description pointer returned by
+    // `kafka_admin_ConsumerGroupDescription_get_member` or
+    // `kafka_admin_ClassicGroupDescription_get_member` while the owning result handle is
+    // still alive, and the reference is used only for the duration of this synchronous call
+    // to copy out `upgraded`. `write_optional` requires `out_upgraded` to be null or
+    // writable, which the same `# Safety` promises; it null-checks `out_upgraded` and
+    // writes exactly one `bool` through it, only when the flag is present.
     unsafe { write_optional(member_description_ref(member).upgraded, out_upgraded) }
 }
 
@@ -8744,6 +11538,18 @@ impl ConsumerGroupDescriptionInner {
 unsafe fn consumer_group_description_ref(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> &'static ConsumerGroupDescriptionInner {
+    // SAFETY: Per this helper's `# Safety`, `description` is a non-null borrowed pointer
+    // from a `describe_consumer_groups` result getter, a requirement every caller
+    // discharges through its own `# Safety` (`description` must be a valid borrowed
+    // consumer-group-description pointer). Such pointers are only produced by
+    // `kafka_admin_DescribeConsumerGroupsResult_get_value`, which returns `description as
+    // *const ConsumerGroupDescriptionInner as *const
+    // kafka_admin_ConsumerGroupDescription_t` pointing into the `descriptions` of the
+    // owning `DescribeConsumerGroupsResultInner`, so casting back yields an aligned,
+    // initialized `ConsumerGroupDescriptionInner`. The `&'static` is used by each caller
+    // only for the duration of its synchronous call; the opaque type is documented as
+    // borrowed from the owning result handle and valid until that handle is destroyed,
+    // which the C caller has not yet done while still using the pointer.
     unsafe { &*(description as *const ConsumerGroupDescriptionInner) }
 }
 
@@ -8752,10 +11558,19 @@ unsafe fn consumer_group_description_ref(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned group-id string borrows from the same
+    // `DescribeConsumerGroupsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     unsafe { consumer_group_description_ref(description) }.group_id_c.as_ptr()
 }
 
@@ -8764,10 +11579,17 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> bool {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a boolean is copied out.
     unsafe { consumer_group_description_ref(description) }.is_simple_consumer_group
 }
 
@@ -8776,10 +11598,17 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_member_count(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> i32 {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a count is copied out.
     unsafe { consumer_group_description_ref(description) }.members.len() as i32
 }
 
@@ -8789,11 +11618,21 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_member_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     index: i32,
 ) -> *const kafka_admin_MemberDescription_t {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; `member_at` bounds-checks `index` and the returned
+    // `kafka_admin_MemberDescription_t` pointer borrows from the `members` of the same
+    // owning `DescribeConsumerGroupsResultInner` allocation and is documented valid only
+    // until that handle is destroyed.
     member_at(&unsafe { consumer_group_description_ref(description) }.members, index)
 }
 
@@ -8804,10 +11643,19 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned partition-assignor string borrows from the same
+    // `DescribeConsumerGroupsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     unsafe { consumer_group_description_ref(description) }
         .partition_assignor_c
         .as_ptr()
@@ -8820,10 +11668,19 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned group-type name borrows from the same
+    // `DescribeConsumerGroupsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     unsafe { consumer_group_description_ref(description) }.group_type_c.as_ptr()
 }
 
@@ -8833,10 +11690,19 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned group-state name borrows from the same
+    // `DescribeConsumerGroupsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     unsafe { consumer_group_description_ref(description) }.group_state_c.as_ptr()
 }
 
@@ -8846,10 +11712,19 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned `kafka_common_Node_t` pointer (or null) borrows
+    // the coordinator stored in the same `DescribeConsumerGroupsResultInner` allocation and
+    // is documented valid only until that handle is destroyed.
     optional_node_ptr(unsafe { consumer_group_description_ref(description) }.coordinator.as_ref())
 }
 
@@ -8863,11 +11738,18 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> i32 {
     authorized_operation_count(
+        // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer
+        // from a `describe_consumer_groups` result getter; per this function's `# Safety`,
+        // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+        // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result
+        // handle the C caller has not yet destroyed. The reference is used only for the
+        // duration of this synchronous call, and only a count is copied out.
         unsafe { consumer_group_description_ref(description) }
             .authorized_operations
             .as_deref(),
@@ -8881,10 +11763,17 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_has_authorized_operations(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> bool {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a boolean is copied out.
     unsafe { consumer_group_description_ref(description) }
         .authorized_operations
         .is_some()
@@ -8896,12 +11785,20 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_has_authorized_ope
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     index: i32,
 ) -> i32 {
     authorized_operation_at(
+        // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer
+        // from a `describe_consumer_groups` result getter; per this function's `# Safety`,
+        // `description` is a valid borrowed consumer-group-description pointer, i.e. one
+        // returned by `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result
+        // handle the C caller has not yet destroyed. The reference is used only for the
+        // duration of this synchronous call, `index` is bounds-checked against the
+        // operations list, and only an operation code is copied out.
         unsafe { consumer_group_description_ref(description) }
             .authorized_operations
             .as_deref(),
@@ -8916,11 +11813,20 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer returned by
+    // `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle the C caller
+    // has not yet destroyed, and the reference is used only for the duration of this
+    // synchronous call to copy out `group_epoch`. `write_optional` requires `out_epoch` to
+    // be null or writable, which the same `# Safety` promises; it null-checks `out_epoch`
+    // and writes exactly one `i32` through it, only when the epoch is present.
     unsafe { write_optional(consumer_group_description_ref(description).group_epoch, out_epoch) }
 }
 
@@ -8931,11 +11837,21 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `consumer_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_consumer_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed consumer-group-description pointer returned by
+    // `kafka_admin_DescribeConsumerGroupsResult_get_value` on a result handle the C caller
+    // has not yet destroyed, and the reference is used only for the duration of this
+    // synchronous call to copy out `target_assignment_epoch`. `write_optional` requires
+    // `out_epoch` to be null or writable, which the same `# Safety` promises; it
+    // null-checks `out_epoch` and writes exactly one `i32` through it, only when the epoch
+    // is present.
     unsafe { write_optional(consumer_group_description_ref(description).target_assignment_epoch, out_epoch) }
 }
 
@@ -8989,6 +11905,18 @@ impl ClassicGroupDescriptionInner {
 unsafe fn classic_group_description_ref(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> &'static ClassicGroupDescriptionInner {
+    // SAFETY: Per this helper's `# Safety`, `description` is a non-null borrowed pointer
+    // from a `describe_classic_groups` result getter, a requirement every caller discharges
+    // through its own `# Safety` (`description` must be a valid borrowed
+    // classic-group-description pointer). Such pointers are only produced by
+    // `kafka_admin_DescribeClassicGroupsResult_get_value`, which returns `description as
+    // *const ClassicGroupDescriptionInner as *const kafka_admin_ClassicGroupDescription_t`
+    // pointing into the `descriptions` of the owning `DescribeClassicGroupsResultInner`, so
+    // casting back yields an aligned, initialized `ClassicGroupDescriptionInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call; the
+    // opaque type is documented as borrowed from the owning result handle and valid until
+    // that handle is destroyed, which the C caller has not yet done while still using the
+    // pointer.
     unsafe { &*(description as *const ClassicGroupDescriptionInner) }
 }
 
@@ -8997,10 +11925,19 @@ unsafe fn classic_group_description_ref(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned group-id string borrows from the same
+    // `DescribeClassicGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { classic_group_description_ref(description) }.group_id_c.as_ptr()
 }
 
@@ -9009,10 +11946,19 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned protocol string borrows from the same
+    // `DescribeClassicGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { classic_group_description_ref(description) }.protocol_c.as_ptr()
 }
 
@@ -9022,10 +11968,19 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned protocol-data string borrows from the same
+    // `DescribeClassicGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { classic_group_description_ref(description) }.protocol_data_c.as_ptr()
 }
 
@@ -9034,10 +11989,17 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> bool {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a boolean is copied out.
     unsafe { classic_group_description_ref(description) }.is_simple_consumer_group
 }
 
@@ -9046,10 +12008,17 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_member_count(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> i32 {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a count is copied out.
     unsafe { classic_group_description_ref(description) }.members.len() as i32
 }
 
@@ -9058,11 +12027,21 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_member_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
     description: *const kafka_admin_ClassicGroupDescription_t,
     index: i32,
 ) -> *const kafka_admin_MemberDescription_t {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; `member_at` bounds-checks `index` and the returned
+    // `kafka_admin_MemberDescription_t` pointer borrows from the `members` of the same
+    // owning `DescribeClassicGroupsResultInner` allocation and is documented valid only
+    // until that handle is destroyed.
     member_at(&unsafe { classic_group_description_ref(description) }.members, index)
 }
 
@@ -9072,10 +12051,19 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned state name borrows from the same
+    // `DescribeClassicGroupsResultInner` allocation and is documented valid only until that
+    // handle is destroyed.
     unsafe { classic_group_description_ref(description) }.state_c.as_ptr()
 }
 
@@ -9085,10 +12073,19 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const kafka_common_Node_t {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call; the returned `kafka_common_Node_t` pointer (or null) borrows
+    // the coordinator stored in the same `DescribeClassicGroupsResultInner` allocation and
+    // is documented valid only until that handle is destroyed.
     optional_node_ptr(unsafe { classic_group_description_ref(description) }.coordinator.as_ref())
 }
 
@@ -9101,11 +12098,18 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> i32 {
     authorized_operation_count(
+        // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from
+        // a `describe_classic_groups` result getter; per this function's `# Safety`,
+        // `description` is a valid borrowed classic-group-description pointer, i.e. one
+        // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result
+        // handle the C caller has not yet destroyed. The reference is used only for the
+        // duration of this synchronous call, and only a count is copied out.
         unsafe { classic_group_description_ref(description) }
             .authorized_operations
             .as_deref(),
@@ -9119,10 +12123,17 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_has_authorized_operations(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> bool {
+    // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from a
+    // `describe_classic_groups` result getter; per this function's `# Safety`,
+    // `description` is a valid borrowed classic-group-description pointer, i.e. one
+    // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result handle
+    // the C caller has not yet destroyed. The reference is used only for the duration of
+    // this synchronous call, and only a boolean is copied out.
     unsafe { classic_group_description_ref(description) }
         .authorized_operations
         .is_some()
@@ -9134,12 +12145,20 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_has_authorized_oper
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation(
     description: *const kafka_admin_ClassicGroupDescription_t,
     index: i32,
 ) -> i32 {
     authorized_operation_at(
+        // SAFETY: `classic_group_description_ref` requires a non-null borrowed pointer from
+        // a `describe_classic_groups` result getter; per this function's `# Safety`,
+        // `description` is a valid borrowed classic-group-description pointer, i.e. one
+        // returned by `kafka_admin_DescribeClassicGroupsResult_get_value` on a result
+        // handle the C caller has not yet destroyed. The reference is used only for the
+        // duration of this synchronous call, `index` is bounds-checked against the
+        // operations list, and only an operation code is copied out.
         unsafe { classic_group_description_ref(description) }
             .authorized_operations
             .as_deref(),
@@ -9207,6 +12226,17 @@ impl OffsetAndMetadataMapInner {
 unsafe fn offset_and_metadata_map_ref(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
 ) -> &'static OffsetAndMetadataMapInner {
+    // SAFETY: Per this helper's `# Safety`, `map` is a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter, a requirement every
+    // caller discharges through its own `# Safety` (`map` must be a valid borrowed
+    // offset-map pointer). Such pointers are only produced by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value`, which returns `map as *const
+    // OffsetAndMetadataMapInner as *const kafka_admin_OffsetAndMetadataMap_t` pointing into
+    // the `offsets` of the owning `ListConsumerGroupOffsetsResultInner`, so casting back
+    // yields an aligned, initialized `OffsetAndMetadataMapInner`. The `&'static` is used by
+    // each caller only for the duration of its synchronous call; the opaque type is
+    // documented as borrowed from the owning result handle and valid until that handle is
+    // destroyed, which the C caller has not yet done while still using the pointer.
     unsafe { &*(map as *const OffsetAndMetadataMapInner) }
 }
 
@@ -9223,8 +12253,15 @@ fn group_offset_at(map: &OffsetAndMetadataMapInner, index: i32) -> Option<&Group
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_count(map: *const kafka_admin_OffsetAndMetadataMap_t) -> i32 {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a count is copied out.
     unsafe { offset_and_metadata_map_ref(map) }.entries.len() as i32
 }
 
@@ -9234,11 +12271,20 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_count(map: *const kafk
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_topic(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call; the returned topic string borrows from the same
+    // `ListConsumerGroupOffsetsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
         Some(entry) => entry.topic_c.as_ptr(),
         None => std::ptr::null(),
@@ -9250,11 +12296,18 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_topic(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_partition(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a partition number is copied out.
     match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
         Some(entry) => entry.partition,
         None => -1,
@@ -9274,11 +12327,18 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_partition(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_has_offset(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
 ) -> bool {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only a boolean is copied out.
     match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
         Some(entry) => entry.offset.is_some(),
         None => false,
@@ -9294,11 +12354,18 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_has_offset(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_offset(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only an offset is copied out.
     match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
         Some(entry) => entry.offset.as_ref().map_or(-1, OffsetAndMetadata::offset),
         None => -1,
@@ -9313,11 +12380,20 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_offset(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_metadata(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call; the returned metadata string (or null) borrows from the same
+    // `ListConsumerGroupOffsetsResultInner` allocation and is documented valid only until
+    // that handle is destroyed.
     match group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index) {
         Some(entry) => optional_cstring_ptr(&entry.metadata_c),
         None => std::ptr::null(),
@@ -9333,15 +12409,26 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_metadata(
 ///
 /// `map` must be a valid borrowed offset-map pointer; `out_epoch` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_leader_epoch(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
     index: i32,
     out_epoch: *mut i32,
 ) -> bool {
+    // SAFETY: `offset_and_metadata_map_ref` requires a non-null borrowed pointer from a
+    // `list_consumer_group_offsets_with_group_specs` result getter; per this function's `#
+    // Safety`, `map` is a valid borrowed offset-map pointer, i.e. one returned by
+    // `kafka_admin_ListConsumerGroupOffsetsResult_get_value` on a result handle the C
+    // caller has not yet destroyed. The reference is used only for the duration of this
+    // synchronous call, and only the optional leader epoch is copied out by value.
     let epoch = group_offset_at(unsafe { offset_and_metadata_map_ref(map) }, index)
         .and_then(|entry| entry.offset.as_ref())
         .and_then(OffsetAndMetadata::leader_epoch);
+    // SAFETY: `write_optional` requires `out_epoch` to be null or writable, which this
+    // function's `# Safety` promises (`out_epoch` must be null or writable); it null-checks
+    // `out_epoch` and writes exactly one `i32` through it, only when the entry carries a
+    // leader epoch, leaving `*out_epoch` untouched otherwise.
     unsafe { write_optional(epoch, out_epoch) }
 }
 
@@ -9388,6 +12475,11 @@ unsafe fn read_required_string(text: *const c_char, parameter: &str) -> Result<S
     if text.is_null() {
         return Err(Error::local_illegal_argument(format!("{parameter} must not be null")));
     }
+    // SAFETY: `text` is non-null (the NULL case returned `Err(LocalIllegalArgument)` above)
+    // and, per this helper's `# Safety`, null or a valid C string that the C caller keeps
+    // alive for the call, which each entry point discharges through its own `# Safety`
+    // (`group_id` must be a valid C string); `CStr::from_ptr` reads the NUL-terminated
+    // bytes and they are copied immediately via `to_string_lossy().to_string()`.
     Ok(unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string())
 }
 
@@ -9472,6 +12564,13 @@ fn flatten_partition_void_outcomes(
 ///
 /// `names` must be null or have `count` entries, each NULL or a valid C string.
 unsafe fn read_group_states(names: *const *const c_char, count: i32) -> HashSet<GroupState> {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string, which is exactly this helper's own `# Safety` contract (`names`
+    // must be null or have `count` entries, each NULL or a valid C string), in turn
+    // discharged by `kafka_admin_AdminClient_list_groups[_async]`'s promise that each name
+    // array is null or has its stated number of valid C strings. `read_strings` clamps with
+    // `count.max(0)`, treats a NULL array as empty, skips NULL entries and copies every
+    // string into an owned `String` before the names are parsed.
     unsafe { read_strings(names, count) }
         .iter()
         .map(|name| GroupState::parse(name))
@@ -9488,6 +12587,13 @@ unsafe fn read_group_states(names: *const *const c_char, count: i32) -> HashSet<
 ///
 /// `names` must be null or have `count` entries, each NULL or a valid C string.
 unsafe fn read_group_types(names: *const *const c_char, count: i32) -> HashSet<GroupType> {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string, which is exactly this helper's own `# Safety` contract (`names`
+    // must be null or have `count` entries, each NULL or a valid C string), in turn
+    // discharged by `kafka_admin_AdminClient_list_groups[_async]`'s promise that each name
+    // array is null or has its stated number of valid C strings. `read_strings` clamps with
+    // `count.max(0)`, treats a NULL array as empty, skips NULL entries and copies every
+    // string into an owned `String` before the names are parsed.
     unsafe { read_strings(names, count) }
         .iter()
         .map(|name| GroupType::parse(name))
@@ -9509,12 +12615,34 @@ unsafe fn list_groups_options(
     timeout_ms: i32,
 ) -> ListGroupsOptions {
     ListGroupsOptions::new()
+        // SAFETY: `read_group_states` requires `group_states` to be null or have
+        // `group_state_count` entries, each NULL or a valid C string; per this helper's `#
+        // Safety` the three name arrays are null or have their stated counts, and per the
+        // `# Safety` of its callers `kafka_admin_AdminClient_list_groups` and `_async` each
+        // name array is null or holds its stated number of valid C strings. The underlying
+        // `read_strings` clamps a negative count to zero, treats a NULL array as empty,
+        // skips NULL entries and copies the names into owned `String`s.
         .in_group_states(unsafe { read_group_states(group_states, group_state_count) })
         .with_protocol_types(
+            // SAFETY: `read_strings` requires `protocol_types` to be null or have
+            // `protocol_type_count` entries, each NULL or a valid C string; per this
+            // helper's `# Safety` the three name arrays are null or have their stated
+            // counts, and per the `# Safety` of its callers
+            // `kafka_admin_AdminClient_list_groups` and `_async` each name array is null or
+            // holds its stated number of valid C strings. `read_strings` clamps a negative
+            // count to zero, treats a NULL array as empty, skips NULL entries and copies
+            // the names into owned `String`s.
             unsafe { read_strings(protocol_types, protocol_type_count) }
                 .into_iter()
                 .collect(),
         )
+        // SAFETY: `read_group_types` requires `types` to be null or have `type_count`
+        // entries, each NULL or a valid C string; per this helper's `# Safety` the three
+        // name arrays are null or have their stated counts, and per the `# Safety` of its
+        // callers `kafka_admin_AdminClient_list_groups` and `_async` each name array is
+        // null or holds its stated number of valid C strings. The underlying `read_strings`
+        // clamps a negative count to zero, treats a NULL array as empty, skips NULL entries
+        // and copies the names into owned `String`s.
         .with_types(unsafe { read_group_types(types, type_count) })
         .set_timeout_ms(option_timeout(timeout_ms))
 }
@@ -9589,12 +12717,22 @@ unsafe fn remove_members_options(
         // Java's `RemoveMembersFromConsumerGroupOptions()`: removeAll mode.
         RemoveMembersFromConsumerGroupOptions::default()
     } else {
+        // SAFETY: `read_strings` requires `group_instance_ids` to be null or have
+        // `member_count` entries, each NULL or a valid C string, which is exactly what this
+        // helper's `# Safety` promises for `group_instance_ids`; the array is only read on
+        // the `!remove_all` path. `read_strings` clamps with `member_count.max(0)`, treats
+        // a NULL array as empty, skips NULL entries and copies every id into an owned
+        // `String`, so nothing borrowed from C outlives the call.
         let members = unsafe { read_strings(group_instance_ids, member_count) }
             .into_iter()
             .map(MemberToRemove::new);
         RemoveMembersFromConsumerGroupOptions::new(members)?
     };
     if !reason.is_null() {
+        // SAFETY: `reason` is non-null (checked above) and, per this helper's `# Safety`,
+        // null or a valid C string the C caller keeps alive for the call, so
+        // `CStr::from_ptr` reads a NUL-terminated string; it is copied immediately via
+        // `to_string_lossy().to_string()` into the owned options value.
         options.set_reason(unsafe { CStr::from_ptr(reason) }.to_string_lossy().to_string());
     }
     Ok(options.set_timeout_ms(option_timeout(timeout_ms)))
@@ -9634,30 +12772,74 @@ unsafe fn read_group_offsets_specs(
         return Ok(specs);
     }
     for i in 0..n {
+        // SAFETY: `group_ids` is non-null (the helper returned `Ok` with an empty map above
+        // if `group_ids` or `all_partitions` is NULL) and `i < group_count.max(0)`, so per
+        // this helper's `# Safety` (`group_ids` null or with `group_count` readable
+        // entries) `group_ids.add(i)` addresses a readable `*const c_char` entry; only the
+        // pointer value is copied out and a NULL entry is rejected with `Err` rather than
+        // dereferenced.
         let id_ptr = unsafe { *group_ids.add(i) };
         if id_ptr.is_null() {
             return Err(Error::local_illegal_argument(format!("group id at index {i} must not be null")));
         }
+        // SAFETY: `id_ptr` was read from the readable entry `group_ids[i]` and is non-null
+        // (checked above, a NULL id returns `Err`); per this helper's `# Safety`, as
+        // mirrored by the `# Safety` of
+        // `kafka_admin_AdminClient_list_consumer_group_offsets[_async]`, the group-id
+        // entries are valid C strings kept alive by the C caller for the call, so
+        // `CStr::from_ptr` reads a NUL-terminated string, which is copied immediately via
+        // `to_string_lossy().to_string()`.
         let group_id = unsafe { CStr::from_ptr(id_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `all_partitions` is non-null (the helper returned early above if
+        // `group_ids` or `all_partitions` is NULL) and `i < group_count.max(0)`, so per
+        // this helper's `# Safety` (`all_partitions` null or with `group_count` readable
+        // entries) `all_partitions.add(i)` addresses a readable `bool` flag, which is
+        // copied by value.
         let spec = if unsafe { *all_partitions.add(i) } {
             ListConsumerGroupOffsetsSpec::new()
         } else {
             let count = if partition_counts.is_null() {
                 0
             } else {
+                // SAFETY: `partition_counts` is non-null (checked above, the NULL case
+                // yields a count of 0 instead) and `i < group_count.max(0)`, so per this
+                // helper's `# Safety` (`partition_counts` null or with `group_count`
+                // readable entries) `partition_counts.add(i)` addresses a readable `i32`,
+                // which is copied by value.
                 unsafe { *partition_counts.add(i) }
             };
             let group_topics = if topics.is_null() {
                 std::ptr::null()
             } else {
+                // SAFETY: `topics` is non-null (checked above, the NULL case substitutes a
+                // null inner pointer instead) and `i < group_count.max(0)`, so per this
+                // helper's `# Safety` (`topics` null or with `group_count` readable
+                // entries) `topics.add(i)` addresses a readable `*const *const c_char`
+                // entry; only the pointer value is copied out.
                 unsafe { *topics.add(i) }
             };
             let group_partitions = if partitions.is_null() {
                 std::ptr::null()
             } else {
+                // SAFETY: `partitions` is non-null (checked above, the NULL case
+                // substitutes a null inner pointer instead) and `i < group_count.max(0)`,
+                // so per this helper's `# Safety` (`partitions` null or with `group_count`
+                // readable entries) `partitions.add(i)` addresses a readable `*const i32`
+                // entry; only the pointer value is copied out.
                 unsafe { *partitions.add(i) }
             };
             ListConsumerGroupOffsetsSpec::new()
+                // SAFETY: `read_topic_partitions` requires `group_topics` and
+                // `group_partitions` to be null or have `count` readable entries each,
+                // every topic NULL or a valid C string. This call is reached only when
+                // `all_partitions[i]` is false, and for such a group this helper's `#
+                // Safety` promises that `topics[i]` and `partitions[i]` have
+                // `partition_counts[i]` readable entries, which is exactly where
+                // `group_topics`, `group_partitions` and `count` were read from above (a
+                // NULL outer array yields a null inner pointer or a zero count, both of
+                // which `read_topic_partitions` treats as empty; it also clamps a negative
+                // count to zero and skips NULL topics). Every entry is copied into owned
+                // `TopicPartition` values.
                 .set_topic_partitions(Some(unsafe { read_topic_partitions(group_topics, group_partitions, count) }))
         };
         if specs.insert(group_id.clone(), spec).is_some() {
@@ -9704,13 +12886,39 @@ unsafe fn read_alter_group_offsets(
         return Ok(out);
     }
     for i in 0..n {
+        // SAFETY: `topics` is non-null (the helper returned `Ok` with an empty map above if
+        // `topics`, `partitions` or `offsets` is NULL) and `i < count.max(0)`, so per this
+        // helper's `# Safety` (every non-null array has `count` readable entries)
+        // `topics.add(i)` addresses a readable `*const c_char` entry; only the pointer
+        // value is copied out and a NULL entry is rejected with `Err` rather than
+        // dereferenced.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             return Err(Error::local_illegal_argument(format!("topic at index {i} must not be null")));
         }
+        // SAFETY: `name_ptr` was read from the readable entry `topics[i]` and is non-null
+        // (checked above, a NULL topic returns `Err`); per this helper's `# Safety`, every
+        // topic entry is NULL or a valid C string the C caller keeps alive for the call, so
+        // `CStr::from_ptr` reads a NUL-terminated string, which is copied immediately via
+        // `to_string_lossy().to_string()`.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` is non-null (the helper returned early above if `topics`,
+        // `partitions` or `offsets` is NULL) and `i < count.max(0)`, so per this helper's
+        // `# Safety` (every non-null array has `count` readable entries)
+        // `partitions.add(i)` addresses a readable `i32`, which is copied by value into the
+        // new `TopicPartition`.
         let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
+        // SAFETY: `has_leader_epoch` is non-null (checked first in the same `&&` chain, so
+        // the dereference is never reached for a NULL array) and `i < count.max(0)`, so per
+        // this helper's `# Safety` (every non-null array has `count` readable entries)
+        // `has_leader_epoch.add(i)` addresses a readable `bool` flag, which is copied by
+        // value.
         let epoch = if !has_leader_epoch.is_null() && unsafe { *has_leader_epoch.add(i) } && !leader_epochs.is_null() {
+            // SAFETY: `leader_epochs` is non-null (checked in the `&&` chain above, and
+            // this branch is only taken when `has_leader_epoch[i]` is true) and `i <
+            // count.max(0)`, so per this helper's `# Safety` (every non-null array has
+            // `count` readable entries) `leader_epochs.add(i)` addresses a readable `i32`,
+            // which is copied by value.
             Some(unsafe { *leader_epochs.add(i) })
         } else {
             None
@@ -9718,13 +12926,28 @@ unsafe fn read_alter_group_offsets(
         let text = if metadata.is_null() {
             String::new()
         } else {
+            // SAFETY: `metadata` is non-null (checked above, the NULL case uses an empty
+            // string instead) and `i < count.max(0)`, so per this helper's `# Safety`
+            // (every non-null array has `count` readable entries) `metadata.add(i)`
+            // addresses a readable `*const c_char` entry; only the pointer value is copied
+            // out and a NULL entry maps to an empty string.
             let text_ptr = unsafe { *metadata.add(i) };
             if text_ptr.is_null() {
                 String::new()
             } else {
+                // SAFETY: `text_ptr` was read from the readable entry `metadata[i]` and is
+                // non-null (checked above); per this helper's `# Safety`, every metadata
+                // entry is NULL or a valid C string the C caller keeps alive for the call,
+                // so `CStr::from_ptr` reads a NUL-terminated string, which is copied
+                // immediately via `to_string_lossy().to_string()`.
                 unsafe { CStr::from_ptr(text_ptr) }.to_string_lossy().to_string()
             }
         };
+        // SAFETY: `offsets` is non-null (the helper returned early above if `topics`,
+        // `partitions` or `offsets` is NULL) and `i < count.max(0)`, so per this helper's
+        // `# Safety` (every non-null array has `count` readable entries) `offsets.add(i)`
+        // addresses a readable `i64`, which is copied by value and then range-checked by
+        // `OffsetAndMetadata::with_leader_epoch_metadata`.
         let offset = OffsetAndMetadata::with_leader_epoch_metadata(unsafe { *offsets.add(i) }, epoch, text)
             .map_err(|e| Error::local_illegal_argument(format!("offset at index {i}: {}", e.message())))?;
         out.insert(tp, offset);
@@ -9933,6 +13156,15 @@ fn box_list_groups_result(outcome: ListGroupsOutcome) -> *mut kafka_admin_ListGr
 ///
 /// `result` must be a non-null handle from a `list_groups` call.
 unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) -> &'static ListGroupsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_groups` call, a requirement every caller discharges through its own `# Safety`
+    // (`result` must be a valid `list_groups` result handle). Such a pointer is only ever
+    // produced by `Box::into_raw(Box::new(ListGroupsResultInner { .. }))` in
+    // `box_list_groups_result` and cast to the opaque marker type, so casting it back
+    // yields an aligned, initialized `ListGroupsResultInner`. The `&'static` is used by
+    // each caller only for the duration of its synchronous call, during which the C caller
+    // keeps the handle alive by not yet having called
+    // `kafka_admin_ListGroupsResult_destroy`.
     unsafe { &*(result as *const ListGroupsResultInner) }
 }
 
@@ -9941,10 +13173,16 @@ unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
     result: *const kafka_admin_ListGroupsResult_t,
 ) -> i32 {
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { list_groups_result_ref(result) }.valid.len() as i32
 }
 
@@ -9954,6 +13192,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -9962,6 +13201,14 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; the returned
+    // `kafka_admin_GroupListing_t` pointer borrows from the `valid` listings of the same
+    // `ListGroupsResultInner` allocation and is documented valid only until the handle is
+    // destroyed.
     match unsafe { list_groups_result_ref(result) }.valid.get(index as usize) {
         Some(listing) => listing as *const GroupListingInner as *const kafka_admin_GroupListing_t,
         None => std::ptr::null(),
@@ -9973,10 +13220,16 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
     result: *const kafka_admin_ListGroupsResult_t,
 ) -> i32 {
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { list_groups_result_ref(result) }.errors.len() as i32
 }
 
@@ -9995,6 +13248,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -10003,6 +13257,12 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_groups_result_ref` requires a non-null handle from a `list_groups`
+    // call; per this function's `# Safety`, `result` is a valid `list_groups` result
+    // handle, i.e. one created by `Box::into_raw` in `box_list_groups_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; any error pointer returned borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     error_ptr(unsafe { list_groups_result_ref(result) }.errors.get(index as usize))
 }
 
@@ -10011,9 +13271,18 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka_admin_ListGroupsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_groups` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(ListGroupsResultInner { .. }))` in
+        // `box_list_groups_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the borrowed `kafka_admin_GroupListing_t` pointers, strings and error
+        // pointers obtained from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut ListGroupsResultInner)) };
     }
 }
@@ -10069,6 +13338,16 @@ fn box_describe_consumer_groups_result(
 unsafe fn describe_consumer_groups_result_ref(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
 ) -> &'static DescribeConsumerGroupsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_consumer_groups` call, a requirement every caller discharges through its
+    // own `# Safety` (`result` must be a valid `describe_consumer_groups` result handle).
+    // Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { .. }))` in
+    // `box_describe_consumer_groups_result` and cast to the opaque marker type, so casting
+    // it back yields an aligned, initialized `DescribeConsumerGroupsResultInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeConsumerGroupsResult_destroy`.
     unsafe { &*(result as *const DescribeConsumerGroupsResultInner) }
 }
 
@@ -10077,10 +13356,17 @@ unsafe fn describe_consumer_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a count is copied out.
     unsafe { describe_consumer_groups_result_ref(result) }.group_ids.len() as i32
 }
 
@@ -10090,11 +13376,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned group-id string borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     cstring_at(&unsafe { describe_consumer_groups_result_ref(result) }.group_ids, index)
 }
 
@@ -10104,6 +13398,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10112,6 +13407,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned `kafka_admin_ConsumerGroupDescription_t` pointer borrows
+    // from the `descriptions` of the same `DescribeConsumerGroupsResultInner` allocation
+    // and is documented valid only until the handle is destroyed.
     match unsafe { describe_consumer_groups_result_ref(result) }
         .descriptions
         .get(index as usize)
@@ -10129,6 +13432,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10137,6 +13441,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_consumer_groups_result_ref` requires a non-null handle from a
+    // `describe_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_consumer_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; any error pointer returned borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     match unsafe { describe_consumer_groups_result_ref(result) }
         .errors
         .get(index as usize)
@@ -10151,11 +13462,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
     result: *mut kafka_admin_DescribeConsumerGroupsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_consumer_groups` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DescribeConsumerGroupsResultInner { .. }))` in
+        // `box_describe_consumer_groups_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the borrowed description, member and assignment pointers,
+        // strings and error pointers obtained from it are documented valid only until this
+        // call.
         unsafe { drop(Box::from_raw(result as *mut DescribeConsumerGroupsResultInner)) };
     }
 }
@@ -10210,6 +13531,16 @@ fn box_describe_classic_groups_result(
 unsafe fn describe_classic_groups_result_ref(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
 ) -> &'static DescribeClassicGroupsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `describe_classic_groups` call, a requirement every caller discharges through its own
+    // `# Safety` (`result` must be a valid `describe_classic_groups` result handle). Such a
+    // pointer is only ever produced by
+    // `Box::into_raw(Box::new(DescribeClassicGroupsResultInner { .. }))` in
+    // `box_describe_classic_groups_result` and cast to the opaque marker type, so casting
+    // it back yields an aligned, initialized `DescribeClassicGroupsResultInner`. The
+    // `&'static` is used by each caller only for the duration of its synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClassicGroupsResult_destroy`.
     unsafe { &*(result as *const DescribeClassicGroupsResultInner) }
 }
 
@@ -10218,10 +13549,17 @@ unsafe fn describe_classic_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive, and only a count is copied out.
     unsafe { describe_classic_groups_result_ref(result) }.group_ids.len() as i32
 }
 
@@ -10231,11 +13569,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned group-id string borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     cstring_at(&unsafe { describe_classic_groups_result_ref(result) }.group_ids, index)
 }
 
@@ -10245,6 +13591,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10253,6 +13600,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; the returned `kafka_admin_ClassicGroupDescription_t` pointer borrows
+    // from the `descriptions` of the same `DescribeClassicGroupsResultInner` allocation and
+    // is documented valid only until the handle is destroyed.
     match unsafe { describe_classic_groups_result_ref(result) }
         .descriptions
         .get(index as usize)
@@ -10270,6 +13625,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10278,6 +13634,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_classic_groups_result_ref` requires a non-null handle from a
+    // `describe_classic_groups` call; per this function's `# Safety`, `result` is a valid
+    // `describe_classic_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_describe_classic_groups_result` and not yet destroyed. The reference is used
+    // only for the duration of this synchronous call, during which the C caller keeps the
+    // handle alive; any error pointer returned borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     match unsafe { describe_classic_groups_result_ref(result) }.errors.get(index as usize) {
         Some(slot) => error_ptr(slot.as_ref()),
         None => std::ptr::null(),
@@ -10289,11 +13652,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
     result: *mut kafka_admin_DescribeClassicGroupsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_classic_groups` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DescribeClassicGroupsResultInner { .. }))` in
+        // `box_describe_classic_groups_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the borrowed description, member and assignment pointers, strings and
+        // error pointers obtained from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DescribeClassicGroupsResultInner)) };
     }
 }
@@ -10351,6 +13723,16 @@ fn box_list_consumer_group_offsets_result(
 unsafe fn list_consumer_group_offsets_result_ref(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) -> &'static ListConsumerGroupOffsetsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `list_consumer_group_offsets` call, a requirement every caller discharges through its
+    // own `# Safety` (`result` must be a valid `list_consumer_group_offsets` result
+    // handle). Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { .. }))` in
+    // `box_list_consumer_group_offsets_result` and cast to the opaque marker type, so
+    // casting it back yields an aligned, initialized `ListConsumerGroupOffsetsResultInner`.
+    // The `&'static` is used by each caller only for the duration of its synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
     unsafe { &*(result as *const ListConsumerGroupOffsetsResultInner) }
 }
 
@@ -10359,10 +13741,17 @@ unsafe fn list_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) -> i32 {
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a count is copied out.
     unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids.len() as i32
 }
 
@@ -10372,11 +13761,19 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned group-id string borrows from the
+    // same allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { list_consumer_group_offsets_result_ref(result) }.group_ids, index)
 }
 
@@ -10386,6 +13783,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10394,6 +13792,15 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned
+    // `kafka_admin_OffsetAndMetadataMap_t` pointer borrows from the `offsets` of the same
+    // `ListConsumerGroupOffsetsResultInner` allocation and is documented valid only until
+    // the handle is destroyed.
     match unsafe { list_consumer_group_offsets_result_ref(result) }
         .offsets
         .get(index as usize)
@@ -10410,6 +13817,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10418,6 +13826,13 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `list_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `list_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `list_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_list_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; any error pointer returned borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     match unsafe { list_consumer_group_offsets_result_ref(result) }
         .errors
         .get(index as usize)
@@ -10434,11 +13849,21 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `list_consumer_group_offsets_with_group_specs` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `list_consumer_group_offsets` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(ListConsumerGroupOffsetsResultInner { .. }))` in
+        // `box_list_consumer_group_offsets_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the borrowed `kafka_admin_OffsetAndMetadataMap_t` pointers,
+        // strings and error pointers obtained from it are documented valid only until this
+        // call.
         unsafe { drop(Box::from_raw(result as *mut ListConsumerGroupOffsetsResultInner)) };
     }
 }
@@ -10480,6 +13905,16 @@ fn box_alter_consumer_group_offsets_result(
 unsafe fn alter_consumer_group_offsets_result_ref(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
 ) -> &'static AlterConsumerGroupOffsetsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from an
+    // `alter_consumer_group_offsets` call, a requirement every caller discharges through
+    // its own `# Safety` (`result` must be a valid `alter_consumer_group_offsets` result
+    // handle). Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { .. }))` in
+    // `box_alter_consumer_group_offsets_result` and cast to the opaque marker type, so
+    // casting it back yields an aligned, initialized
+    // `AlterConsumerGroupOffsetsResultInner`. The `&'static` is used by each caller only
+    // for the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`.
     unsafe { &*(result as *const AlterConsumerGroupOffsetsResultInner) }
 }
 
@@ -10488,10 +13923,17 @@ unsafe fn alter_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
 ) -> i32 {
+    // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
+    // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a count is copied out.
     unsafe { alter_consumer_group_offsets_result_ref(result) }.topics.len() as i32
 }
 
@@ -10501,11 +13943,19 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
+    // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.topics, index)
 }
 
@@ -10514,11 +13964,18 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
+    // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a partition number is copied out.
     partition_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
@@ -10529,11 +13986,19 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `alter_consumer_group_offsets_result_ref` requires a non-null handle from an
+    // `alter_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `alter_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_alter_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; any error pointer returned borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     optional_error_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.errors, index)
 }
 
@@ -10544,11 +14009,20 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `alter_consumer_group_offsets` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `alter_consumer_group_offsets` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(AlterConsumerGroupOffsetsResultInner { .. }))` in
+        // `box_alter_consumer_group_offsets_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the strings and error pointers borrowed from it are
+        // documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut AlterConsumerGroupOffsetsResultInner)) };
     }
 }
@@ -10588,6 +14062,17 @@ fn box_delete_consumer_group_offsets_result(
 unsafe fn delete_consumer_group_offsets_result_ref(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) -> &'static DeleteConsumerGroupOffsetsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `delete_consumer_group_offsets` call, a requirement every caller discharges through
+    // its own `# Safety` (`result` must be a valid `delete_consumer_group_offsets` result
+    // handle). Such a pointer is only ever produced by
+    // `Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { .. }))` in
+    // `box_delete_consumer_group_offsets_result` and cast to the opaque marker type, so
+    // casting it back yields an aligned, initialized
+    // `DeleteConsumerGroupOffsetsResultInner`. The `&'static` is used by each caller only
+    // for the duration of its synchronous call, during which the C caller keeps the handle
+    // alive by not yet having called
+    // `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`.
     unsafe { &*(result as *const DeleteConsumerGroupOffsetsResultInner) }
 }
 
@@ -10596,10 +14081,17 @@ unsafe fn delete_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) -> i32 {
+    // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a count is copied out.
     unsafe { delete_consumer_group_offsets_result_ref(result) }.topics.len() as i32
 }
 
@@ -10609,11 +14101,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; the returned topic string borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     cstring_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.topics, index)
 }
 
@@ -10622,11 +14122,18 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive, and only a partition number is copied out.
     partition_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.partitions, index)
 }
 
@@ -10637,11 +14144,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `delete_consumer_group_offsets_result_ref` requires a non-null handle from a
+    // `delete_consumer_group_offsets` call; per this function's `# Safety`, `result` is a
+    // valid `delete_consumer_group_offsets` result handle, i.e. one created by
+    // `Box::into_raw` in `box_delete_consumer_group_offsets_result` and not yet destroyed.
+    // The reference is used only for the duration of this synchronous call, during which
+    // the C caller keeps the handle alive; any error pointer returned borrows from the same
+    // allocation and is documented valid only until the handle is destroyed.
     optional_error_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.errors, index)
 }
 
@@ -10652,11 +14167,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `delete_consumer_group_offsets` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `delete_consumer_group_offsets` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DeleteConsumerGroupOffsetsResultInner { .. }))` in
+        // `box_delete_consumer_group_offsets_result` and handed to C exactly once, either
+        // through `finish_sync`'s write to `*out_result` or as the owned `result` argument
+        // of the async callback. The destroy contract makes this the single, final release
+        // of that allocation; the strings and error pointers borrowed from it are
+        // documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupOffsetsResultInner)) };
     }
 }
@@ -10691,6 +14215,16 @@ fn box_delete_consumer_groups_result(outcomes: GroupVoidOutcomes) -> *mut kafka_
 unsafe fn delete_consumer_groups_result_ref(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
 ) -> &'static DeleteConsumerGroupsResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `delete_consumer_groups` call, a requirement every caller discharges through its own
+    // `# Safety` (`result` must be a valid `delete_consumer_groups` result handle). Such a
+    // pointer is only ever produced by
+    // `Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { .. }))` in
+    // `box_delete_consumer_groups_result` and cast to the opaque marker type, so casting it
+    // back yields an aligned, initialized `DeleteConsumerGroupsResultInner`. The `&'static`
+    // is used by each caller only for the duration of its synchronous call, during which
+    // the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DeleteConsumerGroupsResult_destroy`.
     unsafe { &*(result as *const DeleteConsumerGroupsResultInner) }
 }
 
@@ -10699,10 +14233,17 @@ unsafe fn delete_consumer_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
 ) -> i32 {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
+    // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive, and only a count is copied out.
     unsafe { delete_consumer_groups_result_ref(result) }.group_ids.len() as i32
 }
 
@@ -10712,11 +14253,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
+    // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive; the returned group-id string borrows from the same allocation and is
+    // documented valid only until the handle is destroyed.
     cstring_at(&unsafe { delete_consumer_groups_result_ref(result) }.group_ids, index)
 }
 
@@ -10726,11 +14275,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `delete_consumer_groups_result_ref` requires a non-null handle from a
+    // `delete_consumer_groups` call; per this function's `# Safety`, `result` is a valid
+    // `delete_consumer_groups` result handle, i.e. one created by `Box::into_raw` in
+    // `box_delete_consumer_groups_result` and not yet destroyed. The reference is used only
+    // for the duration of this synchronous call, during which the C caller keeps the handle
+    // alive; any error pointer returned borrows from the same allocation and is documented
+    // valid only until the handle is destroyed.
     optional_error_at(&unsafe { delete_consumer_groups_result_ref(result) }.errors, index)
 }
 
@@ -10739,11 +14296,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
     result: *mut kafka_admin_DeleteConsumerGroupsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `delete_consumer_groups` result handle: the pointer was created by
+        // `Box::into_raw(Box::new(DeleteConsumerGroupsResultInner { .. }))` in
+        // `box_delete_consumer_groups_result` and handed to C exactly once, either through
+        // `finish_sync`'s write to `*out_result` or as the owned `result` argument of the
+        // async callback. The destroy contract makes this the single, final release of that
+        // allocation; the strings and error pointers borrowed from it are documented valid
+        // only until this call.
         unsafe { drop(Box::from_raw(result as *mut DeleteConsumerGroupsResultInner)) };
     }
 }
@@ -10789,6 +14355,17 @@ fn box_remove_members_from_consumer_group_result(
 unsafe fn remove_members_result_ref(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
 ) -> &'static RemoveMembersFromConsumerGroupResultInner {
+    // SAFETY: Per this helper's `# Safety`, `result` is a non-null handle from a
+    // `remove_members_from_consumer_group` call, a requirement every caller discharges
+    // through its own `# Safety` (`result` must be a valid
+    // `remove_members_from_consumer_group` result handle). Such a pointer is only ever
+    // produced by `Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner { ..
+    // }))` in `box_remove_members_from_consumer_group_result` and cast to the opaque marker
+    // type, so casting it back yields an aligned, initialized
+    // `RemoveMembersFromConsumerGroupResultInner`. The `&'static` is used by each caller
+    // only for the duration of its synchronous call, during which the C caller keeps the
+    // handle alive by not yet having called
+    // `kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`.
     unsafe { &*(result as *const RemoveMembersFromConsumerGroupResultInner) }
 }
 
@@ -10798,10 +14375,17 @@ unsafe fn remove_members_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
 ) -> i32 {
+    // SAFETY: `remove_members_result_ref` requires a non-null handle from a
+    // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
+    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
+    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive, and only a count is copied out.
     unsafe { remove_members_result_ref(result) }.group_instance_ids.len() as i32
 }
 
@@ -10811,11 +14395,20 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `remove_members_result_ref` requires a non-null handle from a
+    // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
+    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
+    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; the returned group-instance-id
+    // string (or null) borrows from the same allocation and is documented valid only until
+    // the handle is destroyed.
     cstring_at(&unsafe { remove_members_result_ref(result) }.group_instance_ids, index)
 }
 
@@ -10825,11 +14418,19 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `remove_members_result_ref` requires a non-null handle from a
+    // `remove_members_from_consumer_group` call; per this function's `# Safety`, `result`
+    // is a valid `remove_members_from_consumer_group` result handle, i.e. one created by
+    // `Box::into_raw` in `box_remove_members_from_consumer_group_result` and not yet
+    // destroyed. The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive; any error pointer returned borrows
+    // from the same allocation and is documented valid only until the handle is destroyed.
     optional_error_at(&unsafe { remove_members_result_ref(result) }.errors, index)
 }
 
@@ -10840,11 +14441,20 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_er
 ///
 /// `result` must be null or a valid `remove_members_from_consumer_group` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(
     result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `remove_members_from_consumer_group` result handle: the pointer was
+        // created by `Box::into_raw(Box::new(RemoveMembersFromConsumerGroupResultInner { ..
+        // }))` in `box_remove_members_from_consumer_group_result` and handed to C exactly
+        // once, either through `finish_sync`'s write to `*out_result` or as the owned
+        // `result` argument of the async callback. The destroy contract makes this the
+        // single, final release of that allocation; the strings and error pointers borrowed
+        // from it are documented valid only until this call.
         unsafe { drop(Box::from_raw(result as *mut RemoveMembersFromConsumerGroupResultInner)) };
     }
 }
@@ -10895,6 +14505,7 @@ pub type kafka_admin_AdminClient_list_groups_callback_t =
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -10907,6 +14518,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListGroupsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_groups_options` requires the three name arrays (`group_states`,
+    // `protocol_types`, `types`) to be null or have their stated counts
+    // (`group_state_count`, `protocol_type_count`, `type_count`), each entry NULL or a
+    // valid C string; per this function's `# Safety`, each name array is null or has its
+    // stated number of valid C strings. The underlying `read_strings` clamps a negative
+    // count to zero, treats a NULL array as empty, skips NULL entries and copies every name
+    // into an owned `String`, so nothing borrowed from C outlives this call.
     let options = unsafe {
         list_groups_options(
             group_states,
@@ -10918,7 +14536,20 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
             timeout_ms,
         )
     };
+    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `options` built above.
     let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_groups(a, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_list_groups_result`, only on `Ok`, giving the C caller sole ownership to release
+    // via `kafka_admin_ListGroupsResult_destroy`; on `Err` it leaves `*out_result`
+    // untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_list_groups_result) }
 }
 
@@ -10941,6 +14572,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -10954,6 +14594,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
     callback: kafka_admin_AdminClient_list_groups_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `list_groups_options` requires the three name arrays (`group_states`,
+    // `protocol_types`, `types`) to be null or have their stated counts
+    // (`group_state_count`, `protocol_type_count`, `type_count`), each entry NULL or a
+    // valid C string; per this function's `# Safety`, each name array is null or has its
+    // stated number of valid C strings. The underlying `read_strings` clamps a negative
+    // count to zero, treats a NULL array as empty, skips NULL entries and copies every name
+    // into an owned `String` before the asynchronous work is submitted, so nothing borrowed
+    // from C outlives this call.
     let options = unsafe {
         list_groups_options(
             group_states,
@@ -10965,6 +14613,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
             timeout_ms,
         )
     };
+    // SAFETY: `admin_async_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_list_groups_result` and `error` by `box_error`, exactly one of them is non-null
+    // and ownership transfers to the callee; the raw pointers are owned handles moved to
+    // the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_future_op(
             admin,
@@ -11026,6 +14689,7 @@ pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11035,9 +14699,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     include_authorized_operations: bool,
     out_result: *mut *mut kafka_admin_DescribeConsumerGroupsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String`, so nothing borrowed from C outlives this
+    // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `group_ids` and `options` built above.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_consumer_groups(a, &ids, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_describe_consumer_groups_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_DescribeConsumerGroupsResult_destroy`; on `Err`
+    // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
+    // owns.
     unsafe { finish_sync(outcome, out_result, box_describe_consumer_groups_result) }
 }
 
@@ -11061,6 +14745,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11071,8 +14764,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
     callback: kafka_admin_AdminClient_describe_consumer_groups_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String` before the asynchronous work is submitted,
+    // so nothing borrowed from C outlives this call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_describe_consumer_groups_result` and `error` by `box_error`, exactly one of them
+    // is non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11130,6 +14844,7 @@ pub type kafka_admin_AdminClient_describe_classic_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11139,9 +14854,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     include_authorized_operations: bool,
     out_result: *mut *mut kafka_admin_DescribeClassicGroupsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String`, so nothing borrowed from C outlives this
+    // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `group_ids` and `options` built above.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_classic_groups(a, &ids, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_describe_classic_groups_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_DescribeClassicGroupsResult_destroy`; on `Err`
+    // it leaves `*out_result` untouched and returns a fresh `box_error` handle the caller
+    // owns.
     unsafe { finish_sync(outcome, out_result, box_describe_classic_groups_result) }
 }
 
@@ -11165,6 +14900,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11175,8 +14919,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
     callback: kafka_admin_AdminClient_describe_classic_groups_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String` before the asynchronous work is submitted,
+    // so nothing borrowed from C outlives this call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_describe_classic_groups_result` and `error` by `box_error`, exactly one of them
+    // is non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11250,6 +15015,7 @@ pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t =
 /// entries each; for a group whose `all_partitions` flag is false, `topics[i]`
 /// and `partitions[i]` must have `partition_counts[i]` valid entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -11263,12 +15029,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
     require_stable: bool,
     out_result: *mut *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_group_offsets_specs` requires `group_ids`, `all_partitions`, `topics`,
+    // `partitions` and `partition_counts` to be null or have `group_count` readable entries
+    // each, and for a group whose `all_partitions` flag is false `topics[i]` and
+    // `partitions[i]` to have `partition_counts[i]` readable entries; this function's `#
+    // Safety` promises exactly that. The helper returns an empty map if `group_ids` or
+    // `all_partitions` is NULL, iterates only `0..group_count.max(0)` so a negative count
+    // reads nothing, rejects NULL or duplicate group ids with `Err`, substitutes empty
+    // partition lists for NULL inner arrays, and copies everything into owned
+    // `ListConsumerGroupOffsetsSpec` values, so nothing borrowed from C outlives this call.
     let specs = unsafe {
         read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
     };
     let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a
+        // NULL `admin` before `handle_ref` is reached. The `&'static AdminHandle` it
+        // derives is used only on the calling thread for the duration of this blocking
+        // call, during which the C caller keeps the handle alive, and the `submit` closure
+        // captures only the owned `specs` result and `options` built above.
         unsafe { admin_sync_value_op(admin, move |a| submit_list_consumer_group_offsets(a, &specs?, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_list_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; on
+    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
+    // caller owns.
     unsafe { finish_sync(outcome, out_result, box_list_consumer_group_offsets_result) }
 }
 
@@ -11294,6 +15083,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
 /// `admin` must be a valid handle; the group arrays must be null or have
 /// `group_count` entries each, and each group's partition arrays must have that
 /// group's `partition_counts` entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11308,10 +15106,36 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
     callback: kafka_admin_AdminClient_list_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_group_offsets_specs` requires `group_ids`, `all_partitions`, `topics`,
+    // `partitions` and `partition_counts` to be null or have `group_count` readable entries
+    // each, and for a group whose `all_partitions` flag is false `topics[i]` and
+    // `partitions[i]` to have `partition_counts[i]` readable entries; per this function's
+    // `# Safety`, the group arrays are null or have `group_count` entries each and each
+    // group's partition arrays have that group's `partition_counts` entries. The helper
+    // returns an empty map if `group_ids` or `all_partitions` is NULL, iterates only
+    // `0..group_count.max(0)` so a negative count reads nothing, rejects NULL or duplicate
+    // group ids with `Err`, substitutes empty partition lists for NULL inner arrays, and
+    // copies everything into owned values before the asynchronous work is submitted, so
+    // nothing borrowed from C outlives this call.
     let specs = unsafe {
         read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
     };
     let options = list_consumer_group_offsets_options(timeout_ms, require_stable);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (including a
+    // `specs` parse error). Otherwise the spawned awaiter task captures only the `'static`
+    // future, a clone of `completion_tx`, `SendUserData(user_data)` and the completion
+    // closure, never the `&'static AdminHandle`, which is used only during this call.
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly
+    // once, as the callback contract documents: on the dispatcher thread via the completion
+    // queue, inline on the calling thread for the synchronous failures, or on a tokio
+    // worker through `enqueue_or_run_inline` if the queue is already gone. `result` is
+    // freshly built by `box_list_consumer_group_offsets_result` and `error` by `box_error`,
+    // exactly one of them is non-null and ownership transfers to the callee; the raw
+    // pointers are owned handles moved to the dispatcher thread; the C user is responsible
+    // for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11379,6 +15203,7 @@ pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
 /// `admin` must be a valid handle; `group_id` must be a valid C string; every
 /// non-null array must have `count` valid entries; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -11393,16 +15218,44 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
+    // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
+    // alive for the call. The helper turns a NULL `group_id` into
+    // `Err(LocalIllegalArgument)` instead of dereferencing it and copies the string into an
+    // owned `String`, so nothing borrowed from C outlives this call.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `read_alter_group_offsets` requires every non-null array (`topics`,
+    // `partitions`, `offsets`, `metadata`, `leader_epochs`, `has_leader_epoch`) to have
+    // `count` readable entries and every topic and metadata entry to be NULL or a valid C
+    // string; per this function's `# Safety`, every non-null array has `count` valid
+    // entries. The helper returns an empty map if `topics`, `partitions` or `offsets` is
+    // NULL, iterates only `0..count.max(0)` so a negative count reads nothing, rejects a
+    // NULL topic with `Err`, reads the optional arrays only when non-null, and copies
+    // everything into owned `TopicPartition` / `OffsetAndMetadata` values, so nothing
+    // borrowed from C outlives this call.
     let parsed = unsafe {
         read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
     };
     let options = alter_consumer_group_offsets_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `group` and `parsed` results and `options` built above.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             Ok(submit_alter_consumer_group_offsets(a, &group?, &parsed?, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_alter_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`; on
+    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
+    // caller owns.
     unsafe { finish_sync(outcome, out_result, box_alter_consumer_group_offsets_result) }
 }
 
@@ -11427,6 +15280,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
 ///
 /// `admin` must be a valid handle; `group_id` must be a valid C string; every
 /// non-null array must have `count` valid entries.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11442,11 +15304,41 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
     callback: kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
+    // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
+    // alive for the call. The helper turns a NULL `group_id` into
+    // `Err(LocalIllegalArgument)` instead of dereferencing it and copies the string into an
+    // owned `String` before the asynchronous work is submitted, so nothing borrowed from C
+    // outlives this call.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `read_alter_group_offsets` requires every non-null array (`topics`,
+    // `partitions`, `offsets`, `metadata`, `leader_epochs`, `has_leader_epoch`) to have
+    // `count` readable entries and every topic and metadata entry to be NULL or a valid C
+    // string; per this function's `# Safety`, every non-null array has `count` valid
+    // entries. The helper returns an empty map if `topics`, `partitions` or `offsets` is
+    // NULL, iterates only `0..count.max(0)` so a negative count reads nothing, rejects a
+    // NULL topic with `Err`, reads the optional arrays only when non-null, and copies
+    // everything into owned values before the asynchronous work is submitted, so nothing
+    // borrowed from C outlives this call.
     let parsed = unsafe {
         read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
     };
     let options = alter_consumer_group_offsets_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (a NULL
+    // `group_id` or a `parsed` offsets error). Otherwise the spawned awaiter task captures
+    // only the `'static` future, a clone of `completion_tx`, `SendUserData(user_data)` and
+    // the completion closure, never the `&'static AdminHandle`, which is used only during
+    // this call. `callback` was supplied by the C caller along with `user_data` and fires
+    // exactly once, as the callback contract documents: on the dispatcher thread via the
+    // completion queue, inline on the calling thread for the synchronous failures, or on a
+    // tokio worker through `enqueue_or_run_inline` if the queue is already gone. `result`
+    // is freshly built by `box_alter_consumer_group_offsets_result` and `error` by
+    // `box_error`, exactly one of them is non-null and ownership transfers to the callee;
+    // the raw pointers are owned handles moved to the dispatcher thread; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11505,6 +15397,7 @@ pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
 /// `admin` must be a valid handle; `group_id` must be a valid C string;
 /// `topics` and `partitions` must be null or have `count` valid entries each;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -11515,16 +15408,42 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
+    // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
+    // alive for the call. The helper turns a NULL `group_id` into
+    // `Err(LocalIllegalArgument)` instead of dereferencing it and copies the string into an
+    // owned `String`, so nothing borrowed from C outlives this call.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
+    // `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, `topics` and `partitions` are null or have `count` valid
+    // entries each. The helper treats NULL arrays as empty, iterates only `0..count.max(0)`
+    // so a negative count reads nothing, skips NULL topics, and copies every entry into
+    // owned `TopicPartition` values collected into the `selection` set, so nothing borrowed
+    // from C outlives this call.
     let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
         .into_iter()
         .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `group` result, `selection` set and `options` built above.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             submit_delete_consumer_group_offsets(a, &group?, &selection, options)
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_delete_consumer_group_offsets_result`, only on `Ok`, giving the C caller sole
+    // ownership to release via `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`; on
+    // `Err` it leaves `*out_result` untouched and returns a fresh `box_error` handle the
+    // caller owns.
     unsafe { finish_sync(outcome, out_result, box_delete_consumer_group_offsets_result) }
 }
 
@@ -11548,6 +15467,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
 ///
 /// `admin` must be a valid handle; `group_id` must be a valid C string;
 /// `topics` and `partitions` must be null or have `count` valid entries each.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11559,11 +15487,39 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
     callback: kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string;
+    // per this function's `# Safety`, `group_id` is a valid C string the C caller keeps
+    // alive for the call. The helper turns a NULL `group_id` into
+    // `Err(LocalIllegalArgument)` instead of dereferencing it and copies the string into an
+    // owned `String` before the asynchronous work is submitted, so nothing borrowed from C
+    // outlives this call.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
+    // `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, `topics` and `partitions` are null or have `count` valid
+    // entries each. The helper treats NULL arrays as empty, iterates only `0..count.max(0)`
+    // so a negative count reads nothing, skips NULL topics, and copies every entry into
+    // owned `TopicPartition` values collected into the `selection` set before the
+    // asynchronous work is submitted, so nothing borrowed from C outlives this call.
     let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
         .into_iter()
         .collect();
     let options = delete_consumer_group_offsets_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails (a NULL
+    // `group_id`). Otherwise the spawned awaiter task captures only the `'static` future, a
+    // clone of `completion_tx`, `SendUserData(user_data)` and the completion closure, never
+    // the `&'static AdminHandle`, which is used only during this call. `callback` was
+    // supplied by the C caller along with `user_data` and fires exactly once, as the
+    // callback contract documents: on the dispatcher thread via the completion queue,
+    // inline on the calling thread for the synchronous failures, or on a tokio worker
+    // through `enqueue_or_run_inline` if the queue is already gone. `result` is freshly
+    // built by `box_delete_consumer_group_offsets_result` and `error` by `box_error`,
+    // exactly one of them is non-null and ownership transfers to the callee; the raw
+    // pointers are owned handles moved to the dispatcher thread; the C user is responsible
+    // for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11618,6 +15574,7 @@ pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11626,9 +15583,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteConsumerGroupsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String`, so nothing borrowed from C outlives this
+    // call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = delete_consumer_groups_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns `Err(LocalIllegalArgument)` for a NULL
+    // `admin` before `handle_ref` is reached. The `&'static AdminHandle` it derives is used
+    // only on the calling thread for the duration of this blocking call, during which the C
+    // caller keeps the handle alive, and the `submit` closure captures only the owned
+    // `group_ids` and `options` built above.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_consumer_groups(a, &ids, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable). It
+    // null-checks `out_result` and writes exactly one element, a handle freshly built by
+    // `box_delete_consumer_groups_result`, only on `Ok`, giving the C caller sole ownership
+    // to release via `kafka_admin_DeleteConsumerGroupsResult_destroy`; on `Err` it leaves
+    // `*out_result` untouched and returns a fresh `box_error` handle the caller owns.
     unsafe { finish_sync(outcome, out_result, box_delete_consumer_groups_result) }
 }
 
@@ -11652,6 +15628,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11661,8 +15646,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
     callback: kafka_admin_AdminClient_delete_consumer_groups_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `group_ids` to be null or have `count` entries, each
+    // NULL or a valid C string; per this function's `# Safety`, `group_ids` is null or has
+    // `count` entries, each NULL or a valid C string. The helper clamps with `count.max(0)`
+    // so a negative count reads nothing, treats a NULL array as empty, skips NULL entries
+    // and copies every id into an owned `String` before the asynchronous work is submitted,
+    // so nothing borrowed from C outlives this call.
     let ids = unsafe { read_strings(group_ids, count) };
     let options = delete_consumer_groups_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running the completion inline on the calling thread with
+    // a `LocalIllegalArgument` error, and does the same when `submit` fails. Otherwise the
+    // spawned awaiter task captures only the `'static` future, a clone of `completion_tx`,
+    // `SendUserData(user_data)` and the completion closure, never the `&'static
+    // AdminHandle`, which is used only during this call. `callback` was supplied by the C
+    // caller along with `user_data` and fires exactly once, as the callback contract
+    // documents: on the dispatcher thread via the completion queue, inline on the calling
+    // thread for the two synchronous failures, or on a tokio worker through
+    // `enqueue_or_run_inline` if the queue is already gone. `result` is freshly built by
+    // `box_delete_consumer_groups_result` and `error` by `box_error`, exactly one of them
+    // is non-null and ownership transfers to the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread; the C user is responsible for the thread-safety of
+    // `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11738,6 +15744,7 @@ pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
 /// `remove_all` is true, `group_instance_ids` must be null or have
 /// `member_count` entries, each NULL or a valid C string; `reason` must be null
 /// or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group(
     admin: *const kafka_admin_AdminClient_t,
@@ -11749,10 +15756,38 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string and
+    // itself turns NULL into a `LocalIllegalArgument` error; this function's `# Safety`
+    // promises `group_id` is a valid C string, so the `CStr::from_ptr` inside reads a
+    // NUL-terminated string the C caller keeps alive for this synchronous call, and the
+    // text is copied into an owned `String`.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `remove_members_options` requires `group_instance_ids` to be null or have
+    // `member_count` entries (each NULL or a valid C string) and `reason` to be null or a
+    // valid C string; this function's `# Safety` promises exactly that, the ids only when
+    // `remove_all` is false, which is the only case in which the helper reads them (via
+    // `read_strings`, which treats a NULL array as no entries, skips NULL entries and
+    // bounds its loop by `member_count.max(0)`). The helper null-checks `reason` before
+    // `CStr::from_ptr`, and every read happens on the calling thread during this call.
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns an error for a NULL `admin` before
+        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+        // inside the `submit` closure (`submit_remove_members_from_consumer_group`) and the
+        // following `block_on`, both on the calling thread during this synchronous call,
+        // while the C caller keeps the handle alive (it has not called
+        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
+        // borrows nothing from the handle, so nothing derived from it outlives the call. A
+        // `group` or `options` marshaling error makes `submit` return `Err` without
+        // touching the handle.
         unsafe { admin_sync_value_op(admin, move |a| submit_remove_members_from_consumer_group(a, &group?, options?)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_RemoveMembersFromConsumerGroupResult_t` freshly boxed by
+    // `box_remove_members_from_consumer_group_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_remove_members_from_consumer_group_result) }
 }
 
@@ -11779,6 +15814,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// `remove_all` is true, `group_instance_ids` must be null or have
 /// `member_count` entries, each NULL or a valid C string; `reason` must be null
 /// or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11791,8 +15835,38 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     callback: kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_required_string` requires `group_id` to be null or a valid C string and
+    // itself turns NULL into a `LocalIllegalArgument` error; this function's `# Safety`
+    // promises `group_id` is a valid C string, so the `CStr::from_ptr` inside reads a
+    // NUL-terminated string the C caller keeps alive for this synchronous call, and the
+    // text is copied into an owned `String`.
     let group = unsafe { read_required_string(group_id, "group_id") };
+    // SAFETY: `remove_members_options` requires `group_instance_ids` to be null or have
+    // `member_count` entries (each NULL or a valid C string) and `reason` to be null or a
+    // valid C string; this function's `# Safety` promises exactly that, the ids only when
+    // `remove_all` is false, which is the only case in which the helper reads them (via
+    // `read_strings`, which treats a NULL array as no entries, skips NULL entries and
+    // bounds its loop by `member_count.max(0)`). The helper null-checks `reason` before
+    // `CStr::from_ptr`, and every read happens on the calling thread during this call.
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit`
+    // (`submit_remove_members_from_consumer_group`) on the calling thread while the C
+    // caller keeps the handle alive; the spawned awaiter owns only the `'static` future, a
+    // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
+    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
+    // must not destroy the handle while an `_async` operation is in flight. A `group` or
+    // `options` marshaling error makes `submit` return `Err`, so the callback fires inline.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_remove_members_from_consumer_group_result` and `box_error` build fresh
+    // `kafka_admin_RemoveMembersFromConsumerGroupResult_t` / `kafka_common_Error_t`
+    // handles, exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -11908,6 +15982,16 @@ impl AclBindingInner {
 ///
 /// `binding` must be a non-null borrowed pointer from an ACL result getter.
 unsafe fn acl_binding_ref(binding: *const kafka_common_acl_AclBinding_t) -> &'static AclBindingInner {
+    // SAFETY: `binding` is, per this helper's `# Safety`, a non-null borrowed pointer from
+    // an ACL result getter: `kafka_admin_CreateAclsResult_get_binding`,
+    // `kafka_admin_DescribeAclsResult_get_binding` and
+    // `kafka_admin_DeleteAclsResult_get_binding` hand out `as_ptr()` of an
+    // `AclBindingInner` stored inside the owning `CreateAclsResultInner` /
+    // `DescribeAclsResultInner` / `DeleteAclsFilterResultInner` allocation, so the cast
+    // back to `*const AclBindingInner` names a live value. The `&'static` is used only for
+    // the duration of the calling getter, during which the C caller keeps the owning result
+    // handle alive: the `kafka_common_acl_AclBinding_t` documentation makes the pointer
+    // valid until that result's `_destroy` and forbids freeing it.
     unsafe { &*(binding as *const AclBindingInner) }
 }
 
@@ -11920,10 +16004,17 @@ unsafe fn acl_binding_ref(binding: *const kafka_common_acl_AclBinding_t) -> &'st
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_type(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.resource_type
 }
 
@@ -11932,10 +16023,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_type(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_name(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.resource_name_c.as_ptr()
 }
 
@@ -11948,10 +16046,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_name(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern_type(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.pattern_type
 }
 
@@ -11961,10 +16066,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern_type(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_principal(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
 }
 
@@ -11973,10 +16085,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_principal(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_host(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
 }
 
@@ -11990,8 +16109,15 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_host(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_operation(binding: *const kafka_common_acl_AclBinding_t) -> i32 {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.operation
 }
 
@@ -12003,10 +16129,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_operation(binding: *const k
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_permission_type(
     binding: *const kafka_common_acl_AclBinding_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_ref` requires a non-null borrowed pointer from an ACL result
+    // getter, which this function's `# Safety` promises (`binding` must be a valid borrowed
+    // ACL-binding pointer); the reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the owning `create_acls` / `describe_acls` /
+    // `delete_acls` result handle alive, the binding being documented on
+    // `kafka_common_acl_AclBinding_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_ref(binding) }.permission_type
 }
 
@@ -12083,6 +16216,15 @@ impl AclBindingFilterInner {
 /// `filter` must be a non-null borrowed pointer from a `delete_acls` result
 /// getter.
 unsafe fn acl_binding_filter_ref(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'static AclBindingFilterInner {
+    // SAFETY: `filter` is, per this helper's `# Safety`, a non-null borrowed pointer from a
+    // `delete_acls` result getter: `kafka_admin_DeleteAclsResult_get_filter` hands out
+    // `as_ptr()` of an `AclBindingFilterInner` stored in the owning
+    // `DeleteAclsResultInner.filters` vector, so the cast back to `*const
+    // AclBindingFilterInner` names a live value. The `&'static` is used only for the
+    // duration of the calling getter, during which the C caller keeps the owning
+    // `delete_acls` result handle alive: the `kafka_common_acl_AclBindingFilter_t`
+    // documentation makes the pointer valid until that result's `_destroy` and forbids
+    // freeing it.
     unsafe { &*(filter as *const AclBindingFilterInner) }
 }
 
@@ -12093,10 +16235,17 @@ unsafe fn acl_binding_filter_ref(filter: *const kafka_common_acl_AclBindingFilte
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_type(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_filter_ref(filter) }.resource_type
 }
 
@@ -12107,10 +16256,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_type(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_name(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.resource_name_c)
 }
 
@@ -12122,10 +16278,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_name(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_type(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_filter_ref(filter) }.pattern_type
 }
 
@@ -12135,10 +16298,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_type(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_principal(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.principal_c)
 }
 
@@ -12148,10 +16318,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_principal(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_host(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.host_c)
 }
 
@@ -12162,10 +16339,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_host(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_operation(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_filter_ref(filter) }.operation
 }
 
@@ -12176,10 +16360,17 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_operation(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_permission_type(
     filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
+    // SAFETY: `acl_binding_filter_ref` requires a non-null borrowed pointer from a
+    // `delete_acls` result getter, which this function's `# Safety` promises (`filter` must
+    // be a valid borrowed ACL-filter pointer); the reference is used only for the duration
+    // of this synchronous call, during which the C caller keeps the owning `delete_acls`
+    // result handle alive, the filter being documented on
+    // `kafka_common_acl_AclBindingFilter_t` as valid until that result's `_destroy`.
     unsafe { acl_binding_filter_ref(filter) }.permission_type
 }
 
@@ -12253,6 +16444,15 @@ impl ClientQuotaEntityInner {
 unsafe fn client_quota_entity_ref(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> &'static ClientQuotaEntityInner {
+    // SAFETY: `entity` is, per this helper's `# Safety`, a non-null borrowed pointer from a
+    // client-quota result getter: `kafka_admin_DescribeClientQuotasResult_get_entity` and
+    // `kafka_admin_AlterClientQuotasResult_get_entity` hand out `as_ptr()` of a
+    // `ClientQuotaEntityInner` stored in the owning result's `entities` vector, so the cast
+    // back to `*const ClientQuotaEntityInner` names a live value. The `&'static` is used
+    // only for the duration of the calling getter, during which the C caller keeps the
+    // owning result handle alive: the `kafka_common_quota_ClientQuotaEntity_t`
+    // documentation makes the pointer valid until that result's `_destroy` and forbids
+    // freeing it.
     unsafe { &*(entity as *const ClientQuotaEntityInner) }
 }
 
@@ -12262,10 +16462,18 @@ unsafe fn client_quota_entity_ref(
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entry_count(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> i32 {
+    // SAFETY: `client_quota_entity_ref` requires a non-null borrowed pointer from a
+    // client-quota result getter, which this function's `# Safety` promises (`entity` must
+    // be a valid borrowed client-quota-entity pointer); the reference is used only for the
+    // duration of this synchronous call, during which the C caller keeps the owning
+    // `describe_client_quotas` / `alter_client_quotas` result handle alive, the entity
+    // being documented on `kafka_common_quota_ClientQuotaEntity_t` as valid until that
+    // result's `_destroy`.
     unsafe { client_quota_entity_ref(entity) }.entry_types_c.len() as i32
 }
 
@@ -12275,11 +16483,19 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entry_count(
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_type(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `client_quota_entity_ref` requires a non-null borrowed pointer from a
+    // client-quota result getter, which this function's `# Safety` promises (`entity` must
+    // be a valid borrowed client-quota-entity pointer); the reference is used only for the
+    // duration of this synchronous call, during which the C caller keeps the owning
+    // `describe_client_quotas` / `alter_client_quotas` result handle alive, the entity
+    // being documented on `kafka_common_quota_ClientQuotaEntity_t` as valid until that
+    // result's `_destroy`.
     cstring_at(&unsafe { client_quota_entity_ref(entity) }.entry_types_c, index)
 }
 
@@ -12294,6 +16510,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_type(
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
@@ -12302,6 +16519,13 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `client_quota_entity_ref` requires a non-null borrowed pointer from a
+    // client-quota result getter, which this function's `# Safety` promises (`entity` must
+    // be a valid borrowed client-quota-entity pointer); the reference is used only for the
+    // duration of this synchronous call, during which the C caller keeps the owning
+    // `describe_client_quotas` / `alter_client_quotas` result handle alive, the entity
+    // being documented on `kafka_common_quota_ClientQuotaEntity_t` as valid until that
+    // result's `_destroy`.
     match unsafe { client_quota_entity_ref(entity) }.entry_names_c.get(index as usize) {
         Some(name) => optional_cstring_ptr(name),
         None => std::ptr::null(),
@@ -12342,14 +16566,30 @@ type DescribeClientQuotasOutcome = HashMap<ClientQuotaEntity, HashMap<String, f6
 ///
 /// # Safety
 ///
-/// `strings` must be non-null with at least `index + 1` entries.
+/// `strings` must be non-null with at least `index + 1` entries; a non-null
+/// entry must be a valid C string.
 unsafe fn required_string_at(strings: *const *const c_char, index: usize, field: &str) -> Result<String, Error> {
+    // SAFETY: Reads entry `index` of `strings`, which this helper's `# Safety` requires to
+    // be non-null with at least `index + 1` entries. Every caller establishes that:
+    // `read_client_quota_filter`, `read_client_quota_alterations`, `read_kafka_principals`,
+    // `read_scram_alterations` and `read_feature_updates` null-check the array before their
+    // loop, `read_acl_binding_at` and `read_client_quota_entity` require it non-null in
+    // their own `# Safety` (met by `read_acl_bindings`' seven-way null check and by the
+    // `types.is_null()` rejection in `read_client_quota_alterations`), and each bounds
+    // `index` by its `count.max(0)` loop, `count` being the entry count the C entry point's
+    // `# Safety` promises for every non-null array (the per-row count for inner arrays).
+    // The entry read may be NULL and is diagnosed before use.
     let ptr = unsafe { *strings.add(index) };
     if ptr.is_null() {
         return Err(Error::local_illegal_argument(format!(
             "{field} at index {index} must not be null"
         )));
     }
+    // SAFETY: `ptr` is the entry just read from `strings` and is non-null (a NULL entry
+    // returned a `LocalIllegalArgument` error above). Per every calling C entry point's `#
+    // Safety`, string entries are NULL or valid C strings, so `ptr` addresses a
+    // NUL-terminated string the C caller keeps alive while this synchronous marshaling
+    // runs; the bytes are copied into an owned `String` before returning.
     Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
 }
 
@@ -12362,15 +16602,28 @@ unsafe fn required_string_at(strings: *const *const c_char, index: usize, field:
 ///
 /// # Safety
 ///
-/// `strings` must be null, or non-null with at least `index + 1` entries.
+/// `strings` must be null, or non-null with at least `index + 1` entries; a
+/// non-null entry must be a valid C string.
 unsafe fn optional_string_at(strings: *const *const c_char, index: usize) -> Option<String> {
     if strings.is_null() {
         return None;
     }
+    // SAFETY: `strings` is non-null (checked above) and, per this helper's `# Safety`, then
+    // has at least `index + 1` entries: its callers `read_client_quota_filter`,
+    // `read_client_quota_entity` and `read_feature_levels` bound `index` by their
+    // `count.max(0)` loop, where `count` is the entry count the C entry point's `# Safety`
+    // promises for every non-null array (for `read_client_quota_entity`, the per-row count
+    // `kafka_admin_AdminClient_alter_client_quotas` promises for each non-null inner
+    // array). The entry read may be NULL and is preserved as `None`.
     let ptr = unsafe { *strings.add(index) };
     if ptr.is_null() {
         return None;
     }
+    // SAFETY: `ptr` is the entry just read from `strings` and is non-null (checked above; a
+    // NULL entry is preserved as `None`). Per every calling C entry point's `# Safety`,
+    // string entries are NULL or valid C strings, so `ptr` addresses a NUL-terminated
+    // string the C caller keeps alive while this synchronous marshaling runs; the bytes are
+    // copied into an owned `String` before returning.
     Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
 }
 
@@ -12399,15 +16652,60 @@ unsafe fn read_acl_binding_at(
 ) -> Result<AclBinding, Error> {
     let context = |e: Error| Error::local_illegal_argument(format!("acl at index {index}: {}", e.message()));
     let pattern = ResourcePattern::new(
+        // SAFETY: `resource_types` is non-null with at least `index + 1` entries per this
+        // helper's `# Safety`, which its sole caller `read_acl_bindings` establishes by
+        // returning early when any of the seven arrays is NULL and by iterating `index`
+        // over `0..count.max(0)`, `count` being the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise in their `# Safety` for
+        // every non-null array; the `i32` read is therefore in bounds.
         ResourceType::from_code(enum_code_or_unknown(unsafe { *resource_types.add(index) })),
+        // SAFETY: `required_string_at` requires `resource_names` to be non-null with at
+        // least `index + 1` entries, which this helper's own `# Safety` requires of every
+        // array and its sole caller `read_acl_bindings` establishes (early return when any
+        // array is NULL; `index < count.max(0)`, where `count` is the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise for every non-null
+        // array). A NULL entry is diagnosed by the helper, and a non-null entry is a valid
+        // C string per the same contract.
         unsafe { required_string_at(resource_names, index, "resource name")? },
+        // SAFETY: `pattern_types` is non-null with at least `index + 1` entries per this
+        // helper's `# Safety`, which its sole caller `read_acl_bindings` establishes by
+        // returning early when any of the seven arrays is NULL and by iterating `index`
+        // over `0..count.max(0)`, `count` being the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise in their `# Safety` for
+        // every non-null array; the `i32` read is therefore in bounds.
         PatternType::from_code(enum_code_or_unknown(unsafe { *pattern_types.add(index) })),
     )
     .map_err(context)?;
     let entry = AccessControlEntry::new(
+        // SAFETY: `required_string_at` requires `principals` to be non-null with at least
+        // `index + 1` entries, which this helper's own `# Safety` requires of every array
+        // and its sole caller `read_acl_bindings` establishes (early return when any array
+        // is NULL; `index < count.max(0)`, where `count` is the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise for every non-null
+        // array). A NULL entry is diagnosed by the helper, and a non-null entry is a valid
+        // C string per the same contract.
         unsafe { required_string_at(principals, index, "principal")? },
+        // SAFETY: `required_string_at` requires `hosts` to be non-null with at least `index
+        // + 1` entries, which this helper's own `# Safety` requires of every array and its
+        // sole caller `read_acl_bindings` establishes (early return when any array is NULL;
+        // `index < count.max(0)`, where `count` is the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise for every non-null
+        // array). A NULL entry is diagnosed by the helper, and a non-null entry is a valid
+        // C string per the same contract.
         unsafe { required_string_at(hosts, index, "host")? },
+        // SAFETY: `operations` is non-null with at least `index + 1` entries per this
+        // helper's `# Safety`, which its sole caller `read_acl_bindings` establishes by
+        // returning early when any of the seven arrays is NULL and by iterating `index`
+        // over `0..count.max(0)`, `count` being the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise in their `# Safety` for
+        // every non-null array; the `i32` read is therefore in bounds.
         AclOperation::from_code(enum_code_or_unknown(unsafe { *operations.add(index) })),
+        // SAFETY: `permission_types` is non-null with at least `index + 1` entries per this
+        // helper's `# Safety`, which its sole caller `read_acl_bindings` establishes by
+        // returning early when any of the seven arrays is NULL and by iterating `index`
+        // over `0..count.max(0)`, `count` being the entry count
+        // `kafka_admin_AdminClient_create_acls` / `_async` promise in their `# Safety` for
+        // every non-null array; the `i32` read is therefore in bounds.
         AclPermissionType::from_code(enum_code_or_unknown(unsafe { *permission_types.add(index) })),
     )
     .map_err(context)?;
@@ -12444,6 +16742,13 @@ unsafe fn read_acl_bindings(
     }
     let mut out = Vec::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `read_acl_binding_at` requires every array to be non-null with at least
+        // `index + 1` entries: all seven arrays were null-checked above (any NULL array
+        // returns an empty vector), and `index` ranges over `0..count.max(0)`, where
+        // `count` is the entry count `kafka_admin_AdminClient_create_acls` / `_async`
+        // promise in their `# Safety` for every non-null array, with string entries NULL
+        // (diagnosed by `required_string_at`) or valid C strings; all reads happen on the
+        // calling thread during the call.
         out.push(unsafe {
             read_acl_binding_at(
                 resource_types,
@@ -12482,6 +16787,15 @@ unsafe fn build_acl_binding_filter(
         if ptr.is_null() {
             None
         } else {
+            // SAFETY: `ptr` is one of `resource_name`, `principal` or `host`, non-null
+            // (checked above; NULL becomes `None`), and per this helper's `# Safety` the
+            // three string pointers are NULL or valid C strings. Both callers uphold that:
+            // `kafka_admin_AdminClient_describe_acls` / `_async` promise it directly for
+            // their three string parameters, and `read_acl_binding_filters` passes either
+            // NULL or an entry of an array whose entries
+            // `kafka_admin_AdminClient_delete_acls` / `_async` promise are NULL or valid C
+            // strings. The text is copied into an owned `String` during this synchronous
+            // call.
             Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string())
         }
     };
@@ -12523,6 +16837,15 @@ unsafe fn read_acl_binding_filters(
     }
     let mut out = Vec::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `resource_types`, `pattern_types`, `operations` and `permission_types`
+        // are non-null (checked above) and each of `resource_names`, `principals` and
+        // `hosts` is null-checked inline before being indexed, passing NULL otherwise;
+        // `index` ranges over `0..count.max(0)`, and per this helper's `# Safety` (upheld
+        // by `kafka_admin_AdminClient_delete_acls` / `_async`: every non-null array has
+        // `count` entries) each non-null array has at least that many entries, so every
+        // read is in bounds. The string entries read are NULL or valid C strings per the
+        // same contract, which is exactly what `build_acl_binding_filter` requires of its
+        // three string pointers.
         out.push(unsafe {
             build_acl_binding_filter(
                 *resource_types.add(index),
@@ -12591,8 +16914,24 @@ unsafe fn read_client_quota_filter(
     }
     let mut components = Vec::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `required_string_at` requires `entity_types` to be non-null with at least
+        // `index + 1` entries: `entity_types` is non-null (checked above, together with
+        // `match_types`) and `index < count.max(0)`, where `count` is the entry count
+        // `kafka_admin_AdminClient_describe_client_quotas` / `_async` promise for every
+        // non-null array; a NULL entry is diagnosed by the helper and a non-null one is a
+        // valid C string per the same contract.
         let entity_type = unsafe { required_string_at(entity_types, index, "entity type")? };
+        // SAFETY: `match_types` is non-null (checked above) and has `count` entries per
+        // this helper's `# Safety`, upheld by
+        // `kafka_admin_AdminClient_describe_client_quotas` / `_async`, which promise every
+        // non-null array has `count` entries; `index < count.max(0)`, so the `i32` read is
+        // in bounds.
         let match_type = unsafe { *match_types.add(index) };
+        // SAFETY: `optional_string_at` requires `match_names` to be null or have at least
+        // `index + 1` entries and tolerates a NULL array (and a NULL entry) as `None`;
+        // `index < count.max(0)` and `kafka_admin_AdminClient_describe_client_quotas` /
+        // `_async` promise every non-null array has `count` entries, with string entries
+        // NULL or valid C strings.
         let name = unsafe { optional_string_at(match_names, index) };
         // The `MATCH_TYPE_*` constants are bare wire values with no UNKNOWN
         // member, so a code that does not narrow is rejected rather than folded
@@ -12652,7 +16991,22 @@ unsafe fn read_client_quota_entity(
     let n = count.max(0) as usize;
     let mut entries: HashMap<String, Option<String>> = HashMap::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `required_string_at` requires `types` to be non-null with at least `index
+        // + 1` entries, which this helper's own `# Safety` requires (`types` must be
+        // non-null with `count` entries) and its sole caller
+        // `read_client_quota_alterations` establishes by rejecting a NULL row pointer with
+        // an error and passing the row's `entity_counts` entry as `count`, the per-row
+        // entry count `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise for
+        // each non-null inner array; `index < count.max(0)`. A NULL entry is diagnosed by
+        // the helper and a non-null one is a valid C string per the same contract.
         let entity_type = unsafe { required_string_at(types, index, "entity type")? };
+        // SAFETY: `optional_string_at` requires `names` to be null or have at least `index
+        // + 1` entries and preserves a NULL array or entry as `None`; per this helper's `#
+        // Safety` `names` is null or has `count` entries, which
+        // `read_client_quota_alterations` upholds by passing NULL or the row's
+        // `entity_names` entry, an inner array
+        // `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise has the matching
+        // per-row count of entries; `index < count.max(0)`.
         let name = unsafe { optional_string_at(names, index) };
         if entries.insert(entity_type.clone(), name).is_some() {
             return Err(Error::local_illegal_argument(format!(
@@ -12715,6 +17069,11 @@ unsafe fn read_client_quota_alterations(
     let mut out: Vec<ClientQuotaAlteration> = Vec::with_capacity(n);
     let mut seen: HashSet<ClientQuotaEntity> = HashSet::with_capacity(n);
     for row in 0..n {
+        // SAFETY: `entity_types` is non-null (checked above) and, per this helper's `#
+        // Safety` (upheld by `kafka_admin_AdminClient_alter_client_quotas` / `_async`:
+        // every non-null outer array has `count` entries), has `count` entries; `row <
+        // count.max(0)`, so the pointer read is in bounds. The inner pointer read may be
+        // NULL, which is rejected with an error before any use.
         let types = unsafe { *entity_types.add(row) };
         if types.is_null() {
             return Err(Error::local_illegal_argument(format!(
@@ -12724,8 +17083,22 @@ unsafe fn read_client_quota_alterations(
         let names = if entity_names.is_null() {
             std::ptr::null()
         } else {
+            // SAFETY: `entity_names` is non-null on this branch (checked in the enclosing
+            // `if`) and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_client_quotas` / `_async`, which promise every
+            // non-null outer array has `count` entries; `row < count.max(0)`, so the
+            // pointer read is in bounds. The inner pointer read may itself be NULL, which
+            // `read_client_quota_entity` treats as all-default names.
             unsafe { *entity_names.add(row) }
         };
+        // SAFETY: `entity_counts` is non-null (checked above) with `count` entries per this
+        // helper's `# Safety`, so `*entity_counts.add(row)` is in bounds for `row <
+        // count.max(0)`. `read_client_quota_entity` requires `types` non-null with that
+        // many entries and `names` null or with that many: `types` was rejected with an
+        // error if NULL, `names` is NULL or the row's `entity_names` entry, and
+        // `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise each non-null
+        // inner array has the matching per-row count of entries, with string entries NULL
+        // or valid C strings.
         let entity = unsafe { read_client_quota_entity(types, names, *entity_counts.add(row), row)? };
         if !seen.insert(entity.clone()) {
             return Err(Error::local_illegal_argument(format!(
@@ -12736,29 +17109,70 @@ unsafe fn read_client_quota_alterations(
         let op_count = if op_counts.is_null() {
             0
         } else {
+            // SAFETY: `op_counts` is non-null on this branch (checked in the enclosing
+            // `if`) and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_client_quotas` / `_async`, which promise every
+            // non-null outer array has `count` entries; `row < count.max(0)`, so the
+            // pointer read is in bounds. The `i32` read is this row's op count, later
+            // clamped with `max(0)`.
             unsafe { *op_counts.add(row) }
         };
         let keys = if op_keys.is_null() {
             std::ptr::null()
         } else {
+            // SAFETY: `op_keys` is non-null on this branch (checked in the enclosing `if`)
+            // and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_client_quotas` / `_async`, which promise every
+            // non-null outer array has `count` entries; `row < count.max(0)`, so the
+            // pointer read is in bounds. The inner pointer read may be NULL, in which case
+            // no op is read for this row.
             unsafe { *op_keys.add(row) }
         };
         let values = if op_values.is_null() {
             std::ptr::null()
         } else {
+            // SAFETY: `op_values` is non-null on this branch (checked in the enclosing
+            // `if`) and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_client_quotas` / `_async`, which promise every
+            // non-null outer array has `count` entries; `row < count.max(0)`, so the
+            // pointer read is in bounds. The inner pointer read is null-checked before
+            // every use.
             unsafe { *op_values.add(row) }
         };
         let has_values = if op_has_values.is_null() {
             std::ptr::null()
         } else {
+            // SAFETY: `op_has_values` is non-null on this branch (checked in the enclosing
+            // `if`) and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_client_quotas` / `_async`, which promise every
+            // non-null outer array has `count` entries; `row < count.max(0)`, so the
+            // pointer read is in bounds. The inner pointer read is null-checked before
+            // every use.
             unsafe { *op_has_values.add(row) }
         };
         let mut ops = Vec::with_capacity(op_count.max(0) as usize);
         if !keys.is_null() {
             for index in 0..op_count.max(0) as usize {
+                // SAFETY: `required_string_at` requires `keys` to be non-null with at least
+                // `index + 1` entries: `keys` is non-null (the enclosing `if`) and `index <
+                // op_count.max(0)`, where `op_count` is this row's `op_counts` entry and
+                // `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise each
+                // non-null inner array has that matching per-row count of entries, with
+                // string entries NULL (diagnosed by the helper) or valid C strings.
                 let key = unsafe { required_string_at(keys, index, "quota op key")? };
+                // SAFETY: `has_values` is non-null (the short-circuit
+                // `!has_values.is_null() &&` guards the read) and is this row's
+                // `op_has_values` inner array, which
+                // `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise has the
+                // matching per-row count of entries; `index < op_count.max(0)`, so the
+                // `bool` read is in bounds.
                 let present = !has_values.is_null() && unsafe { *has_values.add(index) };
                 let value = if present && !values.is_null() {
+                    // SAFETY: `values` is non-null (checked in the enclosing condition) and
+                    // is this row's `op_values` inner array, which
+                    // `kafka_admin_AdminClient_alter_client_quotas` / `_async` promise has
+                    // the matching per-row count of entries; `index < op_count.max(0)`, so
+                    // the `f64` read is in bounds.
                     Some(unsafe { *values.add(index) })
                 } else {
                     None
@@ -12891,6 +17305,13 @@ fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_Crea
 ///
 /// `result` must be a non-null handle from a `create_acls` call.
 unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) -> &'static CreateAclsResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `create_acls` call; such handles are produced only by `box_create_acls_result` via
+    // `Box::into_raw(Box::new(CreateAclsResultInner { .. }))`, so casting back to `*const
+    // CreateAclsResultInner` names that same live allocation. The `&'static` is used only
+    // for the duration of the calling getter, during which the C caller keeps the handle
+    // alive by not yet having called `kafka_admin_CreateAclsResult_destroy`, the only path
+    // that frees it.
     unsafe { &*(result as *const CreateAclsResultInner) }
 }
 
@@ -12899,8 +17320,15 @@ unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka_admin_CreateAclsResult_t) -> i32 {
+    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_CreateAclsResult_destroy`.
     unsafe { create_acls_result_ref(result) }.bindings.len() as i32
 }
 
@@ -12912,6 +17340,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     result: *const kafka_admin_CreateAclsResult_t,
@@ -12920,6 +17349,14 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_CreateAclsResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     match unsafe { create_acls_result_ref(result) }.bindings.get(index as usize) {
         Some(binding) => binding.as_ptr(),
         None => std::ptr::null(),
@@ -12932,11 +17369,20 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
     result: *const kafka_admin_CreateAclsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `create_acls_result_ref` requires a non-null handle from a `create_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `create_acls` result handle; only `kafka_admin_CreateAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_CreateAclsResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     optional_error_at(&unsafe { create_acls_result_ref(result) }.errors, index)
 }
 
@@ -12945,9 +17391,17 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka_admin_CreateAclsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `create_acls` result handle, i.e. the pointer `box_create_acls_result`
+        // produced with `Box::into_raw(Box::new(CreateAclsResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_CreateAclsResult_destroy`, after which it and every pointer borrowed
+        // from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut CreateAclsResultInner)) };
     }
 }
@@ -12982,6 +17436,13 @@ fn box_describe_acls_result(bindings: Vec<AclBinding>) -> *mut kafka_admin_Descr
 unsafe fn describe_acls_result_ref(
     result: *const kafka_admin_DescribeAclsResult_t,
 ) -> &'static DescribeAclsResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `describe_acls` call; such handles are produced only by `box_describe_acls_result`
+    // via `Box::into_raw(Box::new(DescribeAclsResultInner { .. }))`, so casting back to
+    // `*const DescribeAclsResultInner` names that same live allocation. The `&'static` is
+    // used only for the duration of the calling getter, during which the C caller keeps the
+    // handle alive by not yet having called `kafka_admin_DescribeAclsResult_destroy`, the
+    // only path that frees it.
     unsafe { &*(result as *const DescribeAclsResultInner) }
 }
 
@@ -12990,8 +17451,15 @@ unsafe fn describe_acls_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kafka_admin_DescribeAclsResult_t) -> i32 {
+    // SAFETY: `describe_acls_result_ref` requires a non-null handle from a `describe_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `describe_acls` result handle; only `kafka_admin_DescribeAclsResult_destroy` admits
+    // null, so a valid handle is non-null). The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive by not yet
+    // having called `kafka_admin_DescribeAclsResult_destroy`.
     unsafe { describe_acls_result_ref(result) }.bindings.len() as i32
 }
 
@@ -13002,6 +17470,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     result: *const kafka_admin_DescribeAclsResult_t,
@@ -13010,6 +17479,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_acls_result_ref` requires a non-null handle from a `describe_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `describe_acls` result handle; only `kafka_admin_DescribeAclsResult_destroy` admits
+    // null, so a valid handle is non-null). The reference is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive by not yet
+    // having called `kafka_admin_DescribeAclsResult_destroy`. The pointer this getter
+    // returns is an interior pointer into the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
     match unsafe { describe_acls_result_ref(result) }.bindings.get(index as usize) {
         Some(binding) => binding.as_ptr(),
         None => std::ptr::null(),
@@ -13021,9 +17498,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kafka_admin_DescribeAclsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_acls` result handle, i.e. the pointer
+        // `box_describe_acls_result` produced with
+        // `Box::into_raw(Box::new(DescribeAclsResultInner { .. }))`. Reconstituting and
+        // dropping the `Box` here is the single, final use: the result documentation tells
+        // the caller to free the handle exactly once with
+        // `kafka_admin_DescribeAclsResult_destroy`, after which it and every pointer
+        // borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeAclsResultInner)) };
     }
 }
@@ -13095,6 +17581,13 @@ fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_Dele
 ///
 /// `result` must be a non-null handle from a `delete_acls` call.
 unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) -> &'static DeleteAclsResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `delete_acls` call; such handles are produced only by `box_delete_acls_result` via
+    // `Box::into_raw(Box::new(DeleteAclsResultInner { .. }))`, so casting back to `*const
+    // DeleteAclsResultInner` names that same live allocation. The `&'static` is used only
+    // for the duration of the calling getter, during which the C caller keeps the handle
+    // alive by not yet having called `kafka_admin_DeleteAclsResult_destroy`, the only path
+    // that frees it.
     unsafe { &*(result as *const DeleteAclsResultInner) }
 }
 
@@ -13103,8 +17596,15 @@ unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka_admin_DeleteAclsResult_t) -> i32 {
+    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_DeleteAclsResult_destroy`.
     unsafe { delete_acls_result_ref(result) }.filters.len() as i32
 }
 
@@ -13114,6 +17614,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13122,6 +17623,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_DeleteAclsResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
         Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t,
         None => std::ptr::null(),
@@ -13140,11 +17649,20 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_DeleteAclsResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     optional_error_at(&unsafe { delete_acls_result_ref(result) }.errors, index)
 }
 
@@ -13155,6 +17673,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13163,6 +17682,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     if index < 0 {
         return 0;
     }
+    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
+    // call, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle; only `kafka_admin_DeleteAclsResult_destroy` admits null,
+    // so a valid handle is non-null). The reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the handle alive by not yet having
+    // called `kafka_admin_DeleteAclsResult_destroy`.
     match unsafe { delete_acls_result_ref(result) }.results.get(index as usize) {
         Some(results) => results.len() as i32,
         None => 0,
@@ -13180,12 +17705,23 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
     result_index: i32,
 ) -> *const kafka_common_acl_AclBinding_t {
+    // SAFETY: `delete_acls_filter_result_at` requires `result` to be a valid `delete_acls`
+    // result handle, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle, non-null since only
+    // `kafka_admin_DeleteAclsResult_destroy` admits null); it range-checks `index` and
+    // `result_index` itself and returns `None` when either is out of range. The
+    // `DeleteAclsFilterResultInner` reference it yields is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive by not yet
+    // having called `kafka_admin_DeleteAclsResult_destroy`; the binding pointer returned is
+    // an interior pointer into the same allocation, documented as valid until that
+    // `_destroy`.
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => match &entry.binding {
             Some(binding) => binding.as_ptr(),
@@ -13207,12 +17743,22 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_error(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
     result_index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `delete_acls_filter_result_at` requires `result` to be a valid `delete_acls`
+    // result handle, which this function's `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle, non-null since only
+    // `kafka_admin_DeleteAclsResult_destroy` admits null); it range-checks `index` and
+    // `result_index` itself and returns `None` when either is out of range. The
+    // `DeleteAclsFilterResultInner` reference it yields is used only for the duration of
+    // this synchronous call, during which the C caller keeps the handle alive by not yet
+    // having called `kafka_admin_DeleteAclsResult_destroy`; the error pointer returned is
+    // an interior pointer into the same allocation, documented as borrowed.
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => error_ptr(entry.error.as_ref()),
         None => std::ptr::null(),
@@ -13233,6 +17779,13 @@ unsafe fn delete_acls_filter_result_at(
     if index < 0 || result_index < 0 {
         return None;
     }
+    // SAFETY: `delete_acls_result_ref` requires a non-null handle from a `delete_acls`
+    // call, which this helper's own `# Safety` promises (`result` must be a valid
+    // `delete_acls` result handle) and which its callers
+    // `kafka_admin_DeleteAclsResult_get_binding` / `_get_result_error` promise in turn; the
+    // negative-index early return above does not weaken that. The reference is used only to
+    // index `results` for the duration of the calling getter, while the C caller keeps the
+    // handle alive by not yet having called `kafka_admin_DeleteAclsResult_destroy`.
     unsafe { delete_acls_result_ref(result) }
         .results
         .get(index as usize)?
@@ -13244,9 +17797,17 @@ unsafe fn delete_acls_filter_result_at(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka_admin_DeleteAclsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `delete_acls` result handle, i.e. the pointer `box_delete_acls_result`
+        // produced with `Box::into_raw(Box::new(DeleteAclsResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_DeleteAclsResult_destroy`, after which it and every pointer borrowed
+        // from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DeleteAclsResultInner)) };
     }
 }
@@ -13303,6 +17864,14 @@ fn box_describe_client_quotas_result(
 unsafe fn describe_client_quotas_result_ref(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> &'static DescribeClientQuotasResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `describe_client_quotas` call; such handles are produced only by
+    // `box_describe_client_quotas_result` via
+    // `Box::into_raw(Box::new(DescribeClientQuotasResultInner { .. }))`, so casting back to
+    // `*const DescribeClientQuotasResultInner` names that same live allocation. The
+    // `&'static` is used only for the duration of the calling getter, during which the C
+    // caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const DescribeClientQuotasResultInner) }
 }
 
@@ -13311,10 +17880,18 @@ unsafe fn describe_client_quotas_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
 ) -> i32 {
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
+    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_client_quotas` result handle; only
+    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
     unsafe { describe_client_quotas_result_ref(result) }.entities.len() as i32
 }
 
@@ -13324,6 +17901,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13332,6 +17910,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
+    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_client_quotas` result handle; only
+    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`. The pointer this getter returns is
+    // an interior pointer into the same allocation and is documented as borrowed, valid
+    // until that `_destroy`.
     match unsafe { describe_client_quotas_result_ref(result) }
         .entities
         .get(index as usize)
@@ -13347,6 +17934,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13355,6 +17943,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
     if index < 0 {
         return 0;
     }
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
+    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_client_quotas` result handle; only
+    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
     match unsafe { describe_client_quotas_result_ref(result) }
         .quota_keys
         .get(index as usize)
@@ -13374,6 +17969,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13383,6 +17979,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
+    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_client_quotas` result handle; only
+    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`. The pointer this getter returns is
+    // an interior pointer into the same allocation and is documented as borrowed, valid
+    // until that `_destroy`.
     match unsafe { describe_client_quotas_result_ref(result) }
         .quota_keys
         .get(index as usize)
@@ -13405,6 +18010,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
 ///
 /// `result` must be a valid `describe_client_quotas` result handle; `out` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13415,11 +18021,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
     if index < 0 || quota_index < 0 {
         return false;
     }
+    // SAFETY: `describe_client_quotas_result_ref` requires a non-null handle from a
+    // `describe_client_quotas` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_client_quotas` result handle; only
+    // `kafka_admin_DescribeClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeClientQuotasResult_destroy`.
     let value = unsafe { describe_client_quotas_result_ref(result) }
         .quota_values
         .get(index as usize)
         .and_then(|values| values.get(quota_index as usize))
         .copied();
+    // SAFETY: `write_optional` requires `out` to be null or writable, which this function's
+    // `# Safety` promises (`out` must be null or writable); the helper null-checks `out`
+    // and writes exactly one `f64` when `value` is present, returning false otherwise.
     unsafe { write_optional(value, out) }
 }
 
@@ -13428,11 +18044,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
     result: *mut kafka_admin_DescribeClientQuotasResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_client_quotas` result handle, i.e. the pointer
+        // `box_describe_client_quotas_result` produced with
+        // `Box::into_raw(Box::new(DescribeClientQuotasResultInner { .. }))`. Reconstituting
+        // and dropping the `Box` here is the single, final use: the result documentation
+        // tells the caller to free the handle exactly once with
+        // `kafka_admin_DescribeClientQuotasResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeClientQuotasResultInner)) };
     }
 }
@@ -13474,6 +18099,14 @@ fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut k
 unsafe fn alter_client_quotas_result_ref(
     result: *const kafka_admin_AlterClientQuotasResult_t,
 ) -> &'static AlterClientQuotasResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `alter_client_quotas` call; such handles are produced only by
+    // `box_alter_client_quotas_result` via
+    // `Box::into_raw(Box::new(AlterClientQuotasResultInner { .. }))`, so casting back to
+    // `*const AlterClientQuotasResultInner` names that same live allocation. The `&'static`
+    // is used only for the duration of the calling getter, during which the C caller keeps
+    // the handle alive by not yet having called
+    // `kafka_admin_AlterClientQuotasResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const AlterClientQuotasResultInner) }
 }
 
@@ -13482,10 +18115,18 @@ unsafe fn alter_client_quotas_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
     result: *const kafka_admin_AlterClientQuotasResult_t,
 ) -> i32 {
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
+    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
+    // be a valid `alter_client_quotas` result handle; only
+    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterClientQuotasResult_destroy`.
     unsafe { alter_client_quotas_result_ref(result) }.entities.len() as i32
 }
 
@@ -13495,6 +18136,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     result: *const kafka_admin_AlterClientQuotasResult_t,
@@ -13503,6 +18145,15 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
+    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
+    // be a valid `alter_client_quotas` result handle; only
+    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterClientQuotasResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     match unsafe { alter_client_quotas_result_ref(result) }.entities.get(index as usize) {
         Some(entity) => entity.as_ptr(),
         None => std::ptr::null(),
@@ -13516,11 +18167,21 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
     result: *const kafka_admin_AlterClientQuotasResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `alter_client_quotas_result_ref` requires a non-null handle from a
+    // `alter_client_quotas` call, which this function's `# Safety` promises (`result` must
+    // be a valid `alter_client_quotas` result handle; only
+    // `kafka_admin_AlterClientQuotasResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterClientQuotasResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     optional_error_at(&unsafe { alter_client_quotas_result_ref(result) }.errors, index)
 }
 
@@ -13529,11 +18190,20 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
     result: *mut kafka_admin_AlterClientQuotasResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `alter_client_quotas` result handle, i.e. the pointer
+        // `box_alter_client_quotas_result` produced with
+        // `Box::into_raw(Box::new(AlterClientQuotasResultInner { .. }))`. Reconstituting
+        // and dropping the `Box` here is the single, final use: the result documentation
+        // tells the caller to free the handle exactly once with
+        // `kafka_admin_AlterClientQuotasResult_destroy`, after which it and every pointer
+        // borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut AlterClientQuotasResultInner)) };
     }
 }
@@ -13595,6 +18265,7 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     admin: *const kafka_admin_AdminClient_t,
@@ -13609,6 +18280,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_CreateAclsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_acl_bindings` requires each array to be null or have `count` entries,
+    // with string entries NULL or valid C strings, which this function's `# Safety`
+    // promises (every non-null array has `count` entries, string entries NULL or valid C
+    // strings); the helper treats any NULL array as no bindings, clamps a negative `count`
+    // to zero and diagnoses NULL string entries with an error, and all reads happen on the
+    // calling thread during this call.
     let acls = unsafe {
         read_acl_bindings(
             resource_types,
@@ -13622,7 +18299,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
         )
     };
     let options = create_acls_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_create_acls`) and the following `block_on`, both
+    // on the calling thread during this synchronous call, while the C caller keeps the
+    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
+    // future owns its result and borrows nothing from the handle, so nothing derived from
+    // it outlives the call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_acls(a, &acls?, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_CreateAclsResult_t` freshly boxed by `box_create_acls_result`, leaving
+    // it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_create_acls_result) }
 }
 
@@ -13648,6 +18339,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -13663,6 +18363,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     callback: kafka_admin_AdminClient_create_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_acl_bindings` requires each array to be null or have `count` entries,
+    // with string entries NULL or valid C strings, which this function's `# Safety`
+    // promises (every non-null array has `count` entries, string entries NULL or valid C
+    // strings); the helper treats any NULL array as no bindings, clamps a negative `count`
+    // to zero and diagnoses NULL string entries with an error, and all reads happen on the
+    // calling thread during this call.
     let acls = unsafe {
         read_acl_bindings(
             resource_types,
@@ -13676,6 +18382,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
         )
     };
     let options = create_acls_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_create_acls`) on the calling
+    // thread while the C caller keeps the handle alive; the spawned awaiter owns only the
+    // `'static` future, a `completion_tx` clone and `user_data` wrapped in `SendUserData`,
+    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` documents that
+    // the C caller must not destroy the handle while an `_async` operation is in flight.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_create_acls_result` and `box_error` build fresh
+    // `kafka_admin_CreateAclsResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -13742,6 +18464,7 @@ pub type kafka_admin_AdminClient_describe_acls_callback_t =
 ///
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     admin: *const kafka_admin_AdminClient_t,
@@ -13755,6 +18478,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeAclsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `build_acl_binding_filter` requires its three string pointers
+    // (`resource_name`, `principal`, `host`) to be NULL or valid C strings, which this
+    // function's `# Safety` promises (the three string parameters must be NULL or valid C
+    // strings); the helper null-checks each before `CStr::from_ptr` and copies the text
+    // into owned `String`s during this synchronous call.
     let filter = unsafe {
         build_acl_binding_filter(
             resource_type,
@@ -13767,7 +18495,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
         )
     };
     let options = describe_acls_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_describe_acls`) and the following `block_on`,
+    // both on the calling thread during this synchronous call, while the C caller keeps the
+    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
+    // future owns its result and borrows nothing from the handle, so nothing derived from
+    // it outlives the call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_acls(a, &filter, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DescribeAclsResult_t` freshly boxed by `box_describe_acls_result`,
+    // leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_describe_acls_result) }
 }
 
@@ -13791,6 +18533,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
 ///
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -13805,6 +18556,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
     callback: kafka_admin_AdminClient_describe_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `build_acl_binding_filter` requires its three string pointers
+    // (`resource_name`, `principal`, `host`) to be NULL or valid C strings, which this
+    // function's `# Safety` promises (the three string parameters must be NULL or valid C
+    // strings); the helper null-checks each before `CStr::from_ptr` and copies the text
+    // into owned `String`s during this synchronous call.
     let filter = unsafe {
         build_acl_binding_filter(
             resource_type,
@@ -13817,6 +18573,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
         )
     };
     let options = describe_acls_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_describe_acls`) on the
+    // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
+    // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
+    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
+    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
+    // if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_describe_acls_result` and `box_error` build fresh
+    // `kafka_admin_DescribeAclsResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -13872,6 +18644,7 @@ pub type kafka_admin_AdminClient_delete_acls_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     admin: *const kafka_admin_AdminClient_t,
@@ -13886,6 +18659,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteAclsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_acl_binding_filters` requires each array to be null or have `count`
+    // entries, with string entries NULL or valid C strings, which this function's `#
+    // Safety` promises (every non-null array has `count` entries, string entries NULL or
+    // valid C strings); the helper returns no filters when any of the four code arrays is
+    // NULL, null-checks each string array before indexing it, clamps a negative `count` to
+    // zero and reads only on the calling thread during this call.
     let filters = unsafe {
         read_acl_binding_filters(
             resource_types,
@@ -13899,7 +18678,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
         )
     };
     let options = delete_acls_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_delete_acls`) and the following `block_on`, both
+    // on the calling thread during this synchronous call, while the C caller keeps the
+    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
+    // future owns its result and borrows nothing from the handle, so nothing derived from
+    // it outlives the call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_acls(a, &filters, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DeleteAclsResult_t` freshly boxed by `box_delete_acls_result`, leaving
+    // it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_delete_acls_result) }
 }
 
@@ -13923,6 +18716,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -13938,6 +18740,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     callback: kafka_admin_AdminClient_delete_acls_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_acl_binding_filters` requires each array to be null or have `count`
+    // entries, with string entries NULL or valid C strings, which this function's `#
+    // Safety` promises (every non-null array has `count` entries, string entries NULL or
+    // valid C strings); the helper returns no filters when any of the four code arrays is
+    // NULL, null-checks each string array before indexing it, clamps a negative `count` to
+    // zero and reads only on the calling thread during this call.
     let filters = unsafe {
         read_acl_binding_filters(
             resource_types,
@@ -13951,6 +18759,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
         )
     };
     let options = delete_acls_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_delete_acls`) on the calling
+    // thread while the C caller keeps the handle alive; the spawned awaiter owns only the
+    // `'static` future, a `completion_tx` clone and `user_data` wrapped in `SendUserData`,
+    // so no handle reference escapes, and `kafka_admin_AdminClient_destroy` documents that
+    // the C caller must not destroy the handle while an `_async` operation is in flight.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_delete_acls_result` and `box_error` build fresh
+    // `kafka_admin_DeleteAclsResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -14019,6 +18843,7 @@ pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
@@ -14030,10 +18855,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeClientQuotasResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_client_quota_filter` requires each array to be null or have `count`
+    // entries, with string entries NULL or valid C strings, which this function's `#
+    // Safety` promises (every non-null array has `count` entries, string entries NULL or
+    // valid C strings); the helper returns an unfiltered or empty filter when
+    // `entity_types` or `match_types` is NULL, tolerates a NULL `match_names`, clamps a
+    // negative `count` to zero and diagnoses a NULL entity-type entry with an error.
     let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
     let options = describe_client_quotas_options(timeout_ms);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns an error for a NULL `admin` before
+        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+        // inside the `submit` closure (`submit_describe_client_quotas`) and the following
+        // `block_on`, both on the calling thread during this synchronous call, while the C
+        // caller keeps the handle alive (it has not called
+        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
+        // borrows nothing from the handle, so nothing derived from it outlives the call.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_client_quotas(a, &filter?, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DescribeClientQuotasResult_t` freshly boxed by
+    // `box_describe_client_quotas_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_describe_client_quotas_result) }
 }
 
@@ -14058,6 +18903,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -14070,8 +18924,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
     callback: kafka_admin_AdminClient_describe_client_quotas_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_client_quota_filter` requires each array to be null or have `count`
+    // entries, with string entries NULL or valid C strings, which this function's `#
+    // Safety` promises (every non-null array has `count` entries, string entries NULL or
+    // valid C strings); the helper returns an unfiltered or empty filter when
+    // `entity_types` or `match_types` is NULL, tolerates a NULL `match_names`, clamps a
+    // negative `count` to zero and diagnoses a NULL entity-type entry with an error.
     let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
     let options = describe_client_quotas_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_describe_client_quotas`) on
+    // the calling thread while the C caller keeps the handle alive; the spawned awaiter
+    // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
+    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
+    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
+    // if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_describe_client_quotas_result` and `box_error` build fresh
+    // `kafka_admin_DescribeClientQuotasResult_t` / `kafka_common_Error_t` handles, exactly
+    // one non-null, whose ownership transfers to the callee; the C user is responsible for
+    // the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -14159,6 +19035,7 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings; `out_result` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
@@ -14174,6 +19051,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     validate_only: bool,
     out_result: *mut *mut kafka_admin_AlterClientQuotasResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_client_quota_alterations` requires each outer array to be null or have
+    // `count` entries, each entry null or with the matching per-row count of entries, which
+    // this function's `# Safety` promises (every non-null outer array has `count` entries,
+    // each non-null inner array the matching per-row count, string entries NULL or valid C
+    // strings); the helper returns no alterations when `entity_types` or `entity_counts` is
+    // NULL, null-checks every other outer and inner pointer before indexing it, clamps
+    // negative counts to zero and diagnoses NULL required entries with an error.
     let entries = unsafe {
         read_client_quota_alterations(
             entity_types,
@@ -14187,7 +19071,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
         )
     };
     let options = alter_client_quotas_options(timeout_ms, validate_only);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_alter_client_quotas`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_alter_client_quotas(a, &entries?, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_AlterClientQuotasResult_t` freshly boxed by
+    // `box_alter_client_quotas_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_alter_client_quotas_result) }
 }
 
@@ -14213,6 +19111,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// `admin` must be a valid handle; every non-null outer array must have `count`
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -14229,6 +19136,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     callback: kafka_admin_AdminClient_alter_client_quotas_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_client_quota_alterations` requires each outer array to be null or have
+    // `count` entries, each entry null or with the matching per-row count of entries, which
+    // this function's `# Safety` promises (every non-null outer array has `count` entries,
+    // each non-null inner array the matching per-row count, string entries NULL or valid C
+    // strings); the helper returns no alterations when `entity_types` or `entity_counts` is
+    // NULL, null-checks every other outer and inner pointer before indexing it, clamps
+    // negative counts to zero and diagnoses NULL required entries with an error.
     let entries = unsafe {
         read_client_quota_alterations(
             entity_types,
@@ -14242,6 +19156,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
         )
     };
     let options = alter_client_quotas_options(timeout_ms, validate_only);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_alter_client_quotas`) on the
+    // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
+    // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
+    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
+    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
+    // if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_alter_client_quotas_result` and `box_error` build fresh
+    // `kafka_admin_AlterClientQuotasResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -14284,6 +19214,14 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
     if admin.is_null() {
         return Err(Error::local_illegal_argument("admin handle must not be null"));
     }
+    // SAFETY: `handle_ref` requires `admin` to be non-null and created by an admin-client
+    // constructor: `admin` is non-null (checked above; NULL returns an error) and per this
+    // helper's `# Safety` it is null or a valid handle from an admin-client constructor,
+    // i.e. the `Box::into_raw` pointer `build_admin_handle` returned. The `&'static
+    // AdminHandle` is only matched on `kind` / `is_mock` and narrowed to the
+    // `MockAdminClient` reference the calling `kafka_admin_MockAdminClient_*` driver uses
+    // for the duration of its synchronous call, while the C caller keeps the handle alive
+    // (it has not called `kafka_admin_AdminClient_destroy`).
     let h = unsafe { handle_ref(admin) };
     match (&h.kind, h.is_mock) {
         (AdminKind::Mock(mock), true) => Ok(mock.as_ref()),
@@ -14305,11 +19243,19 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
 /// # Safety
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     admin: *const kafka_admin_AdminClient_t,
     number_of_requests: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `mock_ref` requires `admin` to be null or a valid handle from an admin-client
+    // constructor, which this function's `# Safety` promises (`admin` must be null or a
+    // valid handle from an admin-client constructor); the helper rejects NULL and a
+    // non-mock handle with an error instead of dereferencing, and the `MockAdminClient`
+    // reference it yields is used only for the duration of this synchronous call, during
+    // which the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`).
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             mock.timeout_next_request(number_of_requests);
@@ -14354,6 +19300,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `features` must be null or have `count` entries, each NULL or a valid C
 /// string; each level array must be null or have `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     admin: *const kafka_admin_AdminClient_t,
@@ -14363,9 +19310,23 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     max_levels: *const i16,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `mock_ref` requires `admin` to be null or a valid handle from an admin-client
+    // constructor, which this function's `# Safety` promises (`admin` must be null or a
+    // valid handle from an admin-client constructor); the helper rejects NULL and a
+    // non-mock handle with an error instead of dereferencing, and the `MockAdminClient`
+    // reference it yields is used only for the duration of this synchronous call, during
+    // which the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`).
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             let (current, minimum, maximum) =
+                // SAFETY: `read_feature_levels` requires `features` to be null or have
+                // `count` entries, each NULL or a valid C string, and each level array to
+                // be null or have `count` entries, which this function's `# Safety`
+                // promises verbatim; the helper returns empty maps for a NULL `features`,
+                // null-checks each level array before indexing it (a NULL array reads as
+                // level 0), skips NULL feature entries and clamps a negative `count` to
+                // zero, reading only on the calling thread during this call.
                 unsafe { read_feature_levels(features, levels, min_levels, max_levels, count) };
             mock.set_feature_levels(current, minimum, maximum);
             std::ptr::null_mut()
@@ -14373,6 +19334,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
         Err(e) => box_error(e),
     }
 }
+
+/// The `(current, minimum, maximum)` level maps `MockAdminClient::set_feature_levels` takes.
+type FeatureLevelMaps = (HashMap<String, i16>, HashMap<String, i16>, HashMap<String, i16>);
 
 /// Reads `count` `(feature, level, min, max)` rows into the three maps
 /// `MockAdminClient::set_feature_levels` takes, skipping rows whose feature
@@ -14382,8 +19346,6 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
 ///
 /// `features` must be null or have `count` entries, each NULL or a valid C
 /// string; each level array must be null or have `count` entries.
-type FeatureLevelMaps = (HashMap<String, i16>, HashMap<String, i16>, HashMap<String, i16>);
-
 unsafe fn read_feature_levels(
     features: *const *const c_char,
     levels: *const i16,
@@ -14402,10 +19364,20 @@ unsafe fn read_feature_levels(
         if values.is_null() {
             0
         } else {
+            // SAFETY: `values` is one of `levels`, `min_levels` or `max_levels`, non-null
+            // (checked above in the `at` closure; a NULL array yields 0), and per this
+            // helper's `# Safety`, upheld by
+            // `kafka_admin_MockAdminClient_set_feature_levels`, each level array is null or
+            // has `count` entries; `index < count.max(0)`, so the `i16` read is in bounds.
             unsafe { *values.add(index) }
         }
     };
     for index in 0..n {
+        // SAFETY: `optional_string_at` requires `features` to be null or have at least
+        // `index + 1` entries: `features` is non-null (checked above) and `index <
+        // count.max(0)`, where per this helper's `# Safety` (upheld by
+        // `kafka_admin_MockAdminClient_set_feature_levels`) `features` has `count` entries,
+        // each NULL (skipped here) or a valid C string.
         let Some(feature) = (unsafe { optional_string_at(features, index) }) else {
             continue;
         };
@@ -14433,6 +19405,7 @@ unsafe fn read_feature_levels(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -14441,8 +19414,22 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     offsets: *const i64,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `mock_ref` requires `admin` to be null or a valid handle from an admin-client
+    // constructor, which this function's `# Safety` promises (`admin` must be null or a
+    // valid handle from an admin-client constructor); the helper rejects NULL and a
+    // non-mock handle with an error instead of dereferencing, and the `MockAdminClient`
+    // reference it yields is used only for the duration of this synchronous call, during
+    // which the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`).
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
+            // SAFETY: `read_partition_offsets` requires `topics`, `partitions` and
+            // `offsets` to be null or have `count` readable entries each, every topic NULL
+            // or a valid C string, which this function's `# Safety` promises more strongly
+            // (the three arrays have `count` valid entries each); the helper additionally
+            // returns an empty map if any array is NULL, skips NULL topic entries and
+            // clamps a negative `count` to zero, reading only on the calling thread during
+            // this call and copying every topic name.
             mock.update_beginning_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
             std::ptr::null_mut()
         },
@@ -14467,6 +19454,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -14475,8 +19463,22 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     offsets: *const i64,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `mock_ref` requires `admin` to be null or a valid handle from an admin-client
+    // constructor, which this function's `# Safety` promises (`admin` must be null or a
+    // valid handle from an admin-client constructor); the helper rejects NULL and a
+    // non-mock handle with an error instead of dereferencing, and the `MockAdminClient`
+    // reference it yields is used only for the duration of this synchronous call, during
+    // which the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`).
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
+            // SAFETY: `read_partition_offsets` requires `topics`, `partitions` and
+            // `offsets` to be null or have `count` readable entries each, every topic NULL
+            // or a valid C string, which this function's `# Safety` promises more strongly
+            // (the three arrays have `count` valid entries each); the helper additionally
+            // returns an empty map if any array is NULL, skips NULL topic entries and
+            // clamps a negative `count` to zero, reading only on the calling thread during
+            // this call and copying every topic name.
             mock.update_end_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
             std::ptr::null_mut()
         },
@@ -14507,6 +19509,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -14515,8 +19518,22 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
     offsets: *const i64,
     count: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `mock_ref` requires `admin` to be null or a valid handle from an admin-client
+    // constructor, which this function's `# Safety` promises (`admin` must be null or a
+    // valid handle from an admin-client constructor); the helper rejects NULL and a
+    // non-mock handle with an error instead of dereferencing, and the `MockAdminClient`
+    // reference it yields is used only for the duration of this synchronous call, during
+    // which the C caller keeps the handle alive (it has not called
+    // `kafka_admin_AdminClient_destroy`).
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
+            // SAFETY: `read_partition_offsets` requires `topics`, `partitions` and
+            // `offsets` to be null or have `count` readable entries each, every topic NULL
+            // or a valid C string, which this function's `# Safety` promises more strongly
+            // (the three arrays have `count` valid entries each); the helper additionally
+            // returns an empty map if any array is NULL, skips NULL topic entries and
+            // clamps a negative `count` to zero, reading only on the calling thread during
+            // this call and copying every topic name.
             mock.update_consumer_group_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
             std::ptr::null_mut()
         },
@@ -14542,11 +19559,26 @@ unsafe fn read_partition_offsets(
         return out;
     }
     for i in 0..count.max(0) as usize {
+        // SAFETY: `topics` is non-null (checked above) and, per this helper's `# Safety`
+        // (upheld by the `kafka_admin_MockAdminClient_update_*_offsets` entry points, which
+        // promise `count` valid entries per array), has `count` entries; `i <
+        // count.max(0)`, so the pointer read is in bounds. The entry read may be NULL and
+        // is skipped before any use.
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
             continue;
         }
+        // SAFETY: `name_ptr` is non-null (checked above) and, per this helper's `# Safety`,
+        // every topic entry is NULL or a valid C string, so it addresses a NUL-terminated
+        // string the C caller keeps alive during this synchronous call; the text is copied
+        // into an owned `String`.
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
+        // SAFETY: `partitions` and `offsets` are both non-null (checked above) and, per
+        // this helper's `# Safety` (upheld by the
+        // `kafka_admin_MockAdminClient_update_*_offsets` entry points' promise of `count`
+        // valid entries per array), each has `count` readable entries; `i < count.max(0)`,
+        // so both the `i32` read from `partitions` and the `i64` read from `offsets` are in
+        // bounds.
         out.insert(TopicPartition::new(name, unsafe { *partitions.add(i) }), unsafe {
             *offsets.add(i)
         });
@@ -14636,6 +19668,15 @@ impl KafkaPrincipalInner {
 unsafe fn kafka_principal_ref(
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> &'static KafkaPrincipalInner {
+    // SAFETY: `principal` is, per this helper's `# Safety`, a non-null borrowed pointer
+    // from a token getter: `kafka_common_security_token_delegation_TokenInformation_owner`,
+    // `_token_requester` and `_get_renewer` hand out `as_ptr()` of a `KafkaPrincipalInner`
+    // stored inside the `TokenInformationInner` of a `DelegationTokenInner` owned by a
+    // `create_delegation_token` / `describe_delegation_token` result handle, so the cast
+    // back to `*const KafkaPrincipalInner` names a live value. The `&'static` is used only
+    // for the duration of the calling getter, during which the C caller keeps the owning
+    // result handle alive; `kafka_common_security_auth_KafkaPrincipal_t` is documented as
+    // borrowed, valid until that result's `_destroy`, and never freed by the caller.
     unsafe { &*(principal as *const KafkaPrincipalInner) }
 }
 
@@ -14644,10 +19685,18 @@ unsafe fn kafka_principal_ref(
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
+    // SAFETY: `kafka_principal_ref` requires a non-null borrowed pointer from a token
+    // getter, which this function's `# Safety` promises (`principal` must be a valid
+    // borrowed principal pointer); the reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the owning delegation-token result
+    // handle alive, the principal being documented on
+    // `kafka_common_security_auth_KafkaPrincipal_t` as borrowed and valid until that
+    // result's `_destroy`.
     unsafe { kafka_principal_ref(principal) }.principal_type_c.as_ptr()
 }
 
@@ -14656,10 +19705,18 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_typ
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
+    // SAFETY: `kafka_principal_ref` requires a non-null borrowed pointer from a token
+    // getter, which this function's `# Safety` promises (`principal` must be a valid
+    // borrowed principal pointer); the reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the owning delegation-token result
+    // handle alive, the principal being documented on
+    // `kafka_common_security_auth_KafkaPrincipal_t` as borrowed and valid until that
+    // result's `_destroy`.
     unsafe { kafka_principal_ref(principal) }.name_c.as_ptr()
 }
 
@@ -14669,10 +19726,18 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
     principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> bool {
+    // SAFETY: `kafka_principal_ref` requires a non-null borrowed pointer from a token
+    // getter, which this function's `# Safety` promises (`principal` must be a valid
+    // borrowed principal pointer); the reference is used only for the duration of this
+    // synchronous call, during which the C caller keeps the owning delegation-token result
+    // handle alive, the principal being documented on
+    // `kafka_common_security_auth_KafkaPrincipal_t` as borrowed and valid until that
+    // result's `_destroy`.
     unsafe { kafka_principal_ref(principal) }.token_authenticated
 }
 
@@ -14724,6 +19789,15 @@ impl TokenInformationInner {
 unsafe fn token_information_ref(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> &'static TokenInformationInner {
+    // SAFETY: `info` is, per this helper's `# Safety`, a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which hands out
+    // `as_ptr()` of the `TokenInformationInner` embedded in a `DelegationTokenInner` owned
+    // by a `create_delegation_token` / `describe_delegation_token` result handle, so the
+    // cast back to `*const TokenInformationInner` names a live value. The `&'static` is
+    // used only for the duration of the calling getter, during which the C caller keeps the
+    // owning result handle alive;
+    // `kafka_common_security_token_delegation_TokenInformation_t` is documented as
+    // borrowed, valid until that result's `_destroy`, and never freed by the caller.
     unsafe { &*(info as *const TokenInformationInner) }
 }
 
@@ -14732,10 +19806,19 @@ unsafe fn token_information_ref(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const c_char {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`.
     unsafe { token_information_ref(info) }.token_id_c.as_ptr()
 }
 
@@ -14745,10 +19828,20 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`. The principal pointer handed back is an interior
+    // pointer into the same allocation and shares that lifetime.
     unsafe { token_information_ref(info) }.owner.as_ptr()
 }
 
@@ -14759,10 +19852,20 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`. The principal pointer handed back is an interior
+    // pointer into the same allocation and shares that lifetime.
     unsafe { token_information_ref(info) }.token_requester.as_ptr()
 }
 
@@ -14771,10 +19874,19 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewer_count(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i32 {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`.
     unsafe { token_information_ref(info) }.renewers.len() as i32
 }
 
@@ -14784,6 +19896,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_get_renewer(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
@@ -14792,6 +19905,15 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`. The principal pointer handed back is an interior
+    // pointer into the same allocation and shares that lifetime.
     match unsafe { token_information_ref(info) }.renewers.get(index as usize) {
         Some(renewer) => renewer.as_ptr(),
         None => std::ptr::null(),
@@ -14803,10 +19925,19 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_issue_timestamp(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`.
     unsafe { token_information_ref(info) }.issue_timestamp
 }
 
@@ -14815,10 +19946,19 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`.
     unsafe { token_information_ref(info) }.expiry_timestamp
 }
 
@@ -14828,10 +19968,19 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_max_timestamp(
     info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
+    // SAFETY: `token_information_ref` requires a non-null borrowed pointer from
+    // `kafka_common_security_token_delegation_DelegationToken_token_info`, which this
+    // function's `# Safety` promises (`info` must be a valid borrowed token-information
+    // pointer); the reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the owning `create_delegation_token` /
+    // `describe_delegation_token` result handle alive, the token information being
+    // documented on `kafka_common_security_token_delegation_TokenInformation_t` as valid
+    // until that result's `_destroy`.
     unsafe { token_information_ref(info) }.max_timestamp
 }
 
@@ -14881,6 +20030,16 @@ impl DelegationTokenInner {
 unsafe fn delegation_token_ref(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
 ) -> &'static DelegationTokenInner {
+    // SAFETY: `token` is, per this helper's `# Safety`, a non-null borrowed pointer from a
+    // delegation-token result getter: `kafka_admin_CreateDelegationTokenResult_get_token`
+    // and `kafka_admin_DescribeDelegationTokenResult_get_token` hand out `as_ptr()` of a
+    // `DelegationTokenInner` stored inside the owning `CreateDelegationTokenResultInner` /
+    // `DescribeDelegationTokenResultInner` allocation, so the cast back to `*const
+    // DelegationTokenInner` names a live value. The `&'static` is used only for the
+    // duration of the calling getter, during which the C caller keeps the owning result
+    // handle alive; `kafka_common_security_token_delegation_DelegationToken_t` is
+    // documented as borrowed, valid until that result's `_destroy`, and never freed by the
+    // caller.
     unsafe { &*(token as *const DelegationTokenInner) }
 }
 
@@ -14890,10 +20049,19 @@ unsafe fn delegation_token_ref(
 /// # Safety
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
 ) -> *const kafka_common_security_token_delegation_TokenInformation_t {
+    // SAFETY: `delegation_token_ref` requires a non-null borrowed pointer from a
+    // delegation-token result getter, which this function's `# Safety` promises (`token`
+    // must be a valid borrowed delegation-token pointer); the reference is used only for
+    // the duration of this synchronous call, during which the C caller keeps the owning
+    // `create_delegation_token` / `describe_delegation_token` result handle alive, the
+    // token being documented on `kafka_common_security_token_delegation_DelegationToken_t`
+    // as valid until that result's `_destroy`. The token-information pointer handed back is
+    // an interior pointer into the same allocation and shares that lifetime.
     unsafe { delegation_token_ref(token) }.token_info.as_ptr()
 }
 
@@ -14909,13 +20077,26 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 ///
 /// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
     out_len: *mut i32,
 ) -> *const u8 {
+    // SAFETY: `delegation_token_ref` requires a non-null borrowed pointer from a
+    // delegation-token result getter, which this function's `# Safety` promises (`token`
+    // must be a valid borrowed delegation-token pointer); the reference is used only for
+    // the duration of this synchronous call, during which the C caller keeps the owning
+    // `create_delegation_token` / `describe_delegation_token` result handle alive, the
+    // token being documented on `kafka_common_security_token_delegation_DelegationToken_t`
+    // as valid until that result's `_destroy`. The HMAC pointer returned borrows the `hmac`
+    // buffer owned by that same allocation.
     let inner = unsafe { delegation_token_ref(token) };
     if !out_len.is_null() {
+        // SAFETY: `out_len` is non-null (checked above) and, per this function's `#
+        // Safety`, null or writable, so exactly one `i32` (the HMAC length) is written
+        // through it; `inner` is the borrowed `DelegationTokenInner` whose `hmac` buffer
+        // stays owned by the result handle.
         unsafe { *out_len = inner.hmac.len() as i32 };
     }
     inner.hmac.as_ptr()
@@ -14926,10 +20107,18 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 /// # Safety
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
 ) -> *const c_char {
+    // SAFETY: `delegation_token_ref` requires a non-null borrowed pointer from a
+    // delegation-token result getter, which this function's `# Safety` promises (`token`
+    // must be a valid borrowed delegation-token pointer); the reference is used only for
+    // the duration of this synchronous call, during which the C caller keeps the owning
+    // `create_delegation_token` / `describe_delegation_token` result handle alive, the
+    // token being documented on `kafka_common_security_token_delegation_DelegationToken_t`
+    // as valid until that result's `_destroy`.
     unsafe { delegation_token_ref(token) }.hmac_base64_c.as_ptr()
 }
 
@@ -14987,6 +20176,15 @@ unsafe fn read_bytes(bytes: *const u8, len: i32) -> Vec<u8> {
     if bytes.is_null() || len <= 0 {
         return Vec::new();
     }
+    // SAFETY: `bytes` is non-null and `len` is positive (both checked above, so `len as
+    // usize` cannot wrap), and per this helper's `# Safety` `bytes` is readable for at
+    // least `len` bytes; its callers pass either an `hmac` pointer
+    // `kafka_admin_AdminClient_renew_delegation_token` / `_expire_delegation_token` (and
+    // their `_async` forms) promise is null or readable for `hmac_len` bytes, or a SCRAM
+    // password / salt entry that `read_indexed_bytes` passes under the
+    // `alter_user_scram_credentials` promise that each non-null byte pointer is readable
+    // for its matching length. The slice is copied into an owned `Vec<u8>` before this
+    // synchronous call returns, so no borrow of C memory outlives it.
     unsafe { std::slice::from_raw_parts(bytes, len as usize) }.to_vec()
 }
 
@@ -15015,7 +20213,23 @@ unsafe fn read_kafka_principals(
     }
     let mut out = Vec::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `required_string_at` requires `principal_types` to be non-null with at
+        // least `index + 1` entries: `principal_types` is non-null (checked above, together
+        // with `names`) and `index < count.max(0)`, where per this helper's `# Safety`
+        // (upheld by `kafka_admin_AdminClient_create_delegation_token` /
+        // `_describe_delegation_token` and their `_async` forms, which promise the
+        // principal arrays are null or have `renewer_count` / `owner_count` entries, each
+        // NULL or a valid C string) both arrays have `count` entries; a NULL entry is
+        // diagnosed by the helper.
         let principal_type = unsafe { required_string_at(principal_types, index, &format!("{what} principal type")) }?;
+        // SAFETY: `required_string_at` requires `names` to be non-null with at least `index
+        // + 1` entries: `names` is non-null (checked above, together with
+        // `principal_types`) and `index < count.max(0)`, where per this helper's `# Safety`
+        // (upheld by `kafka_admin_AdminClient_create_delegation_token` /
+        // `_describe_delegation_token` and their `_async` forms, which promise the
+        // principal arrays are null or have `renewer_count` / `owner_count` entries, each
+        // NULL or a valid C string) both arrays have `count` entries; a NULL entry is
+        // diagnosed by the helper.
         let name = unsafe { required_string_at(names, index, &format!("{what} principal name")) }?;
         out.push(KafkaPrincipal::new(principal_type, name));
     }
@@ -15067,10 +20281,26 @@ unsafe fn read_scram_alterations(
     }
     let mut out = Vec::with_capacity(n);
     for index in 0..n {
+        // SAFETY: `required_string_at` requires `users` to be non-null with at least `index
+        // + 1` entries: `users` is non-null (checked above, together with `is_deletions`
+        // and `mechanisms`) and `index < count.max(0)`, where per this helper's `# Safety`
+        // (upheld by `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`:
+        // every non-null array has `count` entries, string entries NULL or valid C strings)
+        // `users` has `count` entries; a NULL entry is diagnosed by the helper.
         let user = unsafe { required_string_at(users, index, "scram alteration user") }?;
         // `ScramMechanism.fromType` falls through to UNKNOWN for an
         // unrecognised indicator, exactly as Java does; the broker rejects it.
+        // SAFETY: `mechanisms` is non-null (checked above) and has `count` entries per this
+        // helper's `# Safety`, upheld by
+        // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`, which promise
+        // every non-null array has `count` entries; `index < count.max(0)`, so the `i32`
+        // read is in bounds.
         let mechanism = ScramMechanism::from_type(enum_code_or_unknown(unsafe { *mechanisms.add(index) }));
+        // SAFETY: `is_deletions` is non-null (checked above) and has `count` entries per
+        // this helper's `# Safety`, upheld by
+        // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`, which promise
+        // every non-null array has `count` entries; `index < count.max(0)`, so the `bool`
+        // read is in bounds.
         if unsafe { *is_deletions.add(index) } {
             out.push(UserScramCredentialAlteration::Deletion(UserScramCredentialDeletion::new(
                 user, mechanism,
@@ -15080,6 +20310,11 @@ unsafe fn read_scram_alterations(
         let iteration_count = if iterations.is_null() {
             0
         } else {
+            // SAFETY: `iterations` is non-null (checked in the enclosing `if`; a NULL array
+            // reads as 0) and has `count` entries per this helper's `# Safety`, upheld by
+            // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`, which
+            // promise every non-null array has `count` entries; `index < count.max(0)`, so
+            // the `i32` read is in bounds.
             unsafe { *iterations.add(index) }
         };
         // An empty password is passed through, not rejected: Java records
@@ -15087,14 +20322,35 @@ unsafe fn read_scram_alterations(
         // other users' alterations (KafkaAdminClient.java:4414-4416). Same
         // reasoning as the mechanism above — let the core raise the per-user
         // error rather than failing the whole batch here.
+        // SAFETY: `read_indexed_bytes` requires `passwords` and `password_lens` to be null
+        // or have `index + 1` entries, each non-null byte pointer readable for its matching
+        // length; `index < count.max(0)` and per this helper's `# Safety`, upheld by
+        // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async` (every non-null
+        // array has `count` entries and each non-null byte pointer is readable for its
+        // matching length), that holds for the password arrays. The helper tolerates a NULL
+        // array or entry as an empty buffer and copies the bytes during this synchronous
+        // call.
         let password = unsafe { read_indexed_bytes(passwords, password_lens, index) };
         let info = ScramCredentialInfo::new(mechanism, iteration_count);
         // `has_salts[index]`, not `salt.is_empty()`: Java's four-argument
         // constructor accepts a zero-length salt, so a present-but-empty salt
         // must still reach it. A NULL `has_salts` array is "no row supplies a
         // salt", following `op_has_values` in `read_client_quota_alterations`.
+        // SAFETY: `has_salts` is non-null (the short-circuit `!has_salts.is_null() &&`
+        // guards the read) and has `count` entries per this helper's `# Safety`, upheld by
+        // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`, which promise
+        // every non-null array has `count` entries; `index < count.max(0)`, so the `bool`
+        // read is in bounds.
         let supplied = !has_salts.is_null() && unsafe { *has_salts.add(index) };
         let upsertion = if supplied {
+            // SAFETY: `read_indexed_bytes` requires `salts` and `salt_lens` to be null or
+            // have `index + 1` entries, each non-null byte pointer readable for its
+            // matching length; `index < count.max(0)` and per this helper's `# Safety`,
+            // upheld by `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`
+            // (every non-null array has `count` entries and each non-null byte pointer is
+            // readable for its matching length), that holds for the salt arrays. The helper
+            // tolerates a NULL array or entry as an empty buffer and copies the bytes
+            // during this synchronous call.
             let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
             UserScramCredentialUpsertion::with_salt(user, info, password, salt)
         } else {
@@ -15117,6 +20373,13 @@ unsafe fn read_indexed_bytes(arrays: *const *const u8, lens: *const i32, index: 
     if arrays.is_null() || lens.is_null() {
         return Vec::new();
     }
+    // SAFETY: `arrays` and `lens` are both non-null (checked above) and, per this helper's
+    // `# Safety`, have `index + 1` entries, so both reads are in bounds; the byte pointer
+    // read is handed to `read_bytes`, which requires it null or readable for the length
+    // read from `lens`, exactly what this helper's `# Safety` promises for each non-null
+    // byte pointer (upheld by `read_scram_alterations` and in turn by
+    // `kafka_admin_AdminClient_alter_user_scram_credentials` / `_async`), and `read_bytes`
+    // handles a NULL pointer or non-positive length itself.
     unsafe { read_bytes(*arrays.add(index), *lens.add(index)) }
 }
 
@@ -15148,11 +20411,25 @@ unsafe fn read_feature_updates(
         return Ok(out);
     }
     for index in 0..n {
+        // SAFETY: `required_string_at` requires `features` to be non-null with at least
+        // `index + 1` entries: `features` is non-null (checked above, together with
+        // `max_version_levels` and `upgrade_types`) and `index < count.max(0)`, where per
+        // this helper's `# Safety` (upheld by `kafka_admin_AdminClient_update_features` /
+        // `_async`: every non-null array has `count` entries, name entries NULL or valid C
+        // strings) `features` has `count` entries; a NULL entry is diagnosed by the helper.
         let feature = unsafe { required_string_at(features, index, "feature") }?;
         // `UpgradeType.fromCode` already takes an `int` in Java and falls
         // through to UNKNOWN, which `FeatureUpdate` accepts and the broker
         // rejects; there is no `i8` narrowing to do here.
+        // SAFETY: `upgrade_types` is non-null (checked above) and has `count` entries per
+        // this helper's `# Safety`, upheld by `kafka_admin_AdminClient_update_features` /
+        // `_async`, which promise every non-null array has `count` entries; `index <
+        // count.max(0)`, so the `i32` read is in bounds.
         let upgrade_type = UpgradeType::from_code(unsafe { *upgrade_types.add(index) });
+        // SAFETY: `max_version_levels` is non-null (checked above) and has `count` entries
+        // per this helper's `# Safety`, upheld by `kafka_admin_AdminClient_update_features`
+        // / `_async`, which promise every non-null array has `count` entries; `index <
+        // count.max(0)`, so the `i16` read is in bounds.
         let update = FeatureUpdate::new(unsafe { *max_version_levels.add(index) }, upgrade_type)
             .map_err(|e| Error::local_illegal_argument(format!("feature update at index {index}: {}", e.message())))?;
         if out.insert(feature.clone(), update).is_some() {
@@ -15347,6 +20624,7 @@ pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
 ///
 /// `admin` must be a valid handle; `users` must be null or have `count` entries,
 /// each NULL or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials(
     admin: *const kafka_admin_AdminClient_t,
@@ -15355,10 +20633,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `users` to be null or have `count` entries, each NULL
+    // or a valid C string, which this function's `# Safety` promises verbatim; the helper
+    // treats a NULL array as no users, skips NULL entries, clamps a negative `count` to
+    // zero and copies each string on the calling thread during this call.
     let users = unsafe { read_strings(users, count) };
     let options = describe_user_scram_credentials_options(timeout_ms);
     let outcome =
+        // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+        // admin-client constructor, which this function's `# Safety` promises (`admin` must
+        // be a valid handle); the helper itself returns an error for a NULL `admin` before
+        // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+        // inside the `submit` closure (`submit_describe_user_scram_credentials`) and the
+        // following `block_on`, both on the calling thread during this synchronous call,
+        // while the C caller keeps the handle alive (it has not called
+        // `kafka_admin_AdminClient_destroy`); the awaited future owns its result and
+        // borrows nothing from the handle, so nothing derived from it outlives the call.
+        // The `impl Future + Send + use<>` that `submit_describe_user_scram_credentials`
+        // returns captures no borrow of the handle.
         unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_user_scram_credentials(a, &users, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DescribeUserScramCredentialsResult_t` freshly boxed by
+    // `box_describe_user_scram_credentials_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_describe_user_scram_credentials_result) }
 }
 
@@ -15382,6 +20680,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
 ///
 /// `admin` must be a valid handle; `users` must be null or have `count` entries,
 /// each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -15391,8 +20698,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     callback: kafka_admin_AdminClient_describe_user_scram_credentials_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `users` to be null or have `count` entries, each NULL
+    // or a valid C string, which this function's `# Safety` promises verbatim; the helper
+    // treats a NULL array as no users, skips NULL entries, clamps a negative `count` to
+    // zero and copies each string on the calling thread during this call.
     let users = unsafe { read_strings(users, count) };
     let options = describe_user_scram_credentials_options(timeout_ms);
+    // SAFETY: `admin_async_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit`
+    // (`submit_describe_user_scram_credentials`) on the calling thread while the C caller
+    // keeps the handle alive; the spawned awaiter owns only the `'static` future, a
+    // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
+    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
+    // must not destroy the handle while an `_async` operation is in flight. The `impl
+    // Future + Send + use<>` that `submit` returns captures no borrow of the handle, which
+    // the helper's `Fut: 'static` bound also enforces. `callback` was supplied by the C
+    // caller along with `user_data` and is invoked exactly once by `complete`: on the
+    // dispatcher thread normally, inline on the calling thread when `admin` is NULL or
+    // marshaling failed, or on a tokio worker thread if the completion queue is
+    // unreachable, as this function's callback-thread documentation states.
+    // `box_describe_user_scram_credentials_result` and `box_error` build fresh
+    // `kafka_admin_DescribeUserScramCredentialsResult_t` / `kafka_common_Error_t` handles,
+    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_future_op(
             admin,
@@ -15491,6 +20821,7 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     admin: *const kafka_admin_AdminClient_t,
@@ -15507,6 +20838,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_scram_alterations` requires every array to be null or have `count`
+    // entries, with byte pointers null or readable for their matching length, which this
+    // function's `# Safety` promises (every non-null array has `count` entries, string
+    // entries NULL or valid C strings, each non-null byte pointer readable for its matching
+    // length); the helper returns no alterations when `users`, `is_deletions` or
+    // `mechanisms` is NULL, null-checks every optional array before indexing it, clamps a
+    // negative `count` to zero and diagnoses a NULL user entry, copying all strings and
+    // bytes on the calling thread during this call.
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -15522,11 +20861,25 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
         )
     };
     let options = alter_user_scram_credentials_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_alter_user_scram_credentials`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             Ok(submit_alter_user_scram_credentials(a, &alterations?, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_AlterUserScramCredentialsResult_t` freshly boxed by
+    // `box_alter_user_scram_credentials_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_alter_user_scram_credentials_result) }
 }
 
@@ -15552,6 +20905,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -15569,6 +20931,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     callback: kafka_admin_AdminClient_alter_user_scram_credentials_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_scram_alterations` requires every array to be null or have `count`
+    // entries, with byte pointers null or readable for their matching length, which this
+    // function's `# Safety` promises (every non-null array has `count` entries, string
+    // entries NULL or valid C strings, each non-null byte pointer readable for its matching
+    // length); the helper returns no alterations when `users`, `is_deletions` or
+    // `mechanisms` is NULL, null-checks every optional array before indexing it, clamps a
+    // negative `count` to zero and diagnoses a NULL user entry, copying all strings and
+    // bytes on the calling thread during this call.
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -15584,6 +20954,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
         )
     };
     let options = alter_user_scram_credentials_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit`
+    // (`submit_alter_user_scram_credentials`) on the calling thread while the C caller
+    // keeps the handle alive; the spawned awaiter owns only the `'static` future, a
+    // `completion_tx` clone and `user_data` wrapped in `SendUserData`, so no handle
+    // reference escapes, and `kafka_admin_AdminClient_destroy` documents that the C caller
+    // must not destroy the handle while an `_async` operation is in flight. `callback` was
+    // supplied by the C caller along with `user_data` and is invoked exactly once by
+    // `complete`: on the dispatcher thread normally, inline on the calling thread when
+    // `admin` is NULL or marshaling failed, or on a tokio worker thread if the completion
+    // queue is unreachable, as this function's callback-thread documentation states.
+    // `box_alter_user_scram_credentials_result` and `box_error` build fresh
+    // `kafka_admin_AlterUserScramCredentialsResult_t` / `kafka_common_Error_t` handles,
+    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -15637,7 +21024,19 @@ unsafe fn read_optional_principal(principal_type: *const c_char, name: *const c_
         return None;
     }
     Some(KafkaPrincipal::new(
+        // SAFETY: `principal_type` is non-null (checked above together with `name`; either
+        // NULL yields `None`) and, per this helper's `# Safety` (upheld by
+        // `kafka_admin_AdminClient_create_delegation_token` / `_async`: the owner pointers
+        // must be null or valid C strings), addresses a NUL-terminated string the C caller
+        // keeps alive during this synchronous call; the text is copied into an owned
+        // `String`.
         unsafe { CStr::from_ptr(principal_type) }.to_string_lossy().to_string(),
+        // SAFETY: `name` is non-null (checked above together with `principal_type`; either
+        // NULL yields `None`) and, per this helper's `# Safety` (upheld by
+        // `kafka_admin_AdminClient_create_delegation_token` / `_async`: the owner pointers
+        // must be null or valid C strings), addresses a NUL-terminated string the C caller
+        // keeps alive during this synchronous call; the text is copied into an owned
+        // `String`.
         unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string(),
     ))
 }
@@ -15686,6 +21085,7 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 /// `admin` must be a valid handle; the renewer arrays must be null or have
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -15698,14 +21098,40 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_CreateDelegationTokenResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_kafka_principals` requires both arrays to be null or have `count`
+    // entries, each NULL or a valid C string, which this function's `# Safety` promises
+    // (the renewer arrays are null or have `renewer_count` entries, each NULL or a valid C
+    // string); the helper returns no principals if either array is NULL, clamps a negative
+    // count to zero and diagnoses NULL entries with an error (the documented
+    // synchronous-failure path of `kafka_admin_AdminClient_create_delegation_token` /
+    // `_async`), reading only on the calling thread during this call.
     let renewers = unsafe { read_kafka_principals(renewer_principal_types, renewer_names, renewer_count, "renewer") };
+    // SAFETY: `read_optional_principal` requires both pointers to be null or valid C
+    // strings, which this function's `# Safety` promises (the owner pointers must be null
+    // or valid C strings); the helper null-checks both before `CStr::from_ptr` and copies
+    // the text during this synchronous call.
     let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_create_delegation_token`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call. A `renewers` marshaling error makes `submit`
+    // return `Err` without touching the handle.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             let options = create_delegation_token_options(renewers?, owner, max_lifetime_ms, timeout_ms);
             Ok(submit_create_delegation_token(a, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_CreateDelegationTokenResult_t` freshly boxed by
+    // `box_create_delegation_token_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_create_delegation_token_result) }
 }
 
@@ -15731,6 +21157,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
 /// `admin` must be a valid handle; the renewer arrays must be null or have
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -15744,8 +21179,36 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
     callback: kafka_admin_AdminClient_create_delegation_token_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_kafka_principals` requires both arrays to be null or have `count`
+    // entries, each NULL or a valid C string, which this function's `# Safety` promises
+    // (the renewer arrays are null or have `renewer_count` entries, each NULL or a valid C
+    // string); the helper returns no principals if either array is NULL, clamps a negative
+    // count to zero and diagnoses NULL entries with an error (the documented
+    // synchronous-failure path of `kafka_admin_AdminClient_create_delegation_token` /
+    // `_async`), reading only on the calling thread during this call.
     let renewers = unsafe { read_kafka_principals(renewer_principal_types, renewer_names, renewer_count, "renewer") };
+    // SAFETY: `read_optional_principal` requires both pointers to be null or valid C
+    // strings, which this function's `# Safety` promises (the owner pointers must be null
+    // or valid C strings); the helper null-checks both before `CStr::from_ptr` and copies
+    // the text during this synchronous call.
     let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_create_delegation_token`) on
+    // the calling thread while the C caller keeps the handle alive; the spawned awaiter
+    // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. A `renewers` marshaling error makes `submit` return `Err`, so the
+    // callback fires inline. `callback` was supplied by the C caller along with `user_data`
+    // and is invoked exactly once by `complete`: on the dispatcher thread normally, inline
+    // on the calling thread when `admin` is NULL or marshaling failed, or on a tokio worker
+    // thread if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_create_delegation_token_result` and `box_error` build
+    // fresh `kafka_admin_CreateDelegationTokenResult_t` / `kafka_common_Error_t` handles,
+    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -15811,6 +21274,7 @@ pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -15820,9 +21284,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_RenewDelegationTokenResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_bytes` requires `hmac` to be null or readable for at least `hmac_len`
+    // bytes, which this function's `# Safety` promises verbatim; the helper returns an
+    // empty buffer for a NULL pointer or a non-positive length and otherwise copies the
+    // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_renew_delegation_token`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call. `hmac` is an owned `Vec<u8>` copied before the
+    // call, not C memory.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_renew_delegation_token(a, &hmac, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_RenewDelegationTokenResult_t` freshly boxed by
+    // `box_renew_delegation_token_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_renew_delegation_token_result) }
 }
 
@@ -15846,6 +21329,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -15856,8 +21348,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
     callback: kafka_admin_AdminClient_renew_delegation_token_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_bytes` requires `hmac` to be null or readable for at least `hmac_len`
+    // bytes, which this function's `# Safety` promises verbatim; the helper returns an
+    // empty buffer for a NULL pointer or a non-positive length and otherwise copies the
+    // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_renew_delegation_token`) on
+    // the calling thread while the C caller keeps the handle alive; the spawned awaiter
+    // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `hmac` is an owned `Vec<u8>` copied before the call, not C memory.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_renew_delegation_token_result` and `box_error` build fresh
+    // `kafka_admin_RenewDelegationTokenResult_t` / `kafka_common_Error_t` handles, exactly
+    // one non-null, whose ownership transfers to the callee; the C user is responsible for
+    // the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -15921,6 +21434,7 @@ pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -15930,9 +21444,28 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ExpireDelegationTokenResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_bytes` requires `hmac` to be null or readable for at least `hmac_len`
+    // bytes, which this function's `# Safety` promises verbatim; the helper returns an
+    // empty buffer for a NULL pointer or a non-positive length and otherwise copies the
+    // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_expire_delegation_token`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call. `hmac` is an owned `Vec<u8>` copied before the
+    // call, not C memory.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_expire_delegation_token(a, &hmac, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_ExpireDelegationTokenResult_t` freshly boxed by
+    // `box_expire_delegation_token_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_expire_delegation_token_result) }
 }
 
@@ -15956,6 +21489,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -15966,8 +21508,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token_async(
     callback: kafka_admin_AdminClient_expire_delegation_token_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_bytes` requires `hmac` to be null or readable for at least `hmac_len`
+    // bytes, which this function's `# Safety` promises verbatim; the helper returns an
+    // empty buffer for a NULL pointer or a non-positive length and otherwise copies the
+    // bytes into an owned `Vec<u8>` on the calling thread during this call.
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_expire_delegation_token`) on
+    // the calling thread while the C caller keeps the handle alive; the spawned awaiter
+    // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `hmac` is an owned `Vec<u8>` copied before the call, not C memory.
+    // `callback` was supplied by the C caller along with `user_data` and is invoked exactly
+    // once by `complete`: on the dispatcher thread normally, inline on the calling thread
+    // when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_expire_delegation_token_result` and `box_error` build fresh
+    // `kafka_admin_ExpireDelegationTokenResult_t` / `kafka_common_Error_t` handles, exactly
+    // one non-null, whose ownership transfers to the callee; the C user is responsible for
+    // the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -16041,6 +21604,7 @@ pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -16051,13 +21615,35 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeDelegationTokenResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_kafka_principals` requires both arrays to be null or have `count`
+    // entries, each NULL or a valid C string, which this function's `# Safety` promises
+    // (the owner arrays are null or have `owner_count` entries, each NULL or a valid C
+    // string); the helper returns no principals if either array is NULL, clamps a negative
+    // count to zero and diagnoses NULL entries with an error (the documented
+    // synchronous-failure path of `kafka_admin_AdminClient_describe_delegation_token` /
+    // `_async`), reading only on the calling thread during this call.
     let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_describe_delegation_token`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call. An `owners` marshaling error makes `submit` return
+    // `Err` without touching the handle.
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
             let options = describe_delegation_token_options(owners?, has_owners_filter, timeout_ms);
             Ok(submit_describe_delegation_token(a, options))
         })
     };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DescribeDelegationTokenResult_t` freshly boxed by
+    // `box_describe_delegation_token_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_describe_delegation_token_result) }
 }
 
@@ -16082,6 +21668,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
 ///
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16093,7 +21688,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async
     callback: kafka_admin_AdminClient_describe_delegation_token_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_kafka_principals` requires both arrays to be null or have `count`
+    // entries, each NULL or a valid C string, which this function's `# Safety` promises
+    // (the owner arrays are null or have `owner_count` entries, each NULL or a valid C
+    // string); the helper returns no principals if either array is NULL, clamps a negative
+    // count to zero and diagnoses NULL entries with an error (the documented
+    // synchronous-failure path of `kafka_admin_AdminClient_describe_delegation_token` /
+    // `_async`), reading only on the calling thread during this call.
     let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_describe_delegation_token`)
+    // on the calling thread while the C caller keeps the handle alive; the spawned awaiter
+    // owns only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. An `owners` marshaling error makes `submit` return `Err`, so the
+    // callback fires inline. `callback` was supplied by the C caller along with `user_data`
+    // and is invoked exactly once by `complete`: on the dispatcher thread normally, inline
+    // on the calling thread when `admin` is NULL or marshaling failed, or on a tokio worker
+    // thread if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_describe_delegation_token_result` and `box_error` build
+    // fresh `kafka_admin_DescribeDelegationTokenResult_t` / `kafka_common_Error_t` handles,
+    // exactly one non-null, whose ownership transfers to the callee; the C user is
+    // responsible for the thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -16160,6 +21779,7 @@ pub type kafka_admin_AdminClient_describe_features_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     admin: *const kafka_admin_AdminClient_t,
@@ -16169,7 +21789,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     out_result: *mut *mut kafka_admin_DescribeFeaturesResult_t,
 ) -> *mut kafka_common_Error_t {
     let options = describe_features_options(node_id, has_node_id, timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_describe_features`) and the following
+    // `block_on`, both on the calling thread during this synchronous call, while the C
+    // caller keeps the handle alive (it has not called `kafka_admin_AdminClient_destroy`);
+    // the awaited future owns its result and borrows nothing from the handle, so nothing
+    // derived from it outlives the call.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_features(a, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_DescribeFeaturesResult_t` freshly boxed by
+    // `box_describe_features_result`, leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_describe_features_result) }
 }
 
@@ -16192,6 +21826,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
 /// # Safety
 ///
 /// `admin` must be a valid handle.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16202,6 +21845,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
     user_data: *mut c_void,
 ) {
     let options = describe_features_options(node_id, has_node_id, timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_describe_features`) on the
+    // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
+    // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. `callback` was supplied by the C caller along with `user_data` and is
+    // invoked exactly once by `complete`: on the dispatcher thread normally, inline on the
+    // calling thread when `admin` is NULL or marshaling failed, or on a tokio worker thread
+    // if the completion queue is unreachable, as this function's callback-thread
+    // documentation states. `box_describe_features_result` and `box_error` build fresh
+    // `kafka_admin_DescribeFeaturesResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -16280,6 +21939,7 @@ pub type kafka_admin_AdminClient_update_features_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     admin: *const kafka_admin_AdminClient_t,
@@ -16291,9 +21951,30 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     validate_only: bool,
     out_result: *mut *mut kafka_admin_UpdateFeaturesResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_feature_updates` requires every array to be null or have `count`
+    // entries, with name entries NULL or valid C strings, which this function's `# Safety`
+    // promises verbatim; the helper returns no updates if any of the three arrays is NULL,
+    // clamps a negative `count` to zero and diagnoses a NULL name entry with an error,
+    // reading only on the calling thread during this call.
     let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
     let options = update_features_options(timeout_ms, validate_only);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises (`admin` must be
+    // a valid handle); the helper itself returns an error for a NULL `admin` before
+    // dereferencing it. The `&dyn Admin` it derives through `handle_ref` is used only
+    // inside the `submit` closure (`submit_update_features`) and the following `block_on`,
+    // both on the calling thread during this synchronous call, while the C caller keeps the
+    // handle alive (it has not called `kafka_admin_AdminClient_destroy`); the awaited
+    // future owns its result and borrows nothing from the handle, so nothing derived from
+    // it outlives the call. An `updates` marshaling error, or `submit_update_features`' own
+    // client-side validation error, makes `submit` return `Err` and is returned as the
+    // call's error.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_update_features(a, &updates?, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer,
+    // which this function's `# Safety` promises (`out_result` must be null or writable);
+    // the helper null-checks `out_result` and on success writes exactly one element, the
+    // `kafka_admin_UpdateFeaturesResult_t` freshly boxed by `box_update_features_result`,
+    // leaving it untouched on error.
     unsafe { finish_sync(outcome, out_result, box_update_features_result) }
 }
 
@@ -16320,6 +22001,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16332,8 +22022,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     callback: kafka_admin_AdminClient_update_features_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_feature_updates` requires every array to be null or have `count`
+    // entries, with name entries NULL or valid C strings, which this function's `# Safety`
+    // promises verbatim; the helper returns no updates if any of the three arrays is NULL,
+    // clamps a negative `count` to zero and diagnoses a NULL name entry with an error,
+    // reading only on the calling thread during this call.
     let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
     let options = update_features_options(timeout_ms, validate_only);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor, which this function's `# Safety` promises; the helper
+    // tolerates a NULL `admin` by running `complete` inline with an error. The `&dyn Admin`
+    // from `handle_ref` is used only inside `submit` (`submit_update_features`) on the
+    // calling thread while the C caller keeps the handle alive; the spawned awaiter owns
+    // only the `'static` future, a `completion_tx` clone and `user_data` wrapped in
+    // `SendUserData`, so no handle reference escapes, and `kafka_admin_AdminClient_destroy`
+    // documents that the C caller must not destroy the handle while an `_async` operation
+    // is in flight. An `updates` marshaling error, or `submit_update_features`' own
+    // client-side validation error, makes `submit` return `Err`, so the callback fires
+    // inline. `callback` was supplied by the C caller along with `user_data` and is invoked
+    // exactly once by `complete`: on the dispatcher thread normally, inline on the calling
+    // thread when `admin` is NULL or marshaling failed, or on a tokio worker thread if the
+    // completion queue is unreachable, as this function's callback-thread documentation
+    // states. `box_update_features_result` and `box_error` build fresh
+    // `kafka_admin_UpdateFeaturesResult_t` / `kafka_common_Error_t` handles, exactly one
+    // non-null, whose ownership transfers to the callee; the C user is responsible for the
+    // thread-safety of `user_data`.
     unsafe {
         admin_async_value_op(
             admin,
@@ -16432,6 +22145,15 @@ fn box_describe_user_scram_credentials_result(
 unsafe fn describe_user_scram_credentials_result_ref(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> &'static DescribeUserScramCredentialsResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `describe_user_scram_credentials` call; such handles are produced only by
+    // `box_describe_user_scram_credentials_result` via
+    // `Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { .. }))`, so casting
+    // back to `*const DescribeUserScramCredentialsResultInner` names that same live
+    // allocation. The `&'static` is used only for the duration of the calling getter,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`, the only path that frees
+    // it.
     unsafe { &*(result as *const DescribeUserScramCredentialsResultInner) }
 }
 
@@ -16448,10 +22170,18 @@ fn scram_user_row_at(inner: &DescribeUserScramCredentialsResultInner, index: i32
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
+    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
+    // handle is non-null). The reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
     unsafe { describe_user_scram_credentials_result_ref(result) }.users.len() as i32
 }
 
@@ -16461,11 +22191,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
+    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
+    // handle is non-null). The reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`. The pointer this getter
+    // returns is an interior pointer into the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
     match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
         Some(row) => row.user_c.as_ptr(),
         None => std::ptr::null(),
@@ -16482,11 +22222,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
+    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
+    // handle is non-null). The reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`. The pointer this getter
+    // returns is an interior pointer into the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
     match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -16499,11 +22249,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_erro
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle from
+    // a `describe_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `describe_user_scram_credentials` result handle; only
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits null, so a valid
+    // handle is non-null). The reference is used only for the duration of this synchronous
+    // call, during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
     match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
         Some(row) => row.mechanisms.len() as i32,
         None => 0,
@@ -16517,6 +22275,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -16524,6 +22283,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
     credential_index: i32,
 ) -> i32 {
     indexed_i32_at(
+        // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle
+        // from a `describe_user_scram_credentials` call, which this function's `# Safety`
+        // promises (`result` must be a valid `describe_user_scram_credentials` result
+        // handle; only `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits
+        // null, so a valid handle is non-null). The reference is used only for the duration
+        // of this synchronous call, during which the C caller keeps the handle alive by not
+        // yet having called `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
         scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
             .map(|row| row.mechanisms.as_slice()),
         credential_index,
@@ -16536,6 +22302,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -16543,6 +22310,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
     credential_index: i32,
 ) -> i32 {
     indexed_i32_at(
+        // SAFETY: `describe_user_scram_credentials_result_ref` requires a non-null handle
+        // from a `describe_user_scram_credentials` call, which this function's `# Safety`
+        // promises (`result` must be a valid `describe_user_scram_credentials` result
+        // handle; only `kafka_admin_DescribeUserScramCredentialsResult_destroy` admits
+        // null, so a valid handle is non-null). The reference is used only for the duration
+        // of this synchronous call, during which the C caller keeps the handle alive by not
+        // yet having called `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
         scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
             .map(|row| row.iterations.as_slice()),
         credential_index,
@@ -16556,11 +22330,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 ///
 /// `result` must be null or a valid `describe_user_scram_credentials` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
     result: *mut kafka_admin_DescribeUserScramCredentialsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_user_scram_credentials` result handle, i.e. the pointer
+        // `box_describe_user_scram_credentials_result` produced with
+        // `Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_DescribeUserScramCredentialsResult_destroy`, after which it and
+        // every pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeUserScramCredentialsResultInner)) };
     }
 }
@@ -16601,6 +22384,14 @@ fn box_alter_user_scram_credentials_result(
 unsafe fn alter_user_scram_credentials_result_ref(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> &'static AlterUserScramCredentialsResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `alter_user_scram_credentials` call; such handles are produced only by
+    // `box_alter_user_scram_credentials_result` via
+    // `Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { .. }))`, so casting
+    // back to `*const AlterUserScramCredentialsResultInner` names that same live
+    // allocation. The `&'static` is used only for the duration of the calling getter,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const AlterUserScramCredentialsResultInner) }
 }
 
@@ -16609,10 +22400,18 @@ unsafe fn alter_user_scram_credentials_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
 ) -> i32 {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
+    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
+    // is non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`.
     unsafe { alter_user_scram_credentials_result_ref(result) }.users.len() as i32
 }
 
@@ -16622,11 +22421,21 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
+    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
+    // is non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`. The pointer this getter
+    // returns is an interior pointer into the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
     cstring_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.users, index)
 }
 
@@ -16636,11 +22445,21 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `alter_user_scram_credentials_result_ref` requires a non-null handle from a
+    // `alter_user_scram_credentials` call, which this function's `# Safety` promises
+    // (`result` must be a valid `alter_user_scram_credentials` result handle; only
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy` admits null, so a valid handle
+    // is non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_AlterUserScramCredentialsResult_destroy`. The pointer this getter
+    // returns is an interior pointer into the same allocation and is documented as
+    // borrowed, valid until that `_destroy`.
     optional_error_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.errors, index)
 }
 
@@ -16651,11 +22470,20 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
 ///
 /// `result` must be null or a valid `alter_user_scram_credentials` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
     result: *mut kafka_admin_AlterUserScramCredentialsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `alter_user_scram_credentials` result handle, i.e. the pointer
+        // `box_alter_user_scram_credentials_result` produced with
+        // `Box::into_raw(Box::new(AlterUserScramCredentialsResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_AlterUserScramCredentialsResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut AlterUserScramCredentialsResultInner)) };
     }
 }
@@ -16689,6 +22517,14 @@ fn box_create_delegation_token_result(token: DelegationToken) -> *mut kafka_admi
 unsafe fn create_delegation_token_result_ref(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
 ) -> &'static CreateDelegationTokenResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `create_delegation_token` call; such handles are produced only by
+    // `box_create_delegation_token_result` via
+    // `Box::into_raw(Box::new(CreateDelegationTokenResultInner { .. }))`, so casting back
+    // to `*const CreateDelegationTokenResultInner` names that same live allocation. The
+    // `&'static` is used only for the duration of the calling getter, during which the C
+    // caller keeps the handle alive by not yet having called
+    // `kafka_admin_CreateDelegationTokenResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const CreateDelegationTokenResultInner) }
 }
 
@@ -16698,10 +22534,20 @@ unsafe fn create_delegation_token_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
 ) -> *const kafka_common_security_token_delegation_DelegationToken_t {
+    // SAFETY: `create_delegation_token_result_ref` requires a non-null handle from a
+    // `create_delegation_token` call, which this function's `# Safety` promises (`result`
+    // must be a valid `create_delegation_token` result handle; only
+    // `kafka_admin_CreateDelegationTokenResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_CreateDelegationTokenResult_destroy`. The pointer this getter returns is
+    // an interior pointer into the same allocation and is documented as borrowed, valid
+    // until that `_destroy`.
     unsafe { create_delegation_token_result_ref(result) }.token.as_ptr()
 }
 
@@ -16710,11 +22556,20 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
     result: *mut kafka_admin_CreateDelegationTokenResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `create_delegation_token` result handle, i.e. the pointer
+        // `box_create_delegation_token_result` produced with
+        // `Box::into_raw(Box::new(CreateDelegationTokenResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_CreateDelegationTokenResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut CreateDelegationTokenResultInner)) };
     }
 }
@@ -16742,10 +22597,19 @@ fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_
 /// # Safety
 ///
 /// `result` must be a valid `renew_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_RenewDelegationTokenResult_t,
 ) -> i64 {
+    // SAFETY: `result` is, per this function's `# Safety`, a valid `renew_delegation_token`
+    // result handle (non-null, since only `kafka_admin_RenewDelegationTokenResult_destroy`
+    // admits null); such handles are produced only by `box_renew_delegation_token_result`
+    // via `Box::into_raw(Box::new(RenewDelegationTokenResultInner { .. }))`, so casting
+    // back to `*const RenewDelegationTokenResultInner` names that live allocation. The
+    // reference is used only to copy `expiry_timestamp` during this synchronous call, while
+    // the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_RenewDelegationTokenResult_destroy`.
     unsafe { &*(result as *const RenewDelegationTokenResultInner) }.expiry_timestamp
 }
 
@@ -16754,11 +22618,20 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 /// # Safety
 ///
 /// `result` must be null or a valid `renew_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
     result: *mut kafka_admin_RenewDelegationTokenResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `renew_delegation_token` result handle, i.e. the pointer
+        // `box_renew_delegation_token_result` produced with
+        // `Box::into_raw(Box::new(RenewDelegationTokenResultInner { .. }))`. Reconstituting
+        // and dropping the `Box` here is the single, final use: the result documentation
+        // tells the caller to free the handle exactly once with
+        // `kafka_admin_RenewDelegationTokenResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut RenewDelegationTokenResultInner)) };
     }
 }
@@ -16787,10 +22660,20 @@ fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin
 /// # Safety
 ///
 /// `result` must be a valid `expire_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_ExpireDelegationTokenResult_t,
 ) -> i64 {
+    // SAFETY: `result` is, per this function's `# Safety`, a valid
+    // `expire_delegation_token` result handle (non-null, since only
+    // `kafka_admin_ExpireDelegationTokenResult_destroy` admits null); such handles are
+    // produced only by `box_expire_delegation_token_result` via
+    // `Box::into_raw(Box::new(ExpireDelegationTokenResultInner { .. }))`, so casting back
+    // to `*const ExpireDelegationTokenResultInner` names that live allocation. The
+    // reference is used only to copy `expiry_timestamp` during this synchronous call, while
+    // the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_ExpireDelegationTokenResult_destroy`.
     unsafe { &*(result as *const ExpireDelegationTokenResultInner) }.expiry_timestamp
 }
 
@@ -16799,11 +22682,20 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestam
 /// # Safety
 ///
 /// `result` must be null or a valid `expire_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
     result: *mut kafka_admin_ExpireDelegationTokenResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `expire_delegation_token` result handle, i.e. the pointer
+        // `box_expire_delegation_token_result` produced with
+        // `Box::into_raw(Box::new(ExpireDelegationTokenResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_ExpireDelegationTokenResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut ExpireDelegationTokenResultInner)) };
     }
 }
@@ -16839,6 +22731,14 @@ fn box_describe_delegation_token_result(
 unsafe fn describe_delegation_token_result_ref(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
 ) -> &'static DescribeDelegationTokenResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `describe_delegation_token` call; such handles are produced only by
+    // `box_describe_delegation_token_result` via
+    // `Box::into_raw(Box::new(DescribeDelegationTokenResultInner { .. }))`, so casting back
+    // to `*const DescribeDelegationTokenResultInner` names that same live allocation. The
+    // `&'static` is used only for the duration of the calling getter, during which the C
+    // caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeDelegationTokenResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const DescribeDelegationTokenResultInner) }
 }
 
@@ -16847,10 +22747,18 @@ unsafe fn describe_delegation_token_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
 ) -> i32 {
+    // SAFETY: `describe_delegation_token_result_ref` requires a non-null handle from a
+    // `describe_delegation_token` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_delegation_token` result handle; only
+    // `kafka_admin_DescribeDelegationTokenResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeDelegationTokenResult_destroy`.
     unsafe { describe_delegation_token_result_ref(result) }.tokens.len() as i32
 }
 
@@ -16860,6 +22768,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
@@ -16868,6 +22777,16 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     if index < 0 {
         return std::ptr::null();
     }
+    // SAFETY: `describe_delegation_token_result_ref` requires a non-null handle from a
+    // `describe_delegation_token` call, which this function's `# Safety` promises (`result`
+    // must be a valid `describe_delegation_token` result handle; only
+    // `kafka_admin_DescribeDelegationTokenResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeDelegationTokenResult_destroy`. The pointer this getter returns
+    // is an interior pointer into the same allocation and is documented as borrowed, valid
+    // until that `_destroy`. The negative `index` was rejected above and `get`
+    // bounds-checks the rest.
     match unsafe { describe_delegation_token_result_ref(result) }
         .tokens
         .get(index as usize)
@@ -16883,11 +22802,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
     result: *mut kafka_admin_DescribeDelegationTokenResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_delegation_token` result handle, i.e. the pointer
+        // `box_describe_delegation_token_result` produced with
+        // `Box::into_raw(Box::new(DescribeDelegationTokenResultInner { .. }))`.
+        // Reconstituting and dropping the `Box` here is the single, final use: the result
+        // documentation tells the caller to free the handle exactly once with
+        // `kafka_admin_DescribeDelegationTokenResult_destroy`, after which it and every
+        // pointer borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeDelegationTokenResultInner)) };
     }
 }
@@ -16941,6 +22869,14 @@ fn box_describe_features_result(metadata: FeatureMetadata) -> *mut kafka_admin_D
 unsafe fn describe_features_result_ref(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> &'static DescribeFeaturesResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `describe_features` call; such handles are produced only by
+    // `box_describe_features_result` via
+    // `Box::into_raw(Box::new(DescribeFeaturesResultInner { .. }))`, so casting back to
+    // `*const DescribeFeaturesResultInner` names that same live allocation. The `&'static`
+    // is used only for the duration of the calling getter, during which the C caller keeps
+    // the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const DescribeFeaturesResultInner) }
 }
 
@@ -16949,10 +22885,18 @@ unsafe fn describe_features_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> i32 {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
     unsafe { describe_features_result_ref(result) }.finalized_features.len() as i32
 }
 
@@ -16962,11 +22906,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_feature(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     cstring_at(&unsafe { describe_features_result_ref(result) }.finalized_features, index)
 }
 
@@ -16976,12 +22930,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_featur
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
     indexed_i16_at(
+        // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+        // `describe_features` call, which this function's `# Safety` promises (`result`
+        // must be a valid `describe_features` result handle; only
+        // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+        // non-null). The reference is used only for the duration of this synchronous call,
+        // during which the C caller keeps the handle alive by not yet having called
+        // `kafka_admin_DescribeFeaturesResult_destroy`.
         &unsafe { describe_features_result_ref(result) }.finalized_min_version_levels,
         index,
     )
@@ -16993,12 +22955,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_ve
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
     indexed_i16_at(
+        // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+        // `describe_features` call, which this function's `# Safety` promises (`result`
+        // must be a valid `describe_features` result handle; only
+        // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+        // non-null). The reference is used only for the duration of this synchronous call,
+        // during which the C caller keeps the handle alive by not yet having called
+        // `kafka_admin_DescribeFeaturesResult_destroy`.
         &unsafe { describe_features_result_ref(result) }.finalized_max_version_levels,
         index,
     )
@@ -17015,11 +22985,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_ve
 ///
 /// `result` must be a valid `describe_features` result handle; `out_epoch` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_epoch(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     out_epoch: *mut i64,
 ) -> bool {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null), and the reference is used
+    // only to copy `finalized_features_epoch` during this synchronous call while the C
+    // caller keeps the handle alive. `write_optional` requires `out_epoch` to be null or
+    // writable, which the same `# Safety` promises; it null-checks `out_epoch` and writes
+    // exactly one `i64` when the epoch is present.
     unsafe { write_optional(describe_features_result_ref(result).finalized_features_epoch, out_epoch) }
 }
 
@@ -17030,10 +23009,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_e
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
 ) -> i32 {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
     unsafe { describe_features_result_ref(result) }.supported_features.len() as i32
 }
 
@@ -17043,11 +23030,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_feature(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     cstring_at(&unsafe { describe_features_result_ref(result) }.supported_features, index)
 }
 
@@ -17057,11 +23054,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_featur
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_version(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
     indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_min_versions, index)
 }
 
@@ -17071,11 +23076,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_ve
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_version(
     result: *const kafka_admin_DescribeFeaturesResult_t,
     index: i32,
 ) -> i16 {
+    // SAFETY: `describe_features_result_ref` requires a non-null handle from a
+    // `describe_features` call, which this function's `# Safety` promises (`result` must be
+    // a valid `describe_features` result handle; only
+    // `kafka_admin_DescribeFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_DescribeFeaturesResult_destroy`.
     indexed_i16_at(&unsafe { describe_features_result_ref(result) }.supported_max_versions, index)
 }
 
@@ -17084,9 +23097,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_ve
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut kafka_admin_DescribeFeaturesResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `describe_features` result handle, i.e. the pointer
+        // `box_describe_features_result` produced with
+        // `Box::into_raw(Box::new(DescribeFeaturesResultInner { .. }))`. Reconstituting and
+        // dropping the `Box` here is the single, final use: the result documentation tells
+        // the caller to free the handle exactly once with
+        // `kafka_admin_DescribeFeaturesResult_destroy`, after which it and every pointer
+        // borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut DescribeFeaturesResultInner)) };
     }
 }
@@ -17121,6 +23143,13 @@ fn box_update_features_result(outcomes: UpdateFeaturesOutcomes) -> *mut kafka_ad
 unsafe fn update_features_result_ref(
     result: *const kafka_admin_UpdateFeaturesResult_t,
 ) -> &'static UpdateFeaturesResultInner {
+    // SAFETY: `result` is, per this helper's `# Safety`, a non-null handle from a
+    // `update_features` call; such handles are produced only by
+    // `box_update_features_result` via `Box::into_raw(Box::new(UpdateFeaturesResultInner {
+    // .. }))`, so casting back to `*const UpdateFeaturesResultInner` names that same live
+    // allocation. The `&'static` is used only for the duration of the calling getter,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_UpdateFeaturesResult_destroy`, the only path that frees it.
     unsafe { &*(result as *const UpdateFeaturesResultInner) }
 }
 
@@ -17129,10 +23158,18 @@ unsafe fn update_features_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
     result: *const kafka_admin_UpdateFeaturesResult_t,
 ) -> i32 {
+    // SAFETY: `update_features_result_ref` requires a non-null handle from a
+    // `update_features` call, which this function's `# Safety` promises (`result` must be a
+    // valid `update_features` result handle; only
+    // `kafka_admin_UpdateFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_UpdateFeaturesResult_destroy`.
     unsafe { update_features_result_ref(result) }.features.len() as i32
 }
 
@@ -17142,11 +23179,21 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
     result: *const kafka_admin_UpdateFeaturesResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `update_features_result_ref` requires a non-null handle from a
+    // `update_features` call, which this function's `# Safety` promises (`result` must be a
+    // valid `update_features` result handle; only
+    // `kafka_admin_UpdateFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_UpdateFeaturesResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     cstring_at(&unsafe { update_features_result_ref(result) }.features, index)
 }
 
@@ -17156,11 +23203,21 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
     result: *const kafka_admin_UpdateFeaturesResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `update_features_result_ref` requires a non-null handle from a
+    // `update_features` call, which this function's `# Safety` promises (`result` must be a
+    // valid `update_features` result handle; only
+    // `kafka_admin_UpdateFeaturesResult_destroy` admits null, so a valid handle is
+    // non-null). The reference is used only for the duration of this synchronous call,
+    // during which the C caller keeps the handle alive by not yet having called
+    // `kafka_admin_UpdateFeaturesResult_destroy`. The pointer this getter returns is an
+    // interior pointer into the same allocation and is documented as borrowed, valid until
+    // that `_destroy`.
     optional_error_at(&unsafe { update_features_result_ref(result) }.errors, index)
 }
 
@@ -17169,9 +23226,18 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut kafka_admin_UpdateFeaturesResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above) and, per this function's `# Safety`,
+        // a valid `update_features` result handle, i.e. the pointer
+        // `box_update_features_result` produced with
+        // `Box::into_raw(Box::new(UpdateFeaturesResultInner { .. }))`. Reconstituting and
+        // dropping the `Box` here is the single, final use: the result documentation tells
+        // the caller to free the handle exactly once with
+        // `kafka_admin_UpdateFeaturesResult_destroy`, after which it and every pointer
+        // borrowed from it are invalid.
         unsafe { drop(Box::from_raw(result as *mut UpdateFeaturesResultInner)) };
     }
 }
@@ -17253,6 +23319,12 @@ unsafe fn read_i64s(values: *const i64, count: i32) -> Vec<i64> {
     }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
+        // SAFETY: `values` is non-null (checked above) and, per this helper's `# Safety`,
+        // has `count` readable entries; `i < count.max(0)` (a negative `count` reads
+        // nothing), so each `i64` read is in bounds. Its caller `list_transactions_options`
+        // passes the `producer_ids` pair, which that helper's `# Safety` requires to be
+        // null or have `producer_ids.1` readable entries, and the values are copied into an
+        // owned `Vec` during this synchronous call.
         out.push(unsafe { *values.add(i) });
     }
     out
@@ -17273,6 +23345,11 @@ unsafe fn read_i64s(values: *const i64, count: i32) -> Vec<i64> {
 ///
 /// `names` must be null or have `count` entries, each NULL or a valid C string.
 unsafe fn read_transaction_states(names: *const *const c_char, count: i32) -> Vec<TransactionState> {
+    // SAFETY: `read_strings` requires `names` to be null or have `count` entries, each NULL
+    // or a valid C string, which this helper's `# Safety` promises verbatim (and which
+    // `list_transactions_options` requires of its `states` pair in turn); the helper treats
+    // a NULL array as no states, skips NULL entries, clamps a negative `count` to zero and
+    // copies each string during this synchronous call.
     unsafe { read_strings(names, count) }
         .iter()
         .map(|name| TransactionState::parse(name))
@@ -17297,6 +23374,10 @@ unsafe fn read_abort_transaction_spec(
     producer_epoch: i32,
     coordinator_epoch: i32,
 ) -> Result<AbortTransactionSpec, Error> {
+    // SAFETY: `read_required_string` requires `topic` to be null or a valid C string and
+    // itself turns NULL into a `LocalIllegalArgument` error, which this helper's `# Safety`
+    // promises (`topic` must be null or a valid C string); the string is copied into an
+    // owned `String` during this synchronous call.
     let topic = unsafe { read_required_string(topic, "abort transaction topic") }?;
     // Java's `producerEpoch` is a `short`; it crosses as `int32_t` for the same
     // reason every other enum/epoch column does, and is narrowed here rather
@@ -17381,9 +23462,22 @@ unsafe fn list_transactions_options(
 ) -> ListTransactionsOptions {
     ListTransactionsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
+        // SAFETY: `read_transaction_states` requires `states.0` to be null or have
+        // `states.1` entries, each NULL or a valid C string, which this helper's `# Safety`
+        // promises verbatim for the `states` pair; binding each count to its own array in a
+        // tuple is what keeps `states.1` from being confused with `producer_ids.1`, and the
+        // helper tolerates a NULL array or entry and copies every string during this
+        // synchronous call.
         .filter_states(unsafe { read_transaction_states(states.0, states.1) })
+        // SAFETY: `read_i64s` requires `producer_ids.0` to be null or have `producer_ids.1`
+        // readable entries, which this helper's `# Safety` promises verbatim for the
+        // `producer_ids` pair; the helper returns an empty vector for a NULL array, clamps
+        // a negative count to zero and copies the values during this synchronous call.
         .filter_producer_ids(unsafe { read_i64s(producer_ids.0, producer_ids.1) })
         .filter_on_duration(duration_ms)
+        // SAFETY: `optional_owned_string` requires `transactional_id_pattern` to be null or
+        // a valid C string, which this helper's `# Safety` promises verbatim; the helper
+        // preserves NULL as `None` and copies the text during this synchronous call.
         .filter_on_transactional_id_pattern(unsafe { optional_owned_string(transactional_id_pattern) })
 }
 
@@ -17397,6 +23491,10 @@ unsafe fn optional_owned_string(text: *const c_char) -> Option<String> {
     if text.is_null() {
         return None;
     }
+    // SAFETY: `text` is non-null (checked above; NULL returned `None`) and, per this
+    // helper's `# Safety`, a valid C string, so `CStr::from_ptr` reads a NUL-terminated
+    // string the C caller keeps alive during this synchronous call; the text is copied into
+    // an owned `String` before returning.
     Some(unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string())
 }
 
@@ -17640,6 +23738,15 @@ fn box_describe_producers_result(outcomes: DescribeProducersOutcomes) -> *mut ka
 unsafe fn describe_producers_result_ref(
     result: *const kafka_admin_DescribeProducersResult_t,
 ) -> &'static DescribeProducersResultInner {
+    // SAFETY: Per this function's `# Safety`, `result` is a non-null handle from a
+    // `describe_producers` call, i.e. the pointer `box_describe_producers_result` produced
+    // with `Box::into_raw(Box::new(DescribeProducersResultInner { .. }))`, so behind the
+    // opaque `kafka_admin_DescribeProducersResult_t` it points to a live, aligned,
+    // initialised `DescribeProducersResultInner` and a shared reborrow is sound. The
+    // `'static` lifetime is nominal: every caller is a synchronous getter that uses the
+    // reference only for the duration of its own call, during which the C caller keeps the
+    // handle alive, since it is only freed by
+    // `kafka_admin_DescribeProducersResult_destroy`.
     unsafe { &*(result as *const DescribeProducersResultInner) }
 }
 
@@ -17658,10 +23765,18 @@ fn producer_rows_at(inner: &DescribeProducersResultInner, index: i32) -> Option<
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_count(
     result: *const kafka_admin_DescribeProducersResult_t,
 ) -> i32 {
+    // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+    // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_producers` result handle, i.e. one returned by
+    // `box_describe_producers_result` and not yet passed to
+    // `kafka_admin_DescribeProducersResult_destroy`; that contract, not a body check,
+    // supplies the non-null guarantee. The reference is used only to read `topics.len()`
+    // within this synchronous call, during which the C caller keeps the handle alive.
     unsafe { describe_producers_result_ref(result) }.topics.len() as i32
 }
 
@@ -17671,11 +23786,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_topic(
     result: *const kafka_admin_DescribeProducersResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+    // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_producers` result handle from `box_describe_producers_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `cstring_at` within this synchronous call, and
+    // the returned `CString` pointer stays borrowed from the handle the C caller keeps
+    // alive.
     cstring_at(&unsafe { describe_producers_result_ref(result) }.topics, index)
 }
 
@@ -17684,11 +23807,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
     result: *const kafka_admin_DescribeProducersResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+    // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_producers` result handle from `box_describe_producers_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `partition_at` within this synchronous call,
+    // during which the C caller keeps the handle alive.
     partition_at(&unsafe { describe_producers_result_ref(result) }.partitions, index)
 }
 
@@ -17698,11 +23828,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
     result: *const kafka_admin_DescribeProducersResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+    // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_producers` result handle from `box_describe_producers_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `optional_error_at` within this synchronous
+    // call, and the returned error pointer stays borrowed from the handle the C caller
+    // keeps alive.
     optional_error_at(&unsafe { describe_producers_result_ref(result) }.errors, index)
 }
 
@@ -17712,11 +23850,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_count(
     result: *const kafka_admin_DescribeProducersResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+    // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_producers` result handle from `box_describe_producers_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `producer_rows_at` within this synchronous call,
+    // during which the C caller keeps the handle alive.
     match producer_rows_at(unsafe { describe_producers_result_ref(result) }, index) {
         Some(rows) => rows.producer_ids.len() as i32,
         None => 0,
@@ -17730,6 +23875,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17737,6 +23883,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
     producer_index: i32,
 ) -> i64 {
     indexed_i64_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_i64_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.producer_ids.as_slice()),
         producer_index,
     )
@@ -17749,6 +23902,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17756,6 +23910,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
     producer_index: i32,
 ) -> i32 {
     indexed_i32_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_i32_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.producer_epochs.as_slice()),
         producer_index,
     )
@@ -17768,6 +23929,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17775,6 +23937,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
     producer_index: i32,
 ) -> i32 {
     indexed_i32_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_i32_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.last_sequences.as_slice()),
         producer_index,
     )
@@ -17787,6 +23956,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17794,6 +23964,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
     producer_index: i32,
 ) -> i64 {
     indexed_i64_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_i64_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index).map(|r| r.last_timestamps.as_slice()),
         producer_index,
     )
@@ -17811,6 +23988,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
 ///
 /// `result` must be a valid `describe_producers` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17819,10 +23997,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transac
     out: *mut i64,
 ) -> bool {
     let value = indexed_optional_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_optional_at` to copy out one `Option<i64>` within this synchronous call,
+        // during which the C caller keeps the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index)
             .map(|r| r.current_transaction_start_offsets.as_slice()),
         producer_index,
     );
+    // SAFETY: `write_optional` requires `out` to be null or writable; per this function's
+    // `# Safety`, `out` is null or writable. It writes exactly one `i64` through `out`, and
+    // only when `value` is `Some` and `out` is non-null, otherwise it merely reports
+    // absence, so a NULL `out` is the documented presence-only query.
     unsafe { write_optional(value, out) }
 }
 
@@ -17835,6 +24024,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transac
 ///
 /// `result` must be a valid `describe_producers` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epoch(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -17843,10 +24033,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epo
     out: *mut i32,
 ) -> bool {
     let value = indexed_optional_at(
+        // SAFETY: `describe_producers_result_ref` requires a non-null handle from a
+        // `describe_producers` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_producers` result handle from `box_describe_producers_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `producer_rows_at` /
+        // `indexed_optional_at` to copy out one `Option<i32>` within this synchronous call,
+        // during which the C caller keeps the handle alive.
         producer_rows_at(unsafe { describe_producers_result_ref(result) }, index)
             .map(|r| r.coordinator_epochs.as_slice()),
         producer_index,
     );
+    // SAFETY: `write_optional` requires `out` to be null or writable; per this function's
+    // `# Safety`, `out` is null or writable. It writes exactly one `i32` through `out`, and
+    // only when `value` is `Some` and `out` is non-null, otherwise it merely reports
+    // absence, so a NULL `out` is the documented presence-only query.
     unsafe { write_optional(value, out) }
 }
 
@@ -17855,11 +24056,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epo
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
     result: *mut kafka_admin_DescribeProducersResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above). Per this function's `# Safety`, a
+        // non-null `result` is a valid `describe_producers` result handle: the pointer
+        // `box_describe_producers_result` created with
+        // `Box::into_raw(Box::new(DescribeProducersResultInner { .. }))`, so
+        // `Box::from_raw` with that same inner type reconstitutes exactly that allocation.
+        // This is the single, final use: the destroy contract, together with the
+        // `out_result` and completion-callback docs that say to free the result with this
+        // function, makes the caller relinquish the handle here, and the `Box` is dropped
+        // once, freeing the rows, `CString`s and error inners.
         unsafe { drop(Box::from_raw(result as *mut DescribeProducersResultInner)) };
     }
 }
@@ -17950,6 +24161,15 @@ fn box_describe_transactions_result(
 unsafe fn describe_transactions_result_ref(
     result: *const kafka_admin_DescribeTransactionsResult_t,
 ) -> &'static DescribeTransactionsResultInner {
+    // SAFETY: Per this function's `# Safety`, `result` is a non-null handle from a
+    // `describe_transactions` call, i.e. the pointer `box_describe_transactions_result`
+    // produced with `Box::into_raw(Box::new(DescribeTransactionsResultInner { .. }))`, so
+    // behind the opaque `kafka_admin_DescribeTransactionsResult_t` it points to a live,
+    // aligned, initialised `DescribeTransactionsResultInner` and a shared reborrow is
+    // sound. The `'static` lifetime is nominal: every caller is a synchronous getter that
+    // uses the reference only for the duration of its own call, during which the C caller
+    // keeps the handle alive, since it is only freed by
+    // `kafka_admin_DescribeTransactionsResult_destroy`.
     unsafe { &*(result as *const DescribeTransactionsResultInner) }
 }
 
@@ -17967,10 +24187,19 @@ fn transaction_row_at(inner: &DescribeTransactionsResultInner, index: i32) -> Op
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_count(
     result: *const kafka_admin_DescribeTransactionsResult_t,
 ) -> i32 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle, i.e. one returned by
+    // `box_describe_transactions_result` and not yet passed to
+    // `kafka_admin_DescribeTransactionsResult_destroy`; that contract, not a body check,
+    // supplies the non-null guarantee. The reference is used only to read
+    // `transactions.len()` within this synchronous call, during which the C caller keeps
+    // the handle alive.
     unsafe { describe_transactions_result_ref(result) }.transactions.len() as i32
 }
 
@@ -17980,11 +24209,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactional_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` within this
+    // synchronous call, and the returned `CString` pointer stays borrowed from the handle
+    // the C caller keeps alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.transactional_id.as_ptr(),
         None => std::ptr::null(),
@@ -17997,11 +24234,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactiona
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` / `error_ptr`
+    // within this synchronous call, and the returned error pointer stays borrowed from the
+    // handle the C caller keeps alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -18014,11 +24259,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_coordinator_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` to copy out one
+    // `i32` within this synchronous call, during which the C caller keeps the handle alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.coordinator_id,
         None => -1,
@@ -18036,11 +24288,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_coordinator_
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_state(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` within this
+    // synchronous call, and the returned state `CString` pointer stays borrowed from the
+    // handle the C caller keeps alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.state.as_ptr(),
         None => std::ptr::null(),
@@ -18054,11 +24314,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_state(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` to copy out one
+    // `i64` within this synchronous call, during which the C caller keeps the handle alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.producer_id,
         None => -1,
@@ -18072,11 +24339,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_epoch(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` to copy out one
+    // `i32` within this synchronous call, during which the C caller keeps the handle alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.producer_epoch,
         None => -1,
@@ -18090,11 +24364,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_epo
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` to copy out one
+    // `i64` within this synchronous call, during which the C caller keeps the handle alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.transaction_timeout_ms,
         None => -1,
@@ -18110,14 +24391,26 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_
 ///
 /// `result` must be a valid `describe_transactions` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
     out: *mut i64,
 ) -> bool {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` to copy out one
+    // `Option<i64>` within this synchronous call, during which the C caller keeps the
+    // handle alive.
     let value = transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index)
         .and_then(|row| row.transaction_start_time_ms);
+    // SAFETY: `write_optional` requires `out` to be null or writable; per this function's
+    // `# Safety`, `out` is null or writable. It writes exactly one `i64` through `out`, and
+    // only when `value` is `Some` and `out` is non-null, otherwise it merely reports
+    // absence, so a NULL `out` is the documented presence-only query.
     unsafe { write_optional(value, out) }
 }
 
@@ -18127,11 +24420,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_count(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` for
+    // `partition_topics.len()` within this synchronous call, during which the C caller
+    // keeps the handle alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => row.partition_topics.len() as i32,
         None => 0,
@@ -18146,12 +24447,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
     partition_index: i32,
 ) -> *const c_char {
+    // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+    // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `describe_transactions` result handle from `box_describe_transactions_result` that
+    // has not been destroyed; the contract supplies the non-null guarantee, as the body
+    // does not check. The reference is only read by `transaction_row_at` / `cstring_at`
+    // within this synchronous call, and the returned `CString` pointer stays borrowed from
+    // the handle the C caller keeps alive.
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => cstring_at(&row.partition_topics, partition_index),
         None => std::ptr::null(),
@@ -18164,6 +24473,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18171,6 +24481,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
     partition_index: i32,
 ) -> i32 {
     indexed_i32_at(
+        // SAFETY: `describe_transactions_result_ref` requires a non-null handle from a
+        // `describe_transactions` call. Per this function's `# Safety`, `result` is a valid
+        // `describe_transactions` result handle from `box_describe_transactions_result`
+        // that has not been destroyed; the contract supplies the non-null guarantee, as the
+        // body does not check. The reference is only read by `transaction_row_at` /
+        // `indexed_i32_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index)
             .map(|row| row.partition_ids.as_slice()),
         partition_index,
@@ -18182,11 +24499,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
     result: *mut kafka_admin_DescribeTransactionsResult_t,
 ) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above). Per this function's `# Safety`, a
+        // non-null `result` is a valid `describe_transactions` result handle: the pointer
+        // `box_describe_transactions_result` created with
+        // `Box::into_raw(Box::new(DescribeTransactionsResultInner { .. }))`, so
+        // `Box::from_raw` with that same inner type reconstitutes exactly that allocation.
+        // This is the single, final use: the destroy contract, together with the
+        // `out_result` and completion-callback docs that say to free the result with this
+        // function, makes the caller relinquish the handle here, and the `Box` is dropped
+        // once, freeing the rows, `CString`s and error inners.
         unsafe { drop(Box::from_raw(result as *mut DescribeTransactionsResultInner)) };
     }
 }
@@ -18254,6 +24581,14 @@ fn box_fence_producers_result(outcomes: FenceProducersOutcomes) -> *mut kafka_ad
 unsafe fn fence_producers_result_ref(
     result: *const kafka_admin_FenceProducersResult_t,
 ) -> &'static FenceProducersResultInner {
+    // SAFETY: Per this function's `# Safety`, `result` is a non-null handle from a
+    // `fence_producers` call, i.e. the pointer `box_fence_producers_result` produced with
+    // `Box::into_raw(Box::new(FenceProducersResultInner { .. }))`, so behind the opaque
+    // `kafka_admin_FenceProducersResult_t` it points to a live, aligned, initialised
+    // `FenceProducersResultInner` and a shared reborrow is sound. The `'static` lifetime is
+    // nominal: every caller is a synchronous getter that uses the reference only for the
+    // duration of its own call, during which the C caller keeps the handle alive, since it
+    // is only freed by `kafka_admin_FenceProducersResult_destroy`.
     unsafe { &*(result as *const FenceProducersResultInner) }
 }
 
@@ -18263,10 +24598,18 @@ unsafe fn fence_producers_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_count(
     result: *const kafka_admin_FenceProducersResult_t,
 ) -> i32 {
+    // SAFETY: `fence_producers_result_ref` requires a non-null handle from a
+    // `fence_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `fence_producers` result handle, i.e. one returned by `box_fence_producers_result`
+    // and not yet passed to `kafka_admin_FenceProducersResult_destroy`; that contract, not
+    // a body check, supplies the non-null guarantee. The reference is used only to read
+    // `transactional_ids.len()` within this synchronous call, during which the C caller
+    // keeps the handle alive.
     unsafe { fence_producers_result_ref(result) }.transactional_ids.len() as i32
 }
 
@@ -18276,11 +24619,18 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
     result: *const kafka_admin_FenceProducersResult_t,
     index: i32,
 ) -> *const c_char {
+    // SAFETY: `fence_producers_result_ref` requires a non-null handle from a
+    // `fence_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `fence_producers` result handle from `box_fence_producers_result` that has not been
+    // destroyed; the contract supplies the non-null guarantee, as the body does not check.
+    // The reference is only read by `cstring_at` within this synchronous call, and the
+    // returned `CString` pointer stays borrowed from the handle the C caller keeps alive.
     cstring_at(&unsafe { fence_producers_result_ref(result) }.transactional_ids, index)
 }
 
@@ -18290,11 +24640,18 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
     result: *const kafka_admin_FenceProducersResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `fence_producers_result_ref` requires a non-null handle from a
+    // `fence_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `fence_producers` result handle from `box_fence_producers_result` that has not been
+    // destroyed; the contract supplies the non-null guarantee, as the body does not check.
+    // The reference is only read by `optional_error_at` within this synchronous call, and
+    // the returned error pointer stays borrowed from the handle the C caller keeps alive.
     optional_error_at(&unsafe { fence_producers_result_ref(result) }.errors, index)
 }
 
@@ -18306,11 +24663,18 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_producer_id(
     result: *const kafka_admin_FenceProducersResult_t,
     index: i32,
 ) -> i64 {
+    // SAFETY: `fence_producers_result_ref` requires a non-null handle from a
+    // `fence_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `fence_producers` result handle from `box_fence_producers_result` that has not been
+    // destroyed; the contract supplies the non-null guarantee, as the body does not check.
+    // The reference is only read by `indexed_i64_at` to copy out one `i64` within this
+    // synchronous call, during which the C caller keeps the handle alive.
     indexed_i64_at(Some(&unsafe { fence_producers_result_ref(result) }.producer_ids), index)
 }
 
@@ -18322,11 +24686,18 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_epoch_id(
     result: *const kafka_admin_FenceProducersResult_t,
     index: i32,
 ) -> i16 {
+    // SAFETY: `fence_producers_result_ref` requires a non-null handle from a
+    // `fence_producers` call. Per this function's `# Safety`, `result` is a valid
+    // `fence_producers` result handle from `box_fence_producers_result` that has not been
+    // destroyed; the contract supplies the non-null guarantee, as the body does not check.
+    // The reference is only read by `indexed_i16_at` to copy out one `i16` within this
+    // synchronous call, during which the C caller keeps the handle alive.
     indexed_i16_at(&unsafe { fence_producers_result_ref(result) }.epochs, index)
 }
 
@@ -18335,9 +24706,19 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_epoch_id(
 /// # Safety
 ///
 /// `result` must be null or a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(result: *mut kafka_admin_FenceProducersResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above). Per this function's `# Safety`, a
+        // non-null `result` is a valid `fence_producers` result handle: the pointer
+        // `box_fence_producers_result` created with
+        // `Box::into_raw(Box::new(FenceProducersResultInner { .. }))`, so `Box::from_raw`
+        // with that same inner type reconstitutes exactly that allocation. This is the
+        // single, final use: the destroy contract, together with the `out_result` and
+        // completion-callback docs that say to free the result with this function, makes
+        // the caller relinquish the handle here, and the `Box` is dropped once, freeing the
+        // `CString`s, scalar columns and error inners.
         unsafe { drop(Box::from_raw(result as *mut FenceProducersResultInner)) };
     }
 }
@@ -18407,6 +24788,14 @@ fn box_list_transactions_result(outcomes: ListTransactionsOutcomes) -> *mut kafk
 unsafe fn list_transactions_result_ref(
     result: *const kafka_admin_ListTransactionsResult_t,
 ) -> &'static ListTransactionsResultInner {
+    // SAFETY: Per this function's `# Safety`, `result` is a non-null handle from a
+    // `list_transactions` call, i.e. the pointer `box_list_transactions_result` produced
+    // with `Box::into_raw(Box::new(ListTransactionsResultInner { .. }))`, so behind the
+    // opaque `kafka_admin_ListTransactionsResult_t` it points to a live, aligned,
+    // initialised `ListTransactionsResultInner` and a shared reborrow is sound. The
+    // `'static` lifetime is nominal: every caller is a synchronous getter that uses the
+    // reference only for the duration of its own call, during which the C caller keeps the
+    // handle alive, since it is only freed by `kafka_admin_ListTransactionsResult_destroy`.
     unsafe { &*(result as *const ListTransactionsResultInner) }
 }
 
@@ -18424,10 +24813,18 @@ fn broker_transaction_row_at(inner: &ListTransactionsResultInner, index: i32) ->
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_count(
     result: *const kafka_admin_ListTransactionsResult_t,
 ) -> i32 {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle, i.e. one returned by
+    // `box_list_transactions_result` and not yet passed to
+    // `kafka_admin_ListTransactionsResult_destroy`; that contract, not a body check,
+    // supplies the non-null guarantee. The reference is used only to read `brokers.len()`
+    // within this synchronous call, during which the C caller keeps the handle alive.
     unsafe { list_transactions_result_ref(result) }.brokers.len() as i32
 }
 
@@ -18437,11 +24834,18 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle from `box_list_transactions_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `broker_transaction_row_at` to copy out one
+    // `i32` within this synchronous call, during which the C caller keeps the handle alive.
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => row.broker_id,
         None => -1,
@@ -18458,11 +24862,19 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
 ) -> *const kafka_common_Error_t {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle from `box_list_transactions_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `broker_transaction_row_at` / `error_ptr` within
+    // this synchronous call, and the returned error pointer stays borrowed from the handle
+    // the C caller keeps alive.
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -18475,11 +24887,19 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_listing_count(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
 ) -> i32 {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle from `box_list_transactions_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `broker_transaction_row_at` for
+    // `transactional_ids.len()` within this synchronous call, during which the C caller
+    // keeps the handle alive.
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => row.transactional_ids.len() as i32,
         None => 0,
@@ -18494,12 +24914,20 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_listing_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_transactional_id(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
     listing_index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle from `box_list_transactions_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `broker_transaction_row_at` / `cstring_at`
+    // within this synchronous call, and the returned `CString` pointer stays borrowed from
+    // the handle the C caller keeps alive.
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => cstring_at(&row.transactional_ids, listing_index),
         None => std::ptr::null(),
@@ -18513,6 +24941,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_transactional_id
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -18520,6 +24949,13 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
     listing_index: i32,
 ) -> i64 {
     indexed_i64_at(
+        // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+        // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+        // `list_transactions` result handle from `box_list_transactions_result` that has
+        // not been destroyed; the contract supplies the non-null guarantee, as the body
+        // does not check. The reference is only read by `broker_transaction_row_at` /
+        // `indexed_i64_at` within this synchronous call, during which the C caller keeps
+        // the handle alive.
         broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index)
             .map(|row| row.producer_ids.as_slice()),
         listing_index,
@@ -18536,12 +24972,20 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_state(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
     listing_index: i32,
 ) -> *const c_char {
+    // SAFETY: `list_transactions_result_ref` requires a non-null handle from a
+    // `list_transactions` call. Per this function's `# Safety`, `result` is a valid
+    // `list_transactions` result handle from `box_list_transactions_result` that has not
+    // been destroyed; the contract supplies the non-null guarantee, as the body does not
+    // check. The reference is only read by `broker_transaction_row_at` / `cstring_at`
+    // within this synchronous call, and the returned state `CString` pointer stays borrowed
+    // from the handle the C caller keeps alive.
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => cstring_at(&row.states, listing_index),
         None => std::ptr::null(),
@@ -18553,9 +24997,19 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_state(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut kafka_admin_ListTransactionsResult_t) {
     if !result.is_null() {
+        // SAFETY: `result` is non-null (checked above). Per this function's `# Safety`, a
+        // non-null `result` is a valid `list_transactions` result handle: the pointer
+        // `box_list_transactions_result` created with
+        // `Box::into_raw(Box::new(ListTransactionsResultInner { .. }))`, so `Box::from_raw`
+        // with that same inner type reconstitutes exactly that allocation. This is the
+        // single, final use: the destroy contract, together with the `out_result` and
+        // completion-callback docs that say to free the result with this function, makes
+        // the caller relinquish the handle here, and the `Box` is dropped once, freeing the
+        // broker rows, `CString`s and error inners.
         unsafe { drop(Box::from_raw(result as *mut ListTransactionsResultInner)) };
     }
 }
@@ -18607,6 +25061,7 @@ pub type kafka_admin_AdminClient_describe_producers_callback_t =
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     admin: *const kafka_admin_AdminClient_t,
@@ -18618,9 +25073,29 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeProducersResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
+    // `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, `topics` and `partitions` are null or have `count` entries
+    // each, with topic entries NULL or valid C strings, for the duration of this call. The
+    // helper returns empty for a NULL array, skips an entry whose topic is NULL, clamps a
+    // negative `count` to zero and copies every string, so nothing the contract does not
+    // promise is read and nothing borrows the C arrays afterwards.
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
     let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // i.e. one from `kafka_admin_AdminClient_new` / `kafka_admin_MockAdminClient_new` not
+    // yet destroyed, and the helper additionally null-checks `admin` itself, returning an
+    // `Err` for NULL rather than dereferencing it. `submit_describe_producers` runs on the
+    // calling thread under the handle's runtime context, borrowing `requested` only for
+    // that call, and the `&'static AdminHandle` the helper derives is used by `block_on`
+    // only within this synchronous call, during which the C caller keeps the handle alive.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_producers(a, &requested, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer;
+    // per this function's `# Safety`, `out_result` is null or writable. It writes exactly
+    // one handle pointer through `out_result`, and only on the `Ok` path when `out_result`
+    // is non-null (a NULL `out_result` means the result is never built); on `Err` the boxed
+    // error is returned and `*out_result` is left untouched.
     unsafe { finish_sync(outcome, out_result, box_describe_producers_result) }
 }
 
@@ -18644,6 +25119,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 ///
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -18656,8 +25140,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     callback: kafka_admin_AdminClient_describe_producers_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_topic_partitions` requires `topics` and `partitions` to be null or have
+    // `count` readable entries each, every topic NULL or a valid C string; per this
+    // function's `# Safety`, `topics` and `partitions` are null or have `count` entries
+    // each, with topic entries NULL or valid C strings, for the duration of this call. The
+    // helper returns empty for a NULL array, skips an entry whose topic is NULL, clamps a
+    // negative `count` to zero and copies every string into `requested`, so the spawned
+    // task never touches the C arrays.
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
     let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. The `&'static AdminHandle` it derives is used on the calling
+    // thread only to run `submit_describe_producers` (which borrows the owned `requested`
+    // for that call and returns an owned `'static` `KafkaFuture`) and to spawn on the
+    // handle's runtime; the task captures only that future, a clone of `completion_tx` and
+    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
+    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
+    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
+    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
+    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `box_describe_producers_result` is freshly allocated and handed over, and any error
+    // handle is likewise owned by the callee; the raw pointers are owned handles moved to
+    // the dispatcher thread, and the C user is responsible for the thread-safety of
+    // `user_data`, which must stay valid until the callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -18714,6 +25222,7 @@ pub type kafka_admin_AdminClient_describe_transactions_callback_t =
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
     admin: *const kafka_admin_AdminClient_t,
@@ -18722,9 +25231,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeTransactionsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `transactional_ids` to be null or have `count`
+    // entries, each NULL or a valid C string; per this function's `# Safety`,
+    // `transactional_ids` is null or has `count` entries, each NULL or a valid C string,
+    // for the duration of this call. The helper returns empty for a NULL array, skips NULL
+    // entries, clamps a negative `count` to zero and copies every string, so nothing
+    // borrows the C array afterwards.
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = describe_transactions_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper additionally null-checks `admin` itself, returning an `Err` for NULL
+    // rather than dereferencing it. `submit_describe_transactions` runs on the calling
+    // thread under the handle's runtime context, borrowing `ids` only for that call, and
+    // the `&'static AdminHandle` the helper derives is used by `block_on` only within this
+    // synchronous call, during which the C caller keeps the handle alive.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_transactions(a, &ids, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer;
+    // per this function's `# Safety`, `out_result` is null or writable. It writes exactly
+    // one handle pointer through `out_result`, and only on the `Ok` path when `out_result`
+    // is non-null (a NULL `out_result` means the result is never built); on `Err` the boxed
+    // error is returned and `*out_result` is left untouched.
     unsafe { finish_sync(outcome, out_result, box_describe_transactions_result) }
 }
 
@@ -18748,6 +25275,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
 ///
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -18757,8 +25293,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     callback: kafka_admin_AdminClient_describe_transactions_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `transactional_ids` to be null or have `count`
+    // entries, each NULL or a valid C string; per this function's `# Safety`,
+    // `transactional_ids` is null or has `count` entries, each NULL or a valid C string,
+    // for the duration of this call. The helper returns empty for a NULL array, skips NULL
+    // entries, clamps a negative `count` to zero and copies every string into `ids`, so the
+    // spawned task never touches the C array.
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = describe_transactions_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. The `&'static AdminHandle` it derives is used on the calling
+    // thread only to run `submit_describe_transactions` (which borrows the owned `ids` for
+    // that call and returns an owned `'static` `KafkaFuture`) and to spawn on the handle's
+    // runtime; the task captures only that future, a clone of `completion_tx` and
+    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
+    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
+    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
+    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
+    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `box_describe_transactions_result` is freshly allocated and handed over, and any
+    // error handle is likewise owned by the callee; the raw pointers are owned handles
+    // moved to the dispatcher thread, and the C user is responsible for the thread-safety
+    // of `user_data`, which must stay valid until the callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -18812,6 +25371,7 @@ pub type kafka_admin_AdminClient_abort_transaction_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
     admin: *const kafka_admin_AdminClient_t,
@@ -18822,8 +25382,21 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
     coordinator_epoch: i32,
     timeout_ms: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_abort_transaction_spec` requires `topic` to be null or a valid C
+    // string; per this function's `# Safety`, `topic` is null or a valid C string. The
+    // helper reports a NULL `topic` (and a `producer_epoch` outside the 16-bit range) as an
+    // `Err` rather than dereferencing it, and copies the topic into the owned
+    // `AbortTransactionSpec` during this call, so nothing borrows the C string afterwards.
     let spec = unsafe { read_abort_transaction_spec(topic, partition, producer_id, producer_epoch, coordinator_epoch) };
     let options = abort_transaction_options(timeout_ms);
+    // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper additionally null-checks `admin` itself, returning an `Err` for NULL
+    // rather than dereferencing it. `spec?` propagates a marshaling failure out of `submit`
+    // as `Err` before any RPC is issued; otherwise `submit_abort_transaction` runs on the
+    // calling thread under the handle's runtime context and the `&'static AdminHandle` the
+    // helper derives is used by `block_on` only within this synchronous call, during which
+    // the C caller keeps the handle alive.
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_abort_transaction(a, spec?, options))) };
     match outcome {
         Ok(()) => std::ptr::null_mut(),
@@ -18851,6 +25424,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -18863,8 +25445,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
     callback: kafka_admin_AdminClient_abort_transaction_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_abort_transaction_spec` requires `topic` to be null or a valid C
+    // string; per this function's `# Safety`, `topic` is null or a valid C string. The
+    // helper reports a NULL `topic` (and a `producer_epoch` outside the 16-bit range) as an
+    // `Err` rather than dereferencing it, and copies the topic into the owned
+    // `AbortTransactionSpec` during this call, so the spawned task never touches the C
+    // string.
     let spec = unsafe { read_abort_transaction_spec(topic, partition, producer_id, producer_epoch, coordinator_epoch) };
     let options = abort_transaction_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. `spec?` turns a NULL `topic` or an out-of-range `producer_epoch`
+    // into a `submit` `Err`, which the helper likewise completes inline on the calling
+    // thread with no task spawned, exactly as the callback contract documents. The
+    // `&'static AdminHandle` is used on the calling thread only to run
+    // `submit_abort_transaction` (returning an owned `'static` `KafkaFuture`) and to spawn
+    // on the handle's runtime; the task captures only that future, a clone of
+    // `completion_tx` and `SendUserData(user_data)`, never the handle reference, and
+    // destroying the handle with an operation in flight is a documented C lifetime
+    // precondition (CLAUDE.md FFI §4). `callback` was supplied by the C caller along with
+    // `user_data` and fires exactly once through the single `FnOnce` completion: on the
+    // dispatcher thread, inline for the synchronous-failure paths, or on a tokio worker
+    // only if the dispatcher terminated abnormally. A non-null error handle from
+    // `box_error` is freshly allocated and owned by the callee; the raw pointers are owned
+    // handles moved to the dispatcher thread, and the C user is responsible for the
+    // thread-safety of `user_data`, which must stay valid until the callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -18917,15 +25523,30 @@ pub type kafka_admin_AdminClient_force_terminate_transaction_callback_t =
 ///
 /// `admin` must be a valid handle; `transactional_id` must be null or a valid C
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
     admin: *const kafka_admin_AdminClient_t,
     transactional_id: *const c_char,
     timeout_ms: i32,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_required_string` requires `transactional_id` to be null or a valid C
+    // string; per this function's `# Safety`, `transactional_id` is null or a valid C
+    // string. The helper reports NULL as an `Err` naming the parameter rather than
+    // dereferencing it, and copies the string into an owned `String` during this call, so
+    // nothing borrows the C string afterwards.
     let id = unsafe { read_required_string(transactional_id, "transactional id") };
     let options = terminate_transaction_options(timeout_ms);
     let outcome =
+        // SAFETY: `admin_sync_value_op` requires `admin` to be a valid handle from an
+        // admin-client constructor; per this function's `# Safety`, `admin` is a valid
+        // handle, and the helper additionally null-checks `admin` itself, returning an
+        // `Err` for NULL rather than dereferencing it. `id?` propagates a NULL
+        // `transactional_id` out of `submit` as `Err` before any RPC is issued; otherwise
+        // `submit_force_terminate_transaction` runs on the calling thread under the
+        // handle's runtime context and the `&'static AdminHandle` the helper derives is
+        // used by `block_on` only within this synchronous call, during which the C caller
+        // keeps the handle alive.
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_force_terminate_transaction(a, &id?, options))) };
     match outcome {
         Ok(()) => std::ptr::null_mut(),
@@ -18953,6 +25574,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
 ///
 /// `admin` must be a valid handle; `transactional_id` must be null or a valid C
 /// string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -18961,8 +25591,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_asy
     callback: kafka_admin_AdminClient_force_terminate_transaction_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_required_string` requires `transactional_id` to be null or a valid C
+    // string; per this function's `# Safety`, `transactional_id` is null or a valid C
+    // string. The helper reports NULL as an `Err` naming the parameter rather than
+    // dereferencing it, and copies the string into an owned `String` during this call, so
+    // the spawned task never touches the C string.
     let id = unsafe { read_required_string(transactional_id, "transactional id") };
     let options = terminate_transaction_options(timeout_ms);
+    // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. `id?` turns a NULL `transactional_id` into a `submit` `Err`,
+    // which the helper likewise completes inline on the calling thread with no task
+    // spawned, exactly as the callback contract documents. The `&'static AdminHandle` is
+    // used on the calling thread only to run `submit_force_terminate_transaction`
+    // (returning an owned `'static` `KafkaFuture`) and to spawn on the handle's runtime;
+    // the task captures only that future, a clone of `completion_tx` and
+    // `SendUserData(user_data)`, never the handle reference, and destroying the handle with
+    // an operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
+    // through the single `FnOnce` completion: on the dispatcher thread, inline for the
+    // synchronous-failure paths, or on a tokio worker only if the dispatcher terminated
+    // abnormally. A non-null error handle from `box_error` is freshly allocated and owned
+    // by the callee; the raw pointers are owned handles moved to the dispatcher thread, and
+    // the C user is responsible for the thread-safety of `user_data`, which must stay valid
+    // until the callback fires.
     unsafe {
         admin_async_value_op(
             admin,
@@ -19016,6 +25669,7 @@ pub type kafka_admin_AdminClient_fence_producers_callback_t =
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
     admin: *const kafka_admin_AdminClient_t,
@@ -19024,9 +25678,27 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_FenceProducersResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `read_strings` requires `transactional_ids` to be null or have `count`
+    // entries, each NULL or a valid C string; per this function's `# Safety`,
+    // `transactional_ids` is null or has `count` entries, each NULL or a valid C string,
+    // for the duration of this call. The helper returns empty for a NULL array, skips NULL
+    // entries, clamps a negative `count` to zero and copies every string, so nothing
+    // borrows the C array afterwards.
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = fence_producers_options(timeout_ms);
+    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper additionally null-checks `admin` itself, returning an `Err` for NULL
+    // rather than dereferencing it. `submit_fence_producers` runs on the calling thread
+    // under the handle's runtime context, borrows `ids` only for that call and returns an
+    // owned future that does not borrow the handle; `block_on` then awaits it within this
+    // synchronous call, during which the C caller keeps the handle alive.
     let outcome = unsafe { admin_sync_future_op(admin, move |a| submit_fence_producers(a, &ids, options)) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer;
+    // per this function's `# Safety`, `out_result` is null or writable. It writes exactly
+    // one handle pointer through `out_result`, and only on the `Ok` path when `out_result`
+    // is non-null (a NULL `out_result` means the result is never built); on `Err` the boxed
+    // error is returned and `*out_result` is left untouched.
     unsafe { finish_sync(outcome, out_result, box_fence_producers_result) }
 }
 
@@ -19050,6 +25722,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
 ///
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -19059,8 +25740,31 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     callback: kafka_admin_AdminClient_fence_producers_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `read_strings` requires `transactional_ids` to be null or have `count`
+    // entries, each NULL or a valid C string; per this function's `# Safety`,
+    // `transactional_ids` is null or has `count` entries, each NULL or a valid C string,
+    // for the duration of this call. The helper returns empty for a NULL array, skips NULL
+    // entries, clamps a negative `count` to zero and copies every string into `ids`, so the
+    // spawned task never touches the C array.
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = fence_producers_options(timeout_ms);
+    // SAFETY: `admin_async_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. The `&'static AdminHandle` it derives is used on the calling
+    // thread only to run `submit_fence_producers` (which borrows the owned `ids` for that
+    // call and returns an owned `'static + Send` future that does not capture the handle)
+    // and to spawn on the handle's runtime; the task captures only that future, a clone of
+    // `completion_tx` and `SendUserData(user_data)`, and destroying the handle with an
+    // operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
+    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
+    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
+    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `box_fence_producers_result` is freshly allocated and handed over, and any error
+    // handle is likewise owned by the callee; the raw pointers are owned handles moved to
+    // the dispatcher thread, and the C user is responsible for the thread-safety of
+    // `user_data`, which must stay valid until the callback fires.
     unsafe {
         admin_async_future_op(
             admin,
@@ -19127,6 +25831,7 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 /// entries, each NULL or a valid C string; `producer_ids` must be null or have
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     admin: *const kafka_admin_AdminClient_t,
@@ -19139,6 +25844,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListTransactionsResult_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: `list_transactions_options` requires `states.0` to be null or have `states.1`
+    // entries, each NULL or a valid C string, `producer_ids.0` to be null or have
+    // `producer_ids.1` readable entries, and `transactional_id_pattern` to be null or a
+    // valid C string; per this function's `# Safety`, `states`, `producer_ids` and
+    // `transactional_id_pattern` satisfy exactly that for the duration of this call, and
+    // passing each count bound to its own array as a tuple keeps `state_count` from ever
+    // being applied to `producer_ids`. Through `read_transaction_states`, `read_i64s` and
+    // `optional_owned_string` the helper tolerates NULL arrays and a NULL pattern (Java's
+    // defaults), skips NULL string entries, clamps negative counts to zero and copies
+    // everything into the owned options, so nothing borrows the C memory afterwards.
     let options = unsafe {
         list_transactions_options(
             timeout_ms,
@@ -19148,7 +25863,19 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
             transactional_id_pattern,
         )
     };
+    // SAFETY: `admin_sync_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper additionally null-checks `admin` itself, returning an `Err` for NULL
+    // rather than dereferencing it. `submit_list_transactions` runs on the calling thread
+    // under the handle's runtime context, takes the owned `options` by value and returns an
+    // owned future that does not borrow the handle; `block_on` then awaits it within this
+    // synchronous call, during which the C caller keeps the handle alive.
     let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_transactions(a, options))) };
+    // SAFETY: `finish_sync` requires `out_result` to be null or a valid, writable pointer;
+    // per this function's `# Safety`, `out_result` is null or writable. It writes exactly
+    // one handle pointer through `out_result`, and only on the `Ok` path when `out_result`
+    // is non-null (a NULL `out_result` means the result is never built); on `Err` the boxed
+    // error is returned and `*out_result` is left untouched.
     unsafe { finish_sync(outcome, out_result, box_list_transactions_result) }
 }
 
@@ -19174,6 +25901,15 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
 /// entries, each NULL or a valid C string; `producer_ids` must be null or have
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: On a caught panic the guard fires the C caller's own `callback`/`user_data`
+    // pair on the calling thread, exactly as the function's callback contract documents for
+    // a synchronous failure; `box_error(err)` is a fresh handle the callback owns. The
+    // panic aborted the body before its own callback path ran, so this is the single
+    // invocation: a panic in the spawn that hands the callback to a task aborts the process
+    // instead (`spawn_callback_task`).
+    unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -19187,6 +25923,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     callback: kafka_admin_AdminClient_list_transactions_callback_t,
     user_data: *mut c_void,
 ) {
+    // SAFETY: `list_transactions_options` requires `states.0` to be null or have `states.1`
+    // entries, each NULL or a valid C string, `producer_ids.0` to be null or have
+    // `producer_ids.1` readable entries, and `transactional_id_pattern` to be null or a
+    // valid C string; per this function's `# Safety`, `states`, `producer_ids` and
+    // `transactional_id_pattern` satisfy exactly that for the duration of this call, and
+    // passing each count bound to its own array as a tuple keeps `state_count` from ever
+    // being applied to `producer_ids`. Through `read_transaction_states`, `read_i64s` and
+    // `optional_owned_string` the helper tolerates NULL arrays and a NULL pattern (Java's
+    // defaults), skips NULL string entries, clamps negative counts to zero and copies
+    // everything into the owned `options`, so the spawned task never touches the C memory.
     let options = unsafe {
         list_transactions_options(
             timeout_ms,
@@ -19196,6 +25942,23 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
             transactional_id_pattern,
         )
     };
+    // SAFETY: `admin_async_future_op` requires `admin` to be a valid handle from an
+    // admin-client constructor; per this function's `# Safety`, `admin` is a valid handle,
+    // and the helper also null-checks it, completing inline with an error instead of
+    // dereferencing NULL. The `&'static AdminHandle` it derives is used on the calling
+    // thread only to run `submit_list_transactions` (which takes the owned `options` by
+    // value and returns an owned `'static + Send` future that does not capture the handle)
+    // and to spawn on the handle's runtime; the task captures only that future, a clone of
+    // `completion_tx` and `SendUserData(user_data)`, and destroying the handle with an
+    // operation in flight is a documented C lifetime precondition (CLAUDE.md FFI §4).
+    // `callback` was supplied by the C caller along with `user_data` and fires exactly once
+    // through the single `FnOnce` completion: on the dispatcher thread, inline on the
+    // calling thread for a NULL `admin`, or on a tokio worker only if the dispatcher
+    // terminated abnormally, as the callback contract documents. The `result` handle from
+    // `box_list_transactions_result` is freshly allocated and handed over, and any error
+    // handle is likewise owned by the callee; the raw pointers are owned handles moved to
+    // the dispatcher thread, and the C user is responsible for the thread-safety of
+    // `user_data`, which must stay valid until the callback fires.
     unsafe {
         admin_async_future_op(
             admin,
@@ -19265,6 +26028,10 @@ mod tests {
 
         let admin = kafka_admin_MockAdminClient_new(1);
         assert!(!admin.is_null());
+        // SAFETY: Test code: `admin` was created just above by
+        // `kafka_admin_MockAdminClient_new(1)` and asserted non-null, so it is a handle
+        // from an admin-client constructor as `kafka_admin_AdminClient_destroy`'s `#
+        // Safety` requires; no operation is in flight on it and this is its single destroy.
         unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
@@ -19287,6 +26054,12 @@ mod tests {
         // element state.
         let promoted = kafka_admin_NewPartitions_new(6, false);
         let brokers = [0i32, 1];
+        // SAFETY: Test code: `populated`, `promoted` and `empty` were created just above by
+        // `kafka_admin_NewPartitions_new`, so each is a live `NewPartitions` handle as
+        // `kafka_admin_NewPartitions_add_assignment`'s `# Safety` requires; `brokers` is a
+        // two-element `i32` stack array that outlives the calls and matches the `count` of
+        // 2, and the NULL broker array is passed deliberately to exercise the documented
+        // no-op path.
         unsafe {
             kafka_admin_NewPartitions_add_assignment(populated, brokers.as_ptr(), 2);
             kafka_admin_NewPartitions_add_assignment(promoted, brokers.as_ptr(), 2);
@@ -19297,6 +26070,12 @@ mod tests {
 
         let (_owned, topics) = c_array_opt(&[Some("absent"), Some("empty"), Some("populated"), Some("promoted")]);
         let specs: [*const kafka_admin_NewPartitions_t; 4] = [absent, empty, populated, promoted];
+        // SAFETY: Test code: `read_new_partitions` requires `topics` and `new_partitions`
+        // to be null or have `count` entries each, every entry NULL or valid; `topics`
+        // holds four pointers into the `CString`s kept alive by `_owned`, and `specs` holds
+        // the four live handles created above by `kafka_admin_NewPartitions_new`, both
+        // matching the `count` of 4. The returned map owns copies, so nothing borrows the
+        // arrays or the handles afterwards.
         let built = unsafe { read_new_partitions(topics.as_ptr(), specs.as_ptr(), 4) };
 
         assert_eq!(built["absent"].total_count(), 3);
@@ -19315,6 +26094,10 @@ mod tests {
         assert_eq!(built["promoted"].total_count(), 6);
         assert_eq!(built["promoted"].assignments(), Some(&vec![vec![0, 1]]));
 
+        // SAFETY: Test code: each of `absent`, `empty`, `populated` and `promoted` was
+        // created by `kafka_admin_NewPartitions_new` above and is destroyed here exactly
+        // once; `read_new_partitions` only read them, so no other owner remains and the
+        // handles are not touched again.
         unsafe {
             kafka_admin_NewPartitions_destroy(absent);
             kafka_admin_NewPartitions_destroy(empty);
@@ -19741,14 +26524,27 @@ mod tests {
 
         // all_partitions = true is Java's absent Set / Optional.empty(): the
         // arrays are not read at all.
+        // SAFETY: Test code: `read_optional_partition_set` requires `topics` and
+        // `partitions` to be null or have `count` readable entries each, every topic NULL
+        // or a valid C string; `ptrs` holds one pointer into the `CString` kept alive by
+        // `_owned` and `partitions` is a one-element stack array, matching the `count` of
+        // 1. With `all_partitions` true the arrays are not read at all.
         let all = unsafe { read_optional_partition_set(true, ptrs.as_ptr(), partitions.as_ptr(), 1) };
         assert_eq!(all, None);
 
+        // SAFETY: Test code: `ptrs` (one pointer into the `CString` held by `_owned`) and
+        // `partitions` (one `i32`) each have the single readable entry the `count` of 1
+        // asks `read_optional_partition_set` to read, and both outlive the call; the
+        // returned set owns copies.
         let selected = unsafe { read_optional_partition_set(false, ptrs.as_ptr(), partitions.as_ptr(), 1) };
         assert_eq!(selected, Some(HashSet::from([TopicPartition::new("t".to_string(), 3)])));
 
         // An empty selection is Some(empty), not None — the distinction the
         // flag exists for.
+        // SAFETY: Test code: `count` is 0, so `read_optional_partition_set` reads no
+        // entries from `ptrs` / `partitions`, which are in any case live stack arrays owned
+        // by this test; the call satisfies the helper's contract trivially and exercises
+        // the empty-selection path.
         let empty = unsafe { read_optional_partition_set(false, ptrs.as_ptr(), partitions.as_ptr(), 0) };
         assert_eq!(empty, Some(HashSet::new()));
     }
@@ -19764,6 +26560,14 @@ mod tests {
         let replica_ptrs = [replicas.as_ptr(), replicas.as_ptr()];
         let replica_counts = [2i32, 2];
 
+        // SAFETY: Test code: `read_reassignments` requires its five arrays to be null or
+        // have `count` readable entries each, every topic NULL or a valid C string, and
+        // every non-cancelled `target_replicas` entry to have `target_replica_counts[i]`
+        // readable `int32_t`s; `ptrs` (two pointers into `CString`s held by `_owned`),
+        // `partitions`, `cancel`, `replica_ptrs` and `replica_counts` are two-element stack
+        // arrays matching `count` 2, and both `replica_ptrs` entries point at the
+        // two-element `replicas` array that `replica_counts` reports as length 2.
+        // Everything is copied into the returned map before the locals go out of scope.
         let out = unsafe {
             read_reassignments(
                 ptrs.as_ptr(),
@@ -19798,6 +26602,11 @@ mod tests {
 
         // Java's `NewPartitionReassignment(List<Integer>)` throws here, so an
         // empty list must stay an error rather than becoming a cancellation.
+        // SAFETY: Test code: `read_reassignments`'s five arrays are one-element stack
+        // arrays matching `count` 1, `ptrs` points into the `CString` held by `_owned`, and
+        // `replica_ptrs[0]` points at the live `replicas` array with a declared length of
+        // 0, so no replica is read; the deliberately empty, non-cancelled list exercises
+        // the documented error path.
         let error = unsafe {
             read_reassignments(
                 ptrs.as_ptr(),
@@ -19829,6 +26638,12 @@ mod tests {
         ];
 
         let out =
+            // SAFETY: Test code: `read_offset_specs` requires `topics`, `partitions`,
+            // `is_timestamp` and `spec_timestamps` to be null or have `count` readable
+            // entries each, every topic NULL or a valid C string; `ptrs` holds three
+            // pointers into `CString`s held by `_owned`, and `partitions`, `is_timestamp`
+            // and `values` are three-element stack arrays, matching `count` 3. The returned
+            // map owns copies made within this call.
             unsafe { read_offset_specs(ptrs.as_ptr(), partitions.as_ptr(), is_timestamp.as_ptr(), values.as_ptr(), 3) }
                 .unwrap();
 
@@ -19851,6 +26666,10 @@ mod tests {
         let values = [42i64];
 
         let error =
+            // SAFETY: Test code: `read_offset_specs`'s four arrays are one-element stack
+            // arrays matching `count` 1, with `ptrs` pointing into the `CString` held by
+            // `_owned`; the non-sentinel value without the `is_timestamp` flag is passed
+            // deliberately to exercise the documented error path.
             unsafe { read_offset_specs(ptrs.as_ptr(), partitions.as_ptr(), is_timestamp.as_ptr(), values.as_ptr(), 1) }
                 .unwrap_err();
         assert_eq!(
@@ -19876,6 +26695,12 @@ mod tests {
             (TopicPartition::new("a".to_string(), 2), None),
         ]);
         let result = box_elect_leaders_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by `box_elect_leaders_result`,
+        // so it is a valid `ElectLeadersResult` handle for every getter called here; the
+        // topic strings and error pointers the getters return are borrowed from the handle
+        // and are only read before it is freed. Out-of-range indices (3, -1) exercise the
+        // documented null / -1 paths, and `kafka_admin_ElectLeadersResult_destroy(result)`
+        // at the end is the handle's single destroy.
         unsafe {
             assert_eq!(kafka_admin_ElectLeadersResult_count(result), 3);
             // Sorted by topic then *numeric* partition: 2 before 10.
@@ -19919,6 +26744,11 @@ mod tests {
             ),
         ]);
         let result = box_alter_partition_reassignments_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_alter_partition_reassignments_result`, so it is a valid handle for the count
+        // / partition / error getters, whose borrowed error pointer is read before the
+        // handle is freed; `kafka_admin_AlterPartitionReassignmentsResult_destroy(result)`
+        // is its single destroy.
         unsafe {
             assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_count(result), 2);
             assert_eq!(kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, 0), 0);
@@ -19940,6 +26770,13 @@ mod tests {
             PartitionReassignment::new(vec![0, 1, 2], vec![3], vec![0, 2]),
         )]);
         let result = box_list_partition_reassignments_result(reassignments);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_list_partition_reassignments_result`; `value` is the borrowed
+        // `PartitionReassignment` handle the result returns for index 0 (asserted non-null)
+        // and is only read through its getters while `result` is alive. Out-of-range
+        // replica indices exercise the documented -1 path, and
+        // `kafka_admin_ListPartitionReassignmentsResult_destroy(result)` is the single
+        // destroy.
         unsafe {
             assert_eq!(kafka_admin_ListPartitionReassignmentsResult_count(result), 1);
             let value = kafka_admin_ListPartitionReassignmentsResult_get_value(result, 0);
@@ -19986,6 +26823,12 @@ mod tests {
             ),
         ]);
         let result = box_list_offsets_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by `box_list_offsets_result`;
+        // each `info` is a borrowed `ListOffsetsResultInfo` handle read only while `result`
+        // lives, `&mut epoch` is a writable local for the single-element out-param write,
+        // and `std::ptr::null_mut()` is passed deliberately to exercise the documented null
+        // out-param path. Out-of-range indices exercise the null paths, and
+        // `kafka_admin_ListOffsetsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_ListOffsetsResult_count(result), 3);
 
@@ -20044,6 +26887,11 @@ mod tests {
         let types = c_strings(&["Classic", "Consumer", "Share"]);
         let (sp, pp, tp) = (c_ptrs(&states), c_ptrs(&protocols), c_ptrs(&types));
 
+        // SAFETY: Test code: `list_groups_options` requires its three name arrays to be
+        // null or have their stated counts, each entry NULL or a valid C string; `sp`, `pp`
+        // and `tp` point into the `CString`s held by `states`, `protocols` and `types`,
+        // which outlive the call, and the counts 1, 2 and 3 match those vectors' lengths.
+        // The options own copies of every string.
         let options = unsafe { list_groups_options(sp.as_ptr(), 1, pp.as_ptr(), 2, tp.as_ptr(), 3, 7_000) };
         assert_eq!(options.group_states(), &HashSet::from([GroupState::Stable]));
         assert_eq!(
@@ -20057,6 +26905,8 @@ mod tests {
         assert_eq!(options.timeout_ms(), Some(7_000));
 
         // Null arrays leave every filter empty, i.e. "everything".
+        // SAFETY: Test code: all three arrays are passed as NULL with count 0, which
+        // `list_groups_options` documents as "everything"; nothing is read through them.
         let options = unsafe { list_groups_options(std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null(), 0, -1) };
         assert!(options.group_states().is_empty());
         assert!(options.protocol_types().is_empty());
@@ -20070,6 +26920,9 @@ mod tests {
         // UNKNOWN, so casing is irrelevant and a bogus name is not an error.
         let names = c_strings(&["stable", "PREPARINGREBALANCE", "NotReady", "not-a-state"]);
         let ptrs = c_ptrs(&names);
+        // SAFETY: Test code: `read_group_states` requires `names` to be null or have
+        // `count` entries, each NULL or a valid C string; `ptrs` holds four pointers into
+        // the `CString`s held by `names`, which outlive the call, matching `count` 4.
         let parsed = unsafe { read_group_states(ptrs.as_ptr(), 4) };
         assert_eq!(
             parsed,
@@ -20086,6 +26939,9 @@ mod tests {
     fn read_group_types_matches_java_parse_including_the_unknown_fallback() {
         let names = c_strings(&["CONSUMER", "streams", "nope"]);
         let ptrs = c_ptrs(&names);
+        // SAFETY: Test code: `read_group_types` requires `names` to be null or have `count`
+        // entries, each NULL or a valid C string; `ptrs` holds three pointers into the
+        // `CString`s held by `names`, which outlive the call, matching `count` 3.
         let parsed = unsafe { read_group_types(ptrs.as_ptr(), 3) };
         assert_eq!(
             parsed,
@@ -20138,6 +26994,11 @@ mod tests {
         let reason = CString::new("rolling restart").unwrap();
 
         let options =
+            // SAFETY: Test code: `remove_members_options` requires `group_instance_ids` to
+            // be null or have `member_count` entries, each NULL or a valid C string, and
+            // `reason` to be null or a valid C string; `ptrs` holds two pointers into the
+            // `CString`s held by `ids`, matching `member_count` 2, and `reason` is a live
+            // `CString`, all outliving the call, which copies them into the options.
             unsafe { remove_members_options(false, ptrs.as_ptr(), 2, reason.as_ptr(), 14_000) }.expect("valid members");
         assert!(!options.remove_all());
         assert_eq!(
@@ -20149,6 +27010,10 @@ mod tests {
 
         // `remove_all` ignores the member array entirely: Java's no-argument
         // constructor. A NULL reason leaves it unset.
+        // SAFETY: Test code: `ptrs` still holds two pointers into the live `CString`s held
+        // by `ids`, matching `member_count` 2, so the array is valid even though
+        // `remove_all` makes `remove_members_options` ignore it; the NULL `reason` is
+        // passed deliberately to exercise the documented unset-reason path.
         let options = unsafe { remove_members_options(true, ptrs.as_ptr(), 2, std::ptr::null(), -1) }
             .expect("remove-all is always valid");
         assert!(options.remove_all());
@@ -20162,6 +27027,10 @@ mod tests {
         // Java's `RemoveMembersFromConsumerGroupOptions(Collection)` throws for
         // an empty collection, so an empty array must not silently mean
         // "remove everything".
+        // SAFETY: Test code: `remove_members_options` is called with a NULL member array
+        // and count 0 and a NULL `reason`, both of which its `# Safety` permits, so nothing
+        // is read; the empty member list is passed deliberately to exercise the documented
+        // error path.
         let error = unsafe { remove_members_options(false, std::ptr::null(), 0, std::ptr::null(), -1) }
             .expect_err("empty members is rejected");
         assert_eq!(error.message(), "Invalid empty members has been provided");
@@ -20182,6 +27051,15 @@ mod tests {
         let partitions: [*const i32; 2] = [std::ptr::null(), some_partitions.as_ptr()];
         let counts = [0i32, 2];
 
+        // SAFETY: Test code: `read_group_offsets_specs` requires its five arrays to be null
+        // or have `group_count` readable entries each, and for a group whose
+        // `all_partitions` flag is false `topics[i]` and `partitions[i]` to have
+        // `partition_counts[i]` readable entries; `group_ptrs`, `all_partitions`, `topics`,
+        // `partitions` and `counts` are two-element stack arrays matching `group_count` 2,
+        // row 1 points at `some_topic_ptrs` (two pointers into `CString`s held by
+        // `some_topics`) and the two-element `some_partitions` with `counts[1]` 2, and row
+        // 0's NULL inner arrays are never read because `all_partitions[0]` is true.
+        // Everything is copied before the locals go out of scope.
         let specs = unsafe {
             read_group_offsets_specs(
                 group_ptrs.as_ptr(),
@@ -20208,6 +27086,12 @@ mod tests {
         let good = CString::new("g").unwrap();
 
         let with_null: [*const c_char; 2] = [good.as_ptr(), std::ptr::null()];
+        // SAFETY: Test code: `read_group_offsets_specs`'s `group_ids` (`with_null`, one
+        // pointer into the live `good` `CString` and one NULL) and `all_partitions` are
+        // two-element stack arrays matching `group_count` 2, and the three per-group arrays
+        // are NULL, which the helper's `# Safety` permits and which are not read because
+        // both `all_partitions` flags are true; the NULL group id is passed deliberately to
+        // exercise the documented error path.
         let error = unsafe {
             read_group_offsets_specs(
                 with_null.as_ptr(),
@@ -20224,6 +27108,11 @@ mod tests {
         // Java takes a Map, where the second entry would silently replace the
         // first, so a duplicate is a marshaling error rather than a silent drop.
         let duplicated: [*const c_char; 2] = [good.as_ptr(), good.as_ptr()];
+        // SAFETY: Test code: `duplicated` holds two pointers into the live `good` `CString`
+        // and `all_partitions` has two entries, matching `group_count` 2; the three
+        // per-group arrays are NULL, which `read_group_offsets_specs`'s `# Safety` permits
+        // and which are not read because both flags are true. The duplicate group id is
+        // passed deliberately to exercise the documented error path.
         let error = unsafe {
             read_group_offsets_specs(
                 duplicated.as_ptr(),
@@ -20252,6 +27141,12 @@ mod tests {
         let epochs = [0i32, 0];
         let has_epoch = [true, false];
 
+        // SAFETY: Test code: `read_alter_group_offsets` requires every non-null array to
+        // have `count` readable entries and every topic and metadata entry to be NULL or a
+        // valid C string; `topic_ptrs` and `meta_ptrs` point into the `CString`s held by
+        // `topics` and `meta`, and `partitions`, `offsets`, `epochs` and `has_epoch` are
+        // two-element stack arrays, all matching `count` 2 and outliving the call, which
+        // copies them into the returned map.
         let parsed = unsafe {
             read_alter_group_offsets(
                 topic_ptrs.as_ptr(),
@@ -20284,6 +27179,12 @@ mod tests {
         let offsets = [7i64];
         let meta: [*const c_char; 1] = [std::ptr::null()];
 
+        // SAFETY: Test code: `topic_ptrs` points into the `CString` held by `topics`,
+        // `meta` holds a deliberate NULL metadata entry (permitted by
+        // `read_alter_group_offsets`'s `# Safety` and exercising the documented
+        // empty-string path), `partitions` and `offsets` are one-element arrays matching
+        // `count` 1, and the NULL `leader_epochs` / `has_leader_epoch` arrays are allowed
+        // as null arrays; everything is copied within the call.
         let parsed = unsafe {
             read_alter_group_offsets(
                 topic_ptrs.as_ptr(),
@@ -20305,6 +27206,10 @@ mod tests {
         let partitions = [0i32];
         let offsets = [-1i64];
         let null_topic: [*const c_char; 1] = [std::ptr::null()];
+        // SAFETY: Test code: `null_topic`, `partitions` and `offsets` are one-element stack
+        // arrays matching `count` 1 and the three remaining arrays are NULL, which
+        // `read_alter_group_offsets`'s `# Safety` permits; the NULL topic entry is passed
+        // deliberately to exercise the documented error path.
         let error = unsafe {
             read_alter_group_offsets(
                 null_topic.as_ptr(),
@@ -20321,6 +27226,11 @@ mod tests {
 
         let topics = c_strings(&["t"]);
         let topic_ptrs = c_ptrs(&topics);
+        // SAFETY: Test code: `topic_ptrs` points into the `CString` held by `topics`,
+        // `partitions` and `offsets` are one-element stack arrays matching `count` 1, and
+        // the three remaining arrays are NULL as `read_alter_group_offsets`'s `# Safety`
+        // permits; the negative offset is passed deliberately to exercise the documented
+        // error path.
         let error = unsafe {
             read_alter_group_offsets(
                 topic_ptrs.as_ptr(),
@@ -20341,9 +27251,15 @@ mod tests {
 
     #[test]
     fn read_required_string_rejects_null_and_names_the_parameter() {
+        // SAFETY: Test code: `read_required_string` requires `text` to be null or a valid C
+        // string; a NULL is passed deliberately to exercise its documented error path, and
+        // nothing is dereferenced.
         let error = unsafe { read_required_string(std::ptr::null(), "group_id") }.expect_err("null is rejected");
         assert_eq!(error.message(), "group_id must not be null");
         let good = CString::new("g1").unwrap();
+        // SAFETY: Test code: `read_required_string` requires `text` to be null or a valid C
+        // string; `good` is a live `CString` owned by this test that outlives the call, and
+        // the helper copies it into an owned `String`.
         assert_eq!(unsafe { read_required_string(good.as_ptr(), "group_id") }.unwrap(), "g1");
     }
 
@@ -20369,6 +27285,14 @@ mod tests {
     fn member_description_exposes_every_field_and_both_assignments() {
         let inner = MemberDescriptionInner::new(&member_fixture());
         let member = &inner as *const MemberDescriptionInner as *const kafka_admin_MemberDescription_t;
+        // SAFETY: Test code: `member` is a pointer to the stack-held
+        // `MemberDescriptionInner` built from `member_fixture()`, cast to the opaque
+        // `kafka_admin_MemberDescription_t`, so it is a valid member handle for every
+        // `kafka_admin_MemberDescription_*` getter, and `inner` outlives the whole block;
+        // `assignment` and `target` are borrowed `MemberAssignment` handles into the same
+        // `inner`, `&mut epoch` and `&mut upgraded` are writable locals for the
+        // single-element out-param writes, and nothing is destroyed because the test, not a
+        // `box_*` helper, owns the value.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_admin_MemberDescription_consumer_id(member)).to_str(),
@@ -20442,6 +27366,13 @@ mod tests {
         );
         let inner = MemberDescriptionInner::new(&member);
         let ptr = &inner as *const MemberDescriptionInner as *const kafka_admin_MemberDescription_t;
+        // SAFETY: Test code: `ptr` points to the stack-held `MemberDescriptionInner` built
+        // from `member`, cast to the opaque `kafka_admin_MemberDescription_t`, and `inner`
+        // outlives the block, so every getter receives a valid member handle; `assignment`
+        // is borrowed from the same `inner`, `&mut epoch` / `&mut upgraded` are writable
+        // locals, and `std::ptr::null_mut()` is passed deliberately to exercise the
+        // documented null out-param path. Nothing is destroyed because the value is owned
+        // by the test.
         unsafe {
             assert!(kafka_admin_MemberDescription_group_instance_id(ptr).is_null());
             assert!(kafka_admin_MemberDescription_rack_id(ptr).is_null());
@@ -20483,6 +27414,14 @@ mod tests {
             ("g-bad".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
         let result = box_describe_consumer_groups_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_consumer_groups_result`, so it is a valid handle for every
+        // `kafka_admin_DescribeConsumerGroupsResult_*` getter; `value` and `error` are
+        // borrowed from it and only read while it lives, the member and coordinator handles
+        // are likewise borrowed, and `&mut epoch` is a writable local for the
+        // single-element out-param writes. Out-of-range indices exercise the documented
+        // null paths, and `kafka_admin_DescribeConsumerGroupsResult_destroy(result)` is the
+        // single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeConsumerGroupsResult_count(result), 2);
             // Sorted by group id: "g-bad" then "g-ok".
@@ -20555,6 +27494,12 @@ mod tests {
         );
         let outcomes = HashMap::from([("cg".to_string(), Ok(description))]);
         let result = box_describe_classic_groups_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_classic_groups_result`, so it is a valid handle for every
+        // `kafka_admin_DescribeClassicGroupsResult_*` getter; `value` is the borrowed
+        // `ClassicGroupDescription` handle for index 0 (asserted non-null) and is only read
+        // through its getters while `result` lives.
+        // `kafka_admin_DescribeClassicGroupsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeClassicGroupsResult_count(result), 1);
             let value = kafka_admin_DescribeClassicGroupsResult_get_value(result, 0);
@@ -20625,6 +27570,15 @@ mod tests {
 
         let consumer_result = box_describe_consumer_groups_result(HashMap::from([("g".to_string(), Ok(consumer))]));
         let classic_result = box_describe_classic_groups_result(HashMap::from([("cg".to_string(), Ok(classic))]));
+        // SAFETY: Test code: `consumer_result` and `classic_result` were built just above
+        // by `box_describe_consumer_groups_result` and
+        // `box_describe_classic_groups_result`, so the `get_value` / `coordinator` chains
+        // yield borrowed `Node` handles (asserted non-null) valid while the results live;
+        // `&mut len` is a writable local, and `kafka_common_Node_host` returns a pointer
+        // into the node's host string whose length it wrote to `len`, so
+        // `slice::from_raw_parts(host.cast::<u8>(), len as usize)` reads exactly that many
+        // bytes before the results are freed. Each result is destroyed exactly once at the
+        // end.
         unsafe {
             for node in [
                 kafka_admin_ConsumerGroupDescription_coordinator(kafka_admin_DescribeConsumerGroupsResult_get_value(
@@ -20701,6 +27655,14 @@ mod tests {
         };
 
         let two = BTreeSet::from([AclOperation::Describe, AclOperation::Read]);
+        // SAFETY: Test code: the `p` closures cast references to stack-held
+        // `TopicDescriptionInner`, `ConsumerGroupDescriptionInner` and
+        // `ClassicGroupDescriptionInner` values (`absent`, `reported_empty`,
+        // `reported_two`) to their opaque handle types, and each value outlives every
+        // getter call on it; the three `DescribeClusterResult` handles come from
+        // `box_describe_cluster_result` and are only read through their getters before
+        // `kafka_admin_DescribeClusterResult_destroy` frees each exactly once. Index 0 on
+        // an absent set exercises the documented -1 path.
         unsafe {
             {
                 let (absent, reported_empty, reported_two) =
@@ -20800,6 +27762,12 @@ mod tests {
         let p = |inner: &TopicPartitionInfoInner| {
             inner as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t
         };
+        // SAFETY: Test code: `p` casts references to the stack-held
+        // `TopicPartitionInfoInner` values `absent`, `reported_empty` and `reported` to the
+        // opaque `kafka_common_TopicPartitionInfo_t`, so every getter receives a valid
+        // handle whose backing value outlives the block; nothing is destroyed because the
+        // test owns the values, and index 0 on an absent ELR exercises the documented null
+        // path.
         unsafe {
             assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&absent)), 0);
             assert!(!kafka_common_TopicPartitionInfo_has_elr(p(&absent)));
@@ -20833,6 +27801,11 @@ mod tests {
             vec![Error::new(Errors::CoordinatorNotAvailable)],
         );
         let result = box_list_groups_result(outcome);
+        // SAFETY: Test code: `result` was built just above by `box_list_groups_result`, so
+        // it is a valid handle for every `kafka_admin_ListGroupsResult_*` getter; `first`,
+        // `second`, `third` and `error` are borrowed listing / error handles read only
+        // while `result` lives, out-of-range indices exercise the documented null paths,
+        // and `kafka_admin_ListGroupsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_ListGroupsResult_valid_count(result), 3);
             assert_eq!(kafka_admin_ListGroupsResult_error_count(result), 1);
@@ -20907,6 +27880,14 @@ mod tests {
             ("g-bad".to_string(), Err(Error::unsupported_version("Not implemented yet"))),
         ]);
         let result = box_list_consumer_group_offsets_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_list_consumer_group_offsets_result`, so it is a valid handle for every
+        // getter; `error` and `map` are borrowed from it (the `OffsetAndMetadataMap` handle
+        // asserted non-null) and only read while `result` lives, `&mut epoch` is a writable
+        // local for the single-element out-param writes, out-of-range indices exercise the
+        // documented absent paths, and
+        // `kafka_admin_ListConsumerGroupOffsetsResult_destroy(result)` is the single
+        // destroy.
         unsafe {
             assert_eq!(kafka_admin_ListConsumerGroupOffsetsResult_count(result), 2);
             // Sorted by group id: "g-bad" then "g-ok".
@@ -20967,6 +27948,12 @@ mod tests {
         ]);
         let altered = box_alter_consumer_group_offsets_result(outcomes.clone());
         let deleted = box_delete_consumer_group_offsets_result(outcomes);
+        // SAFETY: Test code: `altered` and `deleted` were built just above by
+        // `box_alter_consumer_group_offsets_result` and
+        // `box_delete_consumer_group_offsets_result`, so each is a valid handle for its own
+        // getters; the topic strings and error pointers are borrowed and read before the
+        // owning handle is freed, out-of-range indices exercise the documented null / -1
+        // paths, and each handle is destroyed exactly once by its own `_destroy`.
         unsafe {
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_count(altered), 2);
             assert_eq!(
@@ -21005,6 +27992,12 @@ mod tests {
         ]);
         let groups = box_delete_consumer_groups_result(outcomes.clone());
         let members = box_remove_members_from_consumer_group_result(outcomes);
+        // SAFETY: Test code: `groups` and `members` were built just above by
+        // `box_delete_consumer_groups_result` and
+        // `box_remove_members_from_consumer_group_result`, so each is a valid handle for
+        // its own getters; the group-id strings and error pointers are borrowed and read
+        // before the owning handle is freed, out-of-range indices exercise the documented
+        // null paths, and each handle is destroyed exactly once by its own `_destroy`.
         unsafe {
             assert_eq!(kafka_admin_DeleteConsumerGroupsResult_count(groups), 2);
             assert_eq!(
@@ -21111,6 +28104,12 @@ mod tests {
     fn acl_binding_exposes_all_seven_java_fields_with_their_code_values() {
         let inner = AclBindingInner::new(&acl_binding("orders-", "User:alice"));
         let b = inner.as_ptr();
+        // SAFETY: Test code: `b` comes from `inner.as_ptr()` on the stack-held
+        // `AclBindingInner` built from `acl_binding(..)`, so it is a valid
+        // `kafka_common_acl_AclBinding_t` handle for every getter and `inner` outlives the
+        // block; the strings the getters return are borrowed from `inner` and read
+        // immediately with `CStr::from_ptr`. Nothing is destroyed because the test owns the
+        // value.
         unsafe {
             assert_eq!(
                 kafka_common_acl_AclBinding_resource_type(b),
@@ -21203,6 +28202,12 @@ mod tests {
                 AclPermissionType::Allow,
             ),
         ));
+        // SAFETY: Test code: `a` and `e` are casts of references to the stack-held
+        // `AclBindingFilterInner` values `any` and `empty` to the opaque
+        // `kafka_common_acl_AclBindingFilter_t`, both outliving the block, so every getter
+        // receives a valid filter handle; the NULL returns are asserted before any
+        // `CStr::from_ptr`, and the non-null strings are borrowed from `empty`. Nothing is
+        // destroyed because the test owns the values.
         unsafe {
             let a = &any as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
             assert!(kafka_common_acl_AclBindingFilter_resource_name(a).is_null());
@@ -21254,6 +28259,12 @@ mod tests {
             AclPermissionType::Deny.code() as i32,
         ];
 
+        // SAFETY: Test code: `read_acl_bindings` requires each array to be null or have
+        // `count` entries, with string entries NULL or valid C strings; `name_ptrs`,
+        // `principal_ptrs` and `host_ptrs` point into the `CString`s held by `_names`,
+        // `_principals` and `_hosts`, and `resource_types`, `pattern_types`, `operations`
+        // and `permission_types` are two-element stack arrays, all matching `count` 2 and
+        // outliving the call, which copies everything into the returned bindings.
         let acls = unsafe {
             read_acl_bindings(
                 resource_types.as_ptr(),
@@ -21332,6 +28343,12 @@ mod tests {
             ),
         ];
         for (expected, resource_types, pattern_types, operations, permission_types) in cases {
+            // SAFETY: Test code: `read_acl_bindings` requires each array to be null or have
+            // `count` entries, with string entries NULL or valid C strings; the per-case
+            // `[i32; 2]` arrays and the `name_ptrs` / `principal_ptrs` / `host_ptrs`
+            // pointers into `CString`s held by `_names`, `_principals` and `_hosts` all
+            // have the two entries `count` 2 asks for and outlive the call, and each case's
+            // ANY / MATCH value is passed deliberately to exercise a documented error path.
             let err = unsafe {
                 read_acl_bindings(
                     resource_types.as_ptr(),
@@ -21360,6 +28377,12 @@ mod tests {
         let read = [AclOperation::Read.code() as i32; 2];
         let allow = [AclPermissionType::Allow.code() as i32; 2];
 
+        // SAFETY: Test code: `read_acl_bindings` requires each array to be null or have
+        // `count` entries, with string entries NULL or valid C strings; `name_ptrs` holds
+        // one pointer into a `CString` held by `_names` and one deliberate NULL (permitted,
+        // and exercising the documented error path), `principal_ptrs` / `host_ptrs` point
+        // into `CString`s held by `_principals` / `_hosts`, and `topic`, `literal`, `read`
+        // and `allow` are `[i32; 2]` arrays, all matching `count` 2 and outliving the call.
         let err = unsafe {
             read_acl_bindings(
                 topic.as_ptr(),
@@ -21384,6 +28407,13 @@ mod tests {
         let (_names, name_ptrs) = c_array(&["t"]);
         let (_principals, principal_ptrs) = c_array(&["User:a"]);
         let (_hosts, host_ptrs) = c_array(&["*"]);
+        // SAFETY: Test code: `read_acl_bindings` requires each array to be null or have
+        // `count` entries, with string entries NULL or valid C strings; the inline
+        // one-element `i32` temporaries live until the end of the enclosing statement,
+        // which outlasts the call, and `name_ptrs`, `principal_ptrs` and `host_ptrs` each
+        // hold one pointer into a `CString` held by `_names`, `_principals` and `_hosts`,
+        // matching `count` 1. The unrecognised codes are passed deliberately to exercise
+        // the documented UNKNOWN mapping.
         let acls = unsafe {
             read_acl_bindings(
                 [99i32].as_ptr(),
@@ -21417,6 +28447,12 @@ mod tests {
             AclPermissionType::Allow.code() as i32,
         ];
 
+        // SAFETY: Test code: `read_acl_binding_filters` requires each array to be null or
+        // have `count` entries, with string entries NULL or valid C strings; `name_ptrs`,
+        // `principal_ptrs` and `host_ptrs` hold two entries each, pointers into `CString`s
+        // held by `_names`, `_principals`, `_hosts` or deliberate NULLs that the contract
+        // permits and that exercise the documented nullable-filter path, and the four
+        // `[i32; 2]` arrays match `count` 2; everything is copied within the call.
         let filters = unsafe {
             read_acl_binding_filters(
                 resource_types.as_ptr(),
@@ -21453,6 +28489,12 @@ mod tests {
             (failed.clone(), Err(Error::new(Errors::SecurityDisabled))),
         ]);
         let result = box_create_acls_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by `box_create_acls_result`, so
+        // it is a valid handle for every `kafka_admin_CreateAclsResult_*` getter; `first`
+        // and `second` are borrowed `AclBinding` handles and the error pointer is likewise
+        // borrowed, all read while `result` lives, out-of-range indices exercise the
+        // documented null paths, and `kafka_admin_CreateAclsResult_destroy(result)` is the
+        // single destroy.
         unsafe {
             assert_eq!(kafka_admin_CreateAclsResult_count(result), 2);
             // Sorted by resource name, so "a-topic" comes first.
@@ -21486,6 +28528,11 @@ mod tests {
         // listing is unsorted (broker order) and there is no `_get_error`.
         let result =
             box_describe_acls_result(vec![acl_binding("z-topic", "User:zoe"), acl_binding("a-topic", "User:alice")]);
+        // SAFETY: Test code: `result` was built just above by `box_describe_acls_result`,
+        // so it is a valid handle for the count and `get_binding` getters, whose borrowed
+        // `AclBinding` handles are read with `CStr::from_ptr` while `result` lives;
+        // out-of-range indices exercise the documented null path, and
+        // `kafka_admin_DescribeAclsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
             assert_eq!(
@@ -21537,6 +28584,11 @@ mod tests {
             (filter("z-filter"), Err(Error::new(Errors::ClusterAuthorizationFailed))),
         ]);
         let result = box_delete_acls_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by `box_delete_acls_result`, so
+        // it is a valid handle for every `kafka_admin_DeleteAclsResult_*` getter; `f0`,
+        // `f2` and the binding and error pointers are borrowed from it and read only while
+        // it lives, out-of-range indices on both levels exercise the documented null / 0
+        // paths, and `kafka_admin_DeleteAclsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DeleteAclsResult_count(result), 3);
 
@@ -21601,6 +28653,12 @@ mod tests {
             i32::from(DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED),
         ];
         let filter =
+            // SAFETY: Test code: `read_client_quota_filter` requires each array to be null
+            // or have `count` entries, with string entries NULL or valid C strings;
+            // `type_ptrs` and `name_ptrs` hold three entries pointing into `CString`s held
+            // by `_types` / `_names` (or deliberate NULLs the contract permits) and
+            // `match_types` is a three-element stack array, all matching `count` 3 and
+            // outliving the call, which copies them into the filter.
             unsafe { read_client_quota_filter(type_ptrs.as_ptr(), match_types.as_ptr(), name_ptrs.as_ptr(), 3, false) }
                 .expect("valid filter");
 
@@ -21626,16 +28684,26 @@ mod tests {
         let exact = [i32::from(DescribeClientQuotasRequest::MATCH_TYPE_EXACT)];
 
         let strict =
+            // SAFETY: Test code: `type_ptrs`, `exact` and `name_ptrs` each hold the one
+            // entry `count` 1 asks `read_client_quota_filter` to read, pointing into
+            // `CString`s held by `_types` / `_names` or a stack `i32`, and all outlive the
+            // call.
             unsafe { read_client_quota_filter(type_ptrs.as_ptr(), exact.as_ptr(), name_ptrs.as_ptr(), 1, true) }
                 .expect("valid filter");
         assert!(strict.strict());
         assert_eq!(strict.components().len(), 1);
 
         // No components, not strict: Java's `ClientQuotaFilter.all()`.
+        // SAFETY: Test code: all three arrays are NULL with `count` 0, which
+        // `read_client_quota_filter`'s `# Safety` permits; nothing is read, and the call
+        // exercises Java's `ClientQuotaFilter.all()` shape.
         let all = unsafe { read_client_quota_filter(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, false) }
             .expect("valid filter");
         assert_eq!(all, ClientQuotaFilter::all());
         // No components, strict: `containsOnly([])`, a different filter.
+        // SAFETY: Test code: all three arrays are NULL with `count` 0, which
+        // `read_client_quota_filter`'s `# Safety` permits; nothing is read, and the call
+        // exercises the strict `containsOnly([])` shape.
         let none = unsafe { read_client_quota_filter(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, true) }
             .expect("valid filter");
         assert_eq!(none, ClientQuotaFilter::contains_only(Vec::new()));
@@ -21646,6 +28714,11 @@ mod tests {
     fn read_client_quota_filter_rejects_a_bad_match_type_or_a_nameless_exact() {
         let (_types, type_ptrs) = c_array(&["user"]);
         let (_names, name_ptrs) = c_array_opt(&[None]);
+        // SAFETY: Test code: `type_ptrs` points into the `CString` held by `_types`,
+        // `name_ptrs` holds one deliberate NULL (permitted by `read_client_quota_filter`'s
+        // `# Safety`), and the inline `[i32; 1]` temporary lives until the end of the
+        // enclosing statement, all matching `count` 1; the nameless EXACT component
+        // exercises the documented error path.
         let err = unsafe {
             read_client_quota_filter(
                 type_ptrs.as_ptr(),
@@ -21662,6 +28735,10 @@ mod tests {
         );
 
         let err =
+            // SAFETY: Test code: `type_ptrs` and `name_ptrs` are the same live one-entry
+            // arrays as above and the inline `[7i32]` temporary outlives the call, matching
+            // `count` 1; the unknown match type is passed deliberately to exercise
+            // `read_client_quota_filter`'s documented error path.
             unsafe { read_client_quota_filter(type_ptrs.as_ptr(), [7i32].as_ptr(), name_ptrs.as_ptr(), 1, false) }
                 .expect_err("rejected");
         assert_eq!(err.message(), "quota filter component at index 0 has unknown match type 7");
@@ -21695,6 +28772,16 @@ mod tests {
         let op_has_values = [h0.as_ptr(), h1.as_ptr()];
         let op_counts = [1i32, 2];
 
+        // SAFETY: Test code: `read_client_quota_alterations` requires each array to be null
+        // or have `count` entries, each of which is null or has the matching per-row count
+        // of entries; the outer arrays `entity_types`, `entity_names`, `entity_counts`,
+        // `op_keys`, `op_values`, `op_has_values` and `op_counts` all have two entries
+        // matching `count` 2, row 0's inner arrays (`t0`, `n0`, `k0`, `v0`, `h0`) have the
+        // 2 / 1 entries that `entity_counts[0]` / `op_counts[0]` declare and row 1's (`t1`,
+        // `n1`, `k1`, `v1`, `h1`) the 1 / 2 entries that `entity_counts[1]` /
+        // `op_counts[1]` declare, with string pointers into `CString`s held by the `_t*` /
+        // `_n*` / `_k*` locals or deliberate NULLs. Everything outlives the call and is
+        // copied into the returned alterations.
         let alterations = unsafe {
             read_client_quota_alterations(
                 entity_types.as_ptr(),
@@ -21735,6 +28822,12 @@ mod tests {
         let (_names, names) = c_array_opt(&[Some("alice"), Some("bob")]);
         let entity_types = [dup.as_ptr()];
         let entity_names = [names.as_ptr()];
+        // SAFETY: Test code: `entity_types` and `entity_names` are one-element outer arrays
+        // matching `count` 1 whose inner arrays `dup` and `names` have the two entries
+        // `[2i32]` declares, pointing into `CString`s held by `_dup` / `_names`; the four
+        // op arrays are NULL, which `read_client_quota_alterations`'s `# Safety` permits,
+        // and the duplicated entity type is passed deliberately to exercise the documented
+        // error path.
         let err = unsafe {
             read_client_quota_alterations(
                 entity_types.as_ptr(),
@@ -21757,6 +28850,11 @@ mod tests {
         let (_n, n) = c_array_opt(&[Some("alice")]);
         let entity_types = [t.as_ptr(), t.as_ptr()];
         let entity_names = [n.as_ptr(), n.as_ptr()];
+        // SAFETY: Test code: `entity_types` and `entity_names` are two-element outer arrays
+        // matching `count` 2, each row pointing at the one-entry inner arrays `t` / `n`
+        // (into `CString`s held by `_t` / `_n`) that `[1i32, 1]` declares; the four op
+        // arrays are NULL as `read_client_quota_alterations`'s `# Safety` permits, and the
+        // repeated entity is passed deliberately to exercise the documented error path.
         let err = unsafe {
             read_client_quota_alterations(
                 entity_types.as_ptr(),
@@ -21786,6 +28884,12 @@ mod tests {
             ("ip", Some("10.0.0.1")),
         ]));
         let e = inner.as_ptr();
+        // SAFETY: Test code: `e` comes from `inner.as_ptr()` on the stack-held
+        // `ClientQuotaEntityInner` built from `quota_entity(..)`, so it is a valid
+        // `kafka_common_quota_ClientQuotaEntity_t` handle for every getter and `inner`
+        // outlives the block; the entry strings are borrowed from `inner`, null returns are
+        // asserted before any `CStr::from_ptr`, and out-of-range indices exercise the
+        // documented null path. Nothing is destroyed because the test owns the value.
         unsafe {
             assert_eq!(kafka_common_quota_ClientQuotaEntity_entry_count(e), 3);
             // Sorted by entity type: client-id, ip, user.
@@ -21833,6 +28937,13 @@ mod tests {
             (quota_entity(&[("user", Some("bob"))]), HashMap::new()),
         ]);
         let result = box_describe_client_quotas_result(outcome);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_client_quotas_result`, so it is a valid handle for every
+        // `kafka_admin_DescribeClientQuotasResult_*` getter; `alice` and the quota-key
+        // strings are borrowed from it and read while it lives, `&mut value` is a writable
+        // local for the single-element out-param writes, out-of-range indices on both
+        // levels exercise the documented false / null / 0 paths, and
+        // `kafka_admin_DescribeClientQuotasResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeClientQuotasResult_count(result), 2);
 
@@ -21888,6 +28999,12 @@ mod tests {
             (quota_entity(&[("user", Some("bob"))]), Err(Error::new(Errors::InvalidRequest))),
         ]);
         let result = box_alter_client_quotas_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_alter_client_quotas_result`, so it is a valid handle for every
+        // `kafka_admin_AlterClientQuotasResult_*` getter; `alice` and the error pointers
+        // are borrowed from it and read while it lives, out-of-range indices exercise the
+        // documented null paths, and `kafka_admin_AlterClientQuotasResult_destroy(result)`
+        // is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
             let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
@@ -22009,11 +29126,25 @@ mod tests {
     #[test]
     fn read_bytes_copies_the_exact_length_and_tolerates_nul() {
         let raw: [u8; 4] = [0x01, 0x00, 0x02, 0xff];
+        // SAFETY: Test code: `read_bytes` requires `bytes` to be null or readable for at
+        // least `len` bytes; `raw` is a four-byte stack array and `len` is 4, so exactly
+        // its contents are copied.
         assert_eq!(unsafe { read_bytes(raw.as_ptr(), 4) }, vec![0x01, 0x00, 0x02, 0xff]);
         // A short length truncates rather than reading past the caller's array.
+        // SAFETY: Test code: `read_bytes` requires `bytes` to be null or readable for at
+        // least `len` bytes; `raw` has four bytes and `len` is 2, so the read stays within
+        // the array.
         assert_eq!(unsafe { read_bytes(raw.as_ptr(), 2) }, vec![0x01, 0x00]);
+        // SAFETY: Test code: `read_bytes` requires `bytes` to be null or readable for at
+        // least `len` bytes; `len` is 0, so nothing is read from the live `raw` array.
         assert!(unsafe { read_bytes(raw.as_ptr(), 0) }.is_empty());
+        // SAFETY: Test code: `read_bytes` requires `bytes` to be null or readable for at
+        // least `len` bytes; a negative `len` is passed deliberately to exercise the
+        // documented empty path, and nothing is read from the live `raw` array.
         assert!(unsafe { read_bytes(raw.as_ptr(), -1) }.is_empty());
+        // SAFETY: Test code: `read_bytes` requires `bytes` to be null or readable for at
+        // least `len` bytes; a NULL `bytes` is passed deliberately to exercise the
+        // documented empty path, so nothing is read.
         assert!(unsafe { read_bytes(std::ptr::null(), 4) }.is_empty());
     }
 
@@ -22021,6 +29152,10 @@ mod tests {
     fn read_kafka_principals_rejects_a_null_type_or_name_by_index() {
         let (_t, types) = c_array_opt(&[Some("User"), Some("User")]);
         let (_n, names) = c_array_opt(&[Some("alice"), Some("bob")]);
+        // SAFETY: Test code: `read_kafka_principals` requires both arrays to be null or
+        // have `count` entries, each NULL or a valid C string; `types` and `names` hold two
+        // pointers each into the `CString`s held by `_t` and `_n`, matching `count` 2 and
+        // outliving the call, which copies them into owned principals.
         let principals = unsafe { read_kafka_principals(types.as_ptr(), names.as_ptr(), 2, "renewer") }
             .expect("both rows are complete");
         assert_eq!(principals.len(), 2);
@@ -22029,17 +29164,29 @@ mod tests {
         assert_eq!(principals[1].name(), "bob");
 
         let (_bt, bad_types) = c_array_opt(&[Some("User"), None]);
+        // SAFETY: Test code: `bad_types` holds one pointer into a `CString` held by `_bt`
+        // and one deliberate NULL, and `names` still points into the `CString`s held by
+        // `_n`, both with the two entries `count` 2 asks for; `read_kafka_principals`
+        // permits NULL entries and the NULL type exercises its documented error path.
         let error = unsafe { read_kafka_principals(bad_types.as_ptr(), names.as_ptr(), 2, "renewer") }
             .expect_err("a null principal type is rejected");
         assert_eq!(error.message(), "renewer principal type at index 1 must not be null");
 
         let (_bn, bad_names) = c_array_opt(&[None, Some("bob")]);
+        // SAFETY: Test code: `types` points into the `CString`s held by `_t` and
+        // `bad_names` holds one deliberate NULL and one pointer into a `CString` held by
+        // `_bn`, both with the two entries `count` 2 asks for; `read_kafka_principals`
+        // permits NULL entries and the NULL name exercises its documented error path.
         let error = unsafe { read_kafka_principals(types.as_ptr(), bad_names.as_ptr(), 2, "owner") }
             .expect_err("a null principal name is rejected");
         assert_eq!(error.message(), "owner principal name at index 0 must not be null");
 
         // A NULL array is read as "no entries", per CLAUDE.md §4.
         assert!(
+            // SAFETY: Test code: a NULL `types` array is passed deliberately, which
+            // `read_kafka_principals`'s `# Safety` permits and which it documents as "no
+            // entries"; `names` remains a live two-entry array matching `count` 2, and
+            // nothing is read from it on this path.
             unsafe { read_kafka_principals(std::ptr::null(), names.as_ptr(), 2, "renewer") }
                 .expect("null array")
                 .is_empty()
@@ -22050,11 +29197,23 @@ mod tests {
     fn read_optional_principal_needs_both_halves() {
         let ty = to_cstring("User");
         let name = to_cstring("alice");
+        // SAFETY: Test code: `read_optional_principal` requires both pointers to be null or
+        // valid C strings; `ty` and `name` are live `CString`s owned by this test that
+        // outlive the call, and the helper copies them into an owned principal.
         let owner = unsafe { read_optional_principal(ty.as_ptr(), name.as_ptr()) }.expect("both present");
         assert_eq!(owner.principal_type(), "User");
         assert_eq!(owner.name(), "alice");
+        // SAFETY: Test code: `read_optional_principal` requires both pointers to be null or
+        // valid C strings; the deliberate NULL type exercises the documented absent path
+        // and `name` is a live `CString`.
         assert!(unsafe { read_optional_principal(std::ptr::null(), name.as_ptr()) }.is_none());
+        // SAFETY: Test code: `read_optional_principal` requires both pointers to be null or
+        // valid C strings; `ty` is a live `CString` and the deliberate NULL name exercises
+        // the documented absent path.
         assert!(unsafe { read_optional_principal(ty.as_ptr(), std::ptr::null()) }.is_none());
+        // SAFETY: Test code: `read_optional_principal` requires both pointers to be null or
+        // valid C strings; both are passed as NULL deliberately to exercise the documented
+        // absent path, so nothing is read.
         assert!(unsafe { read_optional_principal(std::ptr::null(), std::ptr::null()) }.is_none());
     }
 
@@ -22081,6 +29240,15 @@ mod tests {
         let salt_lens = [2i32, 0, 0];
         let has_salts = [true, false, false];
 
+        // SAFETY: Test code: `read_scram_alterations` requires every array to be null or
+        // have `count` entries and byte pointers to be null or readable for their matching
+        // length; `users` holds three pointers into `CString`s held by `_u`,
+        // `is_deletions`, `mechanisms`, `iterations`, `passwords`, `password_lens`,
+        // `salts`, `salt_lens` and `has_salts` are three-element stack arrays matching
+        // `count` 3, and each non-null password / salt pointer refers to a stack byte array
+        // whose length equals the matching `password_lens` / `salt_lens` entry (`pw1` 3,
+        // `pw234` 5, `alice_salt` 2) while NULL pointers carry length 0. Everything
+        // outlives the call and is copied into the returned alterations.
         let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22139,6 +29307,13 @@ mod tests {
         let passwords: [*const u8; 2] = [password.as_ptr(), std::ptr::null()];
         let password_lens = [3i32, 0];
 
+        // SAFETY: Test code: `users` holds one pointer into a `CString` held by `_u` and
+        // one deliberate NULL, `is_deletions`, `mechanisms`, `iterations`, `passwords` and
+        // `password_lens` are two-element stack arrays matching `count` 2, `passwords[0]`
+        // points at the three-byte `password` array that `password_lens[0]` reports as 3
+        // while `passwords[1]` is NULL with length 0, and the three salt arrays are NULL as
+        // `read_scram_alterations`'s `# Safety` permits; the NULL user exercises the
+        // documented error path.
         let error = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22165,6 +29340,12 @@ mod tests {
         let bob_password: [u8; 3] = *b"pw2";
         let passwords: [*const u8; 2] = [std::ptr::null(), bob_password.as_ptr()];
         let password_lens = [0i32, 3];
+        // SAFETY: Test code: `users` holds two pointers into `CString`s held by `_u2`, the
+        // five two-element arrays match `count` 2, `passwords[0]` is NULL with
+        // `password_lens[0]` 0 and `passwords[1]` points at the three-byte `bob_password`
+        // array reported as length 3, and the three salt arrays are NULL as
+        // `read_scram_alterations`'s `# Safety` permits; the empty password is passed
+        // deliberately to show it reaches the core verbatim.
         let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22222,6 +29403,14 @@ mod tests {
         let salt_lens = [0i32, 0, 2];
         let has_salts = [false, true, true];
 
+        // SAFETY: Test code: `users` holds three pointers into `CString`s held by `_u`, the
+        // nine arrays are three-element stack arrays matching `count` 3, every `passwords`
+        // entry points at the three-byte `password` array reported as length 3, `salts[1]`
+        // points at the live one-byte `empty_salt` array with declared length 0 and
+        // `salts[2]` at the two-byte `real_salt` array reported as 2 while `salts[0]` is
+        // NULL with length 0, so every byte pointer is readable for its matching length as
+        // `read_scram_alterations`'s `# Safety` requires. Everything is copied within the
+        // call.
         let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22256,6 +29445,10 @@ mod tests {
         // A NULL `has_salts` array means no row supplies a salt, following
         // `op_has_values` in `read_client_quota_alterations`. The salt array is
         // still passed, so this also proves the flag — not the array — decides.
+        // SAFETY: Test code: the same live three-element arrays as above are passed to
+        // `read_scram_alterations` with `count` 3 and every byte pointer readable for its
+        // declared length; `has_salts` is NULL deliberately, which the `# Safety` permits,
+        // to show the flag array rather than the salt array decides.
         let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22291,6 +29484,11 @@ mod tests {
         // 259 truncates to 3 under a bare `as i8`, which is not a mechanism
         // either, but 257 would truncate to 1 = SCRAM_SHA_256.
         let mechanisms = [257i32];
+        // SAFETY: Test code: `users` holds one pointer into a `CString` held by `_u`,
+        // `is_deletions` and `mechanisms` are one-element stack arrays matching `count` 1,
+        // and the remaining six arrays are NULL, which `read_scram_alterations`'s `#
+        // Safety` permits and which a deletion never reads; the unknown mechanism code is
+        // passed deliberately to exercise the documented UNKNOWN mapping.
         let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
@@ -22323,6 +29521,12 @@ mod tests {
         let levels = [17i16, 2, 99];
         let min_levels = [14i16, 1, 98];
         let max_levels = [21i16, 3, 97];
+        // SAFETY: Test code: `read_feature_levels` requires `features` to be null or have
+        // `count` entries, each NULL or a valid C string, and each level array to be null
+        // or have `count` entries; `features` holds two pointers into `CString`s held by
+        // `_f` plus a deliberate NULL that exercises the documented skip, and `levels`,
+        // `min_levels` and `max_levels` are three-element `i16` stack arrays, all matching
+        // `count` 3 and outliving the call, which copies them into the three maps.
         let (current, minimum, maximum) = unsafe {
             read_feature_levels(features.as_ptr(), levels.as_ptr(), min_levels.as_ptr(), max_levels.as_ptr(), 3)
         };
@@ -22337,6 +29541,10 @@ mod tests {
 
         // A NULL level array seeds 0 for every feature, matching Java's
         // `getOrDefault(feature, (short) 0)` on the `updateFeatures` path.
+        // SAFETY: Test code: `features` (two pointers into `CString`s held by `_f` and one
+        // NULL) and `min_levels` still have the three entries `count` 3 asks for, and the
+        // two NULL level arrays are passed deliberately, as `read_feature_levels`'s `#
+        // Safety` permits, to exercise the documented zero-default path.
         let (current, minimum, maximum) = unsafe {
             read_feature_levels(features.as_ptr(), std::ptr::null(), min_levels.as_ptr(), std::ptr::null(), 3)
         };
@@ -22354,6 +29562,11 @@ mod tests {
             i32::from(UpgradeType::SafeDowngrade.code()),
         ];
         let updates =
+            // SAFETY: Test code: `read_feature_updates` requires every array to be null or
+            // have `count` entries, with name entries NULL or valid C strings; `features`
+            // holds two pointers into `CString`s held by `_f`, and `max_version_levels` and
+            // `upgrade_types` are two-element stack arrays, all matching `count` 2 and
+            // outliving the call, which copies them into the returned map.
             unsafe { read_feature_updates(features.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2) }
                 .expect("both rows are well formed");
         assert_eq!(updates.len(), 2);
@@ -22363,6 +29576,10 @@ mod tests {
         assert_eq!(updates["transaction.version"].upgrade_type(), UpgradeType::SafeDowngrade);
 
         let (_d, duplicated) = c_array_opt(&[Some("metadata.version"), Some("metadata.version")]);
+        // SAFETY: Test code: `duplicated` holds two pointers into `CString`s held by `_d`,
+        // and `max_version_levels` / `upgrade_types` are the two-element arrays from above,
+        // all matching `count` 2; the repeated feature name is passed deliberately to
+        // exercise `read_feature_updates`'s documented error path.
         let error = unsafe {
             read_feature_updates(duplicated.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2)
         }
@@ -22371,6 +29588,10 @@ mod tests {
 
         let (_n, with_null) = c_array_opt(&[None, Some("transaction.version")]);
         let error =
+            // SAFETY: Test code: `with_null` holds one deliberate NULL (permitted by
+            // `read_feature_updates`'s `# Safety`) and one pointer into a `CString` held by
+            // `_n`, and `max_version_levels` / `upgrade_types` have two entries, all
+            // matching `count` 2; the NULL name exercises the documented error path.
             unsafe { read_feature_updates(with_null.as_ptr(), max_version_levels.as_ptr(), upgrade_types.as_ptr(), 2) }
                 .expect_err("a null feature name is rejected");
         assert_eq!(error.message(), "feature at index 0 must not be null");
@@ -22384,6 +29605,10 @@ mod tests {
         let upgrade_types = [i32::from(UpgradeType::Upgrade.code()); 2];
 
         let levels = [17i16, 0];
+        // SAFETY: Test code: `features` holds two pointers into `CString`s held by `_f`,
+        // and `levels` and `upgrade_types` are two-element stack arrays, all matching
+        // `count` 2 and outliving the call; level 0 with UPGRADE is passed deliberately to
+        // exercise `read_feature_updates`'s documented constructor-error path.
         let error = unsafe { read_feature_updates(features.as_ptr(), levels.as_ptr(), upgrade_types.as_ptr(), 2) }
             .expect_err("level 0 with UPGRADE is rejected");
         assert_eq!(
@@ -22393,6 +29618,11 @@ mod tests {
         );
 
         let levels = [-1i16, 2];
+        // SAFETY: Test code: `features` holds two pointers into `CString`s held by `_f`,
+        // and the rebound `levels` and `upgrade_types` are two-element stack arrays, all
+        // matching `count` 2 and outliving the call; the negative level is passed
+        // deliberately to exercise `read_feature_updates`'s documented constructor-error
+        // path.
         let error = unsafe { read_feature_updates(features.as_ptr(), levels.as_ptr(), upgrade_types.as_ptr(), 2) }
             .expect_err("a negative level is rejected");
         assert_eq!(
@@ -22427,6 +29657,13 @@ mod tests {
         supported.insert("group.version".to_string(), SupportedVersionRange::new(0, 1).expect("valid"));
 
         let result = box_describe_features_result(FeatureMetadata::new(finalized, Some(123), supported));
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_features_result`, so it is a valid handle for every
+        // `kafka_admin_DescribeFeaturesResult_*` getter; the feature-name strings are
+        // borrowed from it and read with `CStr::from_ptr` while it lives, `&mut epoch` is a
+        // writable local for the single-element out-param write, out-of-range indices
+        // exercise the documented -1 / null paths, and
+        // `kafka_admin_DescribeFeaturesResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeFeaturesResult_finalized_count(result), 2);
             assert_eq!(kafka_admin_DescribeFeaturesResult_supported_count(result), 3);
@@ -22475,6 +29712,12 @@ mod tests {
         // Every int64 is a legal epoch, so absence needs the boolean return
         // rather than a sentinel -- and the out-param must be left untouched.
         let result = box_describe_features_result(FeatureMetadata::new(HashMap::new(), None, HashMap::new()));
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_features_result`, so it is a valid handle for
+        // `kafka_admin_DescribeFeaturesResult_finalized_features_epoch`; `&mut epoch` is a
+        // writable local, `std::ptr::null_mut()` is passed deliberately to exercise the
+        // documented null out-param path, and
+        // `kafka_admin_DescribeFeaturesResult_destroy(result)` is the single destroy.
         unsafe {
             let mut epoch = -7i64;
             assert!(!kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &mut epoch));
@@ -22517,6 +29760,13 @@ mod tests {
             ),
         ];
         let result = box_describe_user_scram_credentials_result(rows);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_user_scram_credentials_result`, so it is a valid handle for every
+        // `kafka_admin_DescribeUserScramCredentialsResult_*` getter; the user strings and
+        // `error` are borrowed from it and read (via `kafka_common_Error_message`) while it
+        // lives, out-of-range indices on both levels exercise the documented null / -1 / 0
+        // paths, and `kafka_admin_DescribeUserScramCredentialsResult_destroy(result)` is
+        // the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_count(result), 3);
             let user0 = CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 0));
@@ -22591,6 +29841,17 @@ mod tests {
         let token = DelegationToken::new(info, vec![0x01, 0x00, 0x02]);
         let base64 = token.hmac_as_base64_string();
         let result = box_describe_delegation_token_result(vec![token]);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_delegation_token_result`, so it is a valid handle for the count and
+        // `get_token` getters; `handle`, `info`, `owner`, `requester`, `renewer0` and
+        // `renewer1` are borrowed `DelegationToken` / `TokenInformation` / `KafkaPrincipal`
+        // handles into the same result and are only read while it lives, `&mut len` is a
+        // writable local, and `slice::from_raw_parts(hmac, len as usize)` reads exactly the
+        // `len` bytes `kafka_common_security_token_delegation_DelegationToken_hmac`
+        // reported for the HMAC it returned a pointer into. Out-of-range renewer / token
+        // indices exercise the documented null paths, and
+        // `kafka_admin_DescribeDelegationTokenResult_destroy(result)` is the single
+        // destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeDelegationTokenResult_count(result), 1);
             let handle = kafka_admin_DescribeDelegationTokenResult_get_token(result, 0);
@@ -22657,6 +29918,13 @@ mod tests {
         scram.insert("alice".to_string(), Ok(()));
         scram.insert("bob".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_alter_user_scram_credentials_result(scram);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_alter_user_scram_credentials_result`, so it is a valid handle for every
+        // `kafka_admin_AlterUserScramCredentialsResult_*` getter; the user strings and
+        // `error` are borrowed from it and read while it lives, the out-of-range index
+        // exercises the documented null path, and
+        // `kafka_admin_AlterUserScramCredentialsResult_destroy(result)` is the single
+        // destroy.
         unsafe {
             assert_eq!(kafka_admin_AlterUserScramCredentialsResult_count(result), 2);
             let user0 = CStr::from_ptr(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 0));
@@ -22674,6 +29942,11 @@ mod tests {
         features.insert("metadata.version".to_string(), Err(Error::local_illegal_argument("nope")));
         features.insert("transaction.version".to_string(), Ok(()));
         let result = box_update_features_result(features);
+        // SAFETY: Test code: the rebound `result` was built just above by
+        // `box_update_features_result`, so it is a valid handle for every
+        // `kafka_admin_UpdateFeaturesResult_*` getter; the feature string and error
+        // pointers are borrowed from it and read while it lives, and
+        // `kafka_admin_UpdateFeaturesResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_UpdateFeaturesResult_count(result), 2);
             let feature0 = CStr::from_ptr(kafka_admin_UpdateFeaturesResult_get_feature(result, 0));
@@ -22687,11 +29960,19 @@ mod tests {
     #[test]
     fn single_value_token_results_expose_only_their_value() {
         let result = box_renew_delegation_token_result(1_234);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_renew_delegation_token_result`, so it is a valid handle for
+        // `kafka_admin_RenewDelegationTokenResult_expiry_timestamp`, and
+        // `kafka_admin_RenewDelegationTokenResult_destroy(result)` is its single destroy.
         unsafe {
             assert_eq!(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result), 1_234);
             kafka_admin_RenewDelegationTokenResult_destroy(result);
         }
         let result = box_expire_delegation_token_result(5_678);
+        // SAFETY: Test code: the rebound `result` was built just above by
+        // `box_expire_delegation_token_result`, so it is a valid handle for
+        // `kafka_admin_ExpireDelegationTokenResult_expiry_timestamp`, and
+        // `kafka_admin_ExpireDelegationTokenResult_destroy(result)` is its single destroy.
         unsafe {
             assert_eq!(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result), 5_678);
             kafka_admin_ExpireDelegationTokenResult_destroy(result);
@@ -22706,6 +29987,11 @@ mod tests {
             20,
         );
         let result = box_create_delegation_token_result(DelegationToken::new(info, vec![0xff]));
+        // SAFETY: Test code: the rebound `result` was built just above by
+        // `box_create_delegation_token_result`, so it is a valid handle for
+        // `kafka_admin_CreateDelegationTokenResult_get_token`; `handle` and the
+        // `TokenInformation` handles are borrowed from it and only read while it lives, and
+        // `kafka_admin_CreateDelegationTokenResult_destroy(result)` is its single destroy.
         unsafe {
             let handle = kafka_admin_CreateDelegationTokenResult_get_token(result);
             let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(
@@ -22769,6 +30055,13 @@ mod tests {
         let (_s, states) = c_array_opt(&[Some("Ongoing"), Some("PrepareAbort")]);
         let producer_ids = [11i64, 22, 33];
         let pattern = CString::new("txn-.*").expect("no NUL");
+        // SAFETY: Test code: `list_transactions_options` requires `states.0` to be null or
+        // have `states.1` entries, each NULL or a valid C string, `producer_ids.0` to be
+        // null or have `producer_ids.1` readable entries, and `transactional_id_pattern` to
+        // be null or a valid C string; `states` holds two pointers into `CString`s held by
+        // `_s` (count 2), `producer_ids` is a three-element `i64` stack array (count 3) and
+        // `pattern` is a live `CString`, all outliving the call, which copies them into the
+        // options.
         let options = unsafe {
             list_transactions_options(
                 5_100,
@@ -22789,6 +30082,9 @@ mod tests {
 
         // NULL arrays and a NULL pattern leave every filter at Java's default,
         // and `filteredDuration` stays at Java's own -1 "no filter" value.
+        // SAFETY: Test code: both filter arrays are NULL with count 0 and the pattern is
+        // NULL, all of which `list_transactions_options`'s `# Safety` permits and documents
+        // as Java's defaults; nothing is read.
         let options = unsafe {
             list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), -1, std::ptr::null())
         };
@@ -22801,6 +30097,10 @@ mod tests {
         // An empty pattern is a distinct, legal value -- not the same as NULL.
         let empty = CString::new("").expect("no NUL");
         let options =
+            // SAFETY: Test code: both filter arrays are NULL with count 0, which
+            // `list_transactions_options`'s `# Safety` permits, and `empty` is a live
+            // `CString` owned by this test, passed deliberately to show an empty pattern is
+            // distinct from NULL.
             unsafe { list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), 0, empty.as_ptr()) };
         assert_eq!(options.filtered_transactional_id_pattern(), Some(""));
         assert_eq!(options.filtered_duration(), 0, "zero is a real duration filter, not 'unset'");
@@ -22812,6 +30112,9 @@ mod tests {
         // `GroupState.parse` upper-cases first. Copying the group helper's
         // case-insensitivity here would accept names Java rejects.
         let (_s, names) = c_array_opt(&[Some("CompleteCommit"), Some("ongoing"), Some("nonsense")]);
+        // SAFETY: Test code: `read_transaction_states` requires `names` to be null or have
+        // `count` entries, each NULL or a valid C string; `names` holds three pointers into
+        // the `CString`s held by `_s`, matching `count` 3 and outliving the call.
         let states = unsafe { read_transaction_states(names.as_ptr(), 3) };
         assert_eq!(
             states,
@@ -22828,6 +30131,9 @@ mod tests {
         // Every scalar distinct, and none of them is a plausible value for
         // another column, so any two being transposed fails an assertion.
         let topic = CString::new("txn-topic").expect("no NUL");
+        // SAFETY: Test code: `read_abort_transaction_spec` requires `topic` to be null or a
+        // valid C string; `topic` is a live `CString` owned by this test that outlives the
+        // call, and the helper copies it into the owned spec.
         let spec = unsafe { read_abort_transaction_spec(topic.as_ptr(), 7, 91_234_567_890, 13, 42) }
             .expect("every column is well formed");
         assert_eq!(spec.topic_partition().topic(), "txn-topic");
@@ -22836,12 +30142,19 @@ mod tests {
         assert_eq!(spec.producer_epoch(), 13);
         assert_eq!(spec.coordinator_epoch(), 42);
 
+        // SAFETY: Test code: `read_abort_transaction_spec` requires `topic` to be null or a
+        // valid C string; a NULL is passed deliberately to exercise its documented error
+        // path, and nothing is dereferenced.
         let error = unsafe { read_abort_transaction_spec(std::ptr::null(), 0, 1, 1, 1) }
             .expect_err("a null topic has no TopicPartition form");
         assert_eq!(error.message(), "abort transaction topic must not be null");
 
         // 65_537 truncates to 1 under a bare `as i16`, which is a legal epoch --
         // so it must be rejected rather than narrowed silently.
+        // SAFETY: Test code: `read_abort_transaction_spec` requires `topic` to be null or a
+        // valid C string; `topic` is the same live `CString` as above, and the out-of-range
+        // `producer_epoch` is passed deliberately to exercise the documented narrowing
+        // error.
         let error = unsafe { read_abort_transaction_spec(topic.as_ptr(), 0, 1, 65_537, 1) }
             .expect_err("an out-of-range producer epoch is rejected");
         assert_eq!(error.message(), "producer epoch 65537 does not fit in a 16-bit epoch");
@@ -22869,6 +30182,15 @@ mod tests {
             Err(Error::unsupported_version("Not implemented yet")),
         );
         let result = box_describe_producers_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_producers_result`, so it is a valid `describe_producers` result
+        // handle for every `kafka_admin_DescribeProducersResult_*` getter; the topic
+        // strings and `error` are borrowed from it and read while it lives, `&mut offset`
+        // and `&mut coordinator_epoch` are writable locals for the single-element out-param
+        // writes, `std::ptr::null_mut()` is passed deliberately to exercise the documented
+        // null out-param path, out-of-range indices on both levels exercise the documented
+        // null / -1 / false paths, and
+        // `kafka_admin_DescribeProducersResult_destroy(result)` is the single destroy.
         unsafe {
             // Sorted by topic then partition, so the failed partition 1 is first.
             assert_eq!(kafka_admin_DescribeProducersResult_count(result), 2);
@@ -22979,6 +30301,13 @@ mod tests {
         );
         outcomes.insert("txn-c".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_describe_transactions_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_describe_transactions_result`, so it is a valid `describe_transactions`
+        // result handle for every `kafka_admin_DescribeTransactionsResult_*` getter; the
+        // id, state and topic strings and `error` are borrowed from it and read while it
+        // lives, `&mut start` is a writable local for the single-element out-param writes,
+        // out-of-range indices on both levels exercise the documented null / -1 paths, and
+        // `kafka_admin_DescribeTransactionsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_DescribeTransactionsResult_count(result), 3);
             let id0 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_transactional_id(result, 0));
@@ -23058,6 +30387,12 @@ mod tests {
         outcomes.insert("txn-x".to_string(), Ok(ProducerIdAndEpoch::new(5_000, 3)));
         outcomes.insert("txn-y".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_fence_producers_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by `box_fence_producers_result`,
+        // so it is a valid `fence_producers` result handle for every
+        // `kafka_admin_FenceProducersResult_*` getter; the id strings and `error` are
+        // borrowed from it and read while it lives, out-of-range indices exercise the
+        // documented null / -1 paths, and
+        // `kafka_admin_FenceProducersResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_FenceProducersResult_count(result), 2);
             let id0 = CStr::from_ptr(kafka_admin_FenceProducersResult_get_transactional_id(result, 0));
@@ -23102,6 +30437,12 @@ mod tests {
         );
         outcomes.insert(2, Err(Error::unsupported_version("Not implemented yet")));
         let result = box_list_transactions_result(outcomes);
+        // SAFETY: Test code: `result` was built just above by
+        // `box_list_transactions_result`, so it is a valid `list_transactions` result
+        // handle for every `kafka_admin_ListTransactionsResult_*` getter; the id and state
+        // strings and `error` are borrowed from it and read while it lives, out-of-range
+        // indices on both levels exercise the documented null / -1 / 0 paths, and
+        // `kafka_admin_ListTransactionsResult_destroy(result)` is the single destroy.
         unsafe {
             assert_eq!(kafka_admin_ListTransactionsResult_count(result), 2);
             assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(result, 0), 1);
@@ -23137,6 +30478,10 @@ mod tests {
 
     #[test]
     fn destroying_a_null_b6_result_is_a_no_op() {
+        // SAFETY: Test code: each of the four B6 `_destroy` functions is called with
+        // `std::ptr::null_mut()` deliberately, which its `# Safety` permits ("null or a
+        // valid ... result handle") and which it documents as a no-op; nothing is
+        // dereferenced or freed.
         unsafe {
             kafka_admin_DescribeProducersResult_destroy(std::ptr::null_mut());
             kafka_admin_DescribeTransactionsResult_destroy(std::ptr::null_mut());
@@ -23147,6 +30492,10 @@ mod tests {
 
     #[test]
     fn destroying_a_null_b5b_result_is_a_no_op() {
+        // SAFETY: Test code: each of the eight B5b `_destroy` functions is called with
+        // `std::ptr::null_mut()` deliberately, which its `# Safety` permits ("null or a
+        // valid ... result handle") and which it documents as a no-op; nothing is
+        // dereferenced or freed.
         unsafe {
             kafka_admin_DescribeUserScramCredentialsResult_destroy(std::ptr::null_mut());
             kafka_admin_AlterUserScramCredentialsResult_destroy(std::ptr::null_mut());

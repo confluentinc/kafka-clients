@@ -263,10 +263,25 @@ impl BackendHandle {
     /// cheap to clone (they share the underlying connection pool), so
     /// callers should clone rather than rebuild.
     pub async fn channel(&self) -> Channel {
-        let endpoint = Endpoint::from_shared(self.endpoint.clone())
+        self.connect(Some(Duration::from_secs(30))).await
+    }
+
+    /// Like [`Self::channel`], but with no per-request timeout, for the
+    /// long-lived server-streaming calls of the chaos harness's
+    /// `ChaosWorkloadService`: a workload's stream stays open for the whole
+    /// run, and may go quiet for longer than 30 s while the brokers are down
+    /// (a server sends the response headers only with its first event).
+    pub async fn streaming_channel(&self) -> Channel {
+        self.connect(None).await
+    }
+
+    async fn connect(&self, request_timeout: Option<Duration>) -> Channel {
+        let mut endpoint = Endpoint::from_shared(self.endpoint.clone())
             .expect("backend endpoint is always a valid URI")
-            .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10));
+        if let Some(timeout) = request_timeout {
+            endpoint = endpoint.timeout(timeout);
+        }
 
         // Retry transient transport errors; a genuinely dead container just
         // exhausts the attempts and still panics with its logs.

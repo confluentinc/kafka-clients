@@ -87,6 +87,19 @@ impl From<InvalidReceiveError> for io::Error {
     }
 }
 
+/// Returns `true` if `e` carries an [`InvalidReceiveError`] payload, as the
+/// `From<InvalidReceiveError>` conversion above builds it.
+///
+/// The Rust equivalent of `e instanceof InvalidReceiveException` on the error
+/// closing a channel. Java's `Selector.pollSelectionKeys` logs an `IOException`
+/// disconnect at DEBUG and every other error at WARN (`Selector.java:600-626`),
+/// and `InvalidReceiveException` is a `KafkaException`, so it is one of the
+/// others. Like [`is_authentication_error`](super::is_authentication_error) it
+/// classifies by the typed payload, never by the [`io::ErrorKind`].
+pub fn is_invalid_receive_error(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<InvalidReceiveError>())
+}
+
 impl ErrorSource for InvalidReceiveError {
     // `InvalidReceiveException` exposes no `Throwable cause` constructor, so its cause is
     // always null in Java; the trait default (`None`) is that answer.
@@ -98,5 +111,30 @@ impl InvalidReceiveError {
     /// existing `std::error::Error` impl (kept for the `io::Error` boundary).
     pub fn source(&self) -> Option<&Error> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::network::auth_io_error;
+
+    #[test]
+    fn test_converted_error_is_recognized() {
+        let e = io::Error::from(InvalidReceiveError::new("Invalid receive (size = -1)"));
+        assert!(is_invalid_receive_error(&e));
+        // `Display` delegates to the payload, Java's `toString()` form.
+        assert_eq!("InvalidReceiveError: Invalid receive (size = -1)", e.to_string());
+    }
+
+    #[test]
+    fn test_other_io_errors_are_not_invalid_receives() {
+        // An I/O disconnect, an authentication failure and an unrelated
+        // `InvalidData` error: the classification is by payload, not by kind.
+        let reset = io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 104)");
+        assert!(!is_invalid_receive_error(&reset));
+        assert!(!is_invalid_receive_error(&auth_io_error("bad credentials")));
+        let other = io::Error::new(io::ErrorKind::InvalidData, "EOF during payload read");
+        assert!(!is_invalid_receive_error(&other));
     }
 }

@@ -8,14 +8,17 @@ it stands. The dated, step-by-step record of how it got here lives in
 **Last verified against the tree:** 2026-09-27
 **Coverage:** Producer (including idempotence and transactions), Consumer
 (KIP-848) and AdminClient are all translated. The C FFI and the Python bindings
-cover all three.
+cover all three: the `confluent_kafka` Python package covers the producer and
+the consumer, and the admin client has a separate, older module
+(`python/admin.py`).
 
 > **Paths:** the repository has three top-level directories, `rust/`, `python/`
 > and `c/` (see [structure.md](structure.md#top-level)). Paths in this document
 > such as `src/…`, `tests/…`, `generator/…`, `xtask/…`,
 > `multilanguage-test-server/` and `consumer-perf/` are relative to `rust/`.
 > Run `cargo` commands from there. Binding paths are given from the repository
-> root. Line-number citations are as of the "last verified" date above.
+> root. Line-number citations are as of the "last verified" date above, except
+> where a section gives its own date.
 
 ---
 
@@ -1007,13 +1010,14 @@ dispatcher thread. Both bindings are thin layers over that pair.*
 
 The module is gated on the `ffi` feature, which also turns on the `cbindgen`
 build-dependency that emits the C header. Only crate types that are public
-have bindings (CLAUDE.md §4). It has five files:
+have bindings (CLAUDE.md §4). It has five files. The symbol counts and
+line-number citations in this section are as of 2026-10-05.
 
 | File | Exported symbols | `*_async` |
 |------|-----------------:|----------:|
-| `common.rs` (the `kafka_common_Error_t` surface, error predicates, the shared callback machinery) | 57 | 0 |
-| `producer.rs` | 62 | 12 |
-| `consumer.rs` | 156 | 22 |
+| `common.rs` (the `kafka_common_Error_t` surface, error predicates, the shared callback machinery) | 58 | 0 |
+| `producer.rs` | 65 | 13 |
+| `consumer.rs` | 180 | 30 |
 | `consumer_handle.rs` | 23 | 1 |
 | `admin.rs` | 490 | 47 |
 
@@ -1023,11 +1027,11 @@ Every operation that can block is exposed twice:
   meaning success.
 - The `*_async` form takes a `*_callback_t` plus a `void *user_data` and
   spawns the future on the same runtime. It delivers the result through a
-  dispatcher thread, using `CompletionJob` (`src/ffi/common.rs:1922`),
-  `spawn_dispatcher` (`:1931`) and `enqueue_or_run_inline` (`:1949`).
+  dispatcher thread, using `CompletionJob` (`src/ffi/common.rs:2011`),
+  `spawn_dispatcher` (`:2020`) and `enqueue_or_run_inline` (`:2038`).
 
 `kafka_consumer_Consumer_subscribe` / `_subscribe_async`
-(`src/ffi/consumer.rs:2935`, `:2953`) are the canonical pair.
+(`src/ffi/consumer.rs:3595`, `:3615`) are the canonical pair.
 
 Error classification crosses the boundary as predicates. C cannot see enum
 variants, so every `is_*_error` predicate on `Error` has a
@@ -1040,20 +1044,33 @@ that enters while another holds the guard gets a `ConcurrentModification`
 error rather than being serialized. That is Java's
 `KafkaConsumer.acquire()/release()` contract. `wakeup()` deliberately bypasses
 the guard, because it has to work *while* another thread holds it
-(`src/ffi/consumer.rs:166-167`, `:553`).
+(`src/ffi/consumer.rs:167-168`, `:577`).
 
 `consumer_handle.rs` exposes the reentrant-safe `ConsumerHandle` operations to
 C: `assign`, `seek`, `pause`, `resume`, `position`, `committed`, the offset
 queries and `commit_*`. So a C rebalance listener can call back into the
 consumer.
 
+A rebalance listener or commit callback can also run on the caller's thread
+rather than the dispatcher thread (`consumer-threading.md` §31):
+- The binding registers a notify with
+  `kafka_consumer_Consumer_set_pending_callback_notify`
+  (`src/ffi/consumer.rs:1895`) and subscribes through the
+  `subscribe_*_caller_thread_listener_async` forms (`:1928`, `:1962`).
+- The core then queues each callback and fires the notify.
+- The waiting call takes the entry with `next_pending_callback` (`:2002`), runs
+  it on its own thread and reports the result with `ack_pending_callback`
+  (`:2063`).
+
+A caller that registers no notify keeps the dispatcher-thread behaviour.
+
 The producer handle also has an async submission outbox for
 `send_async` / `send_batch_async`:
-- `SubmitRequest::{Send, Barrier}` (`producer.rs:714-720`).
-- `drain_submitted_sends_await` (`:3108`) pushes a FIFO barrier.
+- `SubmitRequest::{Send, Barrier}` (`producer.rs:771-782`).
+- `drain_submitted_sends_await` (`:3383`) pushes a FIFO barrier.
 - `flush`, `close` and every transaction-control operation drain the outbox
-  first, through `with_txn_control` (`:3172`) and `with_txn_control_async`
-  (`:3593`). So a send that has returned is always included in the next
+  first, through `with_txn_control` (`:3447`) and `with_txn_control_async`
+  (`:3868`). So a send that has returned is always included in the next
   commit, abort or flush (`producer-transactions.md` §13).
 
 The admin handle, `kafka_admin_AdminClient_t` (`src/ffi/admin.rs:278`), wraps
@@ -1065,25 +1082,40 @@ accessor functions.
 > `design/current/consumer-ffi-plan.md`. That plan has moved under
 > `design/history/`, so the path in the code is stale.
 
-### Python bindings (`python/`)
+### Python client (`python/`)
 
-`producer.py`, `consumer.py` and `admin.py` sit over a hand-written CPython
-extension (`_confluentkafka.c`) that links the `confluent_kafka` cdylib.
-`python/setup.py` resolves the library under `../rust/target/`, and
-`CONFLUENT_KAFKA_LIB_DIR` overrides that.
+The `confluent_kafka` package is the Java producer and consumer surface in
+Python. It is generated from CLAUDE.md's `## Python Binding Conventions`, the
+Java source and the C header, and [python/README.md](../../python/README.md) is
+its user guide.
 
-Each module offers both shapes, matching the two C entry points underneath:
-- A synchronous family returning `concurrent.futures.Future`.
-- An async family whose methods are coroutines.
+It mirrors Java's packages with `clients` dropped (`confluent_kafka.producer`,
+`.consumer`, `.common`, `.common.errors`, `.common.serialization`, …), one file
+per Java class. Each family has a non-instantiable base, a `Kafka*` client, a
+`Mock*`, and an `Async*` peer of each.
 
-For the producer these are `Producer` / `KafkaProducer` / `MockProducer` and
-`AsyncProducer` / `AsyncKafkaProducer` / `AsyncMockProducer`, all on a shared
-`_ProducerBase`. The consumer and admin modules follow the same pattern: the
-admin module has `Admin` / `AdminClient` / `MockAdminClient` and their `Async*`
-twins, and the consumer module also has `ConsumerHandle`.
+`MockProducer` is plain Python translated from Java's mock. The other clients
+call the FFI through the hand-written CPython extension `_confluentkafka.c`, a
+marshalling layer that links the `confluent_kafka` cdylib
+(`python/setup.py:37-40`). `setup.py` resolves the library under
+`../rust/target/`, and `CONFLUENT_KAFKA_LIB_DIR` overrides that. The error
+classes and the config key-type table (`_config_types.py`) are generated from
+the Java sources by `cargo xtask generate-error-codes`.
 
-`grpc_server.py`, `grpc_server_async.py` and `grpc_translate.py` back the
-Python arm of the multilanguage tests.
+A blocking method submits the entry point's `_async` form and waits on the
+calling thread or event loop, never inside a native `block_on`. So Ctrl+C and
+task cancellation stay deliverable: they call `wakeup()`, let the call end and
+re-raise. While it waits, a consumer call drains the caller-thread callback
+queue above and runs the listener or commit callback itself (`_run_sync` /
+`_run_async`, `python/confluent_kafka/consumer/_base.py:686-778`). With a
+listener registered, `commit_nowait()` runs its C call on a per-consumer helper
+thread, because `commit_async` has no `_async` form.
+
+`admin.py` is the older admin binding. It is paused and outside the
+conventions, and keeps its flat `KafkaError` and positional value types through
+the private `confluent_kafka/_legacy_compat.py`. `grpc_server.py`,
+`grpc_server_async.py` and `grpc_translate.py` back the Python arm of the
+multilanguage tests, and `soak/` holds the long-running soak client.
 
 ### Multilanguage test harness
 

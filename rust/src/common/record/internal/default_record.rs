@@ -169,22 +169,6 @@ impl DefaultRecord {
         Ok((header_key, header_value))
     }
 
-    /// Read up to `buf.len()` bytes from `reader`, returning the number of bytes read.
-    ///
-    /// Corresponds to Java's `Utils.readFully(InputStream, ByteBuffer)`.
-    fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, InvalidRecordError> {
-        let mut total = 0;
-        while total < buf.len() {
-            match reader.read(&mut buf[total..]) {
-                Ok(0) => break, // EOF
-                Ok(n) => total += n,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(InvalidRecordError::new(e.to_string())),
-            }
-        }
-        Ok(total)
-    }
-
     /// Maximum overhead of a default record, excluding key, value, and headers.
     ///
     /// 5 bytes (length varint) + 10 bytes (timestamp varlong) + 5 bytes (offset varint) + 1 byte (attributes) = 21.
@@ -341,6 +325,8 @@ impl DefaultRecord {
     ///
     /// # Errors
     /// Returns `InvalidRecordError` if the record is malformed or the stream ends early.
+    /// A stream that ends before or inside the record's size fails with Java's
+    /// `Incorrect declared batch size, premature EOF reached`.
     pub fn read_from_stream<R: Read>(
         input: &mut R,
         base_offset: i64,
@@ -348,8 +334,22 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<DefaultRecord, InvalidRecordError> {
-        let size_of_body = ByteUtils::read_varint_reader(input)
-            .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
+        let size_of_body = ByteUtils::read_varint_reader(input).map_err(|e| {
+            // The stream ended before or inside the size: the batch declared more
+            // records than it holds. Java's `ByteUtils.readVarint(InputStream)` takes
+            // the `-1` that `read()` returns at the end of the stream for a
+            // continuation byte, so it throws `IllegalArgumentException`, which
+            // `StreamRecordIterator.readNext` reports as a premature EOF
+            // (`DefaultRecordBatch.java:636-644`). That iterator is Java's one caller
+            // of `DefaultRecord.readFrom(InputStream)`, as `DefaultRecordBatch::iter_records`
+            // is this function's; the iterator's text is chosen here because the
+            // `InvalidRecordError` it receives no longer carries the I/O error kind.
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                InvalidRecordError::new("Incorrect declared batch size, premature EOF reached")
+            } else {
+                InvalidRecordError::new(format!("Failed to read record size: {}", e))
+            }
+        })?;
 
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
@@ -358,8 +358,16 @@ impl DefaultRecord {
             )));
         }
 
-        let mut record_buffer = vec![0u8; size_of_body as usize];
-        let bytes_read = DefaultRecord::read_fully(input, &mut record_buffer)?;
+        // Java allocates the declared body size before reading a byte of it
+        // (`DefaultRecord.java:286`). The size is read off the stream, so here the
+        // buffer grows with the bytes actually read instead — `take` stops the
+        // read at the declared size — and a record declaring 2 GiB over three
+        // bytes of payload allocates for three bytes, then fails as Java's does.
+        let mut record_buffer = Vec::new();
+        let bytes_read = (&mut *input)
+            .take(size_of_body as u64)
+            .read_to_end(&mut record_buffer)
+            .map_err(|e| InvalidRecordError::new(e.to_string()))?;
         if bytes_read != size_of_body as usize {
             return Err(InvalidRecordError::new(format!(
                 "Invalid record size: expected {} bytes in record payload, but the record payload reached EOF.",
@@ -1374,5 +1382,48 @@ mod tests {
         assert!(!record.is_compressed());
         assert!(!record.has_timestamp_type(TimestampType::CreateTime));
         assert!(record.ensure_valid().is_ok());
+    }
+
+    /// D4: a declared body size is not trusted to size the read
+    /// buffer (Java allocates it up front, `DefaultRecord.java:286`). A record
+    /// declaring `i32::MAX` bytes over a three-byte body allocates for the three
+    /// bytes, then fails with Java's end-of-payload message.
+    #[test]
+    fn test_read_from_stream_declared_size_does_not_size_the_buffer() {
+        let mut stream = Vec::new();
+        ByteUtils::write_varint(i32::MAX, &mut stream).unwrap();
+        stream.extend_from_slice(b"abc");
+
+        let (err, max_allocation) = {
+            let _guard = crate::AllocTrackingGuard::new();
+            let err = DefaultRecord::read_from_stream(&mut stream.as_slice(), 0, 0, 0, None)
+                .expect_err("three bytes are not 2 GiB");
+            (err, crate::AllocTrackingGuard::max_allocation())
+        };
+        assert_eq!(
+            "Invalid record size: expected 2147483647 bytes in record payload, but the record payload reached EOF.",
+            err.message()
+        );
+        assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a three-byte body");
+    }
+
+    /// A stream that ends where a record's size should be — before its first
+    /// byte, or after a continuation byte — fails with Java's premature-EOF text:
+    /// `ByteUtils.readVarint(InputStream)` reads an exhausted stream's `-1` as a
+    /// continuation byte and throws `IllegalArgumentException`, which
+    /// `StreamRecordIterator.readNext` reports this way
+    /// (`DefaultRecordBatch.java:636-644`). A size read in full that outruns the
+    /// body keeps Java's end-of-payload text (the test above).
+    #[test]
+    fn test_read_from_stream_ending_in_the_size_is_premature_eof() {
+        for stream in [&[][..], &[0x80][..]] {
+            let mut input = stream;
+            let err = DefaultRecord::read_from_stream(&mut input, 0, 0, 0, None).expect_err("no size to read");
+            assert_eq!(
+                "Incorrect declared batch size, premature EOF reached",
+                err.message(),
+                "stream {stream:?}"
+            );
+        }
     }
 }
