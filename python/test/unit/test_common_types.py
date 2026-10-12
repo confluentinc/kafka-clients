@@ -94,7 +94,7 @@ def test_random_uuid(repetition: int) -> None:
     random_id = Uuid.random_uuid()
     assert Uuid.ZERO_UUID != random_id
     assert Uuid.METADATA_TOPIC_ID != random_id
-    assert not str(random_id).startswith("-")
+    assert "-" not in str(random_id)
 
 
 def test_compare_uuids() -> None:
