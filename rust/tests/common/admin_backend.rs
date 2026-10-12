@@ -521,8 +521,8 @@ pub trait AdminBackend {
     /// response data and exposes three views (`all()` / `users()` /
     /// `description(user)`); this is the per-user shape that subsumes all three,
     /// composed the same way by the C gRPC server (`c/grpc_server/server.cc`)
-    /// and the Python extension's `assemble_scram` (`python/_confluentkafka.c`,
-    /// behind `admin.py`), so every backend answers with the same key set.
+    /// and the Python extension's `assemble_scram` (`python/_confluentkafka.c`),
+    /// so every backend answers with the same key set.
     ///
     /// The broker never returns the salted password or the salt, so the value
     /// carries only the mechanism and iteration count per credential.
@@ -1606,8 +1606,10 @@ impl AdminBackend for RustNativeAdmin {
         //   - when it fails, `users()` still lists every user whose error is not
         //     RESOURCE_NOT_FOUND — necessarily including the one that failed
         //     `all()` — and `description(user)` yields that user's own error.
-        //     The users omitted at that point are exactly the ones Java's `all()`
-        //     also declines to report.
+        //     A requested RESOURCE_NOT_FOUND user is left out here, while the C and
+        //     Python backends answer it with an empty description (the FFI's row
+        //     carries its RESOURCE_NOT_FOUND error). No integration test reaches
+        //     this case.
         //   - if the response future itself failed, all three fail with the same
         //     error and it becomes the whole-call `Err`; and if the composition
         //     yields no rows at all, the `all()` error is returned rather than

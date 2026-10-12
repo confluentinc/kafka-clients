@@ -508,8 +508,8 @@ client repeatedly and a restart must not discard the soak's history.
 `--recreate-topic` deletes and re-creates it, for a deliberate fresh start
 only.
 
-Topic creation goes through **this repo's Rust-backed** `AdminClient`
-(`python/admin.py`) — the soak now drives the Rust client for admin,
+Topic creation goes through **this repo's Rust-backed** `KafkaAdminClient`
+(`confluent_kafka.admin`) — the soak now drives the Rust client for admin,
 produce and consume alike. The admin client takes the **same Java-style config
 namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
 `sasl.mechanism`, `sasl.jaas.config`, `ssl.*`), so the soak passes its admin

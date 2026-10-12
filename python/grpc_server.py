@@ -15,7 +15,7 @@
 
 """gRPC server exposing the sync clients of the ``confluent_kafka`` package
 (``confluent_kafka.producer``, ``confluent_kafka.consumer``) and
-python/admin.py over the ProducerService / ConsumerService /
+confluent_kafka.admin over the ProducerService / ConsumerService /
 AdminService defined in rust/multilanguage-test-server/proto/.
 
 Used by the Rust integration tests under the multilanguage-tests
@@ -23,7 +23,7 @@ feature: the Rust MultilanguageProducer / MultilanguageConsumer /
 MultilanguageAdmin clients tunnel every call to this server, which
 translates each call into a ``confluent_kafka.producer``
 KafkaProducer/MockProducer, ``confluent_kafka.consumer``
-KafkaConsumer/MockConsumer or admin.py AdminClient/MockAdminClient call,
+KafkaConsumer/MockConsumer or the admin facade AdminClient/MockAdminClient call,
 returning the result over gRPC. See
 design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
 design/history/Milestone-11/PLAN-multilanguage-admin.md.
@@ -62,7 +62,6 @@ from confluent_kafka.consumer import (  # noqa: E402
     OffsetAndMetadata,
 )
 from confluent_kafka.common import KafkaError  # noqa: E402
-import admin as ka  # noqa: E402  (AdminClient / MockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
@@ -78,6 +77,7 @@ LOG = logging.getLogger("grpc_server")
 # Proto<->Python translation helpers are shared with the async server
 # (grpc_server_async.py) and live in grpc_translate.py.
 from grpc_translate import (  # noqa: E402
+    admin_create_sync,
     CallbackLog,
     GroupMetadataStore,
     LoggingRebalanceListener,
@@ -94,6 +94,7 @@ from grpc_translate import (  # noqa: E402
     _admin_close_timeout,
     _admin_cluster_description_response,
     _admin_config_resource_key,
+    _admin_config_resource_types,
     _admin_config_resources,
     _admin_constructor_error,
     _admin_create_acls_response,
@@ -141,7 +142,6 @@ from grpc_translate import (  # noqa: E402
     _admin_replicas,
     _admin_retry_on_quota,
     _admin_scram_alterations,
-    _admin_selects_mock,
     _admin_timeout,
     _admin_token_owners,
     _admin_topic_id_key,
@@ -755,11 +755,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
 
 class AdminService(apb_grpc.AdminServiceServicer):
-    """Maps AdminService RPCs onto python/admin.py's *synchronous*
-    AdminClient / MockAdminClient (the async twin is driven by
+    """Maps AdminService RPCs onto the admin facade's *synchronous*
+    Admin / MockAdminClient (the async twin is driven by
     grpc_server_async.py).
 
-    Java's Admin methods return per-key futures, but admin.py's `_run_sync`
+    Java's Admin methods return per-key futures, but the admin facade's `_run_sync`
     already waits for the FFI completion callback and hands back resolved data,
     so blocking the gRPC worker thread here is what the binding does anyway."""
 
@@ -778,10 +778,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             # See CreateAdminRequest in admin_service.proto: this predicate is
             # the normative mock-selection rule for all three servers.
-            if _admin_selects_mock(config):
-                client = ka.MockAdminClient(num_brokers)
-            else:
-                client = ka.AdminClient(config)
+            client = admin_create_sync(config, num_brokers)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateAdmin failed")
             return apb.CreateAdminResponse(admin_id=0, error=_admin_constructor_error(e))
@@ -795,8 +792,8 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # -- Topics & partitions (slice G1) --------------------------------------
     #
     # Every handler follows the same three steps: look the handle up, call the
-    # admin.py method (which blocks this worker thread until the FFI completion
-    # callback fires, exactly as any admin.py caller does), and wrap the
+    # the admin facade method (which blocks this worker thread until the FFI completion
+    # callback fires, exactly as any the admin facade caller does), and wrap the
     # resolved dict in the per-key envelope. A raised KafkaError is a
     # whole-call failure and goes in the response's top-level `error`, leaving
     # `entries` empty — per-key failures never raise, they arrive inside the
@@ -910,7 +907,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #
     # Same three steps as the G1 handlers. Note the split in what "failure"
     # means: describe_cluster / list_config_resources have one Java future
-    # each, so admin.py *raises* and the failure lands in the top-level error;
+    # each, so the admin facade *raises* and the failure lands in the top-level error;
     # the per-key RPCs never raise for a single key, its KafkaError arrives
     # inside the dict.
 
@@ -967,7 +964,8 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             # An empty repeated field is Java's empty Set: every supported type.
             resources = client.list_config_resources(
-                list(request.resource_types), timeout=_admin_timeout(request))
+                _admin_config_resource_types(request.resource_types),
+                timeout=_admin_timeout(request))
             return _admin_list_config_resources_response(resources)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_config_resources raised")
@@ -1016,7 +1014,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # VoidKeyedResponse, but their two error levels do not mean the same thing.
     # alter_partition_reassignments has one Java future per partition, so a
     # single partition's failure arrives inside the dict as usual.
-    # elect_leaders has *one* future for the whole map: admin.py raises when it
+    # elect_leaders has *one* future for the whole map: the admin facade raises when it
     # fails, which is the top-level error, and the per-partition value inside the
     # resolved dict is Java's Optional<Throwable> -- None meaning that partition's
     # election succeeded. list_partition_reassignments is whole-value (one
@@ -1028,7 +1026,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
         try:
             # `partitions=None` is Java's null Set: elect for every partition.
-            # admin.py requires the argument explicitly for exactly that reason.
+            # the admin facade requires the argument explicitly for exactly that reason.
             outcomes = client.elect_leaders(
                 request.election_type,
                 _admin_optional_partitions(request),
@@ -1092,7 +1090,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # Three levels of error, and which one an RPC uses follows its Java future
     # shape rather than a template:
     #
-    #   - list_groups: admin.py returns a *pair* of lists.
+    #   - list_groups: the admin facade returns a *pair* of lists.
     #     A raise is the whole-call error; a per-broker listing failure is inside
     #     the second list, unkeyed.
     #   - describe_consumer_groups / describe_classic_groups /
@@ -1102,7 +1100,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #     remove_members_from_consumer_group: Java holds ONE future over the whole
     #     map, so a failure of that future raises here and becomes the top-level
     #     error with `entries` empty. With an empty input (no partitions, or
-    #     removeAll) that is the *only* observable, and admin.py returns an empty
+    #     removeAll) that is the *only* observable, and the admin facade returns an empty
     #     dict. delete_consumer_groups is the one of the four with genuine
     #     per-key futures.
 
@@ -1112,7 +1110,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.ListGroupsResponse(error=self._unknown_admin(request.admin_id))
         try:
             # Empty filter lists leave the filter unset, which is Java's empty
-            # set; admin.py takes None for the same thing, and [] is equivalent.
+            # set; the admin facade takes None for the same thing, and [] is equivalent.
             outcome = client.list_groups(
                 group_states=list(request.group_states),
                 protocol_types=list(request.protocol_types),
@@ -1184,7 +1182,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = client.delete_consumer_group_offsets(
                 request.group_id,
-                [(tp.topic, tp.partition) for tp in request.partitions],
+                [_tp(tp) for tp in request.partitions],
                 timeout=_admin_timeout(request))
             return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
@@ -1226,7 +1224,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # Five of the thirteen hold ONE future for the whole call in Java
     # (describe_acls, describe_client_quotas, create_delegation_token,
     # renew/expire_delegation_token, describe_delegation_token,
-    # describe_features), so admin.py *raises* on failure and the error becomes
+    # describe_features), so the admin facade *raises* on failure and the error becomes
     # the response's top-level error — there is no per-key slot for it. The other
     # eight have genuine per-key futures, so a per-key failure arrives inside the
     # returned dict and only a submission failure raises.
@@ -1304,7 +1302,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 error=self._unknown_admin(request.admin_id))
         try:
             # An empty `users` is Java's no-argument overload: describe every
-            # user. admin.py takes None for the same thing and [] is equivalent.
+            # user. the admin facade takes None for the same thing and [] is equivalent.
             outcomes = client.describe_user_scram_credentials(
                 list(request.users), timeout=_admin_timeout(request))
             return _admin_describe_user_scram_credentials_response(outcomes)
@@ -1416,7 +1414,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # describe_transactions, fence_producers, list_transactions). The other two,
     # abort_transaction and force_terminate_transaction, answer with the shared
     # StatusResponse because Java's AbortTransactionResult / TerminateTransaction
-    # Result carry no data and no reachable per-key granularity — admin.py
+    # Result carry no data and no reachable per-key granularity — the admin facade
     # resolves both to None, so success is an absent error.
     #
     # list_transactions is keyed by *broker*: byBrokerId() is the only one of
@@ -1432,7 +1430,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # partition's leader); broker 0 is legal, so HasField carries it.
             broker_id = request.broker_id if request.HasField("broker_id") else None
             outcomes = client.describe_producers(
-                [(tp.topic, tp.partition) for tp in request.partitions],
+                [_tp(tp) for tp in request.partitions],
                 broker_id=broker_id,
                 timeout=_admin_timeout(request))
             return _admin_describe_producers_response(outcomes)
@@ -1524,13 +1522,13 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # Close is idempotent — silent success on unknown id, as the
             # producer and consumer services do.
             return pb.StatusResponse()
-        # admin.py's close() takes seconds or a timedelta; absent means Java's
+        # the admin facade's close() takes seconds or a timedelta; absent means Java's
         # no-argument close(). Shared helper so both servers convert the wire's
         # integer milliseconds exactly (see _admin_close_timeout).
         timeout = _admin_close_timeout(request)
         try:
             client.close(timeout)
-        except ka.KafkaError as e:
+        except KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
             LOG.exception("admin close raised")
