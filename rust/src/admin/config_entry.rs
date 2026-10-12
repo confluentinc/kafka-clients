@@ -71,6 +71,32 @@ impl ConfigType {
             _ => ConfigType::Unknown,
         }
     }
+
+    /// The name of this constant in Java's `ConfigEntry.ConfigType`
+    /// (`ConfigEntry.java:199-210`). The Java enum does not override
+    /// `toString()`, so `Enum.toString()` returns this name.
+    fn name(&self) -> &'static str {
+        match self {
+            ConfigType::Unknown => "UNKNOWN",
+            ConfigType::Boolean => "BOOLEAN",
+            ConfigType::String => "STRING",
+            ConfigType::Int => "INT",
+            ConfigType::Short => "SHORT",
+            ConfigType::Long => "LONG",
+            ConfigType::Double => "DOUBLE",
+            ConfigType::List => "LIST",
+            ConfigType::Class => "CLASS",
+            ConfigType::Password => "PASSWORD",
+        }
+    }
+}
+
+/// Renders the Java constant name (`PASSWORD`, `UNKNOWN`, ...), as Java's
+/// `Enum.toString()` does.
+impl std::fmt::Display for ConfigType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
 }
 
 /// Source of configuration entries.
@@ -126,6 +152,31 @@ impl ConfigSource {
             _ => ConfigSource::Unknown,
         }
     }
+
+    /// The name of this constant in Java's `ConfigEntry.ConfigSource`
+    /// (`ConfigEntry.java:215-225`). The Java enum does not override
+    /// `toString()`, so `Enum.toString()` returns this name.
+    fn name(&self) -> &'static str {
+        match self {
+            ConfigSource::DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
+            ConfigSource::DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
+            ConfigSource::DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
+            ConfigSource::DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+            ConfigSource::DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
+            ConfigSource::DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
+            ConfigSource::StaticBrokerConfig => "STATIC_BROKER_CONFIG",
+            ConfigSource::DefaultConfig => "DEFAULT_CONFIG",
+            ConfigSource::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// Renders the Java constant name (`DYNAMIC_BROKER_CONFIG`, `UNKNOWN`, ...), as
+/// Java's `Enum.toString()` does.
+impl std::fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
 }
 
 /// A configuration synonym of a [`ConfigEntry`].
@@ -169,11 +220,13 @@ impl ConfigSynonym {
     }
 }
 
+/// Mirrors Java's `ConfigSynonym.toString()` (`ConfigEntry.java:285-291`): the
+/// source renders as its Java constant name and a missing value as `null`.
 impl std::fmt::Display for ConfigSynonym {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ConfigSynonym(name={}, value={}, source={:?})",
+            "ConfigSynonym(name={}, value={}, source={})",
             self.name,
             self.value.as_deref().unwrap_or("null"),
             self.source
@@ -523,7 +576,10 @@ impl ConfigEntry {
 impl std::fmt::Display for ConfigEntry {
     /// Redacts sensitive value.
     ///
-    /// Mirrors Java's `toString()` (`ConfigEntry.java:183-193`).
+    /// Mirrors Java's `toString()` (`ConfigEntry.java:183-193`): the source and
+    /// type render as their Java constant names, and the synonyms as Java's
+    /// `AbstractCollection.toString()` renders the list (`[a, b]`, `[]` when
+    /// empty), each synonym through its own `Display`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = if self.is_sensitive {
             REDACTED
@@ -532,14 +588,18 @@ impl std::fmt::Display for ConfigEntry {
         };
         write!(
             f,
-            "ConfigEntry(name={}, value={}, source={:?}, isSensitive={}, isReadOnly={}, \
-             synonyms={:?}, type={:?}, documentation={})",
-            self.name,
-            value,
-            self.source,
-            self.is_sensitive,
-            self.is_read_only,
-            self.synonyms,
+            "ConfigEntry(name={}, value={}, source={}, isSensitive={}, isReadOnly={}, synonyms=[",
+            self.name, value, self.source, self.is_sensitive, self.is_read_only
+        )?;
+        for (i, synonym) in self.synonyms.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{synonym}")?;
+        }
+        write!(
+            f,
+            "], type={}, documentation={})",
             self.config_type,
             self.documentation.as_deref().unwrap_or("null")
         )
@@ -605,6 +665,125 @@ mod tests {
         let s = entry.to_string();
         assert!(s.contains("value=Redacted"), "{s}");
         assert!(!s.contains("secret"), "{s}");
+    }
+
+    /// New test, no Java original (Java has no `ConfigEntryTest`): every
+    /// `ConfigType` renders its Java constant name, as Java's `Enum.toString()`
+    /// does (`ConfigEntry.java:199-210`).
+    #[test]
+    fn config_type_display_matches_java_constant_names() {
+        for (config_type, java) in [
+            (ConfigType::Unknown, "UNKNOWN"),
+            (ConfigType::Boolean, "BOOLEAN"),
+            (ConfigType::String, "STRING"),
+            (ConfigType::Int, "INT"),
+            (ConfigType::Short, "SHORT"),
+            (ConfigType::Long, "LONG"),
+            (ConfigType::Double, "DOUBLE"),
+            (ConfigType::List, "LIST"),
+            (ConfigType::Class, "CLASS"),
+            (ConfigType::Password, "PASSWORD"),
+        ] {
+            assert_eq!(config_type.to_string(), java);
+        }
+    }
+
+    /// New test, no Java original: every `ConfigSource` renders its Java
+    /// constant name, as Java's `Enum.toString()` does
+    /// (`ConfigEntry.java:215-225`).
+    #[test]
+    fn config_source_display_matches_java_constant_names() {
+        for (source, java) in [
+            (ConfigSource::DynamicTopicConfig, "DYNAMIC_TOPIC_CONFIG"),
+            (ConfigSource::DynamicBrokerLoggerConfig, "DYNAMIC_BROKER_LOGGER_CONFIG"),
+            (ConfigSource::DynamicBrokerConfig, "DYNAMIC_BROKER_CONFIG"),
+            (ConfigSource::DynamicDefaultBrokerConfig, "DYNAMIC_DEFAULT_BROKER_CONFIG"),
+            (ConfigSource::DynamicClientMetricsConfig, "DYNAMIC_CLIENT_METRICS_CONFIG"),
+            (ConfigSource::DynamicGroupConfig, "DYNAMIC_GROUP_CONFIG"),
+            (ConfigSource::StaticBrokerConfig, "STATIC_BROKER_CONFIG"),
+            (ConfigSource::DefaultConfig, "DEFAULT_CONFIG"),
+            (ConfigSource::Unknown, "UNKNOWN"),
+        ] {
+            assert_eq!(source.to_string(), java);
+        }
+    }
+
+    /// New test, no Java original: `ConfigSynonym`'s `Display` is the string
+    /// Java's `ConfigSynonym.toString()` builds (`ConfigEntry.java:285-291`),
+    /// with a missing value rendered as `null`.
+    #[test]
+    fn config_synonym_display_matches_java_to_string() {
+        let synonym = ConfigSynonym::new(
+            "log.retention.ms".to_string(),
+            Some("604800000".to_string()),
+            ConfigSource::DynamicBrokerConfig,
+        );
+        assert_eq!(
+            synonym.to_string(),
+            "ConfigSynonym(name=log.retention.ms, value=604800000, source=DYNAMIC_BROKER_CONFIG)"
+        );
+        let without_value = ConfigSynonym::new("log.retention.hours".to_string(), None, ConfigSource::DefaultConfig);
+        assert_eq!(
+            without_value.to_string(),
+            "ConfigSynonym(name=log.retention.hours, value=null, source=DEFAULT_CONFIG)"
+        );
+    }
+
+    /// New test, no Java original: `Display` is the string Java's
+    /// `ConfigEntry.toString()` builds (`ConfigEntry.java:183-193`) for an entry
+    /// with two synonyms and a non-default source, type and documentation. The
+    /// synonyms render as Java's list of `ConfigSynonym.toString()`s.
+    #[test]
+    fn display_matches_java_to_string() {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("log.retention.ms".to_string())
+                .set_value(Some("604800000".to_string()))
+                .set_source(ConfigSource::DynamicBrokerConfig)
+                .set_is_read_only(true)
+                .set_synonyms(vec![
+                    ConfigSynonym::new(
+                        "log.retention.ms".to_string(),
+                        Some("604800000".to_string()),
+                        ConfigSource::DynamicBrokerConfig,
+                    ),
+                    ConfigSynonym::new(
+                        "log.retention.hours".to_string(),
+                        Some("168".to_string()),
+                        ConfigSource::DefaultConfig,
+                    ),
+                ])
+                .set_config_type(ConfigType::Long)
+                .set_documentation(Some("The retention time.".to_string()))
+                .build()
+                .unwrap(),
+        );
+        assert_eq!(
+            entry.to_string(),
+            "ConfigEntry(name=log.retention.ms, value=604800000, source=DYNAMIC_BROKER_CONFIG, \
+             isSensitive=false, isReadOnly=true, \
+             synonyms=[ConfigSynonym(name=log.retention.ms, value=604800000, \
+             source=DYNAMIC_BROKER_CONFIG), ConfigSynonym(name=log.retention.hours, value=168, \
+             source=DEFAULT_CONFIG)], type=LONG, documentation=The retention time.)"
+        );
+    }
+
+    /// New test, no Java original: the entry Java's two-argument constructor
+    /// builds (`ConfigEntry.java:44-47`) renders an empty synonym list as `[]`,
+    /// the `UNKNOWN` source and type, and `null` for a missing value and
+    /// documentation; a sensitive entry renders `Redacted` with the same shape.
+    #[test]
+    fn display_matches_java_to_string_for_defaults_and_sensitive_entry() {
+        assert_eq!(
+            ConfigEntry::new("cleanup.policy".to_string(), None).to_string(),
+            "ConfigEntry(name=cleanup.policy, value=null, source=UNKNOWN, isSensitive=false, \
+             isReadOnly=false, synonyms=[], type=UNKNOWN, documentation=null)"
+        );
+        assert_eq!(
+            sensitive_entry().to_string(),
+            "ConfigEntry(name=ssl.keystore.password, value=Redacted, source=DYNAMIC_BROKER_CONFIG, \
+             isSensitive=true, isReadOnly=false, synonyms=[], type=PASSWORD, documentation=null)"
+        );
     }
 
     /// A distinctive secret for the `Debug` tests.
