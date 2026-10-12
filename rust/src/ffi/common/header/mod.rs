@@ -223,11 +223,6 @@ impl HeadersInner {
     pub(crate) fn as_ptr(&self) -> *const kafka_common_header_Headers_t {
         self as *const Self as *const kafka_common_header_Headers_t
     }
-
-    /// A borrowed handle on `self`, valid as long as `self`.
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut kafka_common_header_Headers_t {
-        self as *mut Self as *mut kafka_common_header_Headers_t
-    }
 }
 
 // SAFETY: a `HeadersInner` holds one of three implementations. A view from

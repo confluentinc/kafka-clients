@@ -21,11 +21,11 @@
 //! moves it after the view exists. The `Headers` methods themselves
 //! (`add_*`, `remove`, `last_header`, ...) are reached through that view.
 
-use std::ffi::c_char;
-use std::ptr;
+use std::ffi::{c_char, c_void};
 use std::sync::OnceLock;
 
 use crate::common::header::{Headers, RecordHeaders};
+use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::header::internals::record_header::list_record_headers;
 use crate::ffi::common::header::{HeadersInner, kafka_common_header_Headers_t};
 use crate::ffi::ffi_guard;
@@ -44,7 +44,12 @@ pub struct kafka_common_header_internals_RecordHeaders_t {
 /// headers plus the lazily built `Headers` view.
 pub(crate) struct RecordHeadersInner {
     headers: RecordHeaders,
-    view: OnceLock<HeadersInner>,
+    /// The `Headers` view, a `Box::into_raw`'d `HeadersInner` freed by `Drop`.
+    /// It is a separate allocation, never reborrowed by the handle, so a
+    /// later `headers_view` call (which only reads this cell) leaves every
+    /// pointer an earlier one handed out valid; the mutating `Headers_*`
+    /// functions take `&mut HeadersInner` through it.
+    view: OnceLock<SendPtr>,
 }
 
 impl RecordHeadersInner {
@@ -80,22 +85,30 @@ impl RecordHeadersInner {
         // creating a reference, so the pointer keeps `this`'s provenance and the view built from it
         // may later write through it.
         let headers = unsafe { &raw mut (*this).headers } as *mut dyn Headers;
-        // SAFETY: As above, `this` points at a live `RecordHeadersInner`; `&raw mut` takes the
-        // address of its `view` field without creating a reference, so the `headers` field is not
-        // reborrowed.
-        let view = unsafe { &raw mut (*this).view };
-        // SAFETY: `view` points at the live `OnceLock` of the handle at `this`, and `get_or_init`
-        // needs only a shared reference to it, which `OnceLock`'s interior mutability allows. The
-        // `HeadersInner` it may build points at the handle's `headers` field, which lives as long
-        // as the view since both are fields of the same handle, which per this function's
-        // `# Safety` does not move.
-        unsafe { (*view).get_or_init(|| HeadersInner::borrowed(headers)) };
-        // SAFETY: `view` points at the live `OnceLock` of the handle at `this`, and per this
-        // function's `# Safety` no other reference to it is in use during this call, so the
-        // exclusive reference `get_mut` takes aliases nothing; it lasts for this expression only.
-        // The handle returned is derived from it so that the mutating `Headers_*` functions may
-        // write through it, and it lives as long as the handle, which does not move.
-        unsafe { (*view).get_mut() }.map_or(ptr::null_mut(), HeadersInner::as_mut_ptr)
+        // SAFETY: As above, `this` points at a live `RecordHeadersInner`, and per this function's
+        // `# Safety` no other reference to its `view` field is in use during the call, so the shared
+        // reference to that `OnceLock` (all `get_or_init` needs: its interior mutability) aliases no
+        // exclusive one; it lasts for this statement only and is never exclusive, so it pops no
+        // pointer an earlier call handed out. The `HeadersInner` it may build points at the
+        // handle's `headers` field, which lives as long as the view, since `Drop` frees the view
+        // with the handle, which per this function's `# Safety` does not move.
+        let view = unsafe { &(*this).view }
+            .get_or_init(|| SendPtr(Box::into_raw(Box::new(HeadersInner::borrowed(headers))) as *mut c_void));
+        // The view is its own allocation (see the `view` field), so the pointer keeps the
+        // provenance of the `Box` it came from: the mutating `Headers_*` functions may write
+        // through it, and it lives as long as the handle.
+        view.0 as *mut kafka_common_header_Headers_t
+    }
+}
+
+impl Drop for RecordHeadersInner {
+    fn drop(&mut self) {
+        if let Some(view) = self.view.take() {
+            // SAFETY: `view` is the `Box::into_raw` of the `HeadersInner` `headers_view` built, and
+            // `take` hands it out once, so `from_raw` reclaims that allocation, once. A borrowed
+            // view, never destroyed by C, is invalid once the handle is gone, as its rustdoc says.
+            drop(unsafe { Box::from_raw(view.0 as *mut HeadersInner) });
+        }
     }
 }
 
@@ -280,7 +293,8 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_destroy(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{CStr, CString, c_void};
+    use std::ffi::{CStr, CString};
+    use std::ptr;
 
     use super::*;
     use crate::common::header::{Header, RecordHeader};
