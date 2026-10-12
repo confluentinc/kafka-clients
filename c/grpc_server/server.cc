@@ -250,6 +250,7 @@ using confluent::kafka::test::ScramCredentialInfo;
 using confluent::kafka::test::SupportedVersionRange;
 using confluent::kafka::test::TokenInformation;
 using confluent::kafka::test::UpdateFeaturesRequest;
+using confluent::kafka::test::UserScramCredentialAlteration;
 using confluent::kafka::test::UserScramCredentialsDescription;
 using confluent::kafka::test::AbortTransactionRequest;
 using confluent::kafka::test::DescribeProducersEntry;
