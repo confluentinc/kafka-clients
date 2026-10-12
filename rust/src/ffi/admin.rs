@@ -143,17 +143,17 @@ use crate::admin::{
     DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
     DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureMetadata,
-    FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
-    ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
-    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
-    UserScramCredentialsDescription,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TerminateTransactionOptions, TopicDescription,
+    TopicListing, TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState,
+    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion, UserScramCredentialsDescription,
 };
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -20442,48 +20442,70 @@ unsafe fn read_feature_updates(
 }
 
 /// Submits `describeUserScramCredentials` and returns a future over its
-/// per-user outcomes.
-///
-/// Java exposes three views over one response future — `all()`, `users()` and
-/// `description(user)` — and C has room for one result handle, so this
-/// composes them into the per-user shape that subsumes all three:
-///
-///   - `all()` succeeds only when every user's error code is NONE or
-///     RESOURCE_NOT_FOUND, so when it does, its keys are the complete user set
-///     and no row carries an error;
-///   - when it fails, `users()` still lists every user whose error is not
-///     RESOURCE_NOT_FOUND — which necessarily includes the one that failed
-///     `all()` — and `description(user)` yields that user's own error. Users
-///     omitted at that point are exactly the ones Java's `all()` also declines
-///     to report, so nothing Java can reach is lost.
-///
-/// If the response future itself failed, all three fail with the same error and
-/// it becomes the call's error. If the composition somehow yields no rows at
-/// all, the `all()` error is returned rather than dropped — the empty-key-set
-/// trap B4 hit with `removeMembersFromConsumerGroup`.
+/// per-user outcomes ([`compose_scram_description_outcomes`]).
 fn submit_describe_user_scram_credentials(
     admin: &dyn Admin,
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
 ) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
     let result = admin.describe_user_scram_credentials_with_users_options(users, options);
-    async move {
-        let all_error = match result.all().get().await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get().await?;
-        let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
-        for user in listed {
+    compose_scram_description_outcomes(result, users.to_vec())
+}
+
+/// Composes Java's three views over one `describeUserScramCredentials` response
+/// future — `all()`, `users()` and `description(user)` — into one row per user,
+/// because C has room for one result handle. Each row carries that user's own
+/// `description(user)` outcome, so a binding can rebuild all three views:
+///
+///   - the users `users()` lists come first, in its (the response's) order;
+///   - then the `RESOURCE_NOT_FOUND` users, which `users()` leaves out. When
+///     `all()` succeeds they are its other keys (Java's `all()` keeps them, with
+///     no credentials); when it fails, they are the `requested` users `users()`
+///     does not list. Their row carries their own `RESOURCE_NOT_FOUND` error, with
+///     the broker's message, as `description(user)` gives it. No Java view orders
+///     them (`all()` is a map), so they follow in `requested` order, the rest of
+///     `all()`'s keys sorted.
+///
+/// If the response future itself failed, all three fail with the same error and
+/// it becomes the call's error. If the composition somehow yields no rows while
+/// `all()` failed, the `all()` error is returned rather than dropped — the
+/// empty-key-set trap B4 hit with `removeMembersFromConsumerGroup`.
+async fn compose_scram_description_outcomes(
+    result: DescribeUserScramCredentialsResult,
+    requested: Vec<String>,
+) -> Result<ScramDescriptionOutcomes, Error> {
+    let all = result.all().get().await;
+    let listed = result.users().get().await?;
+    let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
+    let mut seen: HashSet<String> = HashSet::with_capacity(listed.len());
+    for user in listed {
+        if seen.insert(user.clone()) {
             let outcome = result.description(&user).get().await;
             rows.push((user, outcome));
         }
-        if rows.is_empty() {
-            return Err(all_error);
+    }
+    let candidates: Vec<String> = match &all {
+        Ok(map) => {
+            let mut rest: Vec<String> = map.keys().cloned().collect();
+            rest.sort();
+            requested
+                .iter()
+                .filter(|user| map.contains_key(*user))
+                .cloned()
+                .chain(rest)
+                .collect()
+        },
+        Err(_) => requested,
+    };
+    for user in candidates {
+        if seen.insert(user.clone()) {
+            let outcome = result.description(&user).get().await;
+            rows.push((user, outcome));
         }
-        Ok(rows)
+    }
+    match all {
+        Err(e) if rows.is_empty() => Err(e),
+        _ => Ok(rows),
     }
 }
 
@@ -22215,9 +22237,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user
 /// Returns the error for the user at `index` (borrowed), or null if the user was
 /// described successfully or `index` is out of range. Do not destroy it.
 ///
-/// A user the broker reports as `RESOURCE_NOT_FOUND` is *not* an error here: it
-/// is a successfully described user with zero credentials, which is what Java's
-/// `all()` also does.
+/// A user the broker reports as `RESOURCE_NOT_FOUND` carries that error here
+/// (Java's `description(user)`); Java's `all()` still counts it as described,
+/// with no credentials, and `users()` leaves it out.
 ///
 /// # Safety
 ///
@@ -29820,6 +29842,128 @@ mod tests {
             assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 3).is_null());
             kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
         }
+    }
+
+    /// A `describeUserScramCredentials` response future, for
+    /// [`compose_scram_description_outcomes`]: `(user, error code, message,
+    /// [(mechanism, iterations)])` per user, in response order.
+    /// One response row: `(user, error code, message, [(mechanism, iterations)])`.
+    type ScramWireRow<'a> = (&'a str, Errors, Option<&'a str>, &'a [(i8, i32)]);
+
+    /// A row's outcome reduced to its credential count or its error and message.
+    type ScramRowSummary = (String, Result<usize, (Errors, String)>);
+
+    fn scram_result(rows: &[ScramWireRow<'_>]) -> DescribeUserScramCredentialsResult {
+        use crate::DescribeUserScramCredentialsResponseData;
+        use crate::describe_user_scram_credentials_response_data::{
+            CredentialInfo, DescribeUserScramCredentialsResult as WireUserResult,
+        };
+
+        let results = rows
+            .iter()
+            .map(|(user, error, message, infos)| {
+                let mut r = WireUserResult::new();
+                r.set_user((*user).to_string())
+                    .set_error_code(error.code())
+                    .set_error_message(message.map(str::to_string));
+                r.set_credential_infos(
+                    infos
+                        .iter()
+                        .map(|(mechanism, iterations)| {
+                            let mut ci = CredentialInfo::new();
+                            ci.set_mechanism(*mechanism).set_iterations(*iterations);
+                            ci
+                        })
+                        .collect(),
+                );
+                r
+            })
+            .collect();
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_error_code(Errors::None.code()).set_results(results);
+        DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data)))
+    }
+
+    fn scram_row_summary(rows: &ScramDescriptionOutcomes) -> Vec<ScramRowSummary> {
+        rows.iter()
+            .map(|(user, outcome)| {
+                let summary = match outcome {
+                    Ok(description) => Ok(description.credential_infos().len()),
+                    Err(e) => Err((e.error(), e.message().to_string())),
+                };
+                (user.clone(), summary)
+            })
+            .collect()
+    }
+
+    /// When `all()` succeeds, a `RESOURCE_NOT_FOUND` user still carries its own
+    /// error and the broker's message (Java's `description(user)`), and the
+    /// described users keep the response order (`users()`), not a map's.
+    #[tokio::test]
+    async fn compose_scram_description_outcomes_keeps_resource_not_found_and_order() {
+        let result = scram_result(&[
+            ("zed", Errors::None, None, &[(1, 4_096)]),
+            (
+                "nobody",
+                Errors::ResourceNotFound,
+                Some("Attempt to describe a user credential that does not exist: nobody"),
+                &[],
+            ),
+            ("amy", Errors::None, None, &[(1, 4_096), (2, 8_192)]),
+        ]);
+        let rows = compose_scram_description_outcomes(result, vec!["zed".into(), "nobody".into(), "amy".into()])
+            .await
+            .expect("rows");
+        assert_eq!(
+            scram_row_summary(&rows),
+            vec![
+                ("zed".to_string(), Ok(1)),
+                ("amy".to_string(), Ok(2)),
+                (
+                    "nobody".to_string(),
+                    Err((
+                        Errors::ResourceNotFound,
+                        "Attempt to describe a user credential that does not exist: nobody".to_string()
+                    ))
+                ),
+            ]
+        );
+    }
+
+    /// When `all()` fails, every listed user carries its own outcome and the
+    /// requested `RESOURCE_NOT_FOUND` users (left out of `users()`) are added with
+    /// their own error.
+    #[tokio::test]
+    async fn compose_scram_description_outcomes_when_all_fails() {
+        let result = scram_result(&[
+            ("alice", Errors::None, None, &[(1, 4_096)]),
+            ("bad", Errors::ClusterAuthorizationFailed, Some("denied"), &[]),
+            ("nobody", Errors::ResourceNotFound, Some("gone"), &[]),
+        ]);
+        let rows = compose_scram_description_outcomes(result, vec!["alice".into(), "bad".into(), "nobody".into()])
+            .await
+            .expect("rows");
+        assert_eq!(
+            scram_row_summary(&rows),
+            vec![
+                ("alice".to_string(), Ok(1)),
+                (
+                    "bad".to_string(),
+                    Err((Errors::ClusterAuthorizationFailed, "denied".to_string()))
+                ),
+                ("nobody".to_string(), Err((Errors::ResourceNotFound, "gone".to_string()))),
+            ]
+        );
+    }
+
+    /// A failed response future is the call's error.
+    #[tokio::test]
+    async fn compose_scram_description_outcomes_top_level_error() {
+        let result = DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Err(Error::new(
+            Errors::UnknownServerError,
+        ))));
+        let err = compose_scram_description_outcomes(result, Vec::new()).await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnknownServerError);
     }
 
     #[test]

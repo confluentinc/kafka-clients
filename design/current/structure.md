@@ -362,13 +362,14 @@ c/
 └── grpc_server/        # C backend for the multilanguage tests
 
 python/
-├── confluent_kafka/    # the Python client (producer + consumer), generated
+├── confluent_kafka/    # the Python client (producer, consumer, admin), generated
 │   │                   # from CLAUDE.md's Python Binding Conventions
 │   ├── producer/, consumer/   # base, Kafka*, Mock*, Async* peers, records
+│   ├── admin/                 # Admin, KafkaAdminClient, MockAdminClient, Async*
+│   │                          # peers, Options, Results, value classes
 │   ├── common/                # value types, KafkaError, errors/,
 │   │                          # serialization/, config/, …
 │   └── *_error.py             # Java built-in exceptions at the root
-├── admin.py            # older admin binding, paused (not in the package)
 ├── _confluentkafka.c   # hand-written C extension
 ├── tinycthread.{c,h}, c11threads_compat.h   # C11 threads shim (macOS)
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py

@@ -70,6 +70,10 @@
 //! passes a literal `SecurityProtocol::Plaintext`. That is a production gap
 //! recorded in `design/current/status.md:606-609` and out of scope for this
 //! harness; a vacuous SASL test is deliberately not written in its place.
+//!
+//! References below to `admin.py` (and `python/test/unit/test_admin.py`) name the
+//! legacy Python admin binding and its tests, which are removed; the Python arm
+//! now runs on `confluent_kafka.admin`.
 
 use std::time::Duration;
 
@@ -198,8 +202,9 @@ async fn upsert_describe_delete_scram_credential_round_trips<F: AdminBackendFact
     // 4. Describe again. Our user now has *no* credential, which the per-user shape
     //    reports as a successful description with an **empty** credential list
     //    rather than as an error — Java's `all()` treats the broker's
-    //    RESOURCE_NOT_FOUND that way, and the FFI's composition preserves it. The
-    //    distinction matters: an `Err` here would mean the describe failed, which
+    //    RESOURCE_NOT_FOUND that way. The FFI's row carries that RESOURCE_NOT_FOUND
+    //    (Java's `description(user)`), and the C and Python servers map it back to
+    //    an empty description, as the native backend answers. The distinction matters: an `Err` here would mean the describe failed, which
     //    is a different outcome from "the user exists with nothing configured".
     wait_until_true_with_timeout(
         || async {

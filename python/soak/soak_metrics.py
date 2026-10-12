@@ -55,7 +55,7 @@ MAX_LATENCY_MS = 10000
 
 def recreate_topic(config, topic, partitions=-1):
     """Delete `topic` (ignoring "does not exist"), wait 10s, re-create it, wait
-    10s — using this repo's Rust-backed AdminClient (python/admin.py).
+    10s — using this repo's Rust-backed admin client (confluent_kafka.admin).
     Replication factor and (unless `partitions` > 0) partition count use the
     broker default (`-1`), so this works on Confluent Cloud where RF=1 is
     rejected. The two sleeps let the delete/create metadata propagate across the
@@ -66,26 +66,24 @@ def recreate_topic(config, topic, partitions=-1):
     namespace the Rust producer/consumer use, so no credential translation is
     needed; the Rust admin client parses `sasl.jaas.config` itself.
 
-    Each RPC returns one already-resolved result per key (`create_topics`
-    -> `{name: TopicMetadataAndConfig | KafkaError}`, `delete_topics`
-    -> `{name: None | KafkaError}`): a per-key `KafkaError` (whose `.code` is
-    the wire error code) marks that key's failure, and the whole call raises a
-    `KafkaError` on a call-level failure.
+    Each RPC returns a result whose `values()` / `topic_name_values()` hold one
+    future per topic: a per-topic failure is raised by that future's `result()`
+    (a typed error class, whose FFI id is the wire error code), and the whole
+    call raises on a call-level failure.
 
     The admin binding is imported lazily so this module stays importable (and
     unit-testable) without the Rust bindings, which build on Linux only.
     """
-    # The paused admin binding's flat ``KafkaError`` (``code`` / ``message``
-    # properties); admin.py re-exports it from confluent_kafka._legacy_compat.
-    from admin import AdminClient, KafkaError, NewTopic
+    from confluent_kafka.admin import Admin, DeleteTopicsOptions, NewTopic
     # Reuse the startup fatal/transient classification so an ACL / auth failure
     # here surfaces as EXIT_FATAL rather than looping under the supervisor
     # (imported lazily to avoid a soakclient <-> soak_metrics import cycle).
-    from soakclient import FatalStartupError, TransientStartupError
+    from soakclient import (FatalStartupError, TransientStartupError, error_code,
+                            error_message)
 
-    # `Errors` wire codes (src/common/protocol/errors.rs); a per-key value is a
-    # `KafkaError` carrying one of these on a per-key failure, and the whole
-    # call raises a `KafkaError` on a call-level failure.
+    # `Errors` wire codes (src/common/protocol/errors.rs); the typed error of a
+    # failed per-topic future, or of a failed call, has one of these as its FFI
+    # id (`error_code`).
     UNKNOWN_TOPIC_OR_PARTITION = 3
     TOPIC_ALREADY_EXISTS = 36
     # Authentication / authorization failures never clear by retrying; every
@@ -101,12 +99,12 @@ def recreate_topic(config, topic, partitions=-1):
     }
 
     def _classify(op, _topic, ex, benign_code):
-        """Turn one topic's `KafkaError` (per-key value or whole-call) into an
+        """Turn one topic's error (per-topic future or whole-call) into an
         `ok` log, a `FatalStartupError`, or a `TransientStartupError`, exactly as
         `_create_topic` does. `benign_code` is the wire code that means "already
         in the desired state" for this op (topic absent on delete / present on
         create)."""
-        code = ex.code
+        code = error_code(ex)
         if code == benign_code:
             benign = "did not exist" if op == "delete" else "already exists"
             print(f">>> '{_topic}' {benign} (ok)", flush=True)
@@ -114,25 +112,30 @@ def recreate_topic(config, topic, partitions=-1):
             raise FatalStartupError(
                 "authentication/authorization failed on {} of topic {!r}: {}. "
                 "Check sasl.jaas.config (username/password) and the API key's "
-                "ACLs. Restarting will not fix this.".format(op, _topic, ex.message)) from ex
+                "ACLs. Restarting will not fix this.".format(
+                    op, _topic, error_message(ex))) from ex
         else:
             raise TransientStartupError(
                 "could not {} topic {!r}: {}. If the cluster is reachable this "
-                "may clear on retry.".format(op, _topic, ex.message)) from ex
+                "may clear on retry.".format(op, _topic, error_message(ex))) from ex
 
-    admin = AdminClient(dict(config))
+    admin = Admin.create(configs=dict(config))
     try:
         print(f">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...", flush=True)
         try:
-            del_results = admin.delete_topics([topic], timeout=30)
-        except KafkaError as e:
-            # The old admin interface raises a whole-call KafkaError from the
-            # call itself; classify it the same way as a per-key error.
+            del_futures = admin.delete_topics(
+                topics=[topic], options=DeleteTopicsOptions(timeout_ms=30000)
+            ).topic_name_values()
+        except Exception as e:
+            # A call-level failure raises from the call itself; classify it the
+            # same way as a per-topic error.
             _classify("delete", topic, e, UNKNOWN_TOPIC_OR_PARTITION)
         else:
-            for _t, result in del_results.items():
-                if isinstance(result, KafkaError):
-                    _classify("delete", _t, result, UNKNOWN_TOPIC_OR_PARTITION)
+            for _t, future in del_futures.items():
+                try:
+                    future.result()
+                except Exception as e:
+                    _classify("delete", _t, e, UNKNOWN_TOPIC_OR_PARTITION)
                 else:
                     print(f">>> deleted '{_t}'", flush=True)
         print(">>> waiting 10s after delete ...", flush=True)
@@ -141,15 +144,17 @@ def recreate_topic(config, topic, partitions=-1):
         print(f">>> CREATE_TOPIC: creating topic '{topic}' "
               f"(partitions={'broker-default' if partitions < 0 else partitions}, "
               f"rf=broker-default) ...", flush=True)
-        new_topic = NewTopic(topic, num_partitions=partitions, replication_factor=-1)
+        new_topic = NewTopic(name=topic, num_partitions=partitions, replication_factor=-1)
         try:
-            create_results = admin.create_topics([new_topic])
-        except KafkaError as e:
+            create_futures = admin.create_topics(new_topics=[new_topic]).values()
+        except Exception as e:
             _classify("create", topic, e, TOPIC_ALREADY_EXISTS)
         else:
-            for _t, result in create_results.items():
-                if isinstance(result, KafkaError):
-                    _classify("create", _t, result, TOPIC_ALREADY_EXISTS)
+            for _t, future in create_futures.items():
+                try:
+                    future.result()
+                except Exception as e:
+                    _classify("create", _t, e, TOPIC_ALREADY_EXISTS)
                 else:
                     print(f">>> created '{_t}'", flush=True)
         print(">>> waiting 10s after create ...", flush=True)
