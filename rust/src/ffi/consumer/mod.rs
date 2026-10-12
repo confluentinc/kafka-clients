@@ -273,10 +273,6 @@ impl Client {
         &self.delivery
     }
 
-    pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
-        &self.runtime
-    }
-
     pub(crate) fn handle(&self) -> &ConsumerHandle {
         &self.handle
     }

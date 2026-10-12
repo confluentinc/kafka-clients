@@ -28,8 +28,10 @@
 //! blocking consumer operation invoked on the calling thread, i.e. from a
 //! thread already inside the runtime's `block_on`; a nested `block_on`
 //! there is forbidden by tokio. So every blocking handle operation spawns
-//! its future on the consumer's runtime and waits for the result on a
-//! channel, whichever thread it is called from. A `_cb` handle operation
+//! its future as a task of the consumer, which `kafka_consumer_Consumer_destroy`
+//! joins, and waits for the result on a channel, whichever thread it is
+//! called from; a panic on that task is returned as the operation's error,
+//! as the header's panic contract states. A `_cb` handle operation
 //! queues its completion on the consumer's callbacks vector like every
 //! other `_cb`. The handle holds the consumer weakly: once the consumer is
 //! destroyed its operations fail with `LocalIllegalState`, and a `_cb`
@@ -71,7 +73,6 @@ pub struct kafka_consumer_ConsumerHandle_t {
 /// What a handle points at.
 struct HandleInner {
     handle: ConsumerHandle,
-    runtime: tokio::runtime::Handle,
     /// Weak, so a leftover handle never keeps the consumer alive past
     /// `kafka_consumer_Consumer_destroy`.
     client: Weak<Client>,
@@ -81,7 +82,6 @@ struct HandleInner {
 pub(crate) fn box_consumer_handle(client: &Arc<Client>) -> *mut kafka_consumer_ConsumerHandle_t {
     Box::into_raw(Box::new(HandleInner {
         handle: client.handle().clone(),
-        runtime: client.runtime().clone(),
         client: Arc::downgrade(client),
     })) as *mut kafka_consumer_ConsumerHandle_t
 }
@@ -95,20 +95,36 @@ fn destroyed() -> Error {
 }
 
 impl HandleInner {
-    /// Drives `future` on the runtime and waits for it (see the module
-    /// docs for why not `block_on`).
-    fn run_blocking<T, F>(&self, future: F) -> Result<T, Error>
+    /// Drives `future` as a tracked task of the consumer and waits for it
+    /// (see the module docs for why not `block_on`). A panic inside
+    /// `future` is returned as the
+    /// [`panic_error`](crate::ffi::common::panic_error) of `fn_name`, the
+    /// entry point; the consumer being destroyed before the task finishes
+    /// is reported as `LocalIllegalState`.
+    fn run_blocking<T, F>(&self, fn_name: &'static str, future: F) -> Result<T, Error>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
-        if self.client.upgrade().is_none() {
+        let Some(client) = self.client.upgrade() else {
             return Err(destroyed());
-        }
+        };
+        // The fail point is taken on the calling thread and fired inside the
+        // task, so a test can make the task itself panic.
+        #[cfg(test)]
+        let future = {
+            let armed = crate::ffi::common::fail_point::take();
+            async move {
+                crate::ffi::common::fail_point::hit_if(armed);
+                future.await
+            }
+        };
         let (tx, rx) = std::sync::mpsc::channel();
-        self.runtime.spawn(async move {
-            let _ = tx.send(future.await);
+        client.spawn(async move {
+            let _ = tx.send(catch_task_panic(fn_name, future).await);
         });
+        // Not kept alive while waiting: the handle holds the consumer weakly.
+        drop(client);
         rx.recv().unwrap_or_else(|_| Err(destroyed()))
     }
 
@@ -177,7 +193,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.assign(partitions).await }))
+    error_slot(inner.run_blocking(
+        "kafka_consumer_ConsumerHandle_assign",
+        async move { h.assign(partitions).await },
+    ))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -230,7 +249,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset(
     let inner = unsafe { inner(self_) };
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.seek_with_offset(partition, offset).await }))
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_seek_with_offset", async move {
+            h.seek_with_offset(partition, offset).await
+        }),
+    )
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -285,7 +308,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.seek_with_offset_and_metadata(partition, offset_and_metadata).await }))
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata", async move {
+            h.seek_with_offset_and_metadata(partition, offset_and_metadata).await
+        }),
+    )
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -339,7 +366,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.seek_to_beginning(&partitions).await }))
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_seek_to_beginning", async move {
+            h.seek_to_beginning(&partitions).await
+        }),
+    )
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -391,7 +422,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.seek_to_end(&partitions).await }))
+    error_slot(inner.run_blocking("kafka_consumer_ConsumerHandle_seek_to_end", async move {
+        h.seek_to_end(&partitions).await
+    }))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -443,7 +476,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.pause(&partitions).await }))
+    error_slot(inner.run_blocking("kafka_consumer_ConsumerHandle_pause", async move { h.pause(&partitions).await }))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -495,7 +528,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.resume(&partitions).await }))
+    error_slot(inner.run_blocking(
+        "kafka_consumer_ConsumerHandle_resume",
+        async move { h.resume(&partitions).await },
+    ))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -548,7 +584,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
     let inner = unsafe { inner(self_) };
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.position(&partition).await });
+    let result = inner.run_blocking(
+        "kafka_consumer_ConsumerHandle_position",
+        async move { h.position(&partition).await },
+    );
     unsafe { out_slot(result, out_position, |v| v) }
 }
 
@@ -604,7 +643,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout(
     let inner = unsafe { inner(self_) };
     let partition = unsafe { topic_partition_ref(partition) }.clone();
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.position_with_timeout(&partition, ms(timeout)?).await });
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_position_with_timeout", async move {
+        h.position_with_timeout(&partition, ms(timeout)?).await
+    });
     unsafe { out_slot(result, out_position_with_timeout, |v| v) }
 }
 
@@ -662,7 +703,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.committed(&partitions).await });
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_committed", async move {
+        h.committed(&partitions).await
+    });
     unsafe { out_slot(result, out_committed, |offsets| offset_and_metadata_map(&offsets)) }
 }
 
@@ -718,7 +761,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.beginning_offsets(&partitions).await });
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_beginning_offsets", async move {
+        h.beginning_offsets(&partitions).await
+    });
     unsafe { out_slot(result, out_beginning_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -774,7 +819,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     let inner = unsafe { inner(self_) };
     let partitions = unsafe { list_topic_partitions(partitions) };
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.end_offsets(&partitions).await });
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_end_offsets", async move {
+        h.end_offsets(&partitions).await
+    });
     unsafe { out_slot(result, out_end_offsets, |offsets| topic_partition_i64_map(&offsets)) }
 }
 
@@ -832,7 +879,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     let inner = unsafe { inner(self_) };
     let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
     let h = inner.handle.clone();
-    let result = inner.run_blocking(async move { h.offsets_for_times(timestamps_to_search).await });
+    let result = inner.run_blocking("kafka_consumer_ConsumerHandle_offsets_for_times", async move {
+        h.offsets_for_times(timestamps_to_search).await
+    });
     unsafe { out_slot(result, out_offsets_for_times, |offsets| offset_and_timestamp_map(&offsets)) }
 }
 
@@ -886,7 +935,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
 ) -> *mut kafka_common_Error_t {
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.commit_sync().await }))
+    error_slot(inner.run_blocking(
+        "kafka_consumer_ConsumerHandle_commit_sync",
+        async move { h.commit_sync().await },
+    ))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -938,7 +990,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
     let inner = unsafe { inner(self_) };
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.commit_sync_with_offsets(offsets).await }))
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_commit_sync_with_offsets", async move {
+            h.commit_sync_with_offsets(offsets).await
+        }),
+    )
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -988,7 +1044,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
 ) -> *mut kafka_common_Error_t {
     let inner = unsafe { inner(self_) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.commit_async().await }))
+    error_slot(inner.run_blocking(
+        "kafka_consumer_ConsumerHandle_commit_async",
+        async move { h.commit_async().await },
+    ))
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
@@ -1038,7 +1097,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets(
     let inner = unsafe { inner(self_) };
     let offsets = unsafe { map_offset_and_metadata(offsets) };
     let h = inner.handle.clone();
-    error_slot(inner.run_blocking(async move { h.commit_async_offsets(offsets).await }))
+    error_slot(
+        inner.run_blocking("kafka_consumer_ConsumerHandle_commit_async_offsets", async move {
+            h.commit_async_offsets(offsets).await
+        }),
+    )
 }
 
 /// The completion of the `_cb` twin: `error` is `NULL` on success,

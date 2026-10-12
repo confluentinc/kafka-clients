@@ -364,7 +364,19 @@ pub(crate) mod fail_point {
 
     /// Panics, once, when [`arm`] was called on this thread.
     pub(crate) fn hit() {
-        if ARMED.with(|armed| armed.replace(false)) {
+        hit_if(take());
+    }
+
+    /// Disarms the fail point of this thread, returning whether it was armed,
+    /// so a body can carry the arming into a task it spawns and fire it there
+    /// with [`hit_if`].
+    pub(crate) fn take() -> bool {
+        ARMED.with(|armed| armed.replace(false))
+    }
+
+    /// Panics as [`hit`] does when `armed`, a value [`take`] returned.
+    pub(crate) fn hit_if(armed: bool) {
+        if armed {
             panic!("{MESSAGE}");
         }
     }

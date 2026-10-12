@@ -419,12 +419,13 @@ mod tests {
     use super::*;
     use crate::ffi::common::fail_point;
     use crate::ffi::common::panic_probe::{Probe, on_error, on_i64, on_value};
+    use crate::ffi::common::take_error;
     use crate::ffi::common::topic_partition::{
         kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_new, kafka_common_TopicPartition_t,
     };
     use crate::ffi::consumer::consumer_handle::{
-        kafka_consumer_ConsumerHandle_destroy, kafka_consumer_ConsumerHandle_pause_cb,
-        kafka_consumer_ConsumerHandle_position_cb,
+        kafka_consumer_ConsumerHandle_destroy, kafka_consumer_ConsumerHandle_pause,
+        kafka_consumer_ConsumerHandle_pause_cb, kafka_consumer_ConsumerHandle_position_cb,
     };
     use crate::ffi::consumer::consumer_rebalance_listener::{
         kafka_consumer_ConsumerRebalanceListener_destroy, kafka_consumer_ConsumerRebalanceListener_new,
@@ -898,6 +899,39 @@ mod tests {
             inline.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
             assert_eq!(queued.fired().len() + int.fired().len(), 2, "no second completion");
 
+            kafka_consumer_ConsumerHandle_destroy(handle);
+            kafka_List_destroy(partitions);
+            kafka_common_TopicPartition_destroy(tp);
+        }
+    }
+
+    /// A panic on the task a blocking handle operation drives is returned as
+    /// that operation's panic error, not as the consumer being destroyed, and
+    /// leaves the handle and the consumer usable.
+    #[test]
+    fn a_panicking_blocking_handle_task_returns_the_panic_error() {
+        let (mock, consumer) = new_mock();
+        let (partitions, tp) = partition_list(c"topic", 0);
+        // SAFETY: the handles stay live until destroyed at the end.
+        unsafe {
+            let handle = kafka_consumer_Consumer_handle(consumer);
+            fail_point::arm();
+            let error = take_error(kafka_consumer_ConsumerHandle_pause(handle, partitions)).expect("the panic");
+            assert!(error.is_local_illegal_state_error(), "{error:?}");
+            assert_eq!(
+                error.message(),
+                format!(
+                    "Rust panic caught at the FFI boundary in kafka_consumer_ConsumerHandle_pause: {}",
+                    fail_point::MESSAGE
+                )
+            );
+
+            // Disarmed: the mock's handle answers as it always does.
+            let error = take_error(kafka_consumer_ConsumerHandle_pause(handle, partitions)).expect("mock error");
+            assert!(!error.message().starts_with("Rust panic"), "{error:?}");
+            assert!(kafka_consumer_Consumer_commit_sync(consumer).is_null(), "the consumer is free");
+
+            kafka_consumer_MockConsumer_destroy(mock);
             kafka_consumer_ConsumerHandle_destroy(handle);
             kafka_List_destroy(partitions);
             kafka_common_TopicPartition_destroy(tp);
