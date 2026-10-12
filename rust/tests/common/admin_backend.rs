@@ -33,18 +33,19 @@ use confluent_kafka::admin::{
     DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
     DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
     DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
-    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FinalizedVersionRange, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
+    OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RenewDelegationTokenOptions, ScramCredentialInfo, SupportedVersionRange, TerminateTransactionOptions,
+    TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription, TransactionListing,
+    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
+use confluent_kafka::common::errors::ResourceNotFoundError;
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::{
@@ -442,7 +443,7 @@ pub trait AdminBackend {
     /// In `removeAll` mode the returned map is **empty**: Java's `memberResult`
     /// refuses in that mode, so `all()` is the only observable and any failure is
     /// the outer `Err`. That is what `src/ffi/admin.rs`'s
-    /// `submit_remove_members_from_consumer_group` does, so all four backends
+    /// `submit_remove_members_from_consumer_group` does, so all five backends
     /// agree on it.
     async fn remove_members_from_consumer_group(
         &self,
@@ -513,23 +514,25 @@ pub trait AdminBackend {
         options: AlterClientQuotasOptions,
     ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error>;
 
-    /// Describe each user's SCRAM credentials, keyed by user name. An empty
-    /// `users` requests every user, which is Java's no-argument overload.
+    /// Describe each user's SCRAM credentials. An empty `users` requests every
+    /// user, which is Java's no-argument overload.
     ///
-    /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
-    /// response data and exposes three views (`all()` / `users()` /
-    /// `description(user)`); this is the per-user shape that subsumes all three,
-    /// identical to what `src/ffi/admin.rs`'s
-    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
-    /// returns, so all four backends answer with the same key set.
+    /// Returns a [`DescribeUserScramCredentialsView`], the harness's stand-in
+    /// for the crate's `DescribeUserScramCredentialsResult`, which exposes
+    /// Java's three views (`all()` / `users()` / `description(user)`) with their
+    /// distinct RESOURCE_NOT_FOUND semantics. The RustNative backend hands back
+    /// the real result (the view's `Native` arm), and the gRPC backends hand
+    /// back the raw per-user rows carried over the wire (the `Rows` arm), from
+    /// which the view rebuilds the three views with the production rules — so
+    /// all five backends answer the same on every view.
     ///
-    /// The broker never returns the salted password or the salt, so the value
-    /// carries only the mechanism and iteration count per credential.
+    /// The broker never returns the salted password or the salt, so a
+    /// description carries only the mechanism and iteration count per credential.
     async fn describe_user_scram_credentials(
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error>;
+    ) -> Result<DescribeUserScramCredentialsView, Error>;
 
     /// Apply each SCRAM credential upsertion / deletion. Per-user void, one
     /// future per key.
@@ -712,7 +715,7 @@ impl<T> Listings<T> {
     ///
     /// Java's `all()` completes exceptionally with one of the failures without
     /// specifying which; this picks the first, and because the fold runs
-    /// identically for all four backends over the same pair it cannot make
+    /// identically for all five backends over the same pair it cannot make
     /// backends disagree. Same reasoning as [`all_of`].
     pub fn all(&self) -> Result<&[T], Error> {
         match self.errors.first() {
@@ -735,7 +738,7 @@ impl<T> Listings<T> {
 /// CompletionException holding this exception as its cause" for one of the
 /// failures, never which; and the Rust `KafkaFuture::all_of` polls a `Vec`
 /// whose order comes from `HashMap` iteration. Because this fold runs
-/// identically for all four backends over the same map, an unspecified choice
+/// identically for all five backends over the same map, an unspecified choice
 /// cannot make backends disagree — it only affects which message a failing
 /// assertion prints. A scenario that must assert a *particular* key's error
 /// reads that key out of the map instead, which every converted body that cares
@@ -812,7 +815,11 @@ where
 //
 // Slice G5 added exactly one, [`FeatureMetadataView`]: `FeatureMetadata::new` is
 // `pub(crate)`. [`FilterResultsView`] joined it later, when `FilterResult::new`
-// and `FilterResults::new` were made `pub(crate)` to match Java. Everything else in that slice crosses as a production type,
+// and `FilterResults::new` were made `pub(crate)` to match Java, and
+// [`DescribeUserScramCredentialsView`] when the harness began carrying the raw
+// SCRAM-describe rows (`DescribeUserScramCredentialsResult::new` is `pub(crate)`,
+// as Java's constructor is package-private; the native backend still crosses the
+// production result, wrapped in the view's `Native` arm). Everything else in that slice crosses as a production type,
 // checked one by one rather than assumed — `AclBinding::new`,
 // `AclBindingFilter::new`, `AccessControlEntry::new`,
 // `AccessControlEntryFilter::new`, `ResourcePattern::new`,
@@ -907,7 +914,7 @@ pub struct ConfigEntryView {
     pub is_read_only: bool,
     /// Java `source()` as its enum constant name, e.g. `"STATIC_BROKER_CONFIG"`.
     /// `None` only if a backend failed to report it at all — `describeConfigs`
-    /// always carries a source on all four.
+    /// always carries a source on all five.
     pub source: Option<String>,
     /// Java `type()` as its enum constant name, e.g. `"LONG"`.
     pub config_type: Option<String>,
@@ -988,6 +995,109 @@ pub struct FilterResultView {
     pub error: Option<Error>,
 }
 
+/// The three views of one `describeUserScramCredentials` call, standing in for
+/// the production `DescribeUserScramCredentialsResult`.
+///
+/// `DescribeUserScramCredentialsResult::new` is `pub(crate)` — faithfully,
+/// because Java's constructor is package-private
+/// (`DescribeUserScramCredentialsResult.java`, no access modifier) — and its
+/// response-data type is crate-internal, so a gRPC backend cannot rebuild the
+/// production result from what the wire carried.
+///
+/// So the view is either the production result itself (`Native`, the
+/// RustNative backend, whose three views are then the production code under
+/// test) or the raw per-user rows a gRPC backend received (`Rows`), for which
+/// `all()` / `users()` / `description(user)` apply the same rules as the
+/// production result (`src/admin/describe_user_scram_credentials_result.rs`),
+/// each as an already-completed `KafkaFuture` so callers read both arms alike.
+#[derive(Clone, Debug)]
+pub enum DescribeUserScramCredentialsView {
+    /// The production result, answered by its own `all()` / `users()` /
+    /// `description(user)`.
+    Native(DescribeUserScramCredentialsResult),
+    /// The raw per-user rows, in response order.
+    Rows(Vec<ScramUserRow>),
+}
+
+/// One user's raw row of a `describeUserScramCredentials` response: the
+/// response data's per-user `DescribeUserScramCredentialsResult` entry.
+#[derive(Clone, Debug)]
+pub struct ScramUserRow {
+    /// The user name.
+    pub user: String,
+    /// The user's own error, `None` for `NONE`; RESOURCE_NOT_FOUND for a user
+    /// with no credential.
+    pub error: Option<Error>,
+    /// The user's credentials; empty unless `error` is `None`.
+    pub credential_infos: Vec<ScramCredentialInfo>,
+}
+
+impl DescribeUserScramCredentialsView {
+    /// Java `all()`: every described user keyed by name. Succeeds only if every
+    /// user's error is `NONE` or RESOURCE_NOT_FOUND (an RNF user is a success
+    /// with no credential); the first user with any other error fails it.
+    pub fn all(&self) -> KafkaFuture<HashMap<String, UserScramCredentialsDescription>> {
+        let rows = match self {
+            Self::Native(result) => return result.all(),
+            Self::Rows(rows) => rows,
+        };
+        if let Some(error) = rows
+            .iter()
+            .find_map(|row| row.error.as_ref().filter(|e| !is_resource_not_found(e)))
+        {
+            return KafkaFuture::completed(Err(error.clone()));
+        }
+        KafkaFuture::completed(Ok(rows
+            .iter()
+            .map(|row| {
+                let description = UserScramCredentialsDescription::new(row.user.clone(), row.credential_infos.clone());
+                (row.user.clone(), description)
+            })
+            .collect()))
+    }
+
+    /// Java `users()`: the users that have at least one credential — every user
+    /// except the RESOURCE_NOT_FOUND ones, including users that could not be
+    /// described.
+    pub fn users(&self) -> KafkaFuture<Vec<String>> {
+        let rows = match self {
+            Self::Native(result) => return result.users(),
+            Self::Rows(rows) => rows,
+        };
+        KafkaFuture::completed(Ok(rows
+            .iter()
+            .filter(|row| !row.error.as_ref().is_some_and(is_resource_not_found))
+            .map(|row| row.user.clone())
+            .collect()))
+    }
+
+    /// Java `description(user)`: that user's description, its own error
+    /// (RESOURCE_NOT_FOUND included), or RESOURCE_NOT_FOUND "No such user" when
+    /// the response has no row for it.
+    pub fn description(&self, user: &str) -> KafkaFuture<UserScramCredentialsDescription> {
+        let rows = match self {
+            Self::Native(result) => return result.description(user),
+            Self::Rows(rows) => rows,
+        };
+        KafkaFuture::completed(match rows.iter().find(|row| row.user == user) {
+            None => Err(Error::ResourceNotFound(ResourceNotFoundError::new(format!(
+                "No such user: {user}"
+            )))),
+            Some(ScramUserRow { error: Some(error), .. }) => Err(error.clone()),
+            Some(row) => Ok(UserScramCredentialsDescription::new(
+                row.user.clone(),
+                row.credential_infos.clone(),
+            )),
+        })
+    }
+}
+
+/// Whether `error` is RESOURCE_NOT_FOUND, the code `all()` / `users()` treat as
+/// "no credential" rather than a failure.
+fn is_resource_not_found(error: &Error) -> bool {
+    matches!(error, Error::ResourceNotFound(_))
+}
+
 /// Where one replica lives and where it is moving to, standing in for the
 /// production `ReplicaLogDirInfo`.
 ///
@@ -1053,7 +1163,7 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
     }
 }
 
-/// Projects a production [`Config`] onto the [`ConfigView`] the four backends
+/// Projects a production [`Config`] onto the [`ConfigView`] the five backends
 /// are compared on. Every field is carried; only the two enums are rendered as
 /// the names the C boundary uses.
 fn config_view(config: &Config) -> ConfigView {
@@ -1067,7 +1177,7 @@ fn config_view(config: &Config) -> ConfigView {
                 is_sensitive: entry.is_sensitive(),
                 is_read_only: entry.is_read_only(),
                 source: Some(config_source_name(entry.source()).to_string()),
-                config_type: Some(config_type_name(entry.config_type()).to_string()),
+                config_type: entry.config_type().map(|t| config_type_name(t).to_string()),
                 documentation: entry.documentation().map(str::to_string),
                 synonyms: entry
                     .synonyms()
@@ -1223,7 +1333,7 @@ impl AdminBackend for RustNativeAdmin {
         // All four are awaited before any error is reported, so none is
         // abandoned; when more than one failed, the first in Java's declaration
         // order wins. Identical to the FFI's `submit_describe_cluster`, so the
-        // four backends pick the same error out of a multi-failure.
+        // five backends pick the same error out of a multi-failure.
         let nodes = result.nodes().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let controller = result.controller().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let cluster_id = result.cluster_id().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
@@ -1231,7 +1341,8 @@ impl AdminBackend for RustNativeAdmin {
         Ok(ClusterDescription {
             nodes: nodes?,
             controller: controller?,
-            cluster_id: cluster_id?,
+            // The view keeps a plain string, as the gRPC backends carry it.
+            cluster_id: cluster_id?.unwrap_or_default(),
             authorized_operations: authorized_operations?,
         })
     }
@@ -1369,7 +1480,7 @@ impl AdminBackend for RustNativeAdmin {
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a
         // missing entry. Identical to the FFI's `submit_list_offsets`, so all
-        // four backends answer with the same key set.
+        // five backends answer with the same key set.
         let mut outcomes = HashMap::with_capacity(topic_partition_offsets.len());
         for tp in topic_partition_offsets.keys() {
             outcomes.insert(
@@ -1419,7 +1530,7 @@ impl AdminBackend for RustNativeAdmin {
         // did not attempt is a whole-call `Err` rather than a missing entry —
         // Java's `partitionsToOffsetAndMetadata(groupId)` throws
         // `IllegalArgumentException` there. Identical to the FFI's
-        // `submit_list_consumer_group_offsets`, so all four backends answer with
+        // `submit_list_consumer_group_offsets`, so all five backends answer with
         // the same key set.
         let mut outcomes = HashMap::with_capacity(group_specs.len());
         for group_id in group_specs.keys() {
@@ -1580,40 +1691,12 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
-        let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
-        // Java's three views composed into the per-user shape, exactly as
-        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
-        // all four backends answer with the same key set and the same errors.
-        //
-        //   - `all()` succeeds only when every user's error code is NONE or
-        //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
-        //     set and no row carries an error;
-        //   - when it fails, `users()` still lists every user whose error is not
-        //     RESOURCE_NOT_FOUND — necessarily including the one that failed
-        //     `all()` — and `description(user)` yields that user's own error.
-        //     The users omitted at that point are exactly the ones Java's `all()`
-        //     also declines to report.
-        //   - if the response future itself failed, all three fail with the same
-        //     error and it becomes the whole-call `Err`; and if the composition
-        //     yields no rows at all, the `all()` error is returned rather than
-        //     dropped (the empty-key-set trap).
-        let all_error = match result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
-        let mut outcomes = HashMap::with_capacity(listed.len());
-        for user in listed {
-            let outcome = result.description(&user).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-            outcomes.insert(user, outcome);
-        }
-        if outcomes.is_empty() {
-            return Err(all_error);
-        }
-        Ok(outcomes)
+    ) -> Result<DescribeUserScramCredentialsView, Error> {
+        // The native backend hands back the real result object; the caller reads
+        // whichever of the three Java views it needs.
+        Ok(DescribeUserScramCredentialsView::Native(
+            self.admin.describe_user_scram_credentials_with_users_options(users, options),
+        ))
     }
 
     async fn alter_user_scram_credentials(
@@ -1696,7 +1779,7 @@ impl AdminBackend for RustNativeAdmin {
         // map, so the *requested* keys drive the collection and a partition the
         // call did not attempt is a whole-call `Err`. A repeated partition
         // collapses to one key, as Java's `Map` does. Identical to the FFI's
-        // `submit_describe_producers`, so all four backends answer with the same
+        // `submit_describe_producers`, so all five backends answer with the same
         // key set.
         let mut outcomes = HashMap::with_capacity(partitions.len());
         for tp in partitions {
@@ -1831,7 +1914,7 @@ const NATIVE_FUTURE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// This is what both bindings do internally before handing a result back to
 /// their caller (`admin.py`'s `_run_sync`, the C `_async` entry points' result
-/// struct), so doing it here is what makes the four backends comparable. Each
+/// struct), so doing it here is what makes the five backends comparable. Each
 /// await is bounded — see [`NATIVE_FUTURE_TIMEOUT`].
 async fn resolve<K, V>(futures: impl Iterator<Item = (K, KafkaFuture<V>)>) -> Outcomes<K, V>
 where
@@ -1879,15 +1962,15 @@ async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataA
 }
 
 /// Projects a [`Config`] onto the five fields that survive *every* binding's
-/// `createTopics` result, so all four backends are compared on identical
+/// `createTopics` result, so all five backends are compared on identical
 /// information.
 ///
 /// `kafka_admin_TopicMetadataAndConfig_config_*` exposes name / value /
 /// is_default / is_sensitive / is_read_only and nothing else, and `admin.py`'s
 /// `_to_config_entry` mirrors that. The native client *does* know
 /// `ConfigEntry::source()` here, and leaving it in place would let a scenario
-/// assert on a field only one of the four backends can ever produce — a green
-/// `__rust` arm and three red ones, for no defect. Dropping it here makes that
+/// assert on a field only one of the five backends can ever produce — a green
+/// `__rust` arm and four red ones, for no defect. Dropping it here makes that
 /// trap unreachable. `is_default` is preserved by re-deriving the only source
 /// value it depends on (`ConfigSource::DefaultConfig`).
 fn comparable_config(config: &Config) -> Config {
