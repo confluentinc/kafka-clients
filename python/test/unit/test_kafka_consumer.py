@@ -127,6 +127,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import math
+import os
+import signal
 import sys
 import threading
 import time
@@ -596,7 +598,8 @@ def test_construction_releases_the_gil_while_it_resolves_the_bootstrap_hosts(
     # observe, and the test skips.
     margin = 0.005
     window: dict[str, float] = {}
-    native_new = _lib.Consumer_KafkaConsumer_new_typed
+    # The branch C API names the typed-config constructor Consumer_KafkaConsumer_new.
+    native_new = _lib.Consumer_KafkaConsumer_new
 
     def timed_new(native: dict[str, str]) -> Any:
         window["start"] = time.perf_counter()
@@ -605,7 +608,7 @@ def test_construction_releases_the_gil_while_it_resolves_the_bootstrap_hosts(
         finally:
             window["end"] = time.perf_counter()
 
-    monkeypatch.setattr(_lib, "Consumer_KafkaConsumer_new_typed", timed_new)
+    monkeypatch.setattr(_lib, "Consumer_KafkaConsumer_new", timed_new)
     ran: list[float] = []
     stop = threading.Event()
 
@@ -803,13 +806,14 @@ def _spy_close(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     import _confluentkafka as lib  # type: ignore[import-not-found]
 
     calls: list[Any] = []
-    original = lib.Consumer_close_with_option_async
+    # The branch C API's non-blocking close is Consumer_close_cb.
+    original = lib.Consumer_close_cb
 
     def spy(*args: Any) -> Any:
         calls.append(args)
         return original(*args)
 
-    monkeypatch.setattr(lib, "Consumer_close_with_option_async", spy)
+    monkeypatch.setattr(lib, "Consumer_close_cb", spy)
     return calls
 
 
@@ -1043,9 +1047,10 @@ def test_another_thread_during_the_commit_callback_meets_the_guard() -> None:
 
 
 def _listener_consumer() -> KafkaConsumer[bytes, bytes]:
-    """A consumer subscribed with a listener: commit_nowait() then runs its FFI
-    call on the helper thread (the broker is unreachable; empty-offsets commits
-    complete at once)."""
+    """A consumer subscribed with a listener, so commit_nowait() may deliver
+    listener callbacks on its caller's thread while it waits (the broker is
+    unreachable; empty-offsets commits complete at once). The branch C API runs
+    every callback in the waiting call's drain, so there is no helper thread."""
     consumer = new_consumer()
     consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
     return consumer
@@ -1099,8 +1104,9 @@ def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> N
 
 def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> None:
     # Two threads in turn: each commit_nowait() runs the callbacks of the
-    # earlier commits inside its FFI call on the helper thread, and hands them
-    # back to its own caller (threads by name: an ident is reused).
+    # earlier commits on its own caller's thread, in the drain of its wait
+    # (threads by name: an ident is reused). The branch C API has no helper
+    # thread; the guarantee tested is the same.
     consumer = _listener_consumer()
     seen: dict[str, str] = {}
 
@@ -1331,8 +1337,13 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     # checks it, then closes before call_soon_threadsafe. The result is freed
     # on the dispatcher thread instead of the RuntimeError reaching the C
     # trampoline, which printed it and left the result's handles allocated.
+    #
+    # On the branch C API a completion is delivered only by a drain of the
+    # consumer's callbacks vector, which the stopped loop never runs: the next
+    # call on the consumer, from another loop, drains it (and delivers the result
+    # to the closed loop), so the test makes that call.
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
-    held = hold_completion("Consumer_position_async")
+    held = hold_completion("Consumer_position_cb")
     stopped_loop.start(consumer.position(partition=TP0))
     assert held.submitted.is_set()
     loop = stopped_loop.loop
@@ -1340,7 +1351,9 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
     loop.is_closed = lambda: False  # type: ignore[method-assign] # the check saw it open
     capfd.readouterr()
     held.release.set()
-    assert held.delivered.wait(WAIT)
+    _await_queued_completion(consumer)
+    asyncio.run(consumer.assign(partitions=[TP0]))
+    assert held.delivered.is_set()
     del loop.is_closed
     ((_, error),) = held.payloads
     assert error
@@ -1352,19 +1365,22 @@ def test_an_async_result_its_closing_loop_refuses_is_freed(
 
 def test_an_async_result_left_for_a_closed_loop_is_freed_by_the_next_call(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any) -> None:
-    # The result reaches its loop while the loop is stopped, and the loop then
-    # closes, which discards the queued delivery: the consumer's next awaiting
-    # call, from another loop, frees it.
+    # The result is left for its loop while the loop is stopped, and the loop
+    # then closes, so it can never be delivered there: the consumer's next
+    # awaiting call, from another loop, frees it. (On the branch C API that call
+    # is also the drain that delivers the result, the stopped loop draining
+    # nothing.)
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
-    held = hold_completion("Consumer_position_async")
+    held = hold_completion("Consumer_position_cb")
     stopped_loop.start(consumer.position(partition=TP0))
     held.release.set()
-    assert held.delivered.wait(WAIT)
     stopped_loop.loop.close()
-    ((_, error),) = held.payloads
-    assert error
+    _await_queued_completion(consumer)
     assert freed_errors == []
     asyncio.run(consumer.assign(partitions=[TP0]))
+    assert held.delivered.is_set()
+    ((_, error),) = held.payloads
+    assert error
     assert freed_errors == [error]
     _close_bounded(consumer, stopped_loop)  # the call's task still pending
 
@@ -1379,14 +1395,16 @@ def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
     # call's thread or another one, returns and frees the stranded result; it
     # used to wait for that use for good (from another thread, to raise
     # ConcurrentModificationError).
+    # On the branch C API the result stays queued in the consumer's callbacks
+    # vector (the stopped loop drains nothing) until close() drains it.
     consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
-    held = hold_completion("Consumer_position_async")
+    held = hold_completion("Consumer_position_cb")
 
     def leave_a_call() -> None:
         stopped_loop.start(consumer.position(partition=TP0))
         held.release.set()
-        held.delivered.wait(WAIT)
         stopped_loop.loop.close()
+        _await_queued_completion(consumer)
 
     if same_thread:
         leave_a_call()
@@ -1394,11 +1412,21 @@ def test_close_does_not_wait_for_a_call_left_on_a_closed_loop(
         caller = threading.Thread(target=leave_a_call)
         caller.start()
         caller.join(WAIT)
-    assert held.delivered.is_set() and stopped_loop.loop.is_closed()
-    ((_, error),) = held.payloads
+    assert held.submitted.is_set() and stopped_loop.loop.is_closed()
     assert freed_errors == []
     _close_bounded(consumer, stopped_loop)
+    assert held.delivered.is_set()
+    ((_, error),) = held.payloads
     assert freed_errors == [error]
+
+
+def _await_queued_completion(consumer: AsyncKafkaConsumer[Any, Any]) -> None:
+    """Wait until the core has queued the held call's completion (its notify
+    hook fired) and released the call's single-owner guard, which the branch C
+    API does just after queuing it (``run_cb``: deliver, then drop the guard),
+    so the next call is not refused while that guard is still held."""
+    assert consumer._pending_event.wait(WAIT)  # noqa: SLF001
+    time.sleep(0.1)
 
 
 def _close_bounded(consumer: AsyncKafkaConsumer[Any, Any], stopped_loop: Any) -> None:
@@ -1431,3 +1459,103 @@ def test_wakeup_before_poll_raises_once() -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert consumer.poll(timeout=0).is_empty()
+
+
+# ---------------------------------------------------------------------------
+# The sync waiting model: `_cb` entry points, Ctrl+C
+# ---------------------------------------------------------------------------
+# The synchronous KafkaConsumer never calls a blocking C entry point: every
+# waiting method submits the `_cb` form and waits in Python, in 100 ms slices,
+# running the consumer's queued callbacks on the calling thread (CLAUDE.md,
+# Python Binding Conventions, Implementation over the FFI).
+
+_BLOCKING_ENTRY_POINTS = (
+    "Consumer_poll", "Consumer_subscribe", "Consumer_subscribe_pattern", "Consumer_unsubscribe",
+    "Consumer_assign", "Consumer_pause", "Consumer_resume", "Consumer_seek",
+    "Consumer_seek_with_metadata", "Consumer_seek_to_beginning", "Consumer_seek_to_end",
+    "Consumer_commit_sync", "Consumer_commit_async", "Consumer_position", "Consumer_committed",
+    "Consumer_beginning_offsets", "Consumer_end_offsets", "Consumer_offsets_for_times",
+    "Consumer_partitions_for", "Consumer_list_topics", "Consumer_close",
+)
+
+
+def test_sync_consumer_never_calls_a_blocking_entry_point(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(name: str) -> Any:
+        def entry(*args: Any) -> Any:
+            raise AssertionError(f"the sync KafkaConsumer called the blocking {name}")
+        return entry
+
+    for name in _BLOCKING_ENTRY_POINTS:
+        monkeypatch.setattr(_lib, name, forbidden(name))
+    committed: list[Any] = []
+    consumer = new_consumer(**{"default.api.timeout.ms": 200})
+    try:
+        consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+        assert consumer.subscription() == {TOPIC}
+        consumer.unsubscribe()
+        consumer.subscribe(pattern=SubscriptionPattern(pattern="te.*"))
+        consumer.unsubscribe()
+        consumer.assign(partitions=[TP0])
+        consumer.pause(partitions=[TP0])
+        assert consumer.paused() == {TP0}
+        consumer.resume(partitions=[TP0])
+        consumer.seek(partition=TP0, offset=1)
+        consumer.seek(partition=TP0, offset_and_metadata=OffsetAndMetadata(offset=2))
+        consumer.seek_to_beginning(partitions=[TP0])
+        consumer.seek_to_end(partitions=[TP0])
+        assert consumer.poll(timeout=0).is_empty()
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: committed.append((o, e)))
+        consumer.commit(offsets={})
+        # The commit callback ran inside the later waiting call, on this thread.
+        assert committed == [(None, None)]
+        with pytest.raises(IllegalStateError):
+            consumer.position(partition=TopicPartition(topic=TOPIC, partition=1))
+        for call in (lambda: consumer.committed(partitions=[TP0]),
+                     lambda: consumer.beginning_offsets(partitions=[TP0]),
+                     lambda: consumer.end_offsets(partitions=[TP0]),
+                     lambda: consumer.offsets_for_times(timestamps_to_search={TP0: 0}),
+                     lambda: consumer.partitions_for(topic=TOPIC),
+                     lambda: consumer.list_topics()):
+            with pytest.raises(KafkaTimeoutError):
+                call()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_sigint_while_polling_wakes_up_once_then_reraises_and_consumer_reusable(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ctrl+C during a waiting call (CLAUDE.md, Python Binding Conventions,
+    # Threads and callbacks): the consumer calls wakeup() once, waits for the
+    # in-flight operation to end with the WakeupError it caused (the guard
+    # released, the result freed), then re-raises KeyboardInterrupt. The
+    # wakeup is consumed by that operation, so the consumer is usable and the
+    # next call does not see it. pytest runs the test on the main thread, the
+    # only one that runs Python signal handlers.
+    wakeups: list[int] = []
+    real_wakeup = _lib.Consumer_wakeup
+
+    def counting_wakeup(h: int) -> None:
+        wakeups.append(h)
+        real_wakeup(h)
+
+    monkeypatch.setattr(_lib, "Consumer_wakeup", counting_wakeup)
+    consumer = new_consumer()
+    try:
+        consumer.subscribe(topics=[TOPIC])
+        timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+        start = time.monotonic()
+        timer.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                consumer.poll(timeout=30)
+            elapsed = time.monotonic() - start
+        finally:
+            timer.cancel()
+            timer.join()
+        assert 0.25 <= elapsed < 5, elapsed
+        assert len(wakeups) == 1
+        assert consumer.subscription() == {TOPIC}
+        assert consumer.poll(timeout=0).is_empty()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))

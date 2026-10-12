@@ -51,7 +51,7 @@ from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors import UnsupportedVersionError
 from confluent_kafka.common.serialization import bytes_serializer, string_serializer
-from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer
+from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata
 from confluent_kafka.producer import (
     AsyncKafkaProducer,
     AsyncMockProducer,
@@ -1428,8 +1428,11 @@ def test_sync_send_offsets_to_transaction_never_calls_its_blocking_entry_point(
     group_metadata = _consumer_group_metadata()
     _forbid_blocking_entry_points(monkeypatch)
     with KafkaProducer(configs=UNREACHABLE) as p:
+        # Non-empty offsets: Java's empty map is a no-op on an idempotent producer
+        # (see test_send_offsets_to_transaction_checks_group_metadata_first).
+        offsets = {TopicPartition(topic=TOPIC, partition=0): OffsetAndMetadata(offset=1)}
         with pytest.raises(IllegalStateError) as err:
-            p.send_offsets_to_transaction(offsets={}, group_metadata=group_metadata)
+            p.send_offsets_to_transaction(offsets=offsets, group_metadata=group_metadata)
         assert str(err.value) == NOT_TRANSACTIONAL
 
 
