@@ -120,7 +120,8 @@ enum BatchAction {
 /// closure. In Rust, because `handleProduceResponse` needs `&mut self`, we
 /// cannot capture `self` inside the callback. Instead, we store the
 /// topic-partition set and topic names here and process responses after
-/// `client.poll()` returns. The actual batches remain in `in_flight_batches`.
+/// `client.poll()` returns. The actual batches remain in `in_flight_batches`, or in
+/// `batches_awaiting_response` once they have expired.
 ///
 /// This follows CLAUDE.md rule 11: translate callbacks to code executed after
 /// awaiting the corresponding call.
@@ -2036,7 +2037,11 @@ impl<C: KafkaClient> Sender<C> {
             for batch in batch_list.iter_mut() {
                 let tp = batch.topic_partition.clone();
                 let records = batch.records();
-                infos.push(RequestBatchInfo { tp, records_data: Some(records.into_buffer()) });
+                infos.push(RequestBatchInfo {
+                    tp,
+                    records_data: Some(records.into_buffer()),
+                    identity: Arc::clone(&batch.produce_future),
+                });
             }
             request_data.push((*destination, infos));
         }
@@ -2842,7 +2847,7 @@ impl<C: KafkaClient> Sender<C> {
         let topic_ids = self.topic_ids_for_partitions(&batch_infos);
 
         let mut topic_data_list: Vec<TopicProduceData> = Vec::new();
-        let mut batch_tps: Vec<TopicPartition> = Vec::with_capacity(batch_infos.len());
+        let mut sent_batches: Vec<(TopicPartition, Arc<ProduceRequestResult>)> = Vec::with_capacity(batch_infos.len());
 
         // Consume the batch_infos by value to avoid cloning the record data.
         for mut info in batch_infos {
@@ -2881,22 +2886,26 @@ impl<C: KafkaClient> Sender<C> {
                 topic_data_list.push(td);
             }
 
-            batch_tps.push(info.tp);
+            sent_batches.push((info.tp, info.identity));
         }
 
-        // Mark only the specific batches being sent in this request as inflight, and
-        // record their identity so the response can find them again.
-        // In Java, `batch.setInflight(true)` is called on each batch as it is added
-        // to the produce request (Sender.java:919). The batch just added by
-        // `add_to_inflight_batches` is the last one for the partition.
-        let mut pending_batches: Vec<(TopicPartition, Arc<ProduceRequestResult>)> = Vec::with_capacity(batch_tps.len());
-        for tp in batch_tps {
-            if let Some(batches) = self.in_flight_batches.get_mut(&tp)
-                && let Some(batch) = batches.last_mut()
-            {
+        // Mark the batches sent in this request as in flight (`Sender.java:920`). Java
+        // sets the flag on the drained batch object itself, wherever it is now held. A
+        // batch that reached its delivery timeout earlier in this pass has already been
+        // failed and moved from `in_flight_batches` to `batches_awaiting_response`, so
+        // it is looked up in both.
+        for (tp, identity) in &sent_batches {
+            let batch = self
+                .in_flight_batches
+                .get_mut(tp)
+                .and_then(|batches| batches.iter_mut().find(|batch| Arc::ptr_eq(&batch.produce_future, identity)))
+                .or_else(|| {
+                    self.batches_awaiting_response
+                        .iter_mut()
+                        .find(|batch| Arc::ptr_eq(&batch.produce_future, identity))
+                });
+            if let Some(batch) = batch {
                 batch.set_inflight(true);
-                let identity = Arc::clone(&batch.produce_future);
-                pending_batches.push((tp, identity));
             }
         }
 
@@ -2951,13 +2960,14 @@ impl<C: KafkaClient> Sender<C> {
             None, // No callback -- we process responses after poll() returns
         );
 
-        // Store the pending request metadata keyed by correlation ID.
-        // Batches remain in `in_flight_batches` and will be extracted during
-        // response processing in `handle_produce_responses()`.
+        // Store the pending request metadata keyed by correlation ID. The batches stay
+        // in `in_flight_batches`, or in `batches_awaiting_response` if they have already
+        // expired, and are taken from there when the response is handled in
+        // `handle_produce_response_for()`.
         let correlation_id = client_request.correlation_id();
 
         self.pending_produce_responses
-            .insert(correlation_id, PendingProduceRequest { batches: pending_batches, topic_names });
+            .insert(correlation_id, PendingProduceRequest { batches: sent_batches, topic_names });
 
         self.client.send(client_request, now);
         kafka_trace!(self.log_context, "Sent produce request to {}: {}", node_id, request_debug);
@@ -3004,6 +3014,15 @@ struct RequestBatchInfo {
     /// the builder through to the wire send without an intermediate copy
     /// (consumer-threading.md §27 write-path symmetry).
     records_data: Option<bytes::Bytes>,
+    /// The identity of the drained batch, recorded in [`PendingProduceRequest`] so the
+    /// response can find the batch again.
+    ///
+    /// Java's `sendProduceRequest` puts the drained batch objects into
+    /// `recordsByPartition` (`Sender.java:918`), so the response reaches a batch even if
+    /// the delivery-timeout expiry failed it in the same pass. The identity is taken
+    /// when the batch is drained for the same reason: by the time the request is sent,
+    /// such a batch is no longer in `in_flight_batches`.
+    identity: Arc<ProduceRequestResult>,
 }
 
 #[cfg(test)]
@@ -3605,8 +3624,16 @@ mod tests {
         let tp_a = TopicPartition::new("topic-a".to_string(), 0);
         let tp_b = TopicPartition::new("topic-b".to_string(), 0);
         let batch_infos = vec![
-            RequestBatchInfo { tp: tp_a.clone(), records_data: Some(single_record_batch_bytes()) },
-            RequestBatchInfo { tp: tp_b.clone(), records_data: Some(single_record_batch_bytes()) },
+            RequestBatchInfo {
+                tp: tp_a.clone(),
+                records_data: Some(single_record_batch_bytes()),
+                identity: Arc::new(ProduceRequestResult::new(tp_a.clone())),
+            },
+            RequestBatchInfo {
+                tp: tp_b.clone(),
+                records_data: Some(single_record_batch_bytes()),
+                identity: Arc::new(ProduceRequestResult::new(tp_b.clone())),
+            },
         ];
 
         ctx.sender
@@ -3950,7 +3977,11 @@ mod tests {
     #[test]
     fn test_request_batch_info() {
         let tp = TopicPartition::new("topic".to_string(), 0);
-        let info = RequestBatchInfo { tp: tp.clone(), records_data: Some(bytes::Bytes::from(vec![1, 2, 3])) };
+        let info = RequestBatchInfo {
+            tp: tp.clone(),
+            records_data: Some(bytes::Bytes::from(vec![1, 2, 3])),
+            identity: Arc::new(ProduceRequestResult::new(tp.clone())),
+        };
         assert_eq!(info.tp, tp);
         assert_eq!(info.records_data.as_ref().unwrap().len(), 3);
     }
@@ -8840,6 +8871,57 @@ mod tests {
             ctx.accumulator.buffer_pool_available_memory(),
             total_memory,
             "the expired batch's buffer must be returned when its response arrives"
+        );
+    }
+
+    /// A batch that is first drained after its delivery timeout is failed by the expiry
+    /// in the same pass, but its request is still sent, so the response must still find
+    /// it to return its buffer and unmute the partition.
+    ///
+    /// Not a translation of a Java test: no `SenderTest` drains an already-expired batch.
+    /// In Java the request callback holds the drained batch objects
+    /// (`recordsByPartition`, `Sender.java:918`), so the response completes the batch
+    /// whatever the expiry did; the full pool is returned and the next batch is sent.
+    #[tokio::test]
+    async fn test_batch_drained_after_its_delivery_timeout_is_completed_by_its_response() {
+        let mut ctx = SenderTestContext::with_options(true, i32::MAX);
+        let tp0 = ctx.tp0.clone();
+        let total_memory = ctx.accumulator.buffer_pool_available_memory();
+
+        let future = ctx.append_to_accumulator(&tp0).await;
+        // The batch reaches its delivery timeout before it is first drained, so the next
+        // pass drains it, expires it and sends its request.
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1, "the request is sent");
+        assert_eq!(future.get().await.expect_err("expired").error(), Errors::RequestTimedOut);
+        assert_eq!(
+            ctx.sender
+                .pending_produce_responses
+                .values()
+                .map(|pending| pending.batches.len())
+                .sum::<usize>(),
+            1,
+            "the expired batch must be recorded against the request it was sent in"
+        );
+
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.accumulator.buffer_pool_available_memory(),
+            total_memory,
+            "the response must return the expired batch's buffer"
+        );
+        assert!(ctx.sender.batches_awaiting_response.is_empty());
+
+        // The response unmutes the partition, so the next batch is sent.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "the partition must be unmuted by the response"
         );
     }
 
