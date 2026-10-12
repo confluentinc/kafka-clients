@@ -1201,17 +1201,17 @@ schedules; it never runs a callback.
 
 The extension starts no thread. The Python-side threads are:
 - the sync producer's completion thread;
-- `begin_transaction`'s helper (see below);
 - the async producer's fallback pump.
 
-Blocking C entry points are used only where the call cannot park:
-`begin_transaction`, and the re-entrant `ConsumerHandle` inside a listener.
+Blocking C entry points are used only where the call cannot park: the
+re-entrant `ConsumerHandle` inside a listener.
+
+`begin_transaction` does not wait in Java, but its C entry point first drains
+the records already sent, like every transaction-control operation
+(`producer-transactions.md` §13), so it has a `_cb` twin and both Python
+families wait on it like the other control operations.
 
 Deviations recorded in the package's module docstrings:
-- `begin_transaction` has no `_cb` twin. Like every transaction-control
-  operation it first drains the records already sent
-  (`producer-transactions.md` §13), so its blocking entry point runs on a
-  helper thread (sync) or in the loop's default executor (async).
 - Backpressure is the core's `max.block.ms` wait on the submission task, not
   master's `Producer_drain` / on-space-available machinery. `send()` returns
   once the record is queued on the submission task, which hands records to the
@@ -1223,9 +1223,9 @@ Deviations recorded in the package's module docstrings:
 - A call from inside a `send()` callback cannot have its completion run,
   since that runs on the thread the callback blocks. There, `send()` does not
   wait for its record to reach the producer. `init_transactions`,
-  `send_offsets_to_transaction`, `commit_transaction`, `abort_transaction`
-  and `partitions_for` raise `TimeoutError` after `max.block.ms`; the
-  operation itself may still complete.
+  `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`,
+  `abort_transaction` and `partitions_for` raise `TimeoutError` after
+  `max.block.ms`; the operation itself may still complete.
 - A failure the core reports before the partition is chosen carries partition
   -1, even when the record names one. The binding fills in the record's
   partition, as Java's `AppendCallbacks.topicPartition()` gives it.

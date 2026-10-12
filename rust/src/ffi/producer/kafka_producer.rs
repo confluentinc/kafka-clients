@@ -50,11 +50,11 @@ use crate::ffi::producer::producer_record::kafka_producer_ProducerRecord_t;
 use crate::ffi::producer::{
     ProducerHandle, completion_sink, kafka_producer_Producer_abort_transaction,
     kafka_producer_Producer_abort_transaction_cb, kafka_producer_Producer_begin_transaction,
-    kafka_producer_Producer_commit_transaction, kafka_producer_Producer_commit_transaction_cb,
-    kafka_producer_Producer_init_transactions, kafka_producer_Producer_init_transactions_cb,
-    kafka_producer_Producer_send_offsets_to_transaction, kafka_producer_Producer_send_offsets_to_transaction_cb,
-    kafka_producer_Producer_send_with_callback, kafka_producer_Producer_send_with_callback_cb,
-    kafka_producer_Producer_t,
+    kafka_producer_Producer_begin_transaction_cb, kafka_producer_Producer_commit_transaction,
+    kafka_producer_Producer_commit_transaction_cb, kafka_producer_Producer_init_transactions,
+    kafka_producer_Producer_init_transactions_cb, kafka_producer_Producer_send_offsets_to_transaction,
+    kafka_producer_Producer_send_offsets_to_transaction_cb, kafka_producer_Producer_send_with_callback,
+    kafka_producer_Producer_send_with_callback_cb, kafka_producer_Producer_t,
 };
 use crate::ffi::util::{GenericValue, kafka_Bytes_t, kafka_Map_t};
 use crate::producer::KafkaProducer;
@@ -70,6 +70,10 @@ type Handle = ProducerHandle<KafkaProducer<GenericValue, GenericValue>>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_init_transactions_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+/// Completion of a `void` transactional method on the class: the same shape
+/// as the interface's.
+pub type kafka_producer_KafkaProducer_begin_transaction_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
@@ -295,6 +299,32 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
     // `producer(self_)` is its live `__as_Producer` view, which is what
     // `kafka_producer_Producer_begin_transaction`'s `# Safety` asks for.
     unsafe { kafka_producer_Producer_begin_transaction(producer(self_)) }
+}
+
+/// `KafkaProducer.beginTransaction()`, completion queued.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
+    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
+    // body did not return, and the body's one step, the call to
+    // `kafka_producer_Producer_begin_transaction_cb`, delivers `cb` itself (a panic inside it
+    // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires.
+    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction_cb(
+    self_: *const kafka_producer_KafkaProducer_t,
+    cb: kafka_producer_KafkaProducer_begin_transaction_cb_t,
+    opaque: *mut c_void,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer` requires, so
+    // `producer(self_)` is its live `__as_Producer` view, which is what
+    // `kafka_producer_Producer_begin_transaction_cb`'s `# Safety` asks for.
+    unsafe { kafka_producer_Producer_begin_transaction_cb(producer(self_), cb, opaque) }
 }
 
 /// `KafkaProducer.sendOffsetsToTransaction(...)`: see

@@ -1062,9 +1062,9 @@ mod tests {
     };
     use crate::ffi::producer::{
         kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_begin_transaction,
-        kafka_producer_Producer_commit_transaction, kafka_producer_Producer_flush,
-        kafka_producer_Producer_init_transactions, kafka_producer_Producer_send, kafka_producer_Producer_send_cb,
-        kafka_producer_Producer_send_with_callback,
+        kafka_producer_Producer_begin_transaction_cb, kafka_producer_Producer_commit_transaction,
+        kafka_producer_Producer_flush, kafka_producer_Producer_init_transactions, kafka_producer_Producer_send,
+        kafka_producer_Producer_send_cb, kafka_producer_Producer_send_with_callback,
     };
     use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
 
@@ -1203,6 +1203,60 @@ mod tests {
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 3);
             assert_eq!(seen.sends.load(Ordering::SeqCst), 3);
             assert_eq!(kafka_producer_MockProducer_commit_count(mock), 1);
+
+            kafka_producer_ProducerRecord_destroy(record);
+            kafka_producer_MockProducer_destroy(mock);
+        }
+    }
+
+    unsafe extern "C" fn on_operation(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: `opaque` is the `Seen` the test passed to the `_cb` control call,
+        // alive until the callbacks ran.
+        let seen = unsafe { &*(opaque as *const Seen) };
+        assert!(error.is_null());
+        seen.completions.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn begin_transaction_cb_drains_the_queued_sends_first() {
+        // `beginTransaction`'s queued form drains the submission queue before it runs, like the
+        // other four control operations (`producer-transactions.md` §13): the sends that had
+        // returned before it reach the producer outside the transaction, so they are in the sent
+        // history, not staged in the transaction, once the begin completes.
+        let seen = Seen {
+            completions: AtomicI32::new(0),
+            sends: AtomicI32::new(0),
+            last_offset: AtomicI32::new(-1),
+        };
+        let topic = CString::new("topic").unwrap();
+        // SAFETY: Test code: `mock` and `record` are live from their constructor to their single
+        // destroy below, `view` is used only before the mock is destroyed, each list is destroyed
+        // once after its last use, and `seen` outlives the callback runs that read it.
+        unsafe {
+            let mock = kafka_producer_MockProducer_with_auto_complete(1);
+            let view = kafka_producer_MockProducer__as_Producer(mock);
+            let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
+
+            assert!(kafka_producer_Producer_init_transactions(view).is_null());
+            for _ in 0..3 {
+                kafka_producer_Producer_send_cb(view, record, on_sent, &seen as *const Seen as *mut c_void);
+            }
+            kafka_producer_Producer_begin_transaction_cb(view, on_operation, &seen as *const Seen as *mut c_void);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while seen.completions.load(Ordering::SeqCst) == 0 {
+                assert!(std::time::Instant::now() < deadline, "begin_transaction_cb never completed");
+                kafka_producer_Producer__execute_callbacks(view);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(kafka_producer_MockProducer_transaction_in_flight(mock), 1);
+            let history = kafka_producer_MockProducer_history(mock);
+            assert_eq!(kafka_List_size(history), 3);
+            kafka_List_destroy(history);
+            let uncommitted = kafka_producer_MockProducer_uncommitted_records(mock);
+            assert_eq!(kafka_List_size(uncommitted), 0);
+            kafka_List_destroy(uncommitted);
+            kafka_producer_Producer__execute_callbacks(view);
+            assert_eq!(seen.sends.load(Ordering::SeqCst), 3);
 
             kafka_producer_ProducerRecord_destroy(record);
             kafka_producer_MockProducer_destroy(mock);

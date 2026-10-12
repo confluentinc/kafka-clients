@@ -533,7 +533,7 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // `partitions_for_cb`, `close_cb` / `close_with_timeout_cb`, the
 // transaction-control `_cb` ops); the blocking entry points (`Producer_send`,
 // `Producer_flush`, ...) stay exported for completeness but neither family
-// calls them, except `Producer_begin_transaction`, which has no `_cb` twin.
+// calls them.
 // Delivery callbacks and `_cb` completions are QUEUED by Rust on the
 // producer's callback vector and only run when this extension calls
 // `kafka_producer_Producer__execute_callbacks` (Producer_poll /
@@ -1350,6 +1350,9 @@ static PyObject* py_Producer_flush_cb(PyObject* self, PyObject* args) {
 }
 static PyObject* py_Producer_init_transactions_cb(PyObject* self, PyObject* args) {
     return producer_void_cb_op(args, kafka_producer_Producer_init_transactions_cb);
+}
+static PyObject* py_Producer_begin_transaction_cb(PyObject* self, PyObject* args) {
+    return producer_void_cb_op(args, kafka_producer_Producer_begin_transaction_cb);
 }
 static PyObject* py_Producer_commit_transaction_cb(PyObject* self, PyObject* args) {
     return producer_void_cb_op(args, kafka_producer_Producer_commit_transaction_cb);
@@ -8600,7 +8603,9 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_init_transactions_cb", py_Producer_init_transactions_cb, METH_VARARGS,
      "Queued initTransactions; cb(owned_error_int)"},
     {"Producer_begin_transaction", py_Producer_begin_transaction, METH_VARARGS,
-     "beginTransaction -> owned_error_int (no _cb twin: a state transition in Java)"},
+     "beginTransaction -> owned_error_int"},
+    {"Producer_begin_transaction_cb", py_Producer_begin_transaction_cb, METH_VARARGS,
+     "Queued beginTransaction; cb(owned_error_int)"},
     {"Producer_send_offsets_to_transaction", py_Producer_send_offsets_to_transaction, METH_VARARGS,
      "Blocking sendOffsetsToTransaction(spec, group_metadata) -> owned_error_int"},
     {"Producer_send_offsets_to_transaction_cb", py_Producer_send_offsets_to_transaction_cb, METH_VARARGS,

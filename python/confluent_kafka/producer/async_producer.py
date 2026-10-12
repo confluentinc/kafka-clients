@@ -17,15 +17,10 @@
 By rule 3, the same methods as ``Producer`` (CLAUDE.md, Python Binding
 Conventions, Class family), each ``async def`` iff the entry point it calls has
 a queued ``_cb`` completion form in the FFI header: ``init_transactions``,
-``send_offsets_to_transaction``, ``commit_transaction``, ``abort_transaction``,
-``send``, ``flush``, ``partitions_for`` and ``close``. ``metrics`` has none, so
-it is a plain ``def``. ``send`` returns an ``asyncio.Future``, so a round trip
-is ``md = await (await p.send(record=r))``.
-
-*(deviation)* ``begin_transaction`` has no ``_cb`` form either, but it is an
-``async def`` too, as in ``Producer`` it waits: like every transaction-control
-operation it first drains the records already sent (producer-transactions.md
-§13), so its blocking entry point runs in the loop's default executor.
+``begin_transaction``, ``send_offsets_to_transaction``, ``commit_transaction``,
+``abort_transaction``, ``send``, ``flush``, ``partitions_for`` and ``close``.
+``metrics`` has none, so it is a plain ``def``. ``send`` returns an
+``asyncio.Future``, so a round trip is ``md = await (await p.send(record=r))``.
 
 The producer's queued completions -- the ``send()`` callbacks and the results
 of the waiting calls -- are run by ``kafka_producer_Producer__execute_callbacks``
@@ -217,34 +212,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         await self._run_async(_lib.Producer_init_transactions_cb)
 
     async def begin_transaction(self) -> None:
-        """See :meth:`Producer.begin_transaction`. Its entry point has no
-        queued form, so it runs in the loop's default executor, as one use of
-        the handle, and is awaited without blocking the loop (see the module
-        docstring); cancelling the awaiting task lets it end, then raises
-        ``CancelledError``."""
+        """See :meth:`Producer.begin_transaction`."""
         self._check_not_closed()
-        loop = self._enter()
-        use = self._use()
-        c_producer = use.__enter__()
-
-        def begin() -> Exception | None:
-            try:
-                error = _lib.Producer_begin_transaction(c_producer)
-            finally:
-                use.__exit__(None, None, None)
-            if error:
-                return from_ffi_error(error)
-            self._in_transaction = True
-            return None
-
-        try:
-            began = loop.run_in_executor(None, begin)
-        except BaseException:
-            use.__exit__(None, None, None)
-            raise
-        exception = await await_to_end(began)
-        if exception is not None:
-            raise exception
+        await self._run_async(_lib.Producer_begin_transaction_cb)
+        self._in_transaction = True
 
     async def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],

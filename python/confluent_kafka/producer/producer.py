@@ -34,9 +34,6 @@ thread per producer, which runs ``kafka_producer_Producer__execute_callbacks``
 whenever the C API's notify hook signals it (CLAUDE.md, Python Binding
 Conventions, Threads and callbacks).
 
-*(deviation)* ``begin_transaction`` has no ``_cb`` form in the C API, so its
-blocking entry point runs on a helper thread while the caller waits in slices.
-
 *(deviation)* Backpressure is the core's ``max.block.ms`` wait on the
 submission task, not a wait in ``send()`` (see ``_base``).
 
@@ -46,7 +43,9 @@ wait for its record to reach the producer, and ``init_transactions``,
 ``send_offsets_to_transaction``, ``commit_transaction``, ``abort_transaction``
 and ``partitions_for`` raise ``TimeoutError`` after ``max.block.ms``, which is
 when Java's waits, blocking the I/O thread its completion needs, time out; the
-operation itself may still complete.
+operation itself may still complete. ``begin_transaction`` does too, although
+Java's does not wait: its queued form first drains the records already sent
+(producer-transactions.md §13), and its completion needs that same thread.
 """
 
 from __future__ import annotations
@@ -218,32 +217,9 @@ class Producer(Generic[K, V], _ProducerState):
         encountered a previous fatal error.
         """
         self._check_not_closed()
-        # The C API has no queued form of beginTransaction, so the blocking
-        # entry point runs on a helper thread, as one use of the handle, while
-        # this thread waits in slices (see the module docstring). Like every
-        # transaction-control operation it drains the submission queue first
-        # (producer-transactions.md §13); that needs no callback to run, so it
-        # completes from a send() callback too.
-        completion = Completion(free_error_payload)
-        use = self._use()
-        c_producer = use.__enter__()
-
-        def begin() -> None:
-            try:
-                error = _lib.Producer_begin_transaction(c_producer)
-            finally:
-                use.__exit__(None, None, None)
-            completion(error)
-
-        try:
-            threading.Thread(target=begin, name="confluent-kafka-producer-begin-transaction",
-                             daemon=True).start()
-        except BaseException:
-            use.__exit__(None, None, None)
-            raise
-        payload = completion.wait()
-        assert payload is not None
-        raise_if_error(payload[0])
+        # Like every transaction-control operation the C API drains the
+        # submission queue first (producer-transactions.md §13).
+        self._run_void("beginTransaction", _lib.Producer_begin_transaction_cb)
         self._in_transaction = True
 
     def send_offsets_to_transaction(

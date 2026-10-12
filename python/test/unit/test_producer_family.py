@@ -1348,36 +1348,13 @@ def test_begin_transaction_waits_for_earlier_sends(transactional: bool) -> None:
         p.close(timeout=0)
 
 
-def test_begin_transaction_runs_its_blocking_entry_point_off_the_caller(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    # Updated for the branch C API: beginTransaction has no _cb form there, so
-    # the sync class runs the blocking entry point on a helper thread and waits
-    # for it in slices (a deviation), never on the calling thread.
-    calls: list[tuple[str, int]] = []
-    caller = threading.get_ident()
-    name = "Producer_begin_transaction"
-
-    def recording(*args: Any, _real: Any = getattr(_lib, name)) -> Any:
-        calls.append((name, threading.get_ident()))
-        return _real(*args)
-
-    monkeypatch.setattr(_lib, name, recording)
-    with KafkaProducer(configs=UNREACHABLE) as p:
-        with pytest.raises(IllegalStateError) as err:
-            p.begin_transaction()
-        assert str(err.value) == NOT_TRANSACTIONAL
-    assert [n for n, _ in calls] == [name]
-    assert calls[0][1] != caller
-
-
 # The sync KafkaProducer never calls a blocking C entry point (branch commit
 # 2942d0921): every blocking-in-Java operation is submitted through its _cb
-# twin and waited for in Python in 100 ms slices, so Ctrl+C is honoured. The
-# one exception is beginTransaction, which has no _cb twin on the branch: its
-# blocking entry point runs on a helper thread (see the test above).
+# twin and waited for in Python in 100 ms slices, so Ctrl+C is honoured.
 _BLOCKING_ENTRY_POINTS = (
     "Producer_send", "Producer_flush", "Producer_partitions_for",
-    "Producer_init_transactions", "Producer_send_offsets_to_transaction",
+    "Producer_init_transactions", "Producer_begin_transaction",
+    "Producer_send_offsets_to_transaction",
     "Producer_commit_transaction", "Producer_abort_transaction", "Producer_close",
 )
 
@@ -1992,17 +1969,15 @@ def test_a_completion_left_for_a_closed_loop_is_dropped_by_close(
 def test_an_operation_result_its_closing_loop_refuses_is_freed(
         hold_completion: Any, freed_errors: list[int], stopped_loop: Any,
         capfd: pytest.CaptureFixture[str]) -> None:
-    # The same race for the result of an operation (init_transactions()'s
+    # The same race for the result of an operation (begin_transaction()'s
     # error on a non-transactional producer), whose task waits on a loop that
     # stopped: the loop is open when the result checks it, then closes before
     # call_soon_threadsafe. The result is freed on the pumping thread
     # instead of the RuntimeError reaching the C trampoline, which printed it
     # and left the result's handles allocated.
-    # Updated for the branch C API: begin_transaction has no _cb form there,
-    # so the queued operation held is init_transactions (Producer_init_transactions_cb).
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_init_transactions_cb")
-    stopped_loop.start(p.init_transactions())
+    held = hold_completion("Producer_begin_transaction_cb")
+    stopped_loop.start(p.begin_transaction())
     assert held.submitted.is_set()
     loop = stopped_loop.loop
     loop.close()
@@ -2025,11 +2000,9 @@ def test_an_operation_result_left_for_a_closed_loop_is_freed_by_the_next_call(
     # The result reaches its loop while the loop is stopped, and the loop then
     # closes, which discards the queued delivery: the next operation of the
     # producer, from another loop, frees it.
-    # Updated for the branch C API: begin_transaction has no _cb form there,
-    # so the queued operation held is init_transactions (Producer_init_transactions_cb).
     p = AsyncKafkaProducer(configs=UNREACHABLE)
-    held = hold_completion("Producer_init_transactions_cb")
-    stopped_loop.start(p.init_transactions())
+    held = hold_completion("Producer_begin_transaction_cb")
+    stopped_loop.start(p.begin_transaction())
     held.release.set()
     assert held.delivered.wait(30)
     stopped_loop.loop.close()

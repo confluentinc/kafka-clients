@@ -679,6 +679,10 @@ pub type kafka_producer_Producer_init_transactions_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
+pub type kafka_producer_Producer_begin_transaction_cb_t =
+    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+/// Completion of a `void` operation: `error` is `NULL` on success and owned
+/// by the callee otherwise.
 pub type kafka_producer_Producer_send_offsets_to_transaction_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
@@ -787,6 +791,38 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
     with_txn_control(unsafe { client_ref(self_) }, |p| async move { p.begin_transaction() })
+}
+
+/// `Producer.beginTransaction()`, completion queued: ordered after the queued
+/// `send_cb`s like the blocking form, without blocking the caller on them.
+///
+/// # Safety
+///
+/// `self_` must be a live view.
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
+    // requires. The guard runs this only when the body did not return. The body hands `cb` over
+    // only as the last step of `with_txn_control_cb`: to `Client::deliver` before its early return,
+    // or to the task `Client::spawn` registers, after which nothing can panic. So `cb` has not
+    // fired for this `opaque`, as `deliver_panic` requires.
+    unsafe { deliver_panic(completion_sink(self_), cb, opaque, err) }
+})]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
+    self_: *const kafka_producer_Producer_t,
+    cb: kafka_producer_Producer_begin_transaction_cb_t,
+    opaque: *mut c_void,
+) {
+    with_txn_control_cb(
+        "kafka_producer_Producer_begin_transaction_cb",
+        // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
+        // `with_txn_control_cb` uses the reference only before it returns, cloning the `Arc` for
+        // the task it spawns.
+        unsafe { client_ref(self_) },
+        cb,
+        opaque,
+        |p| async move { p.begin_transaction() },
+    );
 }
 
 /// `Producer.sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata>,

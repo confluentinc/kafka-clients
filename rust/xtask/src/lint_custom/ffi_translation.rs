@@ -124,7 +124,9 @@
 //! helpers (`kafka_List_t`, `kafka_Map_t`, `kafka_Bytes_t`,
 //! [`C_ONLY_FREE_FUNCTIONS`]) stand for JDK types and are accepted with any
 //! functions under their prefix; the numeric error code ([`C_ONLY_ERROR_CODE`])
-//! is the C caller's discriminator and has no Rust item behind it; a trait
+//! is the C caller's discriminator and has no Rust item behind it; the
+//! queued twins of sync methods whose C form drains the submission queue
+//! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; a trait
 //! method with `where Self: Sized`
 //! cannot be called through the interface handle and expects nothing;
 //! associated consts expect nothing (cbindgen exports no constants); a
@@ -183,6 +185,19 @@ const C_ONLY_CLOSURE_INTERFACES: &[(&str, &[&str])] = &[
 /// `kafka_common_ErrorCode_e` enum naming every class — is part of the
 /// contract. Rust needs neither: it matches the `Error` variant.
 const C_ONLY_ERROR_CODE: &[&str] = &["kafka_common_ErrorCode_e", "kafka_common_Error_code"];
+
+/// Queued `_cb` twins (and their `_cb_t` typedefs) of methods that are sync in
+/// Rust and Java but whose C form waits: `beginTransaction` does not block in
+/// Java, so the Rust method is a plain `fn` and no `_cb` is derived from it, but
+/// its C entry point first drains the queued `send_cb`s, as every
+/// transaction-control operation does (`producer-transactions.md` §13), so C
+/// gets the non-blocking twin CLAUDE.md §4 gives every waiting function.
+const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
+    "kafka_producer_KafkaProducer_begin_transaction_cb",
+    "kafka_producer_KafkaProducer_begin_transaction_cb_t",
+    "kafka_producer_Producer_begin_transaction_cb",
+    "kafka_producer_Producer_begin_transaction_cb_t",
+];
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
@@ -2290,6 +2305,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
         c_only.iter().any(|p| name == p.as_str() || name.starts_with(&format!("{p}_")))
             || C_ONLY_FREE_FUNCTIONS.contains(&name)
             || C_ONLY_ERROR_CODE.contains(&name)
+            || C_ONLY_DRAINING_CB_TWINS.contains(&name)
             || closure_interfaces.contains(name)
     };
 

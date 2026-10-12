@@ -1749,10 +1749,9 @@ void test_transaction_fenced_producer(void) {
 // ---------------------------------------------------------------------------
 // Queued (`_cb`) transaction control
 //
-// The non-blocking twins of the blocking transaction-control functions
-// (`beginTransaction` does not block in Java, so it has none). Each returns
-// immediately and reports its outcome through a completion queued on the
-// callback vector, so every assertion here pumps the vector first.
+// The non-blocking twins of the blocking transaction-control functions. Each
+// returns immediately and reports its outcome through a completion queued on
+// the callback vector, so every assertion here pumps the vector first.
 // ---------------------------------------------------------------------------
 
 void test_transaction_async_full_lifecycle(void) {
@@ -1768,7 +1767,12 @@ void test_transaction_async_full_lifecycle(void) {
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &init.fired, 1));
     TEST_ASSERT_FALSE(init.had_error);
 
-    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(f.producer));
+    op_result_t begin;
+    memset(&begin, 0, sizeof(begin));
+    kafka_producer_Producer_begin_transaction_cb(f.producer, on_operation, &begin);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &begin.fired, 1));
+    TEST_ASSERT_FALSE(begin.had_error);
+    TEST_ASSERT_TRUE(pthread_equal(pthread_self(), begin.thread_id));
 
     send_one(f.producer, "txn-topic");
     TEST_ASSERT_EQUAL_INT32(0, history_count(f.mock));
@@ -1835,6 +1839,40 @@ void test_transaction_async_commit_drains_async_queued_send(void) {
     TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &record.fired, 1));
     TEST_ASSERT_FALSE(record.had_error);
     kafka_common_KafkaFuture_destroy(record.future);
+
+    fixture_destroy(&f);
+}
+
+void test_transaction_async_begin_drains_async_queued_send(void) {
+    /* begin_transaction_cb drains the submission queue before it runs, like
+     * the other control operations: a record queued by send_cb that had
+     * returned before the call is handed to the producer outside the
+     * transaction, so it is in the sent history as soon as the begin
+     * completes. Had the begin run first, the record would be staged in the
+     * transaction and the history would stay empty until the commit. */
+    fixture_t f;
+    fixture_init(&f, 1);
+    send_result_t record;
+    memset(&record, 0, sizeof(record));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(f.producer));
+
+    send_cb_one(f.producer, "txn-topic", -1, &record);
+
+    op_result_t begin;
+    memset(&begin, 0, sizeof(begin));
+    kafka_producer_Producer_begin_transaction_cb(f.producer, on_operation, &begin);
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &begin.fired, 1));
+    TEST_ASSERT_FALSE(begin.had_error);
+    TEST_ASSERT_EQUAL_INT32(1, history_count(f.mock));
+    TEST_ASSERT_TRUE(callback_pump_until(&f.pump, &record.fired, 1));
+    TEST_ASSERT_FALSE(record.had_error);
+    kafka_common_KafkaFuture_destroy(record.future);
+
+    send_one(f.producer, "txn-topic");
+    TEST_ASSERT_EQUAL_INT32(1, history_count(f.mock));
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(f.producer));
+    TEST_ASSERT_EQUAL_INT32(2, history_count(f.mock));
 
     fixture_destroy(&f);
 }
@@ -2264,6 +2302,7 @@ int main(void) {
     RUN_TEST(test_transaction_async_full_lifecycle);
     RUN_TEST(test_transaction_async_abort);
     RUN_TEST(test_transaction_async_commit_drains_async_queued_send);
+    RUN_TEST(test_transaction_async_begin_drains_async_queued_send);
     RUN_TEST(test_transaction_async_abort_drains_async_queued_send);
     RUN_TEST(test_transaction_async_send_offsets);
     RUN_TEST(test_transaction_async_send_offsets_rejection_releases_guard);
