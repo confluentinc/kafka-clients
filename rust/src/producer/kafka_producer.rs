@@ -1769,7 +1769,12 @@ impl<K, V> KafkaProducer<K, V> {
                 // outer catches dispatch on the resulting class.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback);
+                    return self.handle_api_error(
+                        e,
+                        record.topic(),
+                        Self::record_partition(record.partition()),
+                        callback,
+                    );
                 }
                 return Err(e);
             },
@@ -1810,7 +1815,12 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        return self.handle_api_error(
+                            e,
+                            &record_topic,
+                            Self::record_partition(partition_opt),
+                            callback,
+                        );
                     },
                     Err(e) => return Err(e),
                 };
@@ -1822,7 +1832,12 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        return self.handle_api_error(
+                            e,
+                            &record_topic,
+                            Self::record_partition(partition_opt),
+                            callback,
+                        );
                     },
                     Err(e) => return Err(e),
                 };
@@ -1863,7 +1878,7 @@ impl<K, V> KafkaProducer<K, V> {
             {
                 Ok(bytes) => bytes,
                 Err(e) if e.is_api_error() => {
-                    return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                    return self.handle_api_error(e, &record_topic, Self::record_partition(partition_opt), callback);
                 },
                 Err(e) => return Err(e),
             };
@@ -1875,7 +1890,12 @@ impl<K, V> KafkaProducer<K, V> {
                 {
                     Ok(bytes) => bytes,
                     Err(e) if e.is_api_error() => {
-                        return self.handle_api_error(e, &record_topic, RecordMetadata::UNKNOWN_PARTITION, callback);
+                        return self.handle_api_error(
+                            e,
+                            &record_topic,
+                            Self::record_partition(partition_opt),
+                            callback,
+                        );
                     },
                     Err(e) => return Err(e),
                 };
@@ -2136,6 +2156,17 @@ impl<K, V> KafkaProducer<K, V> {
             return Error::kafka_message_source("Producer closed while send in progress", error);
         }
         error
+    }
+
+    /// The partition of the `RecordMetadata` handed to the callback when a send
+    /// fails before a partition was chosen for the record: Java's
+    /// `AppendCallbacks.topicPartition()` (`KafkaProducer.java:1613-1623`) falls
+    /// back from the chosen partition to the record's own (`recordPartition`),
+    /// and only then to `UNKNOWN_PARTITION`. Once a partition has been chosen,
+    /// `do_send_bytes` passes that one, which is the record's own when it had
+    /// one.
+    fn record_partition(record_partition: Option<i32>) -> i32 {
+        record_partition.unwrap_or(RecordMetadata::UNKNOWN_PARTITION)
     }
 
     /// Handle an `ApiException`-type error by invoking the callback (if any)
@@ -2583,7 +2614,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
                 }
                 if e.is_api_error() {
                     return self
-                        .handle_api_error(e, record.topic(), RecordMetadata::UNKNOWN_PARTITION, callback)
+                        .handle_api_error(e, record.topic(), Self::record_partition(record.partition()), callback)
                         .map(TrySendOutcome::Accepted);
                 }
                 return Err(e);
@@ -4586,6 +4617,43 @@ mod tests {
                 assert!(msg.message().contains("not present in metadata"), "Got: {}", msg);
             },
             other => panic!("Expected Timeout error, got: {:?}", other),
+        }
+    }
+
+    /// The `RecordMetadata` handed to the callback when the metadata wait fails
+    /// carries the record's own partition: Java's `AppendCallbacks.topicPartition()`
+    /// (`KafkaProducer.java:1613-1623`) falls back to `recordPartition` while no
+    /// partition has been chosen, so a record sent with `partition = 3` reports
+    /// `topic-3`, and one without a partition `UNKNOWN_PARTITION`.
+    /// `testCallbackAndInterceptorHandleError` covers only the latter.
+    #[tokio::test]
+    async fn test_api_error_callback_metadata_carries_the_records_partition() {
+        let config = ProducerConfig { max_block_ms: 50, ..Default::default() };
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer_with_config(config, metadata, accumulator);
+
+        for (record_partition, expected) in [(Some(3), 3), (None, RecordMetadata::UNKNOWN_PARTITION)] {
+            let seen: Arc<std::sync::Mutex<Option<(String, i32)>>> = Arc::new(std::sync::Mutex::new(None));
+            let sink = Arc::clone(&seen);
+            let callback: Callback = Box::new(move |record_metadata, error| {
+                assert!(error.is_some(), "the callback gets the ApiException");
+                let rm = record_metadata.expect("Java hands the callback non-null metadata");
+                *sink.lock().unwrap() = Some((rm.topic().to_string(), rm.partition()));
+            });
+            let record = ProducerRecord::with_partition_key(
+                "nonexistent-topic".to_string(),
+                record_partition,
+                None,
+                Some("value".to_string()),
+            )
+            .unwrap();
+            let future = producer
+                .send_with_callback(record, Some(callback))
+                .await
+                .expect("an ApiException yields a failed future, not an Err");
+            assert!(matches!(future.get().await.unwrap_err(), Error::Timeout(_)));
+            assert_eq!(*seen.lock().unwrap(), Some(("nonexistent-topic".to_string(), expected)));
         }
     }
 
