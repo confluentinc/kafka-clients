@@ -937,4 +937,33 @@ mod tests {
             kafka_common_TopicPartition_destroy(tp);
         }
     }
+
+    /// A blocking operation that panics clears the blocking flag on the way
+    /// out, so a listener job delivered afterwards is queued for the pump
+    /// rather than run inline on the delivering thread.
+    #[test]
+    fn a_panicking_blocking_operation_leaves_later_listener_jobs_queued() {
+        let (mock, consumer) = new_mock();
+        // SAFETY: the handles stay live until destroyed at the end.
+        unsafe {
+            with_mock(mock, |m| m.schedule_poll_task(Box::new(|_| panic!("poll task panicked"))))
+                .expect("no other call in flight");
+            let mut records = ptr::null_mut();
+            let error = take_error(kafka_consumer_Consumer_poll(consumer, 0, &mut records)).expect("the panic");
+            assert_eq!(
+                error.message(),
+                "Rust panic caught at the FFI boundary in kafka_consumer_Consumer_poll: poll task panicked"
+            );
+
+            let ran = std::sync::Arc::new(AtomicI32::new(0));
+            let counter = std::sync::Arc::clone(&ran);
+            client_ref(consumer).delivery().invoke(Box::new(move || {
+                counter.fetch_add(1, SeqCst);
+            }));
+            assert_eq!(ran.load(SeqCst), 0, "queued, not run inline");
+            assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
+            assert_eq!(ran.load(SeqCst), 1);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
 }

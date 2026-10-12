@@ -303,11 +303,37 @@ impl Client {
 
     /// Drives `future` on the calling thread with the blocking flag set, so
     /// the interface methods it triggers run there too (see the module docs).
+    /// The flag is cleared even when `future` panics.
     pub(crate) fn block_on<F: Future>(&self, future: F) -> F::Output {
-        self.delivery.blocking.store(true, Ordering::Release);
-        let output = block_on(Some(&self.runtime), future);
-        self.delivery.blocking.store(false, Ordering::Release);
-        output
+        let _blocking = BlockingGuard::set(&self.delivery);
+        block_on(Some(&self.runtime), future)
+    }
+}
+
+/// Holds [`Delivery`]'s blocking flag for one [`Client::block_on`] and clears
+/// it when dropped.
+///
+/// No Java counterpart (DoD #7): Java calls the listener on the thread
+/// inside the blocking method and has nothing to reset. Here the flag routes
+/// every interface method an operation triggers, and a panic inside the
+/// operation unwinds to the entry point's `#[ffi_guard]`, which keeps the
+/// handle usable. A reset written after the `block_on` would be skipped by
+/// that unwind, leaving the flag set, and every later listener or
+/// `OffsetCommitCallback` would then run inline on whatever thread delivered
+/// it, a tokio worker for a `_cb` operation, instead of being queued for
+/// `__execute_callbacks` (CLAUDE.md §4).
+struct BlockingGuard<'a>(&'a Delivery);
+
+impl<'a> BlockingGuard<'a> {
+    fn set(delivery: &'a Delivery) -> Self {
+        delivery.blocking.store(true, Ordering::Release);
+        Self(delivery)
+    }
+}
+
+impl Drop for BlockingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.blocking.store(false, Ordering::Release);
     }
 }
 
