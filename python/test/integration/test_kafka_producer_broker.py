@@ -31,8 +31,10 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import RecordTooLargeError
-from confluent_kafka.common.serialization import string_serializer
+from confluent_kafka.common.serialization import string_deserializer, string_serializer
+from confluent_kafka.consumer import KafkaConsumer
 from confluent_kafka.producer import (
     AsyncKafkaProducer, KafkaProducer, ProducerRecord, RecordMetadata,
 )
@@ -49,6 +51,35 @@ def _topic(broker: Any) -> str:
 def _configs(broker: Any) -> dict[str, Any]:
     return {"bootstrap.servers": broker.external_bootstrap,
             "transactional.id": f"py-txn-{uuid.uuid4().hex[:12]}"}
+
+
+def _committed(broker: Any, topic: str,
+               count: int = 1) -> list[tuple[int, str | None, str | None]]:
+    """The ``(offset, key, value)`` of the first ``count`` records of
+    ``topic``-0 that a ``read_committed`` consumer reads: a record of an aborted
+    or still open transaction is never among them, so this proves the commit
+    included it where its acknowledged offset cannot."""
+    consumer: KafkaConsumer[str, str] = KafkaConsumer(
+        configs={"bootstrap.servers": broker.external_bootstrap,
+                 "group.protocol": "consumer",
+                 "group.id": f"py-committed-{uuid.uuid4().hex[:12]}",
+                 "enable.auto.commit": False,
+                 "isolation.level": "read_committed"},
+        key_deserializer=string_deserializer(), value_deserializer=string_deserializer())
+    try:
+        tp = TopicPartition(topic=topic, partition=0)
+        consumer.assign(partitions=[tp])
+        consumer.seek(partition=tp, offset=0)
+        consumed: list[tuple[int, str | None, str | None]] = []
+        deadline = time.monotonic() + 60
+        while len(consumed) < count and time.monotonic() < deadline:
+            consumed.extend((r.offset(), r.key(), r.value())
+                            for r in consumer.poll(timeout=0.5))
+        if not consumed:
+            raise AssertionError("no committed record was consumed")
+        return consumed
+    finally:
+        consumer.close()
 
 
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
@@ -73,6 +104,15 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
     assert calls == []
 
 
+def _outside_then_inside(inside_offset: int) -> list[tuple[int, str, str]]:
+    """What a read_committed consumer reads after the two sends below and the
+    commit: both records. Java's doSend appends the record to the accumulator
+    before maybeAddPartition throws (KafkaProducer.java:1027-1039), and the
+    Sender holds the batch until its partition joins a transaction, so the send
+    that raised is committed with the transaction, ahead of the one inside it."""
+    return [(0, "key", "outside"), (inside_offset, "key", "inside")]
+
+
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
     # manager is READY (TransactionManager.java:446, with Java's double space).
@@ -83,7 +123,7 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     try:
         producer.init_transactions()
         try:
-            producer.send(record=ProducerRecord(topic=topic, key="key", value="value"),
+            producer.send(record=ProducerRecord(topic=topic, key="key", value="outside"),
                           callback=lambda metadata, exception: calls.append(exception))
         except IllegalStateError as error:
             assert str(error) == (f"Cannot add partition {topic}-0 to transaction while in "
@@ -94,19 +134,20 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
 
         # Inside a transaction the same send goes through, and its callback runs.
         producer.begin_transaction()
-        future = producer.send(record=ProducerRecord(topic=topic, key="key", value="value"),
+        future = producer.send(record=ProducerRecord(topic=topic, key="key", value="inside"),
                                callback=lambda metadata, exception: calls.append(exception))
         producer.commit_transaction()
-        assert future.result(timeout=30).offset() >= 0
+        offset = future.result(timeout=30).offset()
         assert calls == [None]
     finally:
         producer.close(timeout=0)
+    assert _committed(kafka_broker, topic, 2) == _outside_then_inside(offset)
 
 
 def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     topic = _topic(kafka_broker)
 
-    async def main() -> None:
+    async def main() -> int:
         producer = AsyncKafkaProducer(configs=_configs(kafka_broker),
                                       key_serializer=string_serializer(),
                                       value_serializer=string_serializer())
@@ -115,7 +156,7 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
             await producer.init_transactions()
             try:
                 await producer.send(
-                    record=ProducerRecord(topic=topic, key="key", value="value"),
+                    record=ProducerRecord(topic=topic, key="key", value="outside"),
                     callback=lambda metadata, exception: calls.append(exception))
             except IllegalStateError as error:
                 assert str(error) == (f"Cannot add partition {topic}-0 to transaction while "
@@ -126,15 +167,17 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
 
             await producer.begin_transaction()
             future = await producer.send(
-                record=ProducerRecord(topic=topic, key="key", value="value"),
+                record=ProducerRecord(topic=topic, key="key", value="inside"),
                 callback=lambda metadata, exception: calls.append(exception))
             await producer.commit_transaction()
-            assert (await asyncio.wait_for(future, 30)).offset() >= 0
+            offset = (await asyncio.wait_for(future, 30)).offset()
             assert calls == [None]
+            return offset
         finally:
             await producer.close(timeout=0)
 
-    asyncio.run(main())
+    offset = asyncio.run(main())
+    assert _committed(kafka_broker, topic, 2) == _outside_then_inside(offset)
 
 
 # A record of a null key and VALUE_SIZE bytes of value, and no headers.
@@ -259,9 +302,10 @@ def test_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_recor
         assert time.monotonic() - start < 5
         assert str(err.value) == _invalid_begin(configs["transactional.id"])
         producer.commit_transaction()
-        assert future.result(timeout=30).offset() >= 0
+        offset = future.result(timeout=30).offset()
     finally:
         producer.close(timeout=0)
+    assert _committed(kafka_broker, topic) == [(offset, "key", "value")]
 
 
 def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its_records(
@@ -270,7 +314,7 @@ def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its
     topic = _topic(kafka_broker)
     configs = _configs(kafka_broker)
 
-    async def main() -> None:
+    async def main() -> int:
         producer = AsyncKafkaProducer(configs=configs, key_serializer=string_serializer(),
                                       value_serializer=string_serializer())
         try:
@@ -284,11 +328,12 @@ def test_async_begin_transaction_fails_at_once_and_an_open_transaction_keeps_its
             assert time.monotonic() - start < 5
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
             await producer.commit_transaction()
-            assert (await asyncio.wait_for(future, 30)).offset() >= 0
+            return (await asyncio.wait_for(future, 30)).offset()
         finally:
             await producer.close(timeout=0)
 
-    asyncio.run(main())
+    offset = asyncio.run(main())
+    assert _committed(kafka_broker, topic) == [(offset, "key", "value")]
 
 
 # Written as the Headers input: an empty value and a null value kept apart.
@@ -298,9 +343,6 @@ HEADERS = [("trace", b"abc"), ("empty", b""), ("null", None)]
 def _consumed_headers(broker: Any, topic: str) -> list[tuple[str, bytes | None]]:
     """The headers of the record at offset 0 of ``topic``-0, read back with the
     binding's consumer."""
-    from confluent_kafka.common import TopicPartition
-    from confluent_kafka.consumer import KafkaConsumer
-
     consumer = KafkaConsumer(configs={"bootstrap.servers": broker.external_bootstrap,
                                       "group.protocol": "consumer",
                                       "group.id": f"py-headers-{uuid.uuid4().hex[:12]}",
