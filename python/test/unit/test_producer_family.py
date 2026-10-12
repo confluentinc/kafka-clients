@@ -28,6 +28,7 @@ integration tests.
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import itertools
 import logging
@@ -630,8 +631,10 @@ def test_ctrl_c_while_a_transactional_send_waits_for_its_handover_raises_after_i
     # With no transaction started, send() waits for the handover to raise what
     # Java's doSend rethrows. A Ctrl+C meanwhile is raised once the record is
     # handed over: a rethrown error then reaches neither the callback nor the
-    # future (as in Java), an accepted record's later failure reaches both, and
-    # either way flush() has nothing left to wait for (Copilot review, PR #187).
+    # future (as in Java; the callback runs only if the record completes later,
+    # see test_a_rethrown_send_runs_its_callback_once_if_the_record_completes),
+    # an accepted record's later failure reaches both, and either way flush()
+    # has nothing left to wait for (Copilot review, PR #187).
     p = KafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
     captured = _fake_queued_send(monkeypatch)
     seen: list[Exception | None] = []
@@ -725,6 +728,131 @@ async def test_cancelling_a_transactional_send_waiting_for_its_handover_raises_a
         assert not p._futures  # noqa: SLF001
         await asyncio.wait_for(p.flush(), 5)
     finally:
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        await p.close(timeout=0)
+
+
+# A later completion of a record whose send() raised: Java's doSend appends the
+# record, its appendCallbacks carrying the Callback, before maybeAddPartition
+# throws (KafkaProducer.java:1027-1039), so the record completes with its batch
+# and its Callback runs then, with the batch's outcome: the metadata of a
+# committed record, or the error that aborted it, with the -1 metadata of
+# KafkaProducer.AppendCallbacks.onCompletion (:1589-1592).
+_LATE_OUTCOMES = {
+    "committed": (("topic", 0, 7, 1234, 1, 1), None),
+    "aborted": (None, "Producer is closed forcefully."),
+}
+
+
+def _complete_late(captured: dict[str, Any], outcome: str) -> None:
+    """The core fires the record's delivery callback (a BORROWED error handle,
+    freed after the call)."""
+    metadata, message = _LATE_OUTCOMES[outcome]
+    error = 0 if message is None else _lib.KafkaError_new(KafkaError._ffi_id, message)
+    try:
+        captured["on_completion"](metadata, error)
+    finally:
+        if error:
+            _lib.KafkaError_destroy(error)
+
+
+def _check_late(seen: list[tuple[int, Exception | None]], outcome: str) -> None:
+    if outcome == "committed":
+        assert seen == [(7, None)]
+    else:
+        assert len(seen) == 1
+        offset, error = seen[0]
+        assert offset == -1
+        assert type(error) is KafkaError
+        assert str(error) == "Producer is closed forcefully."
+
+
+@pytest.mark.parametrize("outcome", sorted(_LATE_OUTCOMES))
+def test_a_rethrown_send_runs_its_callback_once_if_the_record_completes(
+        monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    # send() raises the handover's error and returns no future; flush() does
+    # not wait for the record, whose callback may never run (a record rejected
+    # before the append). When the record does complete, its callback runs,
+    # once, and the internal future is set once (a second set would raise
+    # InvalidStateError from on_completion).
+    p = KafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_queued_send(monkeypatch)
+    seen: list[tuple[int, Exception | None]] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append((md.offset(), e))
+
+    def hand_over() -> None:
+        while "resolve" not in captured:
+            time.sleep(0.01)
+        _hand_over(captured, rethrown=True)
+
+    handover = threading.Thread(target=hand_over, daemon=True)
+    handover.start()
+    try:
+        with pytest.raises(IllegalStateError) as raised:
+            p.send(record=RECORD, callback=callback)
+        assert str(raised.value) == _NOT_IN_A_TRANSACTION
+        handover.join(5)
+        monkeypatch.undo()
+        assert seen == []
+        assert not p._futures  # noqa: SLF001
+        flush = threading.Thread(target=p.flush, daemon=True)
+        flush.start()
+        flush.join(5)
+        assert not flush.is_alive(), "flush() waits for the rethrown send"
+
+        _complete_late(captured, outcome)
+        _check_late(seen, outcome)
+        _complete_late(captured, outcome)  # never twice
+        _check_late(seen, outcome)
+    finally:
+        p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("outcome", sorted(_LATE_OUTCOMES))
+async def test_a_rethrown_async_send_runs_its_callback_once_if_the_record_completes(
+        monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    # The async peer of the test above. The future send() did not return is
+    # cancelled, so a later failure is not logged as never retrieved.
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "transactional.id": "txn"})
+    captured = _fake_queued_send(monkeypatch)
+    seen: list[tuple[int, Exception | None]] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append((md.offset(), e))
+
+    try:
+        task = asyncio.ensure_future(p.send(record=RECORD, callback=callback))
+        while "resolve" not in captured:
+            await asyncio.sleep(0.01)
+        _hand_over(captured, rethrown=True)
+        with pytest.raises(IllegalStateError) as raised:
+            await task
+        assert str(raised.value) == _NOT_IN_A_TRANSACTION
+        monkeypatch.undo()
+        assert seen == []
+        assert not p._futures  # noqa: SLF001
+        await asyncio.wait_for(p.flush(), 5)
+
+        for _ in range(2):  # never twice
+            _complete_late(captured, outcome)
+            await asyncio.sleep(0.05)
+            _check_late(seen, outcome)
+        # Drop every reference to send()'s frame (the raised error's traceback
+        # holds it), so an unretrieved error would be logged now.
+        del task, raised
+        captured.clear()
+        gc.collect()
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
         p._futures.clear()  # noqa: SLF001 (a failure above must not hang close())
         await p.close(timeout=0)
 

@@ -576,11 +576,15 @@ static PyObject* error_handle_to_py(const kafka_common_Error_t* e) {
 // A `kafka_producer_Callback_t` implementation: Java's `Callback`. The `void
 // *self` Rust hands back is this struct. It has two owners: the delivery
 // callback (released when `on_completion` fires) and the send's completion
-// (released when it resolves). A send that resolved with an error can never
-// fire the callback (Java's doSend rethrow drops it), so the context is then
-// parked on the producer's orphan list and freed at destroy, after `_destroy`
-// ran every still-pending callback: a late `on_completion` still finds it
-// alive.
+// (released when it resolves). A send that resolved with an error may still
+// fire the callback, once, later: Java's doSend appends the record, whose
+// appendCallbacks carry the Callback, before maybeAddPartition throws
+// (KafkaProducer.java:1027-1039), so a record that had reached the accumulator
+// completes with its batch; one rejected before the append never fires. Which
+// one it was cannot be told from here, so the context is then parked on the
+// producer's orphan list and freed at destroy, after `_destroy` ran every
+// still-pending callback: a late `on_completion` still finds it alive, and
+// releases its callable when it has run.
 typedef struct DeliveryCtx {
     PyObject* callable;        // Python callable(meta_tuple | None, borrowed_error_int)
     int refs;                  // owners left: the callback and the send completion
@@ -692,17 +696,21 @@ static DeliveryCtx* delivery_ctx_new(PyObject* callable) {
 }
 
 static void delivery_ctx_free(DeliveryCtx* ctx) {
-    Py_DECREF(ctx->callable);
+    Py_XDECREF(ctx->callable);
     PyMem_Free(ctx);
 }
 
 // Drops one owner (GIL held); the last one frees the context unless it is on
-// the orphan list, which destroy frees.
+// the orphan list, which destroy frees: an orphan only drops its callable, which
+// nothing can call any more (the callback fires once).
 static void delivery_ctx_release(DeliveryCtx* ctx) {
-    if (--ctx->refs == 0 && !ctx->orphaned) delivery_ctx_free(ctx);
+    if (--ctx->refs != 0) return;
+    if (ctx->orphaned) Py_CLEAR(ctx->callable);
+    else delivery_ctx_free(ctx);
 }
 
-// The send resolved with an error (GIL held): the callback can never fire, so
+// The send resolved with an error (GIL held): the callback fires later if the
+// record had reached the accumulator, and never if it was rejected before, so
 // the context goes to the orphan list unless it already fired.
 static void producer_orphan_delivery(Producer* p, DeliveryCtx* ctx) {
     if (--ctx->refs == 0) {
@@ -1143,9 +1151,11 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
 // Producer_send(handle, record, on_completion) -> (KafkaFuture | None, error_int)
 // Blocks (GIL released) until the record is registered, as Java's send(). The
 // on_completion callable is registered as a kafka_producer_Callback_t and is
-// run by Producer_poll / Producer__execute_callbacks / Producer_destroy, exactly
-// once; it receives (meta_tuple | None, borrowed_error_int). The error is
-// OWNED by the caller. Neither Python producer calls this.
+// run by Producer_poll / Producer__execute_callbacks / Producer_destroy, at
+// most once; it receives (meta_tuple | None, borrowed_error_int). After an
+// error return it still runs if the record had reached the accumulator (see
+// Producer_send_cb). The error is OWNED by the caller. Neither Python producer
+// calls this.
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     PyObject* rec_obj;
@@ -1221,10 +1231,12 @@ static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Err
 // Producer_send_cb(handle, record, on_completion, resolve) -> error_int
 // Queues the record on the producer's submission task and returns at once.
 // `on_completion(meta_tuple | None, borrowed_error_int)` is the record's
-// delivery callback (Java's Callback, run exactly once unless the send fails).
+// delivery callback (Java's Callback, run at most once).
 // `resolve(owned_error_int)` runs from the callback pump once the record is
 // handed to the producer: 0 when it was, else the error the producer's send()
-// returned (Java's doSend rethrow), after which `on_completion` never runs.
+// returned (Java's doSend rethrow). After an error `on_completion` still runs,
+// once, if the record had reached the accumulator before the error (Java's
+// maybeAddPartition throws after the append), and never if it had not.
 // A record the C API rejects before queuing returns its OWNED error and calls
 // neither.
 static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {

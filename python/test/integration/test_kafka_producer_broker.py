@@ -15,7 +15,9 @@
 """The producer against a broker, where Java's ``KafkaProducerTest`` scripts a
 ``MockClient`` the binding cannot inject: the errors ``KafkaProducer.doSend``
 rethrows out of ``send()`` (``KafkaProducer.java:1069-1081``) rather than
-giving to the callback and the future, which need the topic's metadata first;
+giving to the callback and the future, which need the topic's metadata first
+(the record then stays in the accumulator, so its callback runs later, with
+the batch's outcome);
 the record size check, which runs after the metadata wait too
 (``KafkaProducer.java:1022-1024``); and an open transaction, which
 ``begin_transaction()`` without a drain needs. Skips without Docker
@@ -31,7 +33,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalStateError
-from confluent_kafka.common import TopicPartition
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import KafkaConsumer
@@ -82,26 +84,46 @@ def _committed(broker: Any, topic: str,
         consumer.close()
 
 
+_Call = tuple[str, int, int, Exception | None]
+
+
+def _recorder(calls: list[_Call], label: str) -> Any:
+    """A callback appending ``(label, partition, offset, exception)``."""
+    def callback(metadata: RecordMetadata, exception: Exception | None) -> None:
+        calls.append((label, metadata.partition(), metadata.offset(), exception))
+    return callback
+
+
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
     # TransactionManager.maybeAddPartition's IllegalStateException
     # (TransactionManager.java:443), rethrown by doSend's catch (Exception e):
-    # send() raises it, the callback does not run.
+    # send() raises it, and the callback does not run yet. doSend appended the
+    # record before (KafkaProducer.java:1027-1039), and the Sender holds its
+    # batch, which no transaction adds. close(Duration.ZERO) force-closes:
+    # abortIncompleteBatches fails it with "Producer is closed forcefully."
+    # (RecordAccumulator.java:1146), and the callback runs then, with the -1
+    # metadata of KafkaProducer.AppendCallbacks.onCompletion (:1589-1592).
     topic = _topic(kafka_broker)
-    calls: list[Exception | None] = []
+    calls: list[_Call] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
                              value_serializer=string_serializer())
     try:
         try:
             producer.send(record=ProducerRecord(topic=topic, key="key", value="value"),
-                          callback=lambda metadata, exception: calls.append(exception))
+                          callback=_recorder(calls, "value"))
         except IllegalStateError as error:
             assert str(error) == (f"Cannot add partition {topic}-0 to transaction before "
                                   "completing a call to initTransactions")
         else:
             raise AssertionError("send() did not raise")
+        assert calls == []
     finally:
         producer.close(timeout=0)
-    assert calls == []
+    assert len(calls) == 1
+    label, partition, offset, exception = calls[0]
+    assert (label, partition, offset) == ("value", 0, -1)
+    assert type(exception) is KafkaError
+    assert str(exception) == "Producer is closed forcefully."
 
 
 def _outside_then_inside(inside_offset: int) -> list[tuple[int, str, str]]:
@@ -113,18 +135,27 @@ def _outside_then_inside(inside_offset: int) -> list[tuple[int, str, str]]:
     return [(0, "key", "outside"), (inside_offset, "key", "inside")]
 
 
+def _callbacks_outside_then_inside(inside_offset: int) -> list[_Call]:
+    """The callbacks Java runs for the two sends below, once the commit has
+    flushed their batch: the record whose send() raised completes with the
+    batch too, its appendCallbacks carrying its Callback, and callbacks of one
+    partition run in send order (ProducerBatch.completeFutureAndFireCallbacks),
+    each with its record's metadata and no error."""
+    return [("outside", 0, 0, None), ("inside", 0, inside_offset, None)]
+
+
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
     # manager is READY (TransactionManager.java:446, with Java's double space).
     topic = _topic(kafka_broker)
-    calls: list[Exception | None] = []
+    calls: list[_Call] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
                              value_serializer=string_serializer())
     try:
         producer.init_transactions()
         try:
             producer.send(record=ProducerRecord(topic=topic, key="key", value="outside"),
-                          callback=lambda metadata, exception: calls.append(exception))
+                          callback=_recorder(calls, "outside"))
         except IllegalStateError as error:
             assert str(error) == (f"Cannot add partition {topic}-0 to transaction while in "
                                   "state  READY")
@@ -132,13 +163,15 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
             raise AssertionError("send() did not raise")
         assert calls == []
 
-        # Inside a transaction the same send goes through, and its callback runs.
+        # Inside a transaction the same send goes through. The commit flushes
+        # the batch holding both records, and both callbacks have run when it
+        # returns.
         producer.begin_transaction()
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="inside"),
-                               callback=lambda metadata, exception: calls.append(exception))
+                               callback=_recorder(calls, "inside"))
         producer.commit_transaction()
         offset = future.result(timeout=30).offset()
-        assert calls == [None]
+        assert calls == _callbacks_outside_then_inside(offset)
     finally:
         producer.close(timeout=0)
     assert _committed(kafka_broker, topic, 2) == _outside_then_inside(offset)
@@ -151,13 +184,13 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
         producer = AsyncKafkaProducer(configs=_configs(kafka_broker),
                                       key_serializer=string_serializer(),
                                       value_serializer=string_serializer())
-        calls: list[Exception | None] = []
+        calls: list[_Call] = []
         try:
             await producer.init_transactions()
             try:
                 await producer.send(
                     record=ProducerRecord(topic=topic, key="key", value="outside"),
-                    callback=lambda metadata, exception: calls.append(exception))
+                    callback=_recorder(calls, "outside"))
             except IllegalStateError as error:
                 assert str(error) == (f"Cannot add partition {topic}-0 to transaction while "
                                       "in state  READY")
@@ -168,10 +201,10 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
             await producer.begin_transaction()
             future = await producer.send(
                 record=ProducerRecord(topic=topic, key="key", value="inside"),
-                callback=lambda metadata, exception: calls.append(exception))
+                callback=_recorder(calls, "inside"))
             await producer.commit_transaction()
             offset = (await asyncio.wait_for(future, 30)).offset()
-            assert calls == [None]
+            assert calls == _callbacks_outside_then_inside(offset)
             return offset
         finally:
             await producer.close(timeout=0)

@@ -293,18 +293,15 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             complete(*completion_to_python(metadata_tuple, error, topic, partition))
 
         def resolve(error: int) -> None:
-            # The handover: the error the Rust send() returned, after which the
-            # record's Callback never runs.
-            nonlocal completed, rethrown
+            # The handover: the error the Rust send() returned, if any.
+            nonlocal rethrown
             if error:
                 exception = from_ffi_error(error)
                 if waiting:
-                    with lock:
-                        completed = True
+                    # Rethrown by send(), and the record's Callback may still
+                    # run, once, if the record had reached the accumulator (see
+                    # Producer.send).
                     rethrown = exception
-                    # The record never reached the producer (Java's doSend
-                    # rethrows the error), so flush() has nothing to wait for.
-                    self._futures.discard(future)
                 else:
                     complete(failure_metadata(topic, partition), exception)
             if waiting and not loop.is_closed():
@@ -317,9 +314,21 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._use(KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)) as c_producer:
             raise_if_error(_lib.Producer_send_cb(c_producer, native, on_completion, resolve))
-            self._track(future)
+            if not waiting:
+                self._track(future)
         if waiting:
-            await await_to_end(handed_over)
+            try:
+                await await_to_end(handed_over)
+            finally:
+                # Tracked only once handed over without an error (see
+                # Producer.send). Otherwise send() does not return the future:
+                # cancelled, a later completion of the record runs only its
+                # callback (_complete_pending skips a done future), and an
+                # error there is not logged as never retrieved.
+                if rethrown is None:
+                    self._track(future)
+                elif not future.cancel():
+                    future.exception()  # completed already: its error is retrieved
             if rethrown is not None:
                 raise rethrown
         return future

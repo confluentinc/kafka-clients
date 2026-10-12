@@ -352,7 +352,13 @@ class Producer(Generic[K, V], _ProducerState):
         ``commit_transaction()`` / ``abort_transaction()``), send returns once
         the record is with the producer (after the metadata wait, as Java's) and
         raises ``IllegalStateError`` as Java's does, e.g. "Cannot add partition
-        … to transaction while in state  READY". The other errors of a send
+        … to transaction while in state  READY". As in Java, such a record has
+        already reached the producer's buffer: it stays there until a
+        transaction adds its partition (it is then committed or aborted with
+        that transaction) or it fails (a forced close aborts it, say), and its
+        ``callback`` runs then, once. A record whose ``send()`` raises before
+        it reaches the buffer (a producer closed meanwhile, say) never runs its
+        callback, as in Java. The other errors of a send
         (``TimeoutError`` for the metadata wait, ``RecordTooLargeError``,
         ``ProducerFencedError``, …) are given to the callback and the future, as
         in Java. So are, unlike Java, the errors its ``send()`` raises once the
@@ -406,17 +412,20 @@ class Producer(Generic[K, V], _ProducerState):
 
         def resolve(error: int) -> None:
             # The handover, on the completion thread: the error the Rust send()
-            # returned, after which the record's Callback never runs.
-            nonlocal completed, rethrown
+            # returned, if any.
+            nonlocal rethrown
             if error:
                 exception = from_ffi_error(error)
                 if waiting:
-                    with lock:
-                        completed = True
+                    # Rethrown by send(), as Java's doSend does. The record's
+                    # Callback may still run: doSend appends the record, its
+                    # appendCallbacks carrying the Callback, before
+                    # maybeAddPartition throws (KafkaProducer.java:1027-1039),
+                    # so a record that had reached the accumulator completes
+                    # with its batch (on_completion, once); one rejected before
+                    # the append never does. The future is left to that
+                    # completion: send() does not return it.
                     rethrown = exception
-                    # The record never reached the producer, so flush() has
-                    # nothing to wait for; no callback runs, as in Java.
-                    future.set_exception(exception)
                 else:
                     complete(failure_metadata(topic, partition), exception)
             handed_over.set()
@@ -425,10 +434,19 @@ class Producer(Generic[K, V], _ProducerState):
         # between) refuses the record as Java's RecordAccumulator.append does.
         with self._use(KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)) as c_producer:
             raise_if_error(_lib.Producer_send_cb(c_producer, native, on_completion, resolve))
-            self._track(future)
+            if not waiting:
+                self._track(future)
         if waiting:
-            # A Ctrl+C is raised once the record is handed over.
-            wait_sliced(handed_over)
+            try:
+                # A Ctrl+C is raised once the record is handed over.
+                wait_sliced(handed_over)
+            finally:
+                # Tracked only once handed over without an error: flush() and
+                # commit_transaction() must not wait for a rethrown record,
+                # whose Callback may never run (the core's own flush covers
+                # it if it reached the accumulator).
+                if rethrown is None:
+                    self._track(future)
             if rethrown is not None:
                 raise rethrown
         return future
