@@ -26,6 +26,7 @@
 
 #ifdef __linux__
 #include <dirent.h>
+#include <stdio.h>
 #endif
 
 #include "unity.h"
@@ -214,6 +215,30 @@ static int thread_count(void) {
     closedir(dir);
     return count;
 }
+
+// Whether a thread of this process has a name starting with prefix, from
+// /proc/self/task/*/comm (where Linux cuts a name to 15 bytes).
+static int has_thread_named(const char *prefix) {
+    DIR *dir = opendir("/proc/self/task");
+    TEST_ASSERT_NOT_NULL(dir);
+    int found = 0;
+    struct dirent *entry;
+    while (!found && (entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char path[300];
+        snprintf(path, sizeof path, "/proc/self/task/%s/comm", entry->d_name);
+        FILE *comm = fopen(path, "r");
+        if (comm == NULL) continue;  // the thread ended meanwhile
+        char name[32] = {0};
+        if (fgets(name, sizeof name, comm) != NULL) found = strncmp(name, prefix, strlen(prefix)) == 0;
+        fclose(comm);
+    }
+    closedir(dir);
+    return found;
+}
+
+// The thread count when the process started, before any test ran.
+static int initial_threads;
 #endif
 
 typedef struct {
@@ -230,11 +255,12 @@ static void record_value(void *value, kafka_common_Error_t *error, void *opaque)
 
 // A future with no client (completed_future, and then_apply / all_of over
 // such futures) is already complete: every get answers it on this thread,
-// before returning, and none starts a thread to drive it.
+// before returning, and none starts a thread to drive it. The count is
+// compared with the one main() took before any test ran, since the tests
+// before this one get client-less futures too: before d4475efa0 the first
+// such get built a process-wide runtime with a worker named
+// kafka-ffi-future, alive for the rest of the process.
 static void test_a_future_without_a_client_starts_no_thread(void) {
-#ifdef __linux__
-    int threads = thread_count();
-#endif
     int64_t value = 4;
     doubler_t doubler = {0, 0};
     kafka_common_KafkaFuture_t *source = kafka_common_KafkaFuture_completed_future(&value, NULL);
@@ -266,7 +292,8 @@ static void test_a_future_without_a_client_starts_no_thread(void) {
     TEST_ASSERT_EQUAL_INT(1, doubler.calls);
 
 #ifdef __linux__
-    TEST_ASSERT_EQUAL_INT(threads, thread_count());
+    TEST_ASSERT_FALSE(has_thread_named("kafka-ffi-futur"));
+    TEST_ASSERT_EQUAL_INT(initial_threads, thread_count());
 #endif
     kafka_common_KafkaFuture_destroy(all);
     kafka_common_KafkaFuture_destroy(derived);
@@ -274,6 +301,9 @@ static void test_a_future_without_a_client_starts_no_thread(void) {
 }
 
 int main(void) {
+#ifdef __linux__
+    initial_threads = thread_count();
+#endif
     UNITY_BEGIN();
     RUN_TEST(test_completed_future_delivers_the_value_or_the_error);
     RUN_TEST(test_all_of_resolves_to_null_and_reports_the_first_failure);

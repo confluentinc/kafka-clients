@@ -1119,6 +1119,24 @@ mod tests {
                 kafka_common_KafkaFuture_destroy(f);
             }
         }
+        // Before d4475efa0 these gets built a process-wide fallback runtime, whose worker was
+        // named `kafka-ffi-future` (cut to 15 bytes in `comm`); none may exist now.
+        #[cfg(target_os = "linux")]
+        {
+            let names = thread_names();
+            assert!(!names.iter().any(|name| name.starts_with("kafka-ffi-futur")), "{names:?}");
+        }
+    }
+
+    /// The names of this process's threads, from `/proc/self/task/*/comm`
+    /// (where Linux cuts a name to 15 bytes).
+    #[cfg(target_os = "linux")]
+    fn thread_names() -> Vec<String> {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .map(|name| name.trim_end().to_string())
+            .collect()
     }
 
     #[test]
