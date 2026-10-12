@@ -50,7 +50,17 @@ impl NewTopicInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `topic` must be a valid new-topic handle, kept alive for `'a`, during
+/// which no setter runs on it.
 unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInner {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
+    // `'a`, during which no setter runs on it; every `kafka_admin_NewTopic_t` is the
+    // `Box::into_raw` of a `Box<NewTopicInner>` (`box_new_topic`, the only producer), so the shared
+    // reference is to a live `NewTopicInner` that nothing mutates while it is held.
     unsafe { &*(topic as *const NewTopicInner) }
 }
 
@@ -58,8 +68,11 @@ unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInn
 ///
 /// # Safety
 ///
-/// `topic` must be a valid new-topic handle.
+/// `topic` must be a valid new-topic handle, kept alive for `'a`, during
+/// which no setter runs on it.
 pub(crate) unsafe fn new_topic_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopic {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
+    // `'a`, during which no setter runs on it, as `inner_ref` requires.
     &unsafe { inner_ref(topic) }.topic
 }
 
@@ -70,9 +83,19 @@ pub(crate) fn box_new_topic(topic: NewTopic) -> *mut kafka_admin_NewTopic_t {
 }
 
 /// Reads a borrowed list of `const int32_t *` into values; null reads as empty.
+///
+/// # Safety
+///
+/// `list` must be null or a valid list whose elements point at `int32_t`s,
+/// kept alive and not mutated for this call.
 unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
+    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // returns.
     unsafe { list_elements(list) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
+        // `int32_t`, read by copy while the list is alive.
         .map(|&element| unsafe { *(element as *const i32) })
         .collect()
 }
@@ -84,20 +107,46 @@ fn box_i32_list(values: &[i32]) -> *mut kafka_List_t {
 }
 
 /// Frees a `kafka_List_t *` element of an owned container.
+///
+/// # Safety
+///
+/// `element` must be an owned list handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 unsafe fn destroy_list_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned list handle not yet destroyed,
+    // that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_List_destroy` requires.
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) };
 }
 
 /// Compares two `int32_t *` keys by value.
+///
+/// # Safety
+///
+/// `a` and `b` must each point at an `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` each point at a live `int32_t`, read by
+    // copy.
     unsafe { *(a as *const i32) == *(b as *const i32) }
 }
 
 /// Reads a borrowed map of `const int32_t *` to `const kafka_List_t *` of
 /// `const int32_t *`; null reads as empty.
+///
+/// # Safety
+///
+/// `map` must be null or a valid map whose keys point at `int32_t`s and whose
+/// values are valid lists whose elements point at `int32_t`s, all kept alive
+/// and not mutated for this call.
 unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec<i32>> {
+    // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
+    // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
+    // returns.
     unsafe { map_entries(map) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
+        // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
+        // alive and not mutated for this call, as `list_i32` requires.
         .map(|&(k, v)| (unsafe { *(k as *const i32) }, unsafe { list_i32(v as *const kafka_List_t) }))
         .collect()
 }
@@ -117,6 +166,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
     replication_factor: i16,
 ) -> *mut kafka_admin_NewTopic_t {
     box_new_topic(NewTopic::with_num_partitions_replication_factor(
+        // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
         unsafe { c_str_to_string(name) },
         (num_partitions >= 0).then_some(num_partitions),
         (replication_factor >= 0).then_some(replication_factor),
@@ -131,13 +182,18 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `replicas_assignments`
-/// null or a valid map of that shape.
+/// null or a valid map whose keys point at `int32_t`s and whose values are
+/// valid lists whose elements point at `int32_t`s, all kept alive and not
+/// mutated for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     name: *const c_char,
     replicas_assignments: *const kafka_Map_t,
 ) -> *mut kafka_admin_NewTopic_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires, and `replicas_assignments` null or a valid map of the shape
+    // `map_replicas_assignments` requires, kept alive and not mutated for this call.
     box_new_topic(NewTopic::with_replicas_assignments(unsafe { c_str_to_string(name) }, unsafe {
         map_replicas_assignments(replicas_assignments)
     }))
@@ -152,6 +208,11 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_NewTopic_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `inner_ref`
+    // requires; the returned pointer borrows `name_c`, which no setter replaces and which lives as
+    // long as the handle.
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -166,6 +227,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_New
 #[ffi_guard(fallback = 0)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka_admin_NewTopic_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
+    // requires.
     unsafe { new_topic_ref(self_) }.num_partitions()
 }
 
@@ -180,6 +245,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka
 #[ffi_guard(fallback = 0)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const kafka_admin_NewTopic_t) -> i16 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
+    // requires.
     unsafe { new_topic_ref(self_) }.replication_factor()
 }
 
@@ -197,6 +266,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const k
 pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
     self_: *const kafka_admin_NewTopic_t,
 ) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
+    // requires.
     match unsafe { new_topic_ref(self_) }.replicas_assignments() {
         None => std::ptr::null_mut(),
         Some(assignments) => {
@@ -225,15 +298,22 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid new-topic handle and `configs` null or a valid
-/// map of NUL-terminated strings.
+/// `self_` must be a valid new-topic handle that no other call uses at the
+/// same time, and `configs` null or a valid map whose keys and values are
+/// NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     self_: *mut kafka_admin_NewTopic_t,
     configs: *const kafka_Map_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map whose keys and
+    // values are NUL-terminated strings, as `map_strings` requires.
     let configs: BTreeMap<String, String> = unsafe { map_strings(configs) }.into_iter().collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle that no other
+    // call uses at the same time; every handle is the `Box::into_raw` of a `Box<NewTopicInner>`
+    // (`box_new_topic`), so the exclusive reference is to a live `NewTopicInner` that nothing else
+    // reads or writes until it is dropped at the end of this call.
     let inner = unsafe { &mut *(self_ as *mut NewTopicInner) };
     inner.topic = inner.topic.clone().set_configs(configs);
 }
@@ -248,6 +328,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_NewTopic_t) -> *mut kafka_Map_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
+    // requires.
     unsafe { new_topic_ref(self_) }
         .configs()
         .map_or(std::ptr::null_mut(), box_string_map)
@@ -261,6 +345,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admin_NewTopic_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
+    // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
+    // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
+    // requires.
     into_c_string(&unsafe { new_topic_ref(self_) }.to_string())
 }
 
@@ -268,11 +356,16 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admi
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned topic handle not yet destroyed.
+/// `self_` must be null or an owned topic handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_destroy(self_: *mut kafka_admin_NewTopic_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // topic handle not yet destroyed, that no other call uses at the same time and that is not
+        // used afterwards; every handle is the `Box::into_raw` of a `Box<NewTopicInner>`
+        // (`box_new_topic`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut NewTopicInner) });
     }
 }
@@ -290,6 +383,13 @@ mod tests {
 
     #[test]
     fn counts_constructor_maps_minus_one_to_defaults() {
+        // SAFETY: Test code: `topic` is the owned handle the factory returned, used only on this
+        // thread and destroyed once, last; the name it lends is read while `topic` is alive. The
+        // first `configs` owns nothing and holds two NUL-terminated string literals, alive until
+        // `kafka_admin_NewTopic_set_configs` copied them, then destroyed once; the second is the
+        // owned map `kafka_admin_NewTopic_configs` returned, looked up by a NUL-terminated key and
+        // destroyed once; `s` is the owned string `kafka_admin_NewTopic_to_string` returned, read
+        // while alive and freed once with `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
             let topic = kafka_admin_NewTopic_with_num_partitions_replication_factor(c"orders".as_ptr(), 3, -1);
             assert_eq!(
@@ -329,6 +429,14 @@ mod tests {
 
     #[test]
     fn assignments_constructor_copies_and_returns_the_map() {
+        // SAFETY: Test code: `brokers` owns nothing and holds pointers to the locals `b1` and `b2`;
+        // `assignments` owns nothing and maps a pointer to the local `partition` to `brokers`; all
+        // outlive their use and stay alive until `kafka_admin_NewTopic_with_replicas_assignments`
+        // copied them, then each container is destroyed once, the map first, which leaves `brokers`
+        // alone. `topic` is the owned handle that call returned, destroyed once, last; `map` is the
+        // owned map `kafka_admin_NewTopic_replicas_assignments` returned, whose keys point at
+        // `int32_t`s and whose values are lists of `int32_t *`, looked up with a pointer to the
+        // local `lookup`, read while alive and destroyed once, which frees `list` with it.
         unsafe {
             let brokers = kafka_List_new();
             let (mut b1, mut b2) = (1_i32, 2_i32);

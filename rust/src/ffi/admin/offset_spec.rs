@@ -101,6 +101,11 @@ pub(crate) fn box_offset_spec(spec: OffsetSpec) -> *mut kafka_admin_OffsetSpec_t
 /// `spec` must be a handle returned by this module and, if owned, not yet
 /// destroyed.
 pub(crate) unsafe fn offset_spec_value_of(spec: *const kafka_admin_OffsetSpec_t) -> OffsetSpec {
+    // SAFETY: Per this function's `# Safety`, `spec` is a handle returned by this module and, if
+    // owned, not yet destroyed; this module hands out only `&VARIANTS[i]` cast from
+    // `*const OffsetSpec` (`singleton`) and the `Box::into_raw` of a `Box<OffsetSpec>`
+    // (`box_offset_spec`), so `spec` points at a live `OffsetSpec`, which is `Copy` and which no
+    // entry point mutates.
     unsafe { *(spec as *const OffsetSpec) }
 }
 
@@ -179,6 +184,8 @@ pub extern "C" fn kafka_admin_OffsetSpec_timestamp(value: i64) -> *mut kafka_adm
 pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
     self_: *const kafka_admin_OffsetSpec_t,
 ) -> kafka_admin_OffsetSpec_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a handle returned by this module and, if
+    // owned, not yet destroyed, as `offset_spec_value_of` requires.
     enum_of(unsafe { offset_spec_value_of(self_) })
 }
 
@@ -186,11 +193,17 @@ pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
 ///
 /// # Safety
 ///
-/// `self_` must be null, a singleton, or an owned handle not yet destroyed.
+/// `self_` must be null, a singleton, or an owned handle not yet destroyed,
+/// that no other call uses at the same time; an owned handle is not used
+/// afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetSpec_destroy(self_: *mut kafka_admin_OffsetSpec_t) {
     if !self_.is_null() && !is_singleton(self_) {
+        // SAFETY: `self_` is non-null and not a singleton (checked above), so per this function's
+        // `# Safety` it is an owned handle not yet destroyed, that no other call uses at the same
+        // time and that is not used afterwards; the only owned handles are the `Box::into_raw` of a
+        // `Box<OffsetSpec>` (`box_offset_spec`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut OffsetSpec) });
     }
 }
@@ -206,6 +219,10 @@ mod tests {
         for (index, &spec) in VARIANTS.iter().enumerate() {
             let handle = box_offset_spec(spec);
             assert!(is_singleton(handle));
+            // SAFETY: Test code: `handle` is the singleton `box_offset_spec` returned for a kind
+            // without data, a pointer into the static `VARIANTS`, so it is a handle of this module
+            // for `offset_spec_value_of` and `kafka_admin_OffsetSpec__enum` both before and after
+            // `kafka_admin_OffsetSpec_destroy`, a no-op on a singleton.
             unsafe {
                 assert_eq!(offset_spec_value_of(handle), spec);
                 assert_eq!(kafka_admin_OffsetSpec__enum(handle) as usize, index);
@@ -239,6 +256,9 @@ mod tests {
         let other = kafka_admin_OffsetSpec_timestamp(42);
         assert_ne!(handle, other);
         assert!(!is_singleton(handle));
+        // SAFETY: Test code: `handle` and `other` are the owned handles the two timestamp factories
+        // returned, used only on this thread and each destroyed once, last; destroying null is a
+        // no-op.
         unsafe {
             assert_eq!(offset_spec_value_of(handle), OffsetSpec::Timestamp(42));
             assert_eq!(offset_spec_value_of(other), OffsetSpec::for_timestamp(42));

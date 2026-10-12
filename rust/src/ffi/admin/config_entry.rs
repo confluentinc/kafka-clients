@@ -118,6 +118,10 @@ pub(crate) fn config_source_singleton(source: ConfigSource) -> *const kafka_admi
 ///
 /// `source` must be a singleton returned by this module.
 pub(crate) unsafe fn config_source_value_of(source: *const kafka_admin_ConfigEntry_ConfigSource_t) -> ConfigSource {
+    // SAFETY: Per this function's `# Safety`, `source` is a singleton returned by this module:
+    // `config_source_singleton`, the only producer of `kafka_admin_ConfigEntry_ConfigSource_t`
+    // pointers, casts `&SOURCES[i]` from `*const ConfigSource`, so it points at a live
+    // `ConfigSource` in a `static`, which is `Copy` and immutable.
     unsafe { *(source as *const ConfigSource) }
 }
 
@@ -204,6 +208,8 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_unknown() -> *const kafka
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigSource_t,
 ) -> kafka_admin_ConfigEntry_ConfigSource_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `config_source_value_of` requires.
     source_enum_of(unsafe { config_source_value_of(self_) })
 }
 
@@ -276,6 +282,10 @@ pub(crate) fn config_type_singleton(config_type: ConfigType) -> *const kafka_adm
 ///
 /// `config_type` must be a singleton returned by this module.
 pub(crate) unsafe fn config_type_value_of(config_type: *const kafka_admin_ConfigEntry_ConfigType_t) -> ConfigType {
+    // SAFETY: Per this function's `# Safety`, `config_type` is a singleton returned by this module:
+    // `config_type_singleton`, the only producer of `kafka_admin_ConfigEntry_ConfigType_t`
+    // pointers, casts `&TYPES[i]` from `*const ConfigType`, so it points at a live `ConfigType` in
+    // a `static`, which is `Copy` and immutable.
     unsafe { *(config_type as *const ConfigType) }
 }
 
@@ -361,6 +371,8 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_password() -> *const kafka_
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigType_t,
 ) -> kafka_admin_ConfigEntry_ConfigType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `config_type_value_of` requires.
     type_enum_of(unsafe { config_type_value_of(self_) })
 }
 
@@ -390,7 +402,16 @@ impl ConfigSynonymInner {
     }
 }
 
+/// What a synonym handle points at.
+///
+/// # Safety
+///
+/// `synonym` must be a valid config-synonym handle, kept alive for `'a`.
 unsafe fn synonym_inner_ref<'a>(synonym: *const kafka_admin_ConfigEntry_ConfigSynonym_t) -> &'a ConfigSynonymInner {
+    // SAFETY: Per this function's `# Safety`, `synonym` is a valid config-synonym handle kept alive
+    // for `'a`; every `kafka_admin_ConfigEntry_ConfigSynonym_t` is the `Box::into_raw` of a
+    // `Box<ConfigSynonymInner>` (`box_config_synonym`, the only producer), so the shared reference
+    // is to a live `ConfigSynonymInner`, which no entry point mutates.
     unsafe { &*(synonym as *const ConfigSynonymInner) }
 }
 
@@ -398,10 +419,12 @@ unsafe fn synonym_inner_ref<'a>(synonym: *const kafka_admin_ConfigEntry_ConfigSy
 ///
 /// # Safety
 ///
-/// `synonym` must be a valid config-synonym handle.
+/// `synonym` must be a valid config-synonym handle, kept alive for `'a`.
 pub(crate) unsafe fn config_synonym_ref<'a>(
     synonym: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) -> &'a ConfigSynonym {
+    // SAFETY: Per this function's `# Safety`, `synonym` is a valid config-synonym handle kept alive
+    // for `'a`, as `synonym_inner_ref` requires.
     &unsafe { synonym_inner_ref(synonym) }.synonym
 }
 
@@ -416,17 +439,32 @@ pub(crate) fn box_config_synonym(synonym: ConfigSynonym) -> *mut kafka_admin_Con
 ///
 /// # Safety
 ///
-/// `element` must be an owned synonym handle not yet destroyed.
+/// `element` must be an owned synonym handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_config_synonym_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned synonym handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_ConfigEntry_ConfigSynonym_destroy` requires.
     unsafe { kafka_admin_ConfigEntry_ConfigSynonym_destroy(element as *mut kafka_admin_ConfigEntry_ConfigSynonym_t) };
 }
 
 /// Reads a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`
 /// into clones; null reads as empty.
+///
+/// # Safety
+///
+/// `list` must be null or a valid list whose elements are valid
+/// config-synonym handles, all kept alive and not mutated for this call.
 unsafe fn list_config_synonyms(list: *const kafka_List_t) -> Vec<ConfigSynonym> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
+    // for this call, as `list_elements` requires; the borrowed slice is consumed before the call
+    // returns.
     unsafe { list_elements(list) }
         .iter()
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, each element of `list` is a valid
+            // config-synonym handle, kept alive for this call, as `config_synonym_ref` requires;
+            // the value is cloned at once.
             unsafe { config_synonym_ref(element as *const kafka_admin_ConfigEntry_ConfigSynonym_t) }.clone()
         })
         .collect()
@@ -443,6 +481,9 @@ unsafe fn list_config_synonyms(list: *const kafka_List_t) -> Vec<ConfigSynonym> 
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-synonym handle, kept alive
+    // for this call, as `synonym_inner_ref` requires; the returned pointer borrows `name_c`, which
+    // lives as long as the handle.
     unsafe { synonym_inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -458,6 +499,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-synonym handle, kept alive
+    // for this call, as `synonym_inner_ref` requires; the returned pointer borrows `value_c`, which
+    // lives as long as the handle.
     unsafe { synonym_inner_ref(self_) }
         .value_c
         .as_ref()
@@ -474,6 +518,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) -> *const kafka_admin_ConfigEntry_ConfigSource_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-synonym handle, kept alive
+    // for this call, as `config_synonym_ref` requires.
     config_source_singleton(unsafe { config_synonym_ref(self_) }.source())
 }
 
@@ -488,6 +534,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
     self_: *const kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-synonym handle, kept alive
+    // for this call, as `config_synonym_ref` requires.
     into_c_string(&unsafe { config_synonym_ref(self_) }.to_string())
 }
 
@@ -495,13 +543,18 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned synonym handle not yet destroyed.
+/// `self_` must be null or an owned synonym handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_destroy(
     self_: *mut kafka_admin_ConfigEntry_ConfigSynonym_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // synonym handle not yet destroyed, that no other call uses at the same time and that is
+        // not used afterwards; every handle is the `Box::into_raw` of a `Box<ConfigSynonymInner>`
+        // (`box_config_synonym`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ConfigSynonymInner) });
     }
 }
@@ -524,10 +577,16 @@ pub struct kafka_admin_ConfigEntryOptions_t {
 ///
 /// # Safety
 ///
-/// `options` must be a valid config-entry-options handle.
+/// `options` must be a valid config-entry-options handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn config_entry_options_ref<'a>(
     options: *const kafka_admin_ConfigEntryOptions_t,
 ) -> &'a ConfigEntryOptions {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid config-entry-options handle kept
+    // alive for `'a`; every `kafka_admin_ConfigEntryOptions_t` is the `Box::into_raw` of a
+    // `Box<ConfigEntryOptions>` (the closure in `kafka_admin_ConfigEntryOptionsBuilder_build`, the
+    // only producer), so the shared reference is to a live `ConfigEntryOptions`, which no entry
+    // point mutates.
     unsafe { &*(options as *const ConfigEntryOptions) }
 }
 
@@ -535,11 +594,16 @@ pub(crate) unsafe fn config_entry_options_ref<'a>(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned options handle not yet destroyed.
+/// `self_` must be null or an owned options handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptions_destroy(self_: *mut kafka_admin_ConfigEntryOptions_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // options handle not yet destroyed, that no other call uses at the same time and that is
+        // not used afterwards; every handle is the `Box::into_raw` of a `Box<ConfigEntryOptions>`
+        // (`kafka_admin_ConfigEntryOptionsBuilder_build`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ConfigEntryOptions) });
     }
 }
@@ -600,9 +664,20 @@ impl ConfigEntryOptionsBuilderInner {
     }
 }
 
+/// What a builder handle points at, for a setter or `build`.
+///
+/// # Safety
+///
+/// `builder` must be a valid builder handle, kept alive for `'a`, that no
+/// other call uses during `'a`.
 unsafe fn builder_mut<'a>(
     builder: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
 ) -> &'a mut ConfigEntryOptionsBuilderInner {
+    // SAFETY: Per this function's `# Safety`, `builder` is a valid builder handle kept alive for
+    // `'a` that no other call uses during `'a`; every `kafka_admin_ConfigEntryOptionsBuilder_t` is
+    // the `Box::into_raw` of a `Box<ConfigEntryOptionsBuilderInner>`
+    // (`kafka_admin_ConfigEntryOptionsBuilder_new`, the only producer), so the exclusive reference
+    // is to a live `ConfigEntryOptionsBuilderInner` nothing else reads or writes while it is held.
     unsafe { &mut *(builder as *mut ConfigEntryOptionsBuilderInner) }
 }
 
@@ -620,14 +695,17 @@ pub extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_new() -> *mut kafka_admi
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `name` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `name` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     name: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `name` a
+    // valid NUL-terminated string, as `c_str_to_string` requires.
     unsafe { builder_mut(self_) }.name = Some(unsafe { c_str_to_string(name) });
 }
 
@@ -636,14 +714,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `value` null or a valid
-/// NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `value` null or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     value: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `value` null
+    // or a valid NUL-terminated string, as `c_str_to_option` requires.
     unsafe { builder_mut(self_) }.value = Some(unsafe { c_str_to_option(value) });
 }
 
@@ -651,13 +732,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `source` a source singleton.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `source` a source singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     source: *const kafka_admin_ConfigEntry_ConfigSource_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `source` a
+    // source singleton, which only this module returns, as `config_source_value_of` requires.
     unsafe { builder_mut(self_) }.source = Some(unsafe { config_source_value_of(source) });
 }
 
@@ -665,13 +750,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     is_sensitive: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires.
     unsafe { builder_mut(self_) }.is_sensitive = Some(is_sensitive != 0);
 }
 
@@ -679,13 +767,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     is_read_only: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires.
     unsafe { builder_mut(self_) }.is_read_only = Some(is_read_only != 0);
 }
 
@@ -695,14 +786,20 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `synonyms` null or a valid
-/// list of config-synonym handles.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `synonyms` null or a valid list whose elements are valid
+/// config-synonym handles, all kept alive and not mutated for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     synonyms: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `synonyms`
+    // null or a valid list whose elements are valid config-synonym handles, all kept alive and not
+    // mutated for this call, as `list_config_synonyms` requires; the list is read before the
+    // exclusive borrow is taken.
     unsafe { builder_mut(self_) }.synonyms = Some(unsafe { list_config_synonyms(synonyms) });
 }
 
@@ -710,14 +807,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `config_type` a type
-/// singleton.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `config_type` a type singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     config_type: *const kafka_admin_ConfigEntry_ConfigType_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `config_type`
+    // a type singleton, which only this module returns, as `config_type_value_of` requires.
     unsafe { builder_mut(self_) }.config_type = Some(unsafe { config_type_value_of(config_type) });
 }
 
@@ -726,14 +826,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `documentation` null or a
-/// valid NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `documentation` null or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     documentation: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires, and
+    // `documentation` null or a valid NUL-terminated string, as `c_str_to_option` requires.
     unsafe { builder_mut(self_) }.documentation = Some(unsafe { c_str_to_option(documentation) });
 }
 
@@ -744,14 +847,19 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle and `out_build` a valid slot.
+/// `self_` must be a valid builder handle that no other call uses at the same
+/// time, and `out_build` a valid slot.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     out_build: *mut *mut kafka_admin_ConfigEntryOptions_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
+    // uses at the same time, kept alive for this call, as `builder_mut` requires; the borrow ends
+    // with this statement.
     let result = unsafe { builder_mut(self_) }.builder().build();
+    // SAFETY: Per this function's `# Safety`, `out_build` is a valid slot, as `out_slot` requires.
     unsafe {
         out_slot(result, out_build, |options| {
             Box::into_raw(Box::new(options)) as *mut kafka_admin_ConfigEntryOptions_t
@@ -763,13 +871,19 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned builder handle not yet destroyed.
+/// `self_` must be null or an owned builder handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_destroy(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // builder handle not yet destroyed, that no other call uses at the same time and that is
+        // not used afterwards; every handle is the `Box::into_raw` of a
+        // `Box<ConfigEntryOptionsBuilderInner>` (`kafka_admin_ConfigEntryOptionsBuilder_new`), so
+        // `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ConfigEntryOptionsBuilderInner) });
     }
 }
@@ -809,7 +923,19 @@ impl ConfigEntryInner {
     }
 }
 
+/// What an entry handle points at.
+///
+/// # Safety
+///
+/// `entry` must be a valid config-entry handle, owned or borrowed, kept
+/// alive for `'a`.
 unsafe fn entry_inner_ref<'a>(entry: *const kafka_admin_ConfigEntry_t) -> &'a ConfigEntryInner {
+    // SAFETY: Per this function's `# Safety`, `entry` is a valid config-entry handle kept alive for
+    // `'a`; every `kafka_admin_ConfigEntry_t` points at a live `ConfigEntryInner`: an owned handle
+    // is the `Box::into_raw` of a `Box<ConfigEntryInner>` (`box_config_entry`), and a borrowed one
+    // is `ConfigEntryInner::as_ptr` of an entry an `AlterConfigOp` or `Config` handle keeps in
+    // place until it is destroyed. No entry point mutates a `ConfigEntryInner`, so the shared
+    // reference is sound.
     unsafe { &*(entry as *const ConfigEntryInner) }
 }
 
@@ -817,8 +943,11 @@ unsafe fn entry_inner_ref<'a>(entry: *const kafka_admin_ConfigEntry_t) -> &'a Co
 ///
 /// # Safety
 ///
-/// `entry` must be a valid config-entry handle.
+/// `entry` must be a valid config-entry handle, owned or borrowed, kept
+/// alive for `'a`.
 pub(crate) unsafe fn config_entry_ref<'a>(entry: *const kafka_admin_ConfigEntry_t) -> &'a ConfigEntry {
+    // SAFETY: Per this function's `# Safety`, `entry` is a valid config-entry handle kept alive for
+    // `'a`, as `entry_inner_ref` requires.
     &unsafe { entry_inner_ref(entry) }.entry
 }
 
@@ -832,8 +961,12 @@ pub(crate) fn box_config_entry(entry: ConfigEntry) -> *mut kafka_admin_ConfigEnt
 ///
 /// # Safety
 ///
-/// `element` must be an owned config-entry handle not yet destroyed.
+/// `element` must be an owned config-entry handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_config_entry_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned config-entry handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_ConfigEntry_destroy` requires.
     unsafe { kafka_admin_ConfigEntry_destroy(element as *mut kafka_admin_ConfigEntry_t) };
 }
 
@@ -850,6 +983,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
     name: *const c_char,
     value: *const c_char,
 ) -> *mut kafka_admin_ConfigEntry_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires, and `value` null or a valid NUL-terminated string, as
+    // `c_str_to_option` requires.
     box_config_entry(ConfigEntry::new(unsafe { c_str_to_string(name) }, unsafe {
         c_str_to_option(value)
     }))
@@ -871,6 +1007,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
     options: *const kafka_admin_ConfigEntryOptions_t,
 ) -> *mut kafka_admin_ConfigEntry_t {
+    // SAFETY: Per this function's `# Safety`, `options` is a valid config-entry-options handle,
+    // kept alive for this call, as `config_entry_options_ref` requires; the options are cloned at
+    // once.
     box_config_entry(ConfigEntry::with_options(unsafe { config_entry_options_ref(options) }.clone()))
 }
 
@@ -883,6 +1022,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `entry_inner_ref` requires; the returned pointer borrows `name_c`, which
+    // lives as long as the handle.
     unsafe { entry_inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -895,6 +1037,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `entry_inner_ref` requires; the returned pointer borrows `value_c`, which
+    // lives as long as the handle.
     unsafe { entry_inner_ref(self_) }
         .value_c
         .as_ref()
@@ -911,6 +1056,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
     self_: *const kafka_admin_ConfigEntry_t,
 ) -> *const kafka_admin_ConfigEntry_ConfigSource_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     config_source_singleton(unsafe { config_entry_ref(self_) }.source())
 }
 
@@ -922,6 +1069,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     i8::from(unsafe { config_entry_ref(self_) }.is_default())
 }
 
@@ -933,6 +1082,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(self_: *const kafka_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     i8::from(unsafe { config_entry_ref(self_) }.is_sensitive())
 }
 
@@ -944,6 +1095,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(self_: *const kafk
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(self_: *const kafka_admin_ConfigEntry_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     i8::from(unsafe { config_entry_ref(self_) }.is_read_only())
 }
 
@@ -959,6 +1112,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(self_: *const kafk
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
     self_: *const kafka_admin_ConfigEntry_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     let elements = unsafe { config_entry_ref(self_) }
         .synonyms()
         .iter()
@@ -977,6 +1132,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
     self_: *const kafka_admin_ConfigEntry_t,
 ) -> *const kafka_admin_ConfigEntry_ConfigType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     config_type_singleton(unsafe { config_entry_ref(self_) }.r#type())
 }
 
@@ -991,6 +1148,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
     self_: *const kafka_admin_ConfigEntry_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `entry_inner_ref` requires; the returned pointer borrows `documentation_c`,
+    // which lives as long as the handle.
     unsafe { entry_inner_ref(self_) }
         .documentation_c
         .as_ref()
@@ -1006,6 +1166,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_admin_ConfigEntry_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
+    // for this call, as `config_entry_ref` requires.
     into_c_string(&unsafe { config_entry_ref(self_) }.to_string())
 }
 
@@ -1013,11 +1175,18 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_a
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned entry handle not yet destroyed.
+/// `self_` must be null or an owned entry handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards. A borrowed
+/// entry handle (from `kafka_admin_Config_get` or
+/// `kafka_admin_AlterConfigOp_config_entry`) is never passed here.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_destroy(self_: *mut kafka_admin_ConfigEntry_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // entry handle not yet destroyed, that no other call uses at the same time and that is not
+        // used afterwards, and not a borrowed view; every owned handle is the `Box::into_raw` of a
+        // `Box<ConfigEntryInner>` (`box_config_entry`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ConfigEntryInner) });
     }
 }
@@ -1033,16 +1202,17 @@ mod tests {
 
     #[test]
     fn source_and_type_singletons_match_their_enumerators() {
-        for (index, &source) in SOURCES.iter().enumerate() {
-            let handle = config_source_singleton(source);
-            unsafe {
+        // SAFETY: Test code: each `handle` is the singleton `config_source_singleton` or
+        // `config_type_singleton` returned, a pointer into the static `SOURCES` or `TYPES`, so
+        // it is a singleton of this module for the value and `__enum` functions read here.
+        unsafe {
+            for (index, &source) in SOURCES.iter().enumerate() {
+                let handle = config_source_singleton(source);
                 assert_eq!(config_source_value_of(handle), source);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigSource__enum(handle) as usize, index);
             }
-        }
-        for (index, &config_type) in TYPES.iter().enumerate() {
-            let handle = config_type_singleton(config_type);
-            unsafe {
+            for (index, &config_type) in TYPES.iter().enumerate() {
+                let handle = config_type_singleton(config_type);
                 assert_eq!(config_type_value_of(handle), config_type);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigType__enum(handle) as usize, index);
             }
@@ -1059,6 +1229,10 @@ mod tests {
 
     #[test]
     fn narrow_constructor_and_getters() {
+        // SAFETY: Test code: `entry` is the owned handle `kafka_admin_ConfigEntry_new` returned,
+        // used only on this thread and destroyed once, last; the name it lends is read while
+        // `entry` is alive; `synonyms` is the owned list `kafka_admin_ConfigEntry_synonyms`
+        // returned, destroyed once; destroying null is a no-op.
         unsafe {
             let entry = kafka_admin_ConfigEntry_new(c"retention.ms".as_ptr(), ptr::null());
             assert_eq!(*config_entry_ref(entry), ConfigEntry::new("retention.ms".to_string(), None));
@@ -1089,6 +1263,19 @@ mod tests {
 
     #[test]
     fn builder_validates_then_builds_the_wide_constructor() {
+        // SAFETY: Test code: `builder` is the owned handle
+        // `kafka_admin_ConfigEntryOptionsBuilder_new` returned, used only on this thread and
+        // destroyed once, after its last build; `options` and `again` are local slots, then the
+        // owned options the builds delivered, each destroyed once after its last read; `error` is
+        // the owned error the first build returned, read while alive and destroyed once. `synonyms`
+        // owns nothing and holds the owned `synonym_handle`; both stay alive until
+        // `kafka_admin_ConfigEntryOptionsBuilder_set_synonyms` copied them, then each is destroyed
+        // once. `entry` is the owned handle `kafka_admin_ConfigEntry_with_options` returned,
+        // destroyed once, last, and the strings it lends are read while it is alive; the second
+        // `synonyms` is the owned list `kafka_admin_ConfigEntry_synonyms` returned, whose element
+        // `first` and the strings it lends are read while the list is alive, then the list is
+        // destroyed once; each `s` is an owned string, read while alive and freed once with
+        // `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
             let builder = kafka_admin_ConfigEntryOptionsBuilder_new();
             let mut options = ptr::null_mut();

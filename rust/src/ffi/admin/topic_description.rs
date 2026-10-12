@@ -57,7 +57,17 @@ impl TopicDescriptionInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `description` must be a valid topic-description handle, kept alive for
+/// `'a`.
 unsafe fn inner_ref<'a>(description: *const kafka_admin_TopicDescription_t) -> &'a TopicDescriptionInner {
+    // SAFETY: Per this function's `# Safety`, `description` is a valid topic-description handle
+    // kept alive for `'a`; every `kafka_admin_TopicDescription_t` is the `Box::into_raw` of a
+    // `Box<TopicDescriptionInner>` (`box_topic_description`, the only producer), so the shared
+    // reference is to a live `TopicDescriptionInner`, which no entry point mutates.
     unsafe { &*(description as *const TopicDescriptionInner) }
 }
 
@@ -71,10 +81,13 @@ pub(crate) fn box_topic_description(description: TopicDescription) -> *mut kafka
 ///
 /// # Safety
 ///
-/// `description` must be a live topic-description handle.
+/// `description` must be a valid topic-description handle, kept alive for
+/// `'a`.
 pub(crate) unsafe fn topic_description_ref<'a>(
     description: *const kafka_admin_TopicDescription_t,
 ) -> &'a TopicDescription {
+    // SAFETY: Per this function's `# Safety`, `description` is a valid topic-description handle
+    // kept alive for `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(description) }.description
 }
 
@@ -82,13 +95,25 @@ pub(crate) unsafe fn topic_description_ref<'a>(
 ///
 /// # Safety
 ///
-/// `element` must be an owned topic-description handle.
+/// `element` must be an owned topic-description handle not yet destroyed,
+/// that no other call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_topic_description_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-description handle not
+    // yet destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_TopicDescription_destroy` requires.
     unsafe { kafka_admin_TopicDescription_destroy(element as *mut kafka_admin_TopicDescription_t) }
 }
 
 /// Frees a `kafka_common_TopicPartitionInfo_t *` element of an owned list.
+///
+/// # Safety
+///
+/// `element` must be an owned topic-partition-info handle not yet destroyed,
+/// that no other call uses at the same time; it is not used afterwards.
 unsafe fn destroy_topic_partition_info_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned topic-partition-info handle not
+    // yet destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_common_TopicPartitionInfo_destroy` requires.
     unsafe { kafka_common_TopicPartitionInfo_destroy(element as *mut kafka_common_TopicPartitionInfo_t) }
 }
 
@@ -120,8 +145,13 @@ pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BT
         return None;
     }
     Some(
+        // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid
+        // list, alive and not mutated for this call, as `list_elements` requires; the borrowed
+        // slice is consumed before the call returns.
         unsafe { list_elements(list) }
             .iter()
+            // SAFETY: Per this function's `# Safety`, each element of `list` is an ACL-operation
+            // singleton, as `acl_operation::value_of` requires.
             .map(|&element| unsafe { acl_operation::value_of(element as *const kafka_common_acl_AclOperation_t) })
             .collect(),
     )
@@ -129,10 +159,22 @@ pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BT
 
 /// Reads a list of `const kafka_common_TopicPartitionInfo_t *` into owned
 /// copies; null reads as empty.
+///
+/// # Safety
+///
+/// `list` must be null or a valid list whose elements are valid
+/// topic-partition-info handles, all kept alive and not mutated for this
+/// call.
 unsafe fn list_topic_partition_infos(list: *const kafka_List_t) -> Vec<TopicPartitionInfo> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
+    // for this call, as `list_elements` requires; the borrowed slice is consumed before the call
+    // returns.
     unsafe { list_elements(list) }
         .iter()
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, each element of `list` is a valid
+            // topic-partition-info handle, kept alive for this call, as `topic_partition_info_ref`
+            // requires; the value is cloned at once.
             unsafe { topic_partition_info_ref(element as *const kafka_common_TopicPartitionInfo_t) }.clone()
         })
         .collect()
@@ -148,7 +190,8 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t) -> Vec<TopicPart
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `partitions` null or a
-/// valid list of topic-partition-info handles.
+/// valid list whose elements are valid topic-partition-info handles, all
+/// kept alive and not mutated for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
@@ -156,6 +199,10 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
     internal: i8,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_admin_TopicDescription_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires, and `partitions` null or a valid list whose elements are valid
+    // topic-partition-info handles, all kept alive and not mutated for this call, as
+    // `list_topic_partition_infos` requires.
     box_topic_description(TopicDescription::new(unsafe { c_str_to_string(name) }, internal != 0, unsafe {
         list_topic_partition_infos(partitions)
     }))
@@ -180,9 +227,17 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
     authorized_operations: *const kafka_List_t,
 ) -> *mut kafka_admin_TopicDescription_t {
     box_topic_description(TopicDescription::with_authorized_operations(
+        // SAFETY: Per this function's `# Safety` (that of `kafka_admin_TopicDescription_new`),
+        // `name` is a valid NUL-terminated string, as `c_str_to_string` requires.
         unsafe { c_str_to_string(name) },
         internal != 0,
+        // SAFETY: Per this function's `# Safety` (that of `kafka_admin_TopicDescription_new`),
+        // `partitions` is null or a valid list whose elements are valid topic-partition-info
+        // handles, all kept alive and not mutated for this call, as `list_topic_partition_infos`
+        // requires.
         unsafe { list_topic_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety`, `authorized_operations` is null or a valid list
+        // of ACL-operation singletons, as `list_acl_operations` requires.
         unsafe { list_acl_operations(authorized_operations) },
     ))
 }
@@ -207,10 +262,24 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
     topic_id: *const kafka_common_Uuid_t,
 ) -> *mut kafka_admin_TopicDescription_t {
     box_topic_description(TopicDescription::with_authorized_operations_topic_id(
+        // SAFETY: Per this function's `# Safety` (through that of
+        // `kafka_admin_TopicDescription_with_authorized_operations`, that of
+        // `kafka_admin_TopicDescription_new`), `name` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
         unsafe { c_str_to_string(name) },
         internal != 0,
+        // SAFETY: Per this function's `# Safety` (through that of
+        // `kafka_admin_TopicDescription_with_authorized_operations`, that of
+        // `kafka_admin_TopicDescription_new`), `partitions` is null or a valid list whose elements
+        // are valid topic-partition-info handles, all kept alive and not mutated for this call, as
+        // `list_topic_partition_infos` requires.
         unsafe { list_topic_partition_infos(partitions) },
+        // SAFETY: Per this function's `# Safety` (that of
+        // `kafka_admin_TopicDescription_with_authorized_operations`), `authorized_operations` is
+        // null or a valid list of ACL-operation singletons, as `list_acl_operations` requires.
         unsafe { list_acl_operations(authorized_operations) },
+        // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
+        // requires.
         unsafe { uuid_of(topic_id) },
     ))
 }
@@ -225,6 +294,9 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     self_: *const kafka_admin_TopicDescription_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `inner_ref` requires; the returned pointer borrows `name_c`, which
+    // lives as long as the handle.
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -236,6 +308,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(self_: *const kafka_admin_TopicDescription_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `topic_description_ref` requires.
     i8::from(unsafe { topic_description_ref(self_) }.is_internal())
 }
 
@@ -249,6 +323,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(self_: *const 
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     self_: *const kafka_admin_TopicDescription_t,
 ) -> *mut kafka_common_Uuid_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `topic_description_ref` requires.
     box_uuid(unsafe { topic_description_ref(self_) }.topic_id())
 }
 
@@ -263,6 +339,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
     self_: *const kafka_admin_TopicDescription_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `topic_description_ref` requires.
     let elements = unsafe { topic_description_ref(self_) }
         .partitions()
         .iter()
@@ -283,6 +361,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
     self_: *const kafka_admin_TopicDescription_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `topic_description_ref` requires.
     acl_operation_list(unsafe { topic_description_ref(self_) }.authorized_operations())
 }
 
@@ -296,6 +376,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
     self_: *const kafka_admin_TopicDescription_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-description handle, kept
+    // alive for this call, as `topic_description_ref` requires.
     into_c_string(&unsafe { topic_description_ref(self_) }.to_string())
 }
 
@@ -303,11 +385,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_destroy(self_: *mut kafka_admin_TopicDescription_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards; every handle is the `Box::into_raw` of a `Box<TopicDescriptionInner>`
+        // (`box_topic_description`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut TopicDescriptionInner) });
     }
 }

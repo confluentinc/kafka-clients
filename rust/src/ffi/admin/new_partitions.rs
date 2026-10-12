@@ -38,8 +38,12 @@ pub(crate) struct NewPartitionsInner {
 ///
 /// # Safety
 ///
-/// `partitions` must be a valid new-partitions handle.
+/// `partitions` must be a valid new-partitions handle, kept alive for `'a`.
 pub(crate) unsafe fn new_partitions_ref<'a>(partitions: *const kafka_admin_NewPartitions_t) -> &'a NewPartitions {
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid new-partitions handle kept
+    // alive for `'a`; every `kafka_admin_NewPartitions_t` is the `Box::into_raw` of a
+    // `Box<NewPartitionsInner>` (`box_new_partitions`, the only producer), so the shared reference
+    // is to a live `NewPartitionsInner`, which no entry point mutates.
     &unsafe { &*(partitions as *const NewPartitionsInner) }.partitions
 }
 
@@ -50,9 +54,19 @@ pub(crate) fn box_new_partitions(partitions: NewPartitions) -> *mut kafka_admin_
 }
 
 /// Reads a borrowed list of `const int32_t *` into values; null reads as empty.
+///
+/// # Safety
+///
+/// `list` must be null or a valid list whose elements point at `int32_t`s,
+/// kept alive and not mutated for this call.
 unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
+    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // returns.
     unsafe { list_elements(list) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
+        // `int32_t`, read by copy while the list is alive.
         .map(|&element| unsafe { *(element as *const i32) })
         .collect()
 }
@@ -64,7 +78,15 @@ fn box_i32_list(values: &[i32]) -> *mut kafka_List_t {
 }
 
 /// Frees a `kafka_List_t *` element of an owned container.
+///
+/// # Safety
+///
+/// `element` must be an owned list handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 unsafe fn destroy_list_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned list handle not yet destroyed,
+    // that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_List_destroy` requires.
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) };
 }
 
@@ -84,15 +106,23 @@ pub extern "C" fn kafka_admin_NewPartitions_increase_to(total_count: i32) -> *mu
 ///
 /// # Safety
 ///
-/// `new_assignments` must be null or a valid list of that shape.
+/// `new_assignments` must be null or a valid list whose elements are valid
+/// lists whose elements point at `int32_t`s, all kept alive and not mutated
+/// for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignments(
     total_count: i32,
     new_assignments: *const kafka_List_t,
 ) -> *mut kafka_admin_NewPartitions_t {
+    // SAFETY: Per this function's `# Safety`, `new_assignments` is null or a valid list, alive and
+    // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
+    // end of this statement.
     let new_assignments = unsafe { list_elements(new_assignments) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each element of `new_assignments` is a valid list
+        // whose elements point at `int32_t`s, alive and not mutated for this call, as `list_i32`
+        // requires.
         .map(|&element| unsafe { list_i32(element as *const kafka_List_t) })
         .collect();
     box_new_partitions(NewPartitions::increase_to_with_new_assignments(total_count, new_assignments))
@@ -106,6 +136,8 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_total_count(self_: *const kafka_admin_NewPartitions_t) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
+    // for this call, as `new_partitions_ref` requires.
     unsafe { new_partitions_ref(self_) }.total_count()
 }
 
@@ -122,6 +154,8 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_total_count(self_: *const kaf
 pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
     self_: *const kafka_admin_NewPartitions_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
+    // for this call, as `new_partitions_ref` requires.
     match unsafe { new_partitions_ref(self_) }.assignments() {
         None => std::ptr::null_mut(),
         Some(assignments) => {
@@ -139,6 +173,8 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_to_string(self_: *const kafka_admin_NewPartitions_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
+    // for this call, as `new_partitions_ref` requires.
     into_c_string(&unsafe { new_partitions_ref(self_) }.to_string())
 }
 
@@ -146,11 +182,16 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_to_string(self_: *const kafka
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_destroy(self_: *mut kafka_admin_NewPartitions_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards; every handle is the `Box::into_raw` of a `Box<NewPartitionsInner>`
+        // (`box_new_partitions`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut NewPartitionsInner) });
     }
 }
@@ -166,6 +207,10 @@ mod tests {
     #[test]
     fn increase_to_without_assignments() {
         let partitions = kafka_admin_NewPartitions_increase_to(4);
+        // SAFETY: Test code: `partitions` is the owned handle
+        // `kafka_admin_NewPartitions_increase_to` returned, used only on this thread and destroyed
+        // once, last; `s` is the owned string `kafka_admin_NewPartitions_to_string` returned, read
+        // while alive and freed once with `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
             assert_eq!(*new_partitions_ref(partitions), NewPartitions::increase_to(4));
             assert_eq!(kafka_admin_NewPartitions_total_count(partitions), 4);
@@ -180,6 +225,13 @@ mod tests {
 
     #[test]
     fn increase_to_with_assignments_copies_the_nested_lists() {
+        // SAFETY: Test code: `inner` and `outer` are lists that own nothing, `inner` holding
+        // pointers to the locals `b1` and `b2`, which outlive it, and `outer` holding `inner`; both
+        // stay alive until the copy is made, then each is destroyed once, `outer` first, which
+        // leaves `inner` alone. `partitions` is the owned handle the factory returned, destroyed
+        // once, last; `assignments` is the owned list `kafka_admin_NewPartitions_assignments`
+        // returned, whose elements are lists of `int32_t *`, read while alive and destroyed once,
+        // which frees `first` with it.
         unsafe {
             let inner = kafka_List_new();
             let (mut b1, mut b2) = (1_i32, 2_i32);

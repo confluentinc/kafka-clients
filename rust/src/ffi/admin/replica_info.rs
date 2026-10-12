@@ -37,8 +37,12 @@ pub(crate) fn box_replica_info(info: ReplicaInfo) -> *mut kafka_admin_ReplicaInf
 ///
 /// # Safety
 ///
-/// `info` must be a live replica-info handle.
+/// `info` must be a valid replica-info handle, kept alive for `'a`.
 pub(crate) unsafe fn replica_info_ref<'a>(info: *const kafka_admin_ReplicaInfo_t) -> &'a ReplicaInfo {
+    // SAFETY: Per this function's `# Safety`, `info` is a valid replica-info handle kept alive for
+    // `'a`; every `kafka_admin_ReplicaInfo_t` is the `Box::into_raw` of a `Box<ReplicaInfo>`
+    // (`box_replica_info`, the only producer), so the shared reference is to a live `ReplicaInfo`,
+    // which no entry point mutates.
     unsafe { &*(info as *const ReplicaInfo) }
 }
 
@@ -46,8 +50,12 @@ pub(crate) unsafe fn replica_info_ref<'a>(info: *const kafka_admin_ReplicaInfo_t
 ///
 /// # Safety
 ///
-/// `element` must be an owned replica-info handle.
+/// `element` must be an owned replica-info handle not yet destroyed, that no
+/// other call uses at the same time; it is not used afterwards.
 pub(crate) unsafe fn destroy_replica_info_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned replica-info handle not yet
+    // destroyed, that no other call uses at the same time and that is not used afterwards, as
+    // `kafka_admin_ReplicaInfo_destroy` requires.
     unsafe { kafka_admin_ReplicaInfo_destroy(element as *mut kafka_admin_ReplicaInfo_t) }
 }
 
@@ -73,6 +81,8 @@ pub extern "C" fn kafka_admin_ReplicaInfo_new(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
+    // for this call, as `replica_info_ref` requires.
     unsafe { replica_info_ref(self_) }.size()
 }
 
@@ -85,6 +95,8 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
+    // for this call, as `replica_info_ref` requires.
     unsafe { replica_info_ref(self_) }.offset_lag()
 }
 
@@ -97,6 +109,8 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_admin_ReplicaInfo_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
+    // for this call, as `replica_info_ref` requires.
     i8::from(unsafe { replica_info_ref(self_) }.is_future())
 }
 
@@ -108,6 +122,8 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_a
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_admin_ReplicaInfo_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
+    // for this call, as `replica_info_ref` requires.
     into_c_string(&unsafe { replica_info_ref(self_) }.to_string())
 }
 
@@ -115,11 +131,16 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_a
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_destroy(self_: *mut kafka_admin_ReplicaInfo_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards; every handle is the `Box::into_raw` of a `Box<ReplicaInfo>`
+        // (`box_replica_info`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ReplicaInfo) });
     }
 }

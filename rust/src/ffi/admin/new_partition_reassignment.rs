@@ -39,10 +39,16 @@ pub(crate) struct NewPartitionReassignmentInner {
 ///
 /// # Safety
 ///
-/// `reassignment` must be a valid new-partition-reassignment handle.
+/// `reassignment` must be a valid new-partition-reassignment handle, kept
+/// alive for `'a`.
 pub(crate) unsafe fn new_partition_reassignment_ref<'a>(
     reassignment: *const kafka_admin_NewPartitionReassignment_t,
 ) -> &'a NewPartitionReassignment {
+    // SAFETY: Per this function's `# Safety`, `reassignment` is a valid new-partition-reassignment
+    // handle kept alive for `'a`; every `kafka_admin_NewPartitionReassignment_t` is the
+    // `Box::into_raw` of a `Box<NewPartitionReassignmentInner>` (`box_new_partition_reassignment`,
+    // the only producer), so the shared reference is to a live `NewPartitionReassignmentInner`,
+    // which no entry point mutates.
     &unsafe { &*(reassignment as *const NewPartitionReassignmentInner) }.reassignment
 }
 
@@ -63,18 +69,24 @@ pub(crate) fn box_new_partition_reassignment(
 ///
 /// # Safety
 ///
-/// `target_replicas` must be null or a valid list of `int32_t *` and
-/// `out_new` a valid slot.
+/// `target_replicas` must be null or a valid list whose elements point at
+/// `int32_t`s, and `out_new` a valid slot.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     target_replicas: *const kafka_List_t,
     out_new: *mut *mut kafka_admin_NewPartitionReassignment_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `target_replicas` is null or a valid list, alive and
+    // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
+    // end of this statement.
     let target_replicas = unsafe { list_elements(target_replicas) }
         .iter()
+        // SAFETY: Per this function's `# Safety`, each element of `target_replicas` points at a
+        // live `int32_t`, read by copy while the list is alive.
         .map(|&element| unsafe { *(element as *const i32) })
         .collect();
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires.
     unsafe {
         out_slot(
             NewPartitionReassignment::new(target_replicas),
@@ -95,6 +107,8 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
     self_: *const kafka_admin_NewPartitionReassignment_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partition-reassignment handle,
+    // kept alive for this call, as `new_partition_reassignment_ref` requires.
     let elements = unsafe { new_partition_reassignment_ref(self_) }
         .target_replicas()
         .iter()
@@ -107,13 +121,18 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_destroy(
     self_: *mut kafka_admin_NewPartitionReassignment_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, that no other call uses at the same time and that is not used
+        // afterwards; every handle is the `Box::into_raw` of a `Box<NewPartitionReassignmentInner>`
+        // (`box_new_partition_reassignment`), so `from_raw` reclaims it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut NewPartitionReassignmentInner) });
     }
 }
@@ -129,6 +148,13 @@ mod tests {
     #[test]
     fn new_rejects_an_empty_list_and_copies_a_full_one() {
         let mut reassignment = ptr::null_mut();
+        // SAFETY: Test code: `reassignment` is a local slot, then the owned handle the second
+        // `kafka_admin_NewPartitionReassignment_new` delivered, destroyed once, last; `error` is
+        // the owned error the first call returned, read while alive and destroyed once; `list` is
+        // an empty list that owns nothing, holding pointers to the locals `b1` and `b2`, which
+        // outlive it, and is destroyed once after the copy; `replicas` is the owned list
+        // `kafka_admin_NewPartitionReassignment_target_replicas` returned, whose elements point at
+        // `int32_t`s, read while alive and destroyed once; destroying null is a no-op.
         unsafe {
             let error = kafka_admin_NewPartitionReassignment_new(ptr::null(), &mut reassignment);
             assert!(!error.is_null());

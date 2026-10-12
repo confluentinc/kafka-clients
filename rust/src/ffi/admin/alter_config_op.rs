@@ -73,6 +73,10 @@ pub(crate) fn op_type_singleton(op_type: OpType) -> *const kafka_admin_AlterConf
 ///
 /// `op_type` must be a singleton returned by this module.
 pub(crate) unsafe fn op_type_value_of(op_type: *const kafka_admin_AlterConfigOp_OpType_t) -> OpType {
+    // SAFETY: Per this function's `# Safety`, `op_type` is a singleton returned by this module:
+    // `op_type_singleton`, the only producer of `kafka_admin_AlterConfigOp_OpType_t` pointers,
+    // casts `&VARIANTS[i]` from `*const OpType`, so it points at a live `OpType` in a `static`,
+    // which is `Copy` and immutable.
     unsafe { *(op_type as *const OpType) }
 }
 
@@ -118,6 +122,8 @@ pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_ad
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     self_: *const kafka_admin_AlterConfigOp_OpType_t,
 ) -> kafka_admin_AlterConfigOp_OpType_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `op_type_value_of` requires.
     enum_of(unsafe { op_type_value_of(self_) })
 }
 
@@ -132,6 +138,8 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka_admin_AlterConfigOp_OpType_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `op_type_value_of` requires.
     unsafe { op_type_value_of(self_) }.id()
 }
 
@@ -167,7 +175,16 @@ impl AlterConfigOpInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `op` must be a valid alter-config-op handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOpInner {
+    // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
+    // `'a`; every `kafka_admin_AlterConfigOp_t` is the `Box::into_raw` of a
+    // `Box<AlterConfigOpInner>` (`box_alter_config_op`, the only producer), so the shared reference
+    // is to a live `AlterConfigOpInner`, which no entry point mutates.
     unsafe { &*(op as *const AlterConfigOpInner) }
 }
 
@@ -175,8 +192,10 @@ unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConf
 ///
 /// # Safety
 ///
-/// `op` must be a valid alter-config-op handle.
+/// `op` must be a valid alter-config-op handle, kept alive for `'a`.
 pub(crate) unsafe fn alter_config_op_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOp {
+    // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
+    // `'a`, as `inner_ref` requires.
     &unsafe { inner_ref(op) }.op
 }
 
@@ -200,6 +219,9 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     config_entry: *const kafka_admin_ConfigEntry_t,
     operation_type: *const kafka_admin_AlterConfigOp_OpType_t,
 ) -> *mut kafka_admin_AlterConfigOp_t {
+    // SAFETY: Per this function's `# Safety`, `config_entry` is a valid config-entry handle, kept
+    // alive for this call, as `config_entry_ref` requires (the entry is cloned at once), and
+    // `operation_type` an op-type singleton, as `op_type_value_of` requires.
     box_alter_config_op(AlterConfigOp::new(unsafe { config_entry_ref(config_entry) }.clone(), unsafe {
         op_type_value_of(operation_type)
     }))
@@ -216,6 +238,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
     self_: *const kafka_admin_AlterConfigOp_t,
 ) -> *const kafka_admin_ConfigEntry_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
+    // for this call, as `inner_ref` requires; the returned view points at the `ConfigEntryInner`
+    // stored inside the boxed `AlterConfigOpInner`, which does not move and lives until
+    // `kafka_admin_AlterConfigOp_destroy`.
     unsafe { inner_ref(self_) }.config_entry.as_ptr()
 }
 
@@ -229,6 +255,8 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
     self_: *const kafka_admin_AlterConfigOp_t,
 ) -> *const kafka_admin_AlterConfigOp_OpType_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
+    // for this call, as `alter_config_op_ref` requires.
     op_type_singleton(unsafe { alter_config_op_ref(self_) }.op_type())
 }
 
@@ -240,6 +268,8 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka_admin_AlterConfigOp_t) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
+    // for this call, as `alter_config_op_ref` requires.
     into_c_string(&unsafe { alter_config_op_ref(self_) }.to_string())
 }
 
@@ -247,11 +277,18 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned operation handle not yet destroyed.
+/// `self_` must be null or an owned operation handle not yet destroyed, that
+/// no other call uses at the same time; it is not used afterwards, nor is the
+/// config-entry view it handed out.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_destroy(self_: *mut kafka_admin_AlterConfigOp_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // operation handle not yet destroyed, that no other call uses at the same time and that is
+        // not used afterwards; every handle is the `Box::into_raw` of a `Box<AlterConfigOpInner>`
+        // (`box_alter_config_op`), so `from_raw` reclaims it exactly once, together with the
+        // config-entry view it hands out.
         drop(unsafe { Box::from_raw(self_ as *mut AlterConfigOpInner) });
     }
 }
@@ -272,6 +309,10 @@ mod tests {
     fn op_type_singletons_ids_and_for_id() {
         for (index, &op_type) in VARIANTS.iter().enumerate() {
             let handle = op_type_singleton(op_type);
+            // SAFETY: Test code: `handle` is the singleton `op_type_singleton` returned, a pointer
+            // into the static `VARIANTS`, so it is a singleton of this module for
+            // `op_type_value_of`, `kafka_admin_AlterConfigOp_OpType__enum` and
+            // `kafka_admin_AlterConfigOp_OpType_id`.
             unsafe {
                 assert_eq!(op_type_value_of(handle), op_type);
                 assert_eq!(kafka_admin_AlterConfigOp_OpType__enum(handle) as usize, index);
@@ -289,6 +330,12 @@ mod tests {
     fn op_copies_its_entry_and_borrows_it_out() {
         let entry = ConfigEntry::new("retention.ms".to_string(), Some("1000".to_string()));
         let entry_handle = box_config_entry(entry.clone());
+        // SAFETY: Test code: `entry_handle` is the owned handle `box_config_entry` returned, alive
+        // until it is destroyed once, after `kafka_admin_AlterConfigOp_new` copied it; `op` is the
+        // owned handle that call returned, destroyed once, last, and the config-entry view it hands
+        // out is read while `op` is alive; `s` is the owned string
+        // `kafka_admin_AlterConfigOp_to_string` returned, read while alive and freed once with
+        // `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
             let op = kafka_admin_AlterConfigOp_new(entry_handle, kafka_admin_AlterConfigOp_OpType_append());
             kafka_admin_ConfigEntry_destroy(entry_handle);
