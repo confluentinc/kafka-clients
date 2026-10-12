@@ -46,11 +46,15 @@ pub(crate) struct GenericStringSerializer(StringSerializer);
 ///
 /// # Safety
 ///
-/// `data` must be null or point at a NUL-terminated string.
+/// `data` must be null or point at a NUL-terminated string that outlives
+/// `'a` and is not written during it.
 unsafe fn string<'a>(data: Option<&GenericValue>) -> Result<Option<&'a str>, Error> {
     let Some(data) = data.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
+    // SAFETY: Per this function's `# Safety`, `data` is non-null here and points at a
+    // NUL-terminated string that outlives `'a` and is not written during it, as `CStr::from_ptr`
+    // requires.
     unsafe { CStr::from_ptr(data.as_ptr() as *const c_char) }
         .to_str()
         .map(Some)
@@ -59,6 +63,13 @@ unsafe fn string<'a>(data: Option<&GenericValue>) -> Result<Option<&'a str>, Err
 
 impl Serializer<GenericValue> for GenericStringSerializer {
     fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
+        // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
+        // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
+        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer` returns,
+        // whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose
+        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
+        // call, so `string`'s `# Safety` holds for this call. The borrow ends before return: the
+        // inner serializer copies the bytes.
         Serializer::<str>::serialize(&self.0, topic, unsafe { string(data) }?)
     }
 
@@ -68,6 +79,13 @@ impl Serializer<GenericValue> for GenericStringSerializer {
         headers: &RecordHeaders,
         data: Option<&GenericValue>,
     ) -> Result<Option<Vec<u8>>, Error> {
+        // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
+        // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
+        // invoker on the view `kafka_common_serialization_StringSerializer__as_Serializer` returns,
+        // whose rustdoc documents a NUL-terminated UTF-8 `const char *` as its `data`, and whose
+        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
+        // call, so `string`'s `# Safety` holds for this call. The borrow ends before return: the
+        // inner serializer copies the bytes.
         Serializer::<str>::serialize_with_headers(&self.0, topic, headers, unsafe { string(data) }?)
     }
 }
@@ -76,10 +94,13 @@ impl Serializer<GenericValue> for GenericStringSerializer {
 ///
 /// # Safety
 ///
-/// `self_` must be a valid string-serializer handle.
+/// `self_` must be a valid string-serializer handle, alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_common_serialization_StringSerializer_t,
 ) -> &'a SerializerHandle<GenericStringSerializer> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid string-serializer handle alive for
+    // `'a`, the `SerializerHandle::boxed` of `kafka_common_serialization_StringSerializer_new`, as
+    // `SerializerHandle::from_ptr` requires.
     unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle<GenericStringSerializer>) }
 }
 
@@ -105,6 +126,10 @@ pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafk
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Serializer(
     self_: *const kafka_common_serialization_StringSerializer_t,
 ) -> *const kafka_common_serialization_Serializer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid string-serializer handle, as
+    // `handle` requires; the reference is used only within this call, and the view returned lives
+    // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
+    // the handle".
     unsafe { handle(self_) }.as_serializer()
 }
 
@@ -119,6 +144,9 @@ pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Seriali
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer_destroy(
     self_: *mut kafka_common_serialization_StringSerializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned string-serializer handle
+    // not yet destroyed, as `SerializerHandle::destroy` requires: the `SerializerHandle::boxed` of
+    // `kafka_common_serialization_StringSerializer_new`.
     unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle<GenericStringSerializer>) }
 }
 
@@ -143,6 +171,12 @@ mod tests {
         let topic = CString::new("t").unwrap();
         let hello = CString::new("héllo").unwrap();
         let headers = box_record_headers(RecordHeaders::new());
+        // SAFETY: Test code: `handle` comes from `kafka_common_serialization_StringSerializer_new`
+        // and is destroyed once, at the end, after the last use of its view `view`; `headers` comes
+        // from `box_record_headers` and is destroyed once, after its last use; `topic`, `hello` and
+        // `latin1` outlive the calls reading them, and `latin1` is NUL-terminated; `out` is a valid
+        // local slot, read before the next call on the handle; the error is destroyed once, after
+        // it is read.
         unsafe {
             let view = kafka_common_serialization_StringSerializer__as_Serializer(handle);
             assert_eq!(view, kafka_common_serialization_StringSerializer__as_Serializer(handle));

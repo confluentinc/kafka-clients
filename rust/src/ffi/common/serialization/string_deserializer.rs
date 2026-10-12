@@ -86,10 +86,14 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
 ///
 /// # Safety
 ///
-/// `self_` must be a valid string-deserializer handle.
+/// `self_` must be a valid string-deserializer handle, alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_common_serialization_StringDeserializer_t,
 ) -> &'a DeserializerHandle<GenericStringDeserializer> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid string-deserializer handle alive
+    // for `'a`, the `DeserializerHandle::boxed` of
+    // `kafka_common_serialization_StringDeserializer_new`, as `DeserializerHandle::from_ptr`
+    // requires.
     unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle<GenericStringDeserializer>) }
 }
 
@@ -116,6 +120,10 @@ pub extern "C" fn kafka_common_serialization_StringDeserializer_new()
 pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer__as_Deserializer(
     self_: *mut kafka_common_serialization_StringDeserializer_t,
 ) -> *mut kafka_common_serialization_Deserializer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid string-deserializer handle, as
+    // `handle` requires; the reference is used only within this call, and the view returned lives
+    // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
+    // the handle".
     unsafe { handle(self_) }.as_deserializer()
 }
 
@@ -130,6 +138,9 @@ pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer__as_Deser
 pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer_destroy(
     self_: *mut kafka_common_serialization_StringDeserializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned string-deserializer
+    // handle not yet destroyed, as `DeserializerHandle::destroy` requires: the
+    // `DeserializerHandle::boxed` of `kafka_common_serialization_StringDeserializer_new`.
     unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle<GenericStringDeserializer>) }
 }
 
@@ -154,7 +165,11 @@ mod tests {
     use crate::ffi::util::{kafka_Bytes_t, kafka_string_destroy};
 
     unsafe fn take_string(out: *mut c_void) -> String {
+        // SAFETY: Test code: `out` is an owned `char *` from `into_c_string` that the deserializer
+        // just wrote, read before `kafka_string_destroy` frees it.
         let s = unsafe { CStr::from_ptr(out as *const c_char) }.to_str().unwrap().to_string();
+        // SAFETY: Test code: `out` is an owned `char *` from `into_c_string` that the deserializer
+        // just wrote, not yet freed and not used after this call.
         unsafe { kafka_string_destroy(out as *mut c_char) };
         s
     }
@@ -165,6 +180,12 @@ mod tests {
         let topic = CString::new("t").unwrap();
         let record_headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
+        // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
+        // the end, after the last use of its view `view`; `record_headers` comes from
+        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `out` is a
+        // valid local slot, and every value written to it is an owned string that `take_string`
+        // frees once; `configure` gets a null map, which reads as empty.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));

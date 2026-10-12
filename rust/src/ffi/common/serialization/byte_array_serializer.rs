@@ -46,14 +46,26 @@ pub(crate) struct GenericByteArraySerializer(ByteArraySerializer);
 /// # Safety
 ///
 /// `data` must be null or point at a `kafka_Bytes_t` whose `data` is null
-/// or points at `len` readable bytes.
+/// or points at `len` readable bytes that outlive `'a` and are not written
+/// during it.
 unsafe fn bytes<'a>(data: Option<&GenericValue>) -> Option<&'a [u8]> {
     let data = data.filter(|value| !value.is_null())?;
+    // SAFETY: Per this function's `# Safety`, `data` is non-null here and points at a
+    // `kafka_Bytes_t` whose `data` is null or points at `len` readable bytes that outlive `'a` and
+    // are not written during it, so the read of the struct is sound and `kafka_Bytes_t::as_slice`'s
+    // contract holds.
     unsafe { (*(data.as_ptr() as *const kafka_Bytes_t)).as_slice() }
 }
 
 impl Serializer<GenericValue> for GenericByteArraySerializer {
     fn serialize(&self, topic: &str, data: Option<&GenericValue>) -> Result<Option<Vec<u8>>, Error> {
+        // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
+        // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
+        // invoker on the view `kafka_common_serialization_ByteArraySerializer__as_Serializer`
+        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose
+        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
+        // call, so `bytes`'s `# Safety` holds for this call. The borrow ends before return: the
+        // inner serializer copies the bytes.
         Serializer::<[u8]>::serialize(&self.0, topic, unsafe { bytes(data) })
     }
 
@@ -63,6 +75,13 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
         headers: &RecordHeaders,
         data: Option<&GenericValue>,
     ) -> Result<Option<Vec<u8>>, Error> {
+        // SAFETY: A `GenericValue` reaching this implementation is the `void *` a C caller passed
+        // with this serializer: through a `kafka_common_serialization_Serializer_serialize*`
+        // invoker on the view `kafka_common_serialization_ByteArraySerializer__as_Serializer`
+        // returns, whose rustdoc documents a `const kafka_Bytes_t *` as its `data`, and whose
+        // `# Safety` requires `data` to be null or that representation, alive and unchanged for the
+        // call, so `bytes`'s `# Safety` holds for this call. The borrow ends before return: the
+        // inner serializer copies the bytes.
         Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, unsafe { bytes(data) })
     }
 }
@@ -71,10 +90,14 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
 ///
 /// # Safety
 ///
-/// `self_` must be a valid byte-array-serializer handle.
+/// `self_` must be a valid byte-array-serializer handle, alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_common_serialization_ByteArraySerializer_t,
 ) -> &'a SerializerHandle<GenericByteArraySerializer> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle alive
+    // for `'a`, the `SerializerHandle::boxed` of
+    // `kafka_common_serialization_ByteArraySerializer_new`, as `SerializerHandle::from_ptr`
+    // requires.
     unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle<GenericByteArraySerializer>) }
 }
 
@@ -100,6 +123,10 @@ pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Serializer(
     self_: *const kafka_common_serialization_ByteArraySerializer_t,
 ) -> *const kafka_common_serialization_Serializer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle, as
+    // `handle` requires; the reference is used only within this call, and the view returned lives
+    // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
+    // the handle".
     unsafe { handle(self_) }.as_serializer()
 }
 
@@ -114,6 +141,9 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Seri
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer_destroy(
     self_: *mut kafka_common_serialization_ByteArraySerializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned byte-array-serializer
+    // handle not yet destroyed, as `SerializerHandle::destroy` requires: the
+    // `SerializerHandle::boxed` of `kafka_common_serialization_ByteArraySerializer_new`.
     unsafe { SerializerHandle::destroy(self_ as *mut SerializerHandle<GenericByteArraySerializer>) }
 }
 
@@ -138,6 +168,12 @@ mod tests {
         let topic = CString::new("t").unwrap();
         let payload = kafka_Bytes_t::from_slice(b"raw");
         let headers = box_record_headers(RecordHeaders::new());
+        // SAFETY: Test code: `handle` comes from
+        // `kafka_common_serialization_ByteArraySerializer_new` and is destroyed once, at the end,
+        // after the last use of its view `view`; `headers` comes from `box_record_headers` and is
+        // destroyed once, after its last use; `topic` and every `kafka_Bytes_t` passed, with the
+        // bytes behind it, outlive the calls reading them; `out` is a valid local slot, read before
+        // the next call on the handle.
         unsafe {
             let view = kafka_common_serialization_ByteArraySerializer__as_Serializer(handle);
             let mut out = kafka_Bytes_t::NULL;

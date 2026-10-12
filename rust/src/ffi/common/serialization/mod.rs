@@ -77,8 +77,12 @@ impl<T: Serializer<GenericValue> + Send + Sync + 'static> SerializerHandle<T> {
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid handle of this class.
+    /// `ptr` must be a valid handle of this class, alive for `'a`.
     pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+        // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
+        // `'a`: the `Box::into_raw` of `boxed`, not yet passed to `destroy`. A `SerializerHandle`
+        // is changed only through its `OnceLock`, which allows shared access, so the shared
+        // reference is sound for `'a`.
         unsafe { &*ptr }
     }
 
@@ -97,6 +101,9 @@ impl<T: Serializer<GenericValue> + Send + Sync + 'static> SerializerHandle<T> {
     /// `ptr` must be null or an owned handle not yet destroyed.
     pub(crate) unsafe fn destroy(ptr: *mut Self) {
         if !ptr.is_null() {
+            // SAFETY: Per this function's `# Safety`, `ptr` is an owned handle not yet destroyed,
+            // so it is the `Box::into_raw` of `boxed` and is reclaimed exactly once here; a view
+            // handed out by `as_serializer` points into the handle and is never passed here.
             drop(unsafe { Box::from_raw(ptr) });
         }
     }
@@ -124,8 +131,12 @@ impl<T: Deserializer<GenericValue>> DeserializerHandle<T> {
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid handle of this class.
+    /// `ptr` must be a valid handle of this class, alive for `'a`.
     pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+        // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
+        // `'a`: the `Box::into_raw` of `boxed`, not yet passed to `destroy`. A `DeserializerHandle`
+        // is changed only through its `OnceLock` and the `Mutex` around the implementation, which
+        // both allow shared access, so the shared reference is sound for `'a`.
         unsafe { &*ptr }
     }
 
@@ -146,6 +157,9 @@ impl<T: Deserializer<GenericValue>> DeserializerHandle<T> {
     /// `ptr` must be null or an owned handle not yet destroyed.
     pub(crate) unsafe fn destroy(ptr: *mut Self) {
         if !ptr.is_null() {
+            // SAFETY: Per this function's `# Safety`, `ptr` is an owned handle not yet destroyed,
+            // so it is the `Box::into_raw` of `boxed` and is reclaimed exactly once here; a view
+            // handed out by `as_deserializer` points into the handle and is never passed here.
             drop(unsafe { Box::from_raw(ptr) });
         }
     }
@@ -164,6 +178,10 @@ mod tests {
     #[test]
     fn serializer_views_are_cached_and_share_the_implementation() {
         let handle = SerializerHandle::boxed(GenericStringSerializer::default());
+        // SAFETY: Test code: `handle` comes from `boxed` and is destroyed once, at the end, after
+        // the last use of `h` and of the views; the view passed to `take_serializer` and
+        // `serializer_ref` comes from `as_serializer` and is not owned, so `take_serializer` clones
+        // its `Arc` and frees nothing.
         unsafe {
             let h = SerializerHandle::from_ptr(handle);
             assert_eq!(h.as_serializer(), h.as_serializer());
@@ -183,6 +201,10 @@ mod tests {
     #[test]
     fn deserializer_views_are_cached_and_share_the_implementation() {
         let handle = DeserializerHandle::boxed(GenericStringDeserializer::default());
+        // SAFETY: Test code: `handle` comes from `boxed` and is destroyed once, at the end, after
+        // the last use of `h` and of the views; the view passed to `take_deserializer` and
+        // `deserializer_ref` comes from `as_deserializer` and is not owned, so `take_deserializer`
+        // clones its `Arc` and frees nothing.
         unsafe {
             let h = DeserializerHandle::from_ptr(handle);
             assert_eq!(h.as_deserializer(), h.as_deserializer());

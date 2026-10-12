@@ -125,10 +125,15 @@ pub type kafka_common_serialization_Deserializer_close_fn_t = Option<unsafe exte
 ///
 /// # Safety
 ///
-/// `deserializer` must be a valid deserializer handle.
+/// `deserializer` must be a valid deserializer handle, alive for `'a`.
 pub(crate) unsafe fn deserializer_ref<'a>(
     deserializer: *const kafka_common_serialization_Deserializer_t,
 ) -> &'a SharedDeserializer {
+    // SAFETY: Per this function's `# Safety`, `deserializer` is a valid deserializer handle alive
+    // for `'a`, as `Interface::from_ptr` requires: the `Interface::owned` box of
+    // `kafka_common_serialization_Deserializer_new`, or the `Interface` a `DeserializerHandle`
+    // caches in its `as_deserializer` `OnceLock`, which lives as long as that class handle. An
+    // `Interface` is never mutated after it is built, so the shared reference is sound for `'a`.
     unsafe { Interface::<SharedDeserializer>::from_ptr(deserializer as *const Interface<SharedDeserializer>) }.get()
 }
 
@@ -143,6 +148,11 @@ pub(crate) unsafe fn deserializer_ref<'a>(
 pub(crate) unsafe fn take_deserializer(
     deserializer: *mut kafka_common_serialization_Deserializer_t,
 ) -> Arc<SharedDeserializer> {
+    // SAFETY: Per this function's `# Safety`, `deserializer` is a valid deserializer handle, not
+    // used again by the caller when it was owned, which is what `Interface::take` requires: an
+    // owned one is the `Interface::owned` box of `kafka_common_serialization_Deserializer_new`,
+    // which `take` frees, and a view is the one a `DeserializerHandle` caches, which `take` only
+    // clones the `Arc` of.
     unsafe { Interface::take(deserializer as *mut Interface<SharedDeserializer>) }
 }
 
@@ -160,10 +170,17 @@ struct CDeserializer {
     close: kafka_common_serialization_Deserializer_close_fn_t,
 }
 
-// SAFETY: `self_` is what the C caller registered, whose thread-safety is
-// the caller's responsibility as for every interface implementation
-// (CLAUDE.md §4).
+// SAFETY: `self_` and the function pointers are what the C caller registered through
+// `kafka_common_serialization_Deserializer_new`: the C user is responsible for the thread-safety
+// of `self_`, which that function's rustdoc states, and the function pointers are trivially
+// shareable. `CDeserializer` itself never dereferences `self_`; it only passes it back to the
+// functions registered with it.
 unsafe impl Send for CDeserializer {}
+// SAFETY: `Sync` is required by the `Deserializer` trait. A `&CDeserializer` exposes only the
+// opaque `self_` and the `Copy` function pointers, which the type never dereferences; it is reached
+// only through the `SharedDeserializer` mutex `kafka_common_serialization_Deserializer_new` wraps
+// it in, so no two threads use one at once, and the C user is responsible for the thread-safety of
+// `self_` across the threads that take that lock in turn.
 unsafe impl Sync for CDeserializer {}
 
 /// Reads a C implementation's result: its error, or the `void *` it wrote.
@@ -172,6 +189,10 @@ unsafe impl Sync for CDeserializer {}
 ///
 /// `error` must be null or an owned error.
 unsafe fn collect(error: *mut kafka_common_Error_t, out: *mut c_void) -> Result<GenericValue, Error> {
+    // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle, the
+    // `box_error` handle of a `kafka_common_Error_*` constructor or a fallible FFI function that
+    // the C implementation handed over, not yet destroyed, as `take_error` requires; it is consumed
+    // here.
     match unsafe { take_error(error) } {
         Some(error) => Err(error),
         None => Ok(GenericValue::new(out)),
@@ -199,8 +220,19 @@ impl Deserializer<GenericValue> for CDeserializer {
     fn deserialize(&self, topic: &str, data: &[u8]) -> Result<GenericValue, Error> {
         let topic = owned_c_string(topic);
         let mut out = ptr::null_mut();
+        // SAFETY: `self.deserialize` and `self.self_` are the pair the C caller registered
+        // together through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle, or the client that consumed it, is
+        // destroyed, which is after this `&self` call. A `CDeserializer` lives only inside the
+        // `SharedDeserializer` mutex that function builds, and every caller locks it, so the
+        // registered functions run one at a time. The arguments are borrowed for the call, as
+        // the `_fn_t` rustdoc states: `topic` is a `CString` local, `data` a view over the
+        // `&[u8]` argument, and `out` a local slot.
         let error =
             unsafe { (self.deserialize)(self.self_, topic.as_ptr(), kafka_Bytes_t::from_slice(data), &raw mut out) };
+        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
+        // its `_fn_t` rustdoc states and `collect` requires; `out` is the slot it wrote, or the
+        // null it was initialised with.
         unsafe { collect(error, out) }
     }
 
@@ -209,8 +241,19 @@ impl Deserializer<GenericValue> for CDeserializer {
             return self.deserialize(topic, data);
         };
         let topic = owned_c_string(topic);
+        // SAFETY: `headers` is the `&dyn Headers` argument, which outlives this call, and the view
+        // built here is a local dropped at the end of this call, before `headers` is, as
+        // `headers_view` requires.
         let headers = unsafe { headers_view(headers) };
         let mut out = ptr::null_mut();
+        // SAFETY: `deserialize_with_headers` and `self.self_` are the pair the C caller registered
+        // together through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle, or the client that consumed it, is destroyed,
+        // which is after this `&self` call. A `CDeserializer` lives only inside the
+        // `SharedDeserializer` mutex that function builds, and every caller locks it, so the
+        // registered functions run one at a time. The arguments are borrowed for the call, as the
+        // `_fn_t` rustdoc states: `topic` is a `CString` local, `headers` the call-local view,
+        // `data` a view over the `&[u8]` argument, and `out` a local slot.
         let error = unsafe {
             deserialize_with_headers(
                 self.self_,
@@ -220,6 +263,9 @@ impl Deserializer<GenericValue> for CDeserializer {
                 &raw mut out,
             )
         };
+        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
+        // its `_fn_t` rustdoc states and `collect` requires; `out` is the slot it wrote, or the
+        // null it was initialised with.
         unsafe { collect(error, out) }
     }
 
@@ -229,6 +275,14 @@ impl Deserializer<GenericValue> for CDeserializer {
         };
         let topic = owned_c_string(topic);
         let mut out = ptr::null_mut();
+        // SAFETY: `deserialize_from_shared` and `self.self_` are the pair the C caller registered
+        // together through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the
+        // caller keep `self_` alive until the handle, or the client that consumed it, is destroyed,
+        // which is after this `&self` call. A `CDeserializer` lives only inside the
+        // `SharedDeserializer` mutex that function builds, and every caller locks it, so the
+        // registered functions run one at a time. The arguments are borrowed for the call, as the
+        // `_fn_t` rustdoc states: `topic` is a `CString` local, `source` and `data` views over the
+        // `&Bytes` and `&[u8]` arguments, and `out` a local slot.
         let error = unsafe {
             deserialize_from_shared(
                 self.self_,
@@ -238,6 +292,9 @@ impl Deserializer<GenericValue> for CDeserializer {
                 &raw mut out,
             )
         };
+        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
+        // its `_fn_t` rustdoc states and `collect` requires; `out` is the slot it wrote, or the
+        // null it was initialised with.
         unsafe { collect(error, out) }
     }
 
@@ -252,8 +309,20 @@ impl Deserializer<GenericValue> for CDeserializer {
             return self.deserialize_with_headers(topic, headers, data);
         };
         let topic = owned_c_string(topic);
+        // SAFETY: `headers` is the `&dyn Headers` argument, which outlives this call, and the view
+        // built here is a local dropped at the end of this call, before `headers` is, as
+        // `headers_view` requires.
         let headers = unsafe { headers_view(headers) };
         let mut out = ptr::null_mut();
+        // SAFETY: `deserialize_from_shared_with_headers` and `self.self_` are the pair the C caller
+        // registered together through `kafka_common_serialization_Deserializer_new`, whose rustdoc
+        // has the caller keep `self_` alive until the handle, or the client that consumed it, is
+        // destroyed, which is after this `&self` call. A `CDeserializer` lives only inside the
+        // `SharedDeserializer` mutex that function builds, and every caller locks it, so the
+        // registered functions run one at a time. The arguments are borrowed for the call, as the
+        // `_fn_t` rustdoc states: `topic` is a `CString` local, `headers` the call-local view,
+        // `source` and `data` views over the `&Bytes` and `&[u8]` arguments, and `out` a local
+        // slot.
         let error = unsafe {
             deserialize_from_shared_with_headers(
                 self.self_,
@@ -264,6 +333,9 @@ impl Deserializer<GenericValue> for CDeserializer {
                 &raw mut out,
             )
         };
+        // SAFETY: `error` is what the C function just returned: null or an owned error handle, as
+        // its `_fn_t` rustdoc states and `collect` requires; `out` is the slot it wrote, or the
+        // null it was initialised with.
         unsafe { collect(error, out) }
     }
 
@@ -276,12 +348,29 @@ impl Deserializer<GenericValue> for CDeserializer {
             sorted.into_iter().map(|(k, v)| (k, into_c_string(v) as *mut c_void)),
             Some(destroy_string_element),
         );
+        // SAFETY: `configure` and `self.self_` are the pair the C caller registered together
+        // through `kafka_common_serialization_Deserializer_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle, or the client that consumed it, is destroyed, which is
+        // after this `&self` call. A `CDeserializer` lives only inside the `SharedDeserializer`
+        // mutex that function builds, and every caller locks it, so the registered functions run
+        // one at a time. `configs` is the owned map `box_string_keyed_map` just built, borrowed by
+        // the call as the `_fn_t` rustdoc states, and destroyed once the call returns.
         unsafe { configure(self.self_, configs, i8::from(is_key)) };
+        // SAFETY: `configs` is the owned map `box_string_keyed_map` built above, not yet destroyed,
+        // as `kafka_Map_destroy` requires; the C `configure` only borrowed it for its call. The map
+        // owns its keys and its values, owned strings from `into_c_string` that
+        // `destroy_string_element` frees.
         unsafe { kafka_Map_destroy(configs) };
     }
 
     fn close(&mut self) {
         let Some(close) = self.close else { return };
+        // SAFETY: `close` and `self.self_` are the pair the C caller registered together through
+        // `kafka_common_serialization_Deserializer_new`, whose rustdoc has the caller keep `self_`
+        // alive until the handle, or the client that consumed it, is destroyed, which is after this
+        // `&self` call. A `CDeserializer` lives only inside the `SharedDeserializer` mutex that
+        // function builds, and every caller locks it, so the registered functions run one at a
+        // time.
         unsafe { close(self.self_) };
     }
 }
@@ -290,7 +379,10 @@ impl Deserializer<GenericValue> for CDeserializer {
 /// required, the other pointers may be `NULL` for the Java default. The
 /// caller owns `self_` and keeps it alive until the handle is destroyed
 /// with [`kafka_common_serialization_Deserializer_destroy`] or, once a
-/// client consumed it, until that client is destroyed.
+/// client consumed it, until that client is destroyed. The functions are
+/// called one at a time, under the handle's lock, but from whichever thread
+/// makes the call, so the C caller is responsible for `self_` being usable
+/// from any thread.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_Deserializer_new(
@@ -322,6 +414,9 @@ pub extern "C" fn kafka_common_serialization_Deserializer_new(
 unsafe fn deliver(result: Result<GenericValue, Error>, out: *mut *mut c_void) -> *mut kafka_common_Error_t {
     match result {
         Ok(value) => {
+            // SAFETY: Per this function's `# Safety`, `out` is a valid slot, so the write is sound;
+            // the `void *` written is the implementation's, owned as its class or C implementation
+            // documents.
             unsafe { *out = value.as_ptr() };
             ptr::null_mut()
         },
@@ -335,6 +430,8 @@ unsafe fn deliver(result: Result<GenericValue, Error>, out: *mut *mut c_void) ->
 ///
 /// As [`kafka_Bytes_t::as_slice`].
 unsafe fn slice<'a>(data: kafka_Bytes_t) -> &'a [u8] {
+    // SAFETY: This function's `# Safety` is `kafka_Bytes_t::as_slice`'s: `data.data` is null or
+    // points at `len` readable bytes that outlive `'a` and are not written during it.
     unsafe { data.as_slice() }.unwrap_or(&[])
 }
 
@@ -359,6 +456,8 @@ fn subslice_range(source: kafka_Bytes_t, data: kafka_Bytes_t) -> Option<Range<us
 unsafe fn shared(source: kafka_Bytes_t, data: kafka_Bytes_t) -> Result<(Bytes, Range<usize>), Error> {
     let range = subslice_range(source, data)
         .ok_or_else(|| Error::local_illegal_argument("data must be a sub-array of source"))?;
+    // SAFETY: Per this function's `# Safety`, `source` meets `kafka_Bytes_t::as_slice`'s contract,
+    // as `slice` requires; the borrow lasts only until `Bytes::copy_from_slice` copies it.
     Ok((Bytes::copy_from_slice(unsafe { slice(source) }), range))
 }
 
@@ -380,10 +479,20 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
     data: kafka_Bytes_t,
     out_deserialize: *mut *mut c_void,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; it stays alive for this call, and the guard on its mutex is
+    // released before return.
     let deserializer = unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: Per this function's `# Safety`, `out_deserialize` is a valid slot, as `deliver`
+    // requires, and `data` is null or a valid array, i.e. `len` readable bytes that live through
+    // this call and are not written during it, as `slice` (`kafka_Bytes_t::as_slice`) requires; the
+    // implementation reads the slice only during this call.
     unsafe { deliver(deserializer.deserialize(&topic, slice(data)), out_deserialize) }
 }
 
@@ -404,11 +513,24 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     data: kafka_Bytes_t,
     out_deserialize_with_headers: *mut *mut c_void,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid headers handle, which the caller
+    // keeps alive and does not mutate for this call, as `headers_ref` requires; the `&dyn Headers`
+    // taken from it is used only within this call.
     let headers = unsafe { headers_ref(headers) }.headers();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; it stays alive for this call, and the guard on its mutex is
+    // released before return.
     let deserializer = unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: Per this function's `# Safety`, `out_deserialize_with_headers` is a valid slot, as
+    // `deliver` requires, and `data` is null or a valid array, i.e. `len` readable bytes that live
+    // through this call and are not written during it, as `slice` (`kafka_Bytes_t::as_slice`)
+    // requires; the implementation reads the slice only during this call.
     unsafe {
         deliver(
             deserializer.deserialize_with_headers(&topic, headers, slice(data)),
@@ -436,14 +558,26 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_fro
     data: kafka_Bytes_t,
     out_deserialize_from_shared: *mut *mut c_void,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `source` and `data` are null or valid arrays, i.e.
+    // `len` readable bytes that live through this call and are not written during it, as `shared`
+    // requires; `shared` copies `source` before returning and reads only the address and length of
+    // `data`.
     let (source, range) = match unsafe { shared(source, data) } {
         Ok(shared) => shared,
         Err(error) => return box_error(error),
     };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; it stays alive for this call, and the guard on its mutex is
+    // released before return.
     let deserializer = unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: Per this function's `# Safety`, `out_deserialize_from_shared` is a valid slot, as
+    // `deliver` requires; the arrays the implementation reads are the owned copy `shared` made.
     unsafe {
         deliver(
             deserializer.deserialize_from_shared(&topic, &source, &source[range]),
@@ -471,15 +605,31 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_fro
     data: kafka_Bytes_t,
     out_deserialize_from_shared_with_headers: *mut *mut c_void,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
     let topic = unsafe { c_str_to_string(topic) };
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid headers handle, which the caller
+    // keeps alive and does not mutate for this call, as `headers_ref` requires; the `&dyn Headers`
+    // taken from it is used only within this call.
     let headers = unsafe { headers_ref(headers) }.headers();
+    // SAFETY: Per this function's `# Safety`, `source` and `data` are null or valid arrays, i.e.
+    // `len` readable bytes that live through this call and are not written during it, as `shared`
+    // requires; `shared` copies `source` before returning and reads only the address and length of
+    // `data`.
     let (source, range) = match unsafe { shared(source, data) } {
         Ok(shared) => shared,
         Err(error) => return box_error(error),
     };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; it stays alive for this call, and the guard on its mutex is
+    // released before return.
     let deserializer = unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
+    // SAFETY: Per this function's `# Safety`, `out_deserialize_from_shared_with_headers` is a valid
+    // slot, as `deliver` requires; the arrays the implementation reads are the owned copy `shared`
+    // made.
     unsafe {
         deliver(
             deserializer.deserialize_from_shared_with_headers(&topic, headers, &source, &source[range]),
@@ -502,14 +652,23 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
     configs: *const kafka_Map_t,
     is_key: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, which the caller
+    // keeps alive and does not mutate for this call, as `map_entries` requires (null reads as
+    // empty); the borrow of its entries ends when they are collected.
     let configs: HashMap<String, String> = unsafe { map_entries(configs) }
         .iter()
         .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid
+            // NUL-terminated string, as `c_str_to_string` requires; both are copied into owned
+            // `String`s, so nothing borrows them after this call.
             (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
                 c_str_to_string(v as *const c_char)
             })
         })
         .collect();
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; the reference and the guard on its mutex are used only within
+    // this call.
     unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -526,6 +685,9 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
     self_: *mut kafka_common_serialization_Deserializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
+    // `deserializer_ref` requires; the reference and the guard on its mutex are used only within
+    // this call.
     unsafe { deserializer_ref(self_) }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -543,6 +705,10 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_destroy(
     self_: *mut kafka_common_serialization_Deserializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned deserializer handle not
+    // yet destroyed, as `Interface::destroy` requires: the `Interface::owned` box of
+    // `kafka_common_serialization_Deserializer_new`. The view a class handle hands out is never
+    // passed here, as the rustdoc states.
     unsafe { Interface::<SharedDeserializer>::destroy(self_ as *mut Interface<SharedDeserializer>) }
 }
 
@@ -571,20 +737,27 @@ mod tests {
         calls: Mutex<Vec<String>>,
     }
     fn upper<'a>(self_: *mut c_void) -> &'a Upper {
+        // SAFETY: Test code: `self_` is the `&imp` the tests register, which outlives every call
+        // that passes it back.
         unsafe { &*(self_ as *const Upper) }
     }
     fn log(self_: *mut c_void, entry: String) {
         upper(self_).calls.lock().unwrap().push(entry);
     }
     fn text(data: kafka_Bytes_t) -> String {
+        // SAFETY: Test code: `data` is a view the invoker built over a live slice, read during the
+        // call.
         String::from_utf8(unsafe { slice(data) }.to_vec()).unwrap()
     }
     fn write_upper(data: kafka_Bytes_t, out: *mut *mut c_void) -> *mut kafka_common_Error_t {
         let text = text(data);
         if text == "fail" {
             let message = CString::new("cannot deserialize fail").unwrap();
+            // SAFETY: Test code: `message` outlives the constructor, which copies it; the error
+            // returned is handed to Rust, which consumes it.
             return unsafe { kafka_common_Error_serialization(message.as_ptr()) };
         }
+        // SAFETY: Test code: `out` is the valid slot the invoker passes.
         unsafe { *out = into_c_string(&text.to_uppercase()) as *mut c_void };
         ptr::null_mut()
     }
@@ -598,6 +771,8 @@ mod tests {
             self_,
             format!(
                 "deserialize {} {}",
+                // SAFETY: Test code: `topic` is the `CString` the invoker passes, alive for the
+                // call.
                 unsafe { CStr::from_ptr(topic) }.to_str().unwrap(),
                 text(data)
             ),
@@ -612,6 +787,8 @@ mod tests {
         out: *mut *mut c_void,
     ) -> *mut kafka_common_Error_t {
         let key = CString::new("k").unwrap();
+        // SAFETY: Test code: `key` outlives the call and `headers` is the view the invoker passes,
+        // alive for the call.
         let has_k = !unsafe { kafka_common_header_Headers_last_header(headers, key.as_ptr()) }.is_null();
         log(self_, format!("deserialize_with_headers k={has_k}"));
         write_upper(data, out)
@@ -627,7 +804,12 @@ mod tests {
         write_upper(data, out)
     }
     unsafe extern "C" fn c_configure(self_: *mut c_void, configs: *const kafka_Map_t, is_key: i8) {
+        // SAFETY: Test code: `configs` is the map the invoker passes, alive and unchanged for the
+        // call, whose keys and values are NUL-terminated strings.
         let entries: Vec<String> = (0..unsafe { kafka_Map_size(configs) })
+            // SAFETY: Test code: `configs` is the map the invoker passes, alive and unchanged for
+            // the call, and `i` is below its size, so each key and value is a NUL-terminated
+            // string.
             .map(|i| unsafe {
                 format!(
                     "{}={}",
@@ -643,7 +825,11 @@ mod tests {
     }
 
     unsafe fn take_string(out: *mut c_void) -> String {
+        // SAFETY: Test code: `out` is an owned `char *` a C deserializer of these tests wrote with
+        // `into_c_string`, read before `kafka_string_destroy` frees it once.
         let s = unsafe { CStr::from_ptr(out as *const c_char) }.to_str().unwrap().to_string();
+        // SAFETY: Test code: `out` is an owned `char *` from `into_c_string`, not yet freed, and
+        // not used after this call.
         unsafe { kafka_string_destroy(out as *mut c_char) };
         s
     }
@@ -665,6 +851,13 @@ mod tests {
         record_headers.add_with_key_value("k", Some(b"v")).unwrap();
         let record_headers = box_record_headers(record_headers);
         let source = b"hello world";
+        // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Deserializer_new` and
+        // is destroyed once, at the end; `imp` outlives it; `record_headers` comes from
+        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; each `out`
+        // slot is a valid local, and every value written to it is an owned string that
+        // `take_string` frees once; `map` comes from `kafka_Map_new`, borrows the `CString`s, which
+        // outlive it, and is destroyed once.
         unsafe {
             let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut out: *mut c_void = ptr::null_mut();
@@ -762,6 +955,12 @@ mod tests {
         let topic = CString::new("t").unwrap();
         let record_headers = box_record_headers(RecordHeaders::new());
         let source = b"fail ok";
+        // SAFETY: Test code: `handle` comes from `kafka_common_serialization_Deserializer_new` and
+        // is destroyed once, at the end; `imp` outlives it; `record_headers` comes from
+        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `out` is a
+        // valid local slot, every value written to it is an owned string that `take_string` frees
+        // once, and each error is destroyed once, after it is read.
         unsafe {
             let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
             let mut out: *mut c_void = ptr::dangling_mut();

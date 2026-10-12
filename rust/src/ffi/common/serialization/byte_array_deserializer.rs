@@ -84,10 +84,14 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
 ///
 /// # Safety
 ///
-/// `self_` must be a valid byte-array-deserializer handle.
+/// `self_` must be a valid byte-array-deserializer handle, alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_common_serialization_ByteArrayDeserializer_t,
 ) -> &'a DeserializerHandle<GenericByteArrayDeserializer> {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-deserializer handle
+    // alive for `'a`, the `DeserializerHandle::boxed` of
+    // `kafka_common_serialization_ByteArrayDeserializer_new`, as `DeserializerHandle::from_ptr`
+    // requires.
     unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle<GenericByteArrayDeserializer>) }
 }
 
@@ -114,6 +118,10 @@ pub extern "C" fn kafka_common_serialization_ByteArrayDeserializer_new()
 pub unsafe extern "C" fn kafka_common_serialization_ByteArrayDeserializer__as_Deserializer(
     self_: *mut kafka_common_serialization_ByteArrayDeserializer_t,
 ) -> *mut kafka_common_serialization_Deserializer_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-deserializer handle, as
+    // `handle` requires; the reference is used only within this call, and the view returned lives
+    // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
+    // the handle".
     unsafe { handle(self_) }.as_deserializer()
 }
 
@@ -128,6 +136,9 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArrayDeserializer__as_De
 pub unsafe extern "C" fn kafka_common_serialization_ByteArrayDeserializer_destroy(
     self_: *mut kafka_common_serialization_ByteArrayDeserializer_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is null or an owned byte-array-deserializer
+    // handle not yet destroyed, as `DeserializerHandle::destroy` requires: the
+    // `DeserializerHandle::boxed` of `kafka_common_serialization_ByteArrayDeserializer_new`.
     unsafe { DeserializerHandle::destroy(self_ as *mut DeserializerHandle<GenericByteArrayDeserializer>) }
 }
 
@@ -152,7 +163,11 @@ mod tests {
 
     unsafe fn take_bytes(out: *mut c_void) -> Vec<u8> {
         let bytes = out as *mut kafka_Bytes_t;
+        // SAFETY: Test code: `out` is an owned `kafka_Bytes_t *` from `box_bytes` that the
+        // deserializer just wrote, read before `kafka_Bytes_destroy` frees it.
         let copy = unsafe { (*bytes).as_slice() }.unwrap().to_vec();
+        // SAFETY: Test code: `out` is an owned `kafka_Bytes_t *` from `box_bytes` that the
+        // deserializer just wrote, not yet freed and not used after this call.
         unsafe { kafka_Bytes_destroy(bytes) };
         copy
     }
@@ -163,6 +178,12 @@ mod tests {
         let topic = CString::new("t").unwrap();
         let record_headers = box_record_headers(RecordHeaders::new());
         let source = b"hello world";
+        // SAFETY: Test code: `handle` comes from the class constructor and is destroyed once, at
+        // the end, after the last use of its view `view`; `record_headers` comes from
+        // `box_record_headers` and is destroyed once, after the last use of its `Headers` view
+        // `headers`; `topic`, `source` and the arrays outlive the calls reading them; `out` is a
+        // valid local slot, and every value written to it is an owned array that `take_bytes` frees
+        // once.
         unsafe {
             let view = kafka_common_serialization_ByteArrayDeserializer__as_Deserializer(handle);
             let headers = kafka_common_header_internals_RecordHeaders__as_Headers(record_headers);
