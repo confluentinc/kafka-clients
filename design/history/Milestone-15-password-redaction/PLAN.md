@@ -6,7 +6,8 @@ Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` afte
 (commit `35d399fa`, Actor/Critic 85, same branch). **`master` merged and the pull-request review
 answered (§12) 2026-10-02** (merge `091f6f9d`, fixup `21be3984`, Actor 85; the branch is pushed and
 its pull request is open). **Critic 85's round-4 blocker fixed (§12.4) 2026-10-02:** `Password` is
-crate-private (fixup `3d11391f`).
+crate-private (fixup `3d11391f`). **Round 6, the pull-request review, answered (§13) 2026-10-12**
+(Actor 85), after the user's merge of `master` (`384b9c2a`).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -501,10 +502,20 @@ with line references, and these rule suggestions; that filename is git-ignored e
 Two commits on the same branch, made after it was pushed and its pull request opened: a merge of
 `master`, and a fixup answering the one review comment on the pull request. No history was rewritten.
 
+That merge, `091f6f9d`, is the second of the branch's three merges of `master`. §13 follows the third.
+(Corrected in round 6, §13: this section used to read as if `091f6f9d` were the only one.)
+
+| Merge | Date | `master` at | Merged into | Brought in |
+|---|---|---|---|---|
+| `79db2f0f` | 2026-09-30 | `010d0620` | `58622a55` | #202 |
+| `091f6f9d` | 2026-10-02 | `4eb87db1` | `79db2f0f` | #204, #208, #209, #210, #211, #213, #216, #217, #218, #223, #225 |
+| `384b9c2a` | 2026-10-12, by the user | `ca5d4f3f` | `3e444252` | #184, #187, #205, #206, #207, #212 |
+
 ### 12.1 Merge of `master` (`091f6f9d`)
 
-`origin/master` at `4eb87db1` was merged into the branch at `79db2f0f`. Master's changes are kept, and so
-is every Milestone 15 redaction. The merge commit's body lists each conflicted file and its resolution.
+`origin/master` at `4eb87db1` was merged into the branch, whose tip was then the first merge, `79db2f0f`.
+Master's changes are kept, and so is every Milestone 15 redaction. The merge commit's body lists each
+conflicted file and its resolution.
 
 - **§1–§11 predate the merge and are left as written**, except §5's `types` line, which §12.4 amends.
   Master moved the crate under `rust/`, renamed
@@ -543,7 +554,10 @@ still derived `Debug`. It holds `tokens: &[DelegationToken]`. `DelegationToken`'
 `toString()`, which hides the HMAC but prints the token id (`DelegationToken.java:71-76`), while the
 response the options build masks both (`DescribeDelegationTokenResponse.java:131-140`). This is the
 Rust-only `*Options` case §11.4 rule 1 names; §11.2 item 11 covered only the Create options. The leak was
-latent, since nothing in the crate Debug-prints the options, but the type is public.
+latent, since nothing in the crate Debug-prints the options. It was also crate-internal: `common::requests`
+has been `pub(crate)` (`rust/src/common/mod.rs:59`) since #209 (`383f3d30`), which came into the branch with
+merge `091f6f9d` before this review, and only that module re-exports the options. No user could reach the
+type. (Corrected in round 6, §13: this sentence used to say that the type is public.)
 
 - **Fix.** The struct derives `Clone` and `Copy` only. A hand-written `Debug`, destructured exhaustively,
   renders each token as `DelegationToken { token_information: TokenInformation { owner, token_requester,
@@ -643,3 +657,164 @@ Java sources, so it is one of the three that §12.3 could not run.
   - With the module change alone, and none of the five link changes, `cargo doc` fails with exactly those
     five errors.
 - `COMMENTS.DONE.85.md` in this directory records the item and its resolution.
+
+## 13. Round 6: the pull-request review (2026-10-12, Actor 85)
+
+The user merged `origin/master` at `ca5d4f3f` into the branch (`384b9c2a`, the third merge in §12's
+table). The review of the pull request then raised eleven items, which the Manager relayed as Critic 85's
+round 6 after checking each against the tree. Each item but one is answered by fixups of the branch's
+commits that wrote or extended the text it corrects, and each fixup's body names the item and the review
+thread. The renumbering (item 8) is a plain `docs:` commit, because no earlier commit was wrong: master's
+#206 took the number 15 after this branch had used it. `COMMENTS.DONE.85.md` in this directory records
+each item and its resolution.
+
+### 13.1 Code (items 1–7)
+
+1. **Java's constant names** (`e1ebf780`, a fixup of `35d399fa`). The `Display` of `ConfigEntry`,
+   `ConfigSynonym` and `AlterConfigOp` said it mirrors Java's `toString()` but printed Rust `Debug` names:
+   `source=DynamicBrokerConfig`, `type=Password`, `opType=Set`, and the synonyms as a `Debug` `Vec`.
+   - `ConfigType`, `ConfigSource` and `OpType` gain a private `name()` that returns the Java constant
+     name, and an `impl Display` over it. That is the translation of Java's `Enum.toString()`, after the
+     crate's precedent in `transaction_state.rs`.
+   - The synonyms render as Java's list renders them, `[a, b]` or `[]`, each through `ConfigSynonym`'s
+     `Display`.
+   - The tests assert exact Java strings.
+2. **The SCRAM and incremental-alter-configs requests render their masked data** (`d15326ad`, a fixup of
+   `35d399fa`). Their `Display` printed counts, while Java's `toString()` renders `maskData(data)`. Each
+   now renders `XxxRequest(version=…, data=…)` of its `mask_data`, the shape the renew- and
+   expire-delegation-token requests use. This is the follow-up that Critic 85's round 3 offered
+   ("Point 4" of `critic-85-final-review.md`).
+3. **The cancel log's message comes from one function** (`e42bb1ed`, a fixup of `35d399fa`).
+   `cancelled_in_flight_request_debug_message` builds the whole DEBUG message of
+   `NetworkClient.java:405-409`, and the log line calls it inside its `log_enabled!(Debug)` branch. It
+   replaces `loggable_request` (§11.5, §12.1).
+   - The tests assert the exact message, with a distinct value for each number in it.
+   - The doc describes the module's `#![cfg_attr(not(test), expect(dead_code))]`, which master introduced,
+     and the item-level `deny(dead_code)` that overrides it, so a log line that stops calling the
+     function fails the build.
+4. **`[hidden]` without quotes** (`fd48956e` and `937ea026`, fixups of `11348821`).
+   `UserScramCredentialUpsertion`'s `Debug` renders `salt: [hidden], password: [hidden]`, as a
+   `Password`'s own `Debug` does. The second commit turns the two intra-doc links that the first added to
+   the impl's doc into code spans. `Password` is crate-private (§12.4), so `cargo doc` with `-D warnings`,
+   which CI's doc-check job runs, rejected them. Item 7's doc check found them.
+5. **Java's delegation-token assertions in full** (`a8cf51fe`, a fixup of `11348821`). The create- and
+   describe-token response tests assert `token_id: "REDACTED"` and `hmac: []`, the Rust form of Java's
+   `tokenId='REDACTED'` and `hmac=[]`. Create asserts each once. Describe uses two tokens and asserts each
+   twice. The tests cite `RequestResponseTest.java:3185-3201` and `:3241-3265`.
+6. **`ConfigTest.shouldImplementToStringProperly`** (`a20fa3cb`, a fixup of `35d399fa`). The `Config`
+   `Display` test translates its two assertions (`ConfigTest.java:77-81`), and the `Debug` test cites it
+   as its counterpart.
+7. **The doc of `SaslConfigs`'s `password` field** (`937dad94`, a fixup of `5e28201b`) now reads
+   "Rust-only. No config key is parsed into it; tests set it directly."
+
+Every new or changed test was teeth-checked: each mutation of the code it guards turned it red. The
+commit bodies list the mutations.
+
+### 13.2 Docs and memory (items 8–11)
+
+- **Item 9** (`4f58998c`, a fixup of `a963fda2`). `status.md` and `MILESTONES.md` describe the two
+  mechanisms apart. `DelegationToken` and the six SASL / delegation-token wrappers delegate `Debug` to
+  their redacting `Display`. `UserScramCredentialUpsertion` has no `Display`, as Java has no `toString()`
+  there, and hides its salt and password in a hand-written `Debug`. Both files now count three Rust-only
+  options types, and call `password` what it is: the Rust-only `SaslConfigs` field, not a config key.
+- **Item 10** (the commit that adds this section, a fixup of `3455a5c0`) corrects this plan,
+  `COMMENTS.DONE.85.md` and the Critic's record:
+  - §12 now lists the branch's three merges of `master`. It used to describe only `091f6f9d`.
+  - §12.2 and `COMMENTS.DONE.85.md` called `DescribeDelegationTokenResponseOptions` public. It was
+    crate-internal: `common::requests` has been `pub(crate)` (`rust/src/common/mod.rs:59`) since #209
+    (`383f3d30`), which came into the branch with merge `091f6f9d`, before round 4 wrote that.
+  - `critic-85-final-review.md` gains a dated note after its round-1 summary line, listing the later
+    rounds' issues. The record itself is not rewritten.
+- **Item 11** (`ce1140d8`, `9a99cdea` and `9bbd226a`, fixups of `354f8838`, `3e869523` and `afbef61f`).
+  The agent memory drops what described one machine or person: a cache size, local exclude advice, two
+  lists of shell traps, and one session's attribution note. The two notes on the pre-commit hook now
+  forbid `--no-verify` without the user's OK (§13.4).
+- **Item 8** (the plain `docs:` commit that follows the one adding this section) renumbers the milestone
+  from 15 to 17.
+
+### 13.3 Follow-ups, not done here
+
+- **Item 1's pattern in other `Display` impls.** These render an enum with `{:?}`, so they print the Rust
+  variant name where Java prints the constant name:
+  - `rust/src/admin/feature_update.rs:124` (`upgradeType`);
+  - `rust/src/admin/scram_credential_info.rs:59` (`mechanism`);
+  - `rust/src/common/config/config_resource.rs:114` (`type`; `mock_admin_client.rs:2550` asserts
+    `type=Topic`);
+  - `rust/src/admin/topic_description.rs:152` (the set of `AclOperation`s).
+
+  These render an `Option` or a collection with `{:?}`. Each needs checking against its Java
+  `toString()`, which renders an `Optional` as `Optional[x]` or `Optional.empty`, a nullable value as
+  itself or `null`, and a collection as `[a, b]`: `log_dir_description.rs:137`,
+  `list_offsets_result.rs:106`, `producer_state.rs:99`, `transaction_description.rs:114`,
+  `new_topic.rs:170`, `partition_reassignment.rs:70` and `user_scram_credentials_description.rs:62`, all
+  under `rust/src/admin/`.
+
+  The C FFI keeps its own copy of item 1's name mapping: `config_source_name` and `config_type_name`
+  (`rust/src/ffi/admin.rs:1727`, `:1744`).
+- **Item 6: the other `ConfigTest` methods are untranslated**, a gap from Milestone 11:
+  `shouldGetEntry`, `shouldReturnNullOnGetUnknownEntry`, `shouldGetAllEntries`,
+  `shouldImplementEqualsProperly`, `shouldImplementHashCodeProperly`, `testHashCodeAndEqualsWithNull`
+  and `testEquals`. Two Rust tests, `new_indexes_entries_by_name` and `equality_is_order_independent`,
+  cover some of their assertions without citing them.
+- **Item 11: one-machine statements elsewhere in the agent memory.** Seven memory files still describe
+  one machine: `/opt/homebrew` paths, and what is or is not installed, or what wedged, "on this machine".
+  They are `ffi_callback_bridging_phase1_notes.md`, `ffi_callback_bridging_phase6_notes.md`,
+  `ffi_verify_env_milestone11_cffi.md`, `phase3_transaction_manager_notes.md`,
+  `python_bindings_local_build_test_macos.md` and `python_soak_client_notes.md` under `actor-executor/`,
+  and `kafka-critic/review_ffi_callback_bridging.md`. Item 11 changed two of them only where they advised
+  `--no-verify`, and in `python_bindings_local_build_test_macos.md` also the Docker-harness sentence
+  beside that line. That file still calls its host "this macOS box" (`:3`, `:9`).
+- **`--no-verify` in a document from `master`.** `design/current/python-rules-execution-plan.md:19-20`,
+  which came with #187, still tells an agent to commit with `git commit --no-verify` and leave
+  `make verify` to the Manager. That contradicts the rule item 11 wrote into the agent memory (§13.4).
+  The document is master's, so this branch leaves it.
+
+### 13.4 The pre-commit hook: no `--no-verify` without the user's OK
+
+The user decided on 2026-10-12 that every commit runs the pre-commit hook, docs-only and memory-only
+commits included. The hook is `make verify-sandbox`: `build-rust build-c format-check check-generated
+lint test-integration test-c`. It takes about 10 minutes and needs Docker.
+
+- When the hook fails on a test the change cannot affect, that test is re-run alone, and the commit is
+  retried if it passes.
+- When the hook cannot pass for a reason outside the change, such as a wedged Docker or repeated
+  unrelated failures, the agent stops and asks the user, through the Manager when it runs as a subagent.
+  It says which of the hook's checks it ran and which are still owed. Only the user's own OK allows
+  `--no-verify`.
+- The agent memory used to advise `--no-verify` after running the cargo checks directly, or when Docker
+  was wedged. Item 11 rewrote those notes.
+
+Later that day the user gave that OK for items 3–11 of this round. §13.5 records how each commit was
+verified.
+
+### 13.5 How each commit was verified
+
+- **Items 1 and 2 ran the full hook.** Item 1 (`e1ebf780`) passed the first time. The first attempt at
+  item 2 (`d15326ad`) failed in `test-integration` on two `producer_transactions_test` tests that wait
+  for the broker to expire a producer id or a transaction. Each passed alone, and the second attempt
+  passed.
+- **Item 3's hook runs failed outside the change.**
+  - The first failed on `consumer_bounce_test::test_async_subscribe_when_topic_unavailable`, which passed
+    alone. The change cannot reach it: it changes only a DEBUG message, and the integration harness's log
+    filter keeps DEBUG off.
+  - The second failed on the three-broker reassignment test, and then Docker's engine died mid-run. After
+    a restart, both tests passed alone.
+  - The third failed 132 of its 288 integration tests, each because Docker's address pools were
+    exhausted by the networks the killed run had left behind.
+- **Items 3–11 skipped the hook, with the user's OK** (2026-10-12). The Manager made those commits with
+  `--no-verify`, because the permission check refused that flag for the Actor. Each commit first passed
+  the fast checks for its kind:
+  - code: `cargo build`, the tests of the module it changes, `cargo xtask format-check` and
+    `cargo xtask lint`; item 7 and item 4's doc fix also ran
+    `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`;
+  - plan and status pages: `git diff --cached --check`;
+  - agent memory: `git diff --cached --check`, a search for internal ticket ids, and a check that every
+    link the change touches resolves.
+- **The commits verified that way**, in order: `e42bb1ed` (item 3), `fd48956e` (item 4), `a8cf51fe`
+  (item 5), `a20fa3cb` (item 6), `937ea026` (item 4's doc links, which item 7's doc check found),
+  `937dad94` (item 7), `4f58998c` (item 9), `ce1140d8`, `9a99cdea` and `9bbd226a` (item 11), the commit
+  that adds this section (item 10) and the plain `docs:` commit that follows it (item 8).
+- **The full gate runs once on the final tree, after the renumbering commit:** `make verify-sandbox`;
+  `cargo test --all-features --lib` from `rust/`, because the hook runs none of the crate's unit
+  tests; `make doc-check`, which the hook does not run and CI runs as a job of its own;
+  `make package-check`; and `make check-bindings`.

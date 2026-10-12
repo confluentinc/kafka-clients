@@ -4,6 +4,20 @@ Java references point to Apache Kafka at `26b251a451ce941d3d7a55e6487bcb7f16b5ad
 
 The one in-scope issue was resolved in `868ea49d` and moved to `COMMENTS.DONE.85.md`. No in-scope issue is open.
 
+> **Note (2026-10-12, Actor 85, round 6 item 10):** the line above describes round 1. Later rounds added
+> entries to `COMMENTS.DONE.85.md`:
+> - Round 4 added two. `DescribeDelegationTokenResponseOptions`'s derived `Debug` was relayed from the
+>   pull-request review and resolved in `21be3984`. The public `Password` that CI's
+>   `check-public-audience` rejects was this record's round-4 blocker, resolved in `3d11391f`.
+> - Rounds 2 and 3 added none, and round 5 found nothing.
+> - Round 6 relayed eleven items from the pull-request review: Java's constant names in the `Display` of
+>   `ConfigEntry`, `ConfigSynonym` and `AlterConfigOp`; the masked data in the `Display` of the SCRAM and
+>   incremental-alter-configs requests; the cancel log's exact message under test; `[hidden]` without
+>   quotes in `UserScramCredentialUpsertion`'s `Debug`; Java's delegation-token assertions in full;
+>   `ConfigTest.shouldImplementToStringProperly`; the doc of the `SaslConfigs` `password` field; the
+>   renumbering of this milestone; and corrections to the status pages, the plan and these records, and
+>   the agent memory. Plan §13 lists their commits.
+
 ## Out of phase scope — candidates for Phase 2 (not to be fixed in this phase)
 
 I checked each line independently against the Java `toString()` at the pinned commit.
