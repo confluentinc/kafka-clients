@@ -17,8 +17,9 @@
 rethrows out of ``send()`` (``KafkaProducer.java:1069-1081``) rather than
 giving to the callback and the future, which need the topic's metadata first;
 the record size check, which runs after the metadata wait too
-(``KafkaProducer.java:1022-1024``); and an open transaction, which
-``begin_transaction()`` without a drain needs. Skips without Docker
+(``KafkaProducer.java:1022-1024``); an open transaction, for
+``begin_transaction()`` not waiting; and a record the producer takes on the
+calling thread, which needs the topic's metadata cached. Skips without Docker
 (``kafka_broker``)."""
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka.common import KafkaError
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_serializer
 from confluent_kafka.producer import (
@@ -54,8 +56,14 @@ def _configs(broker: Any) -> dict[str, Any]:
 
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
     # TransactionManager.maybeAddPartition's IllegalStateException
-    # (TransactionManager.java:443), rethrown by doSend's catch (Exception e):
-    # send() raises it, the callback does not run.
+    # (TransactionManager.java:462), rethrown by doSend's catch (Exception e)
+    # (KafkaProducer.java:1070-1073): send() raises it, and the callback does
+    # not run then. doSend appends the record before maybeAddPartition
+    # (KafkaProducer.java:1029-1038), so the record stays in its batch, which
+    # the sender does not drain until the partition is in a transaction
+    # (RecordAccumulator.java:815-818). The forced close aborts the batch with
+    # "Producer is closed forcefully." (Sender.java:287-295,
+    # RecordAccumulator.java:1146), and the callback runs once, then.
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -69,14 +77,22 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
                                   "completing a call to initTransactions")
         else:
             raise AssertionError("send() did not raise")
+        assert calls == []
     finally:
         producer.close(timeout=0)
-    assert calls == []
+    assert len(calls) == 1
+    assert type(calls[0]) is KafkaError
+    assert str(calls[0]) == "Producer is closed forcefully."
 
 
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
-    # manager is READY (TransactionManager.java:446, with Java's double space).
+    # manager is READY (TransactionManager.java:465, with Java's double space).
+    # As doSend appends before maybeAddPartition (KafkaProducer.java:1029-1038),
+    # the refused record stays in its batch. The next send to the partition,
+    # inside a transaction, adds the partition to it, and the batch is
+    # committed with both records: the second record's offset is 1 and both
+    # callbacks run, each once.
     topic = _topic(kafka_broker)
     calls: list[Exception | None] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -93,18 +109,20 @@ def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
             raise AssertionError("send() did not raise")
         assert calls == []
 
-        # Inside a transaction the same send goes through, and its callback runs.
+        # Inside a transaction the same send goes through; the refused record
+        # is in the same batch, ahead of it.
         producer.begin_transaction()
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="value"),
                                callback=lambda metadata, exception: calls.append(exception))
         producer.commit_transaction()
-        assert future.result(timeout=30).offset() >= 0
-        assert calls == [None]
+        assert future.result(timeout=30).offset() == 1
+        assert calls == [None, None]
     finally:
         producer.close(timeout=0)
 
 
 def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
+    # The async peer of the test above: the same batch, offsets and callbacks.
     topic = _topic(kafka_broker)
 
     async def main() -> None:
@@ -130,8 +148,8 @@ def test_async_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
                 record=ProducerRecord(topic=topic, key="key", value="value"),
                 callback=lambda metadata, exception: calls.append(exception))
             await producer.commit_transaction()
-            assert (await asyncio.wait_for(future, 30)).offset() >= 0
-            assert calls == [None]
+            assert (await asyncio.wait_for(future, 30)).offset() == 1
+            assert calls == [None, None]
         finally:
             await producer.close(timeout=0)
 
@@ -236,10 +254,9 @@ def _invalid_begin(transactional_id: str) -> str:
 def test_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its_records(
         kafka_broker: Any) -> None:
     # Critic 75 N1: Java's beginTransaction does not wait. A record sent in the
-    # open transaction and still in the batching engine (its handover held)
-    # stays in that transaction: a second begin_transaction() fails at once
-    # with the transaction manager's invalid transition, and the
-    # commit_transaction() after it drains and commits the record
+    # open transaction stays in that transaction: a second begin_transaction()
+    # fails at once with the transaction manager's invalid transition, and the
+    # commit_transaction() after it commits the record
     # (producer-transactions.md §13).
     topic = _topic(kafka_broker)
     configs = _configs(kafka_broker)
@@ -248,15 +265,12 @@ def test_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its_recor
     try:
         producer.init_transactions()
         producer.begin_transaction()
-        _lib.Producer_test_set_paused(producer._c_producer, True)  # noqa: SLF001
         future = producer.send(record=ProducerRecord(topic=topic, key="key", value="value"))
         start = time.monotonic()
         with pytest.raises(IllegalStateError) as err:
             producer.begin_transaction()
         assert time.monotonic() - start < 1
         assert str(err.value) == _invalid_begin(configs["transactional.id"])
-        assert not future.done()
-        _lib.Producer_test_set_paused(producer._c_producer, False)  # noqa: SLF001
         producer.commit_transaction()
         assert future.result(timeout=30).offset() >= 0
     finally:
@@ -274,7 +288,6 @@ def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its
         try:
             await producer.init_transactions()
             await producer.begin_transaction()
-            _lib.Producer_test_set_paused(producer._c_producer, True)  # noqa: SLF001
             future = await producer.send(
                 record=ProducerRecord(topic=topic, key="key", value="value"))
             start = time.monotonic()
@@ -282,12 +295,71 @@ def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its
                 await producer.begin_transaction()
             assert time.monotonic() - start < 1
             assert str(err.value) == _invalid_begin(configs["transactional.id"])
-            assert not future.done()
-            _lib.Producer_test_set_paused(producer._c_producer, False)  # noqa: SLF001
             await producer.commit_transaction()
             assert (await asyncio.wait_for(future, 30)).offset() >= 0
         finally:
             await producer.close(timeout=0)
+
+    asyncio.run(main())
+
+
+def _answers(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """What ``_lib.Producer_send`` returned for each record: True for one the
+    producer took on the calling thread, None for one it queued and answered
+    for later, an error handle for one it refused."""
+    answers: list[Any] = []
+    real = _lib.Producer_send
+
+    def spy(*args: Any) -> Any:
+        answer = real(*args)
+        answers.append(answer)
+        return answer
+
+    monkeypatch.setattr(_lib, "Producer_send", spy)
+    return answers
+
+
+def test_a_send_with_cached_metadata_is_taken_on_the_calling_thread(
+        kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The first record of a topic needs its metadata, so the producer cannot
+    # take it at once: it is queued and send() waits for the producer's
+    # answer, as Java's send() blocks in waitOnMetadata. With the metadata
+    # cached, the next record is appended on the calling thread, as Java's
+    # is, and send() returns without waiting.
+    topic = _topic(kafka_broker)
+    answers = _answers(monkeypatch)
+    producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap},
+                             key_serializer=string_serializer(),
+                             value_serializer=string_serializer())
+    try:
+        first = producer.send(record=ProducerRecord(topic=topic, partition=0, key="k", value="a"))
+        second = producer.send(record=ProducerRecord(topic=topic, partition=0, key="k", value="b"))
+        assert answers == [None, True]
+        assert first.result(timeout=30).offset() == 0
+        assert second.result(timeout=30).offset() == 1
+    finally:
+        producer.close()
+
+
+def test_an_async_send_with_cached_metadata_is_taken_on_the_calling_thread(
+        kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    topic = _topic(kafka_broker)
+    answers = _answers(monkeypatch)
+
+    async def main() -> None:
+        producer = AsyncKafkaProducer(
+            configs={"bootstrap.servers": kafka_broker.external_bootstrap},
+            key_serializer=string_serializer(), value_serializer=string_serializer())
+        try:
+            first = await producer.send(
+                record=ProducerRecord(topic=topic, partition=0, key="k", value="a"))
+            second = await producer.send(
+                record=ProducerRecord(topic=topic, partition=0, key="k", value="b"))
+            assert answers == [None, True]
+            assert (await asyncio.wait_for(first, 30)).offset() == 0
+            assert (await asyncio.wait_for(second, 30)).offset() == 1
+        finally:
+            await producer.close()
 
     asyncio.run(main())
 
