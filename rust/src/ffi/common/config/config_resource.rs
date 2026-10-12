@@ -20,7 +20,7 @@
 
 #![expect(non_camel_case_types)]
 
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 
 use crate::common::config::ConfigResource;
 use crate::common::config::config_resource::Type;
@@ -238,6 +238,33 @@ pub(crate) unsafe fn config_resource_ref<'a>(
     // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(resource) }.resource
+}
+
+/// Frees a `kafka_common_config_ConfigResource_t *` element of an owned
+/// list, or key of an owned map.
+///
+/// # Safety
+///
+/// `element` must be an owned config-resource handle not yet destroyed.
+pub(crate) unsafe fn destroy_config_resource_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is an owned config-resource handle not yet
+    // destroyed, as `kafka_common_config_ConfigResource_destroy` requires.
+    unsafe { kafka_common_config_ConfigResource_destroy(element as *mut kafka_common_config_ConfigResource_t) }
+}
+
+/// Compares two `kafka_common_config_ConfigResource_t *` keys by value, for
+/// `kafka_Map_get` on a Rust-built map keyed by config resource.
+///
+/// # Safety
+///
+/// `a` and `b` must be valid config-resource handles, alive for this call.
+pub(crate) unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
+    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid config-resource handles, alive
+    // for this call, as `config_resource_ref` requires; both borrows end with the comparison.
+    unsafe {
+        config_resource_ref(a as *const kafka_common_config_ConfigResource_t)
+            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t)
+    }
 }
 
 /// Hands `resource` to C as an owned handle, freed with

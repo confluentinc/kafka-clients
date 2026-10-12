@@ -23,8 +23,7 @@ use crate::common::config::ConfigResource;
 use crate::ffi::admin::config::{box_config, destroy_config_element};
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
 use crate::ffi::common::config::config_resource::{
-    box_config_resource, config_resource_ref, kafka_common_config_ConfigResource_destroy,
-    kafka_common_config_ConfigResource_t,
+    box_config_resource, config_resource_key_eq, destroy_config_resource_element,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
@@ -56,31 +55,6 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeConfigsResult_t) -> &'a R
     // `box_result::<DescribeConfigsResult, _>` (in `box_describe_configs_result`), as `result_ref`
     // requires.
     unsafe { result_ref(self_) }
-}
-
-/// Frees a `kafka_common_config_ConfigResource_t *` key of an owned map.
-///
-/// # Safety
-///
-/// `element` must be an owned config-resource handle not yet destroyed.
-unsafe fn destroy_config_resource_element(element: *mut c_void) {
-    // SAFETY: Per this function's `# Safety`, `element` is an owned config-resource handle not yet
-    // destroyed, as `kafka_common_config_ConfigResource_destroy` requires.
-    unsafe { kafka_common_config_ConfigResource_destroy(element as *mut kafka_common_config_ConfigResource_t) }
-}
-
-/// Compares two `kafka_common_config_ConfigResource_t *` keys by value.
-///
-/// # Safety
-///
-/// `a` and `b` must be valid config-resource handles, alive for this call.
-unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid config-resource handles, alive
-    // for this call, as `config_resource_ref` requires; both borrows end with the comparison.
-    unsafe {
-        config_resource_ref(a as *const kafka_common_config_ConfigResource_t)
-            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t)
-    }
 }
 
 /// The C shape of `all()`'s value: an owned map, sorted by the resource's
@@ -185,6 +159,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(self_: *mut k
 mod tests {
     use super::*;
     use crate::common::config::config_resource::Type;
+    use crate::ffi::common::config::config_resource::{
+        kafka_common_config_ConfigResource_destroy, kafka_common_config_ConfigResource_t,
+    };
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_get, kafka_Map_put, kafka_Map_size};
 
     /// A null key in a map keyed by value equals only a null key: the

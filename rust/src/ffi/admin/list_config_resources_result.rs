@@ -19,9 +19,7 @@ use std::ffi::c_void;
 
 use crate::admin::ListConfigResourcesResult;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_list_element, destroy_result, result_ref};
-use crate::ffi::common::config::config_resource::{
-    box_config_resource, kafka_common_config_ConfigResource_destroy, kafka_common_config_ConfigResource_t,
-};
+use crate::ffi::common::config::config_resource::{box_config_resource, destroy_config_resource_element};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
 use crate::ffi::util::box_list;
@@ -31,17 +29,6 @@ use crate::ffi::util::box_list;
 #[repr(C)]
 pub struct kafka_admin_ListConfigResourcesResult_t {
     _private: [u8; 0],
-}
-
-/// Frees a `kafka_common_config_ConfigResource_t *` element of an owned list.
-///
-/// # Safety
-///
-/// `element` must be an owned config-resource handle not yet destroyed.
-unsafe fn destroy_config_resource_element(element: *mut c_void) {
-    // SAFETY: Per this function's `# Safety`, `element` is an owned config-resource handle not yet
-    // destroyed, as `kafka_common_config_ConfigResource_destroy` requires.
-    unsafe { kafka_common_config_ConfigResource_destroy(element as *mut kafka_common_config_ConfigResource_t) }
 }
 
 /// Hands `result` to C (used by the RPC functions in `rpc.rs`).
