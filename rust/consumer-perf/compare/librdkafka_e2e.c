@@ -235,6 +235,11 @@ typedef struct {
     const char *extra_conf[32]; /* repeatable --conf k=v via rd_kafka_conf_set */
     int extra_conf_n;
     int no_produce; /* --no-produce: an external producer feeds the topic */
+    /* --producer-config: Java-form properties file forwarded verbatim to the
+     * spawned kafka-producer-perf-test.sh as --producer.config, so the load
+     * generator can authenticate (SASL_SSL etc.). Mirrors the Rust harness's
+     * --client-config forwarding. NULL => plain bootstrap only. */
+    const char *producer_config;
 } args_t;
 
 /* ----------------------- producer spawn (fork+exec) -------------------- */
@@ -272,21 +277,31 @@ static pid_t spawn_producer(const args_t *a, int64_t total_records) {
             if (devnull > 2)
                 close(devnull);
         }
-        char *const argv[] = {
-            bin_path,
-            (char *)"--topic",
-            (char *)a->topic,
-            (char *)"--num-records",
-            num_records,
-            (char *)"--record-size",
-            record_size,
-            (char *)"--throughput",
-            throughput,
-            (char *)"--producer-props",
-            bootstrap_prop,
-            (char *)"acks=1",
-            NULL,
-        };
+        char *argv[16];
+        int n = 0;
+        argv[n++] = bin_path;
+        argv[n++] = (char *)"--topic";
+        argv[n++] = (char *)a->topic;
+        argv[n++] = (char *)"--num-records";
+        argv[n++] = num_records;
+        argv[n++] = (char *)"--record-size";
+        argv[n++] = record_size;
+        argv[n++] = (char *)"--throughput";
+        argv[n++] = throughput;
+        if (a->producer_config) {
+            /* Security (and bootstrap) come from the properties file; only
+             * acks stays on the command line. Same shape as the Rust
+             * harness's spawn_producer with --client-config. */
+            argv[n++] = (char *)"--producer.config";
+            argv[n++] = (char *)a->producer_config;
+            argv[n++] = (char *)"--producer-props";
+            argv[n++] = (char *)"acks=1";
+        } else {
+            argv[n++] = (char *)"--producer-props";
+            argv[n++] = bootstrap_prop;
+            argv[n++] = (char *)"acks=1";
+        }
+        argv[n] = NULL;
         execv(bin_path, argv);
         perror("execv kafka-producer-perf-test.sh");
         _exit(127);
@@ -456,6 +471,7 @@ int main(int argc, char **argv) {
     a.queued_max_messages_kbytes = NULL;
     a.extra_conf_n = 0;
     a.no_produce = 0;
+    a.producer_config = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -514,6 +530,8 @@ int main(int argc, char **argv) {
                 a.extra_conf[a.extra_conf_n++] = NEXT();
         } else if (!strcmp(arg, "--no-produce"))
             a.no_produce = 1;
+        else if (!strcmp(arg, "--producer-config"))
+            a.producer_config = NEXT();
         else {
             fprintf(stderr, "unknown arg: %s\n", arg);
             return 2;
@@ -667,6 +685,7 @@ int main(int argc, char **argv) {
     /* Run-level current-RSS aggregation (avg/min/max over interval samples). */
     double rss_sum = 0.0, rss_min = 1e18, rss_max = 0.0;
     int rss_samples = 0;
+    double cpu_sum = 0.0, cpu_min = 1e18, cpu_max = 0.0;
 
     /* JSONL sink: <results_dir>/<group_id>/metrics.jsonl so each run lands in
      * its own directory (e.g. cmp-librdkafka-c2). */
@@ -808,6 +827,9 @@ int main(int argc, char **argv) {
             if (rss_mb < rss_min) rss_min = rss_mb;
             if (rss_mb > rss_max) rss_max = rss_mb;
             rss_samples++;
+            cpu_sum += cpu;
+            if (cpu < cpu_min) cpu_min = cpu;
+            if (cpu > cpu_max) cpu_max = cpu;
             int64_t icount = interval_hist.count;
             double throughput =
                 elapsed_s > 0 ? (double)icount / elapsed_s : 0.0;
@@ -870,6 +892,8 @@ int main(int argc, char **argv) {
     double sd = hist_stddev(&overall);
     double rss_avg = rss_samples > 0 ? rss_sum / rss_samples : 0.0;
     if (rss_samples == 0) rss_min = 0.0;
+    double cpu_avg = rss_samples > 0 ? cpu_sum / rss_samples : 0.0;
+    if (rss_samples == 0) cpu_min = 0.0;
     double avg_records_per_batch =
         batch_calls > 0 ? (double)batch_records / (double)batch_calls : 0.0;
     /* Records-per-batch distribution (post-warmup, non-empty batches). */
@@ -900,6 +924,8 @@ int main(int argc, char **argv) {
            "p95=%lld p99=%lld p99.9=%lld max=%lld\n",
            (long long)mn, avg, sd, (long long)p50, (long long)p90, (long long)p95,
            (long long)p99, (long long)p999, (long long)mx);
+    printf("CPU (%% one core):   avg=%.1f min=%.1f max=%.1f (%d samples)\n",
+           cpu_avg, cpu_min, cpu_max, rss_samples);
     printf("RSS (MB, current):  avg=%.1f min=%.1f max=%.1f (%d samples)\n",
            rss_avg, rss_min, rss_max, rss_samples);
     printf("======================================================================\n");
@@ -916,6 +942,7 @@ int main(int argc, char **argv) {
             "\"lat_p50_ms\":%lld,"
             "\"lat_p90_ms\":%lld,\"lat_p95_ms\":%lld,\"lat_p99_ms\":%lld,"
             "\"lat_p999_ms\":%lld,\"lat_max_ms\":%lld,"
+            "\"cpu_avg_pct\":%.1f,\"cpu_min_pct\":%.1f,\"cpu_max_pct\":%.1f,"
             "\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}\n",
             a.protocol, (long long)overall.count, measured_duration_s,
             throughput_msg_s, throughput_mib_s, a.max_poll_records,
@@ -924,7 +951,7 @@ int main(int argc, char **argv) {
             rpp_mean, (long long)rpp_p50, (long long)rpp_p99, (long long)rpp_max,
             (long long)mn, avg, sd, (long long)p50, (long long)p90, (long long)p95,
             (long long)p99, (long long)p999, (long long)mx,
-            rss_avg, rss_min, rss_max);
+            cpu_avg, cpu_min, cpu_max, rss_avg, rss_min, rss_max);
     fflush(jsonl);
     fclose(jsonl);
 
