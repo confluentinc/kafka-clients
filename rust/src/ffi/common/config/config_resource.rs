@@ -94,6 +94,9 @@ pub(crate) fn type_singleton(value: Type) -> *const kafka_common_config_ConfigRe
 ///
 /// `value` must be a singleton returned by this module.
 pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Type_t) -> Type {
+    // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
+    // a pointer to an element of the `static` `TYPES` array (`type_singleton`), so it points at a
+    // live, initialised `Type`, which is `Copy` and read out here.
     unsafe { *(value as *const Type) }
 }
 
@@ -154,6 +157,8 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const ka
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
     self_: *const kafka_common_config_ConfigResource_Type_t,
 ) -> kafka_common_config_ConfigResource_Type_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `type_of` requires; the value is copied out.
     type_enum_of(unsafe { type_of(self_) })
 }
 
@@ -170,6 +175,8 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
     self_: *const kafka_common_config_ConfigResource_Type_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `type_of` requires; the value is copied out.
     unsafe { type_of(self_) }.id()
 }
 
@@ -207,7 +214,16 @@ impl ConfigResourceInner {
     }
 }
 
+/// What a handle points at.
+///
+/// # Safety
+///
+/// `resource` must be a valid config-resource handle, alive for `'a`.
 unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -> &'a ConfigResourceInner {
+    // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle alive
+    // for `'a`, so it points at a live `ConfigResourceInner`, the `Box::into_raw` of
+    // `box_config_resource` (no view of this type is handed out). Nothing mutates a
+    // `ConfigResourceInner` while a handle to it exists, so the shared reference is sound for `'a`.
     unsafe { &*(resource as *const ConfigResourceInner) }
 }
 
@@ -215,10 +231,12 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -
 ///
 /// # Safety
 ///
-/// `resource` must be a valid config-resource handle.
+/// `resource` must be a valid config-resource handle, alive for `'a`.
 pub(crate) unsafe fn config_resource_ref<'a>(
     resource: *const kafka_common_config_ConfigResource_t,
 ) -> &'a ConfigResource {
+    // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle, as
+    // `inner_ref` requires; the reference returned lives for the same `'a`.
     &unsafe { inner_ref(resource) }.resource
 }
 
@@ -241,6 +259,10 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     resource_type: *const kafka_common_config_ConfigResource_Type_t,
     name: *const c_char,
 ) -> *mut kafka_common_config_ConfigResource_t {
+    // SAFETY: Per this function's `# Safety`, `resource_type` is a type singleton, as `type_of`
+    // requires, and its value is copied out; `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows either
+    // argument after this call.
     box_config_resource(ConfigResource::new(unsafe { type_of(resource_type) }, unsafe {
         c_str_to_string(name)
     }))
@@ -256,6 +278,9 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
     self_: *const kafka_common_config_ConfigResource_t,
 ) -> *const kafka_common_config_ConfigResource_Type_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
+    // `config_resource_ref` requires; the value is copied out and mapped to its static singleton,
+    // so the borrow lasts for this call only.
     type_singleton(unsafe { config_resource_ref(self_) }.r#type())
 }
 
@@ -269,6 +294,9 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
     self_: *const kafka_common_config_ConfigResource_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
+    // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
+    // as the handle; that is the rustdoc's "borrowed from the handle".
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
@@ -283,6 +311,8 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
     self_: *const kafka_common_config_ConfigResource_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
+    // `config_resource_ref` requires; the reference is used only within this call.
     i8::from(unsafe { config_resource_ref(self_) }.is_default())
 }
 
@@ -296,6 +326,9 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
     self_: *const kafka_common_config_ConfigResource_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
+    // `config_resource_ref` requires; the result is copied into an owned value before return, so
+    // the borrow lasts for this call only.
     into_c_string(&unsafe { config_resource_ref(self_) }.to_string())
 }
 
@@ -309,6 +342,9 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_destroy(self_: *mut kafka_common_config_ConfigResource_t) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // handle not yet destroyed, i.e. the `Box::into_raw` of a `ConfigResourceInner` in
+        // `box_config_resource`, so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut ConfigResourceInner) });
     }
 }
@@ -325,6 +361,8 @@ mod tests {
     fn type_singletons_round_trip_and_follow_the_rust_enum() {
         for (index, &value) in TYPES.iter().enumerate() {
             let handle = type_singleton(value);
+            // SAFETY: Test code: every handle passed is a singleton from `type_singleton`, which
+            // points into the static `TYPES` array and is never freed.
             unsafe {
                 assert_eq!(type_of(handle), value);
                 assert_eq!(kafka_common_config_ConfigResource_Type__enum(handle) as usize, index);
@@ -344,6 +382,8 @@ mod tests {
         assert_eq!(kafka_common_config_ConfigResource_Type_broker(), type_singleton(Type::Broker));
         assert_eq!(kafka_common_config_ConfigResource_Type_topic(), type_singleton(Type::Topic));
         assert_eq!(kafka_common_config_ConfigResource_Type_unknown(), type_singleton(Type::Unknown));
+        // SAFETY: Test code: the handle passed is a singleton from this module's getter, which
+        // points into the static `TYPES` array and is never freed.
         unsafe {
             assert_eq!(
                 kafka_common_config_ConfigResource_Type_id(kafka_common_config_ConfigResource_Type_topic()),
@@ -360,6 +400,10 @@ mod tests {
     fn resource_getters_and_default_follow_java() {
         let name = CString::new("orders").unwrap();
         let empty = CString::new("").unwrap();
+        // SAFETY: Test code: the type arguments are singletons from this module's getters, `name`
+        // and `empty` are `CString`s that outlive the constructors copying them, the name view is
+        // read only while `topic` is alive, and every owned handle (the resources, the string) is
+        // destroyed once.
         unsafe {
             let topic =
                 kafka_common_config_ConfigResource_new(kafka_common_config_ConfigResource_Type_topic(), name.as_ptr());

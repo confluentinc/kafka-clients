@@ -66,6 +66,9 @@ pub(crate) fn singleton(value: SslClientAuth) -> *const kafka_common_config_SslC
 ///
 /// `value` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(value: *const kafka_common_config_SslClientAuth_t) -> SslClientAuth {
+    // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
+    // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
+    // live, initialised `SslClientAuth`, which is `Copy` and read out here.
     unsafe { *(value as *const SslClientAuth) }
 }
 
@@ -104,6 +107,8 @@ pub extern "C" fn kafka_common_config_SslClientAuth_none() -> *const kafka_commo
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
     self_: *const kafka_common_config_SslClientAuth_t,
 ) -> kafka_common_config_SslClientAuth_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -119,6 +124,9 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
     key: *const c_char,
 ) -> *const kafka_common_config_SslClientAuth_t {
+    // SAFETY: Per this function's `# Safety`, `key` is null or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned value, so nothing borrows it after
+    // this call.
     let key = unsafe { c_str_to_option(key) };
     SslClientAuth::for_config(key.as_deref()).map_or(std::ptr::null(), singleton)
 }
@@ -134,6 +142,8 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_to_string(
     self_: *const kafka_common_config_SslClientAuth_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -148,6 +158,8 @@ mod tests {
     fn singletons_round_trip_and_match_their_enumerator() {
         for (index, &value) in VARIANTS.iter().enumerate() {
             let handle = singleton(value);
+            // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
+            // into the static `VARIANTS` array and is never freed.
             unsafe {
                 assert_eq!(value_of(handle), value);
                 assert_eq!(kafka_common_config_SslClientAuth__enum(handle) as usize, index);
@@ -159,6 +171,10 @@ mod tests {
 
     #[test]
     fn methods_follow_the_rust_enum() {
+        // SAFETY: Test code: every handle passed is a singleton from `singleton` or this module's
+        // getters, which point into the static `VARIANTS` array and are never freed; each string
+        // from `to_string` is destroyed once, after `for_config` reads it; `lower` and `bogus` are
+        // `CString`s that outlive the calls reading them.
         unsafe {
             for &value in &VARIANTS {
                 let s = kafka_common_config_SslClientAuth_to_string(singleton(value));
