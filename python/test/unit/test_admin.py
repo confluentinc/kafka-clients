@@ -511,6 +511,20 @@ def test_timeout_accepts_float_and_timedelta():
         assert admin.list_topics(timeout=dt.timedelta(seconds=5), list_internal=True)
 
 
+def test_a_timeout_above_int32_max_ms_raises_instead_of_wrapping():
+    # Java's `Integer timeoutMs` cannot hold 2**31 ms; the extension's
+    # int32_t cast used to wrap it to a negative value (the default timeout).
+    import datetime as dt
+    with MockAdminClient(1) as admin:
+        _created(admin, "t1")
+        with pytest.raises(OverflowError, match="does not fit a 32-bit signed int"):
+            admin.list_topics(timeout=dt.timedelta(milliseconds=2**31), list_internal=True)
+        with pytest.raises(OverflowError):
+            admin.describe_cluster(timeout=float(2**31) / 1000)
+        # INT32_MAX itself is still a valid timeout.
+        assert admin.list_topics(timeout=dt.timedelta(milliseconds=2**31 - 1), list_internal=True)
+
+
 # -- asyncio API -------------------------------------------------------------
 
 async def test_async_create_and_describe():

@@ -5506,6 +5506,19 @@ static PyObject* kafka_principal_to_py(const kafka_common_security_auth_KafkaPri
 #define ADMIN_SET_TIMEOUT(Rpc, options, timeout_ms) \
     do { if ((timeout_ms) >= 0) kafka_admin_##Rpc##Options_set_timeout_ms((options), (int32_t)(timeout_ms)); } while (0)
 
+// The setter takes Java's `Integer timeoutMs`, which holds at most INT32_MAX.
+// Each admin entry checks its parsed timeout with this right after
+// PyArg_ParseTuple, before it builds anything, so a larger value raises
+// OverflowError instead of wrapping in ADMIN_SET_TIMEOUT's int32_t cast.
+static int admin_timeout_fits(long long timeout_ms) {
+    if (timeout_ms > INT32_MAX) {
+        PyErr_Format(PyExc_OverflowError, "timeout of %lld ms does not fit a 32-bit signed int (max %d ms)",
+                     timeout_ms, (int)INT32_MAX);
+        return 0;
+    }
+    return 1;
+}
+
 // ---- Python -> C input builders ------------------------------------------------
 //
 // C-built containers hold BORROWED elements; every builder below owns what it
@@ -6781,6 +6794,7 @@ static PyObject* assemble_create_topics(AdminJob* job) {
 static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only, retry;
     if (!PyArg_ParseTuple(args, "KOLpp", &h, &spec, &timeout_ms, &validate_only, &retry)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "new_topics must be a sequence");
     if (fast == NULL) return NULL;
@@ -6895,6 +6909,7 @@ static int topic_collection_build(PyObject* names, int by_ids, kafka_common_Topi
 static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* names; long long timeout_ms; int retry, by_ids;
     if (!PyArg_ParseTuple(args, "KOLpp", &h, &names, &timeout_ms, &retry, &by_ids)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_TopicCollection_t* topics; kafka_common_Error_t* err;
     if (topic_collection_build(names, by_ids, &topics, &err) < 0) return err ? job_or_error(NULL, err) : NULL;
@@ -6915,6 +6930,7 @@ static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_list_topics(PyObject* self, PyObject* args) {
     unsigned long long h; long long timeout_ms; int list_internal;
     if (!PyArg_ParseTuple(args, "KLp", &h, &timeout_ms, &list_internal)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     ADMIN_OPTIONS(ListTopics, o, timeout_ms);
     kafka_admin_ListTopicsOptions_set_list_internal(o, (int8_t)list_internal);
@@ -6932,6 +6948,7 @@ static PyObject* py_Admin_list_topics(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_topics(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* names; long long timeout_ms; int include_ops, limit, by_ids;
     if (!PyArg_ParseTuple(args, "KOLpip", &h, &names, &timeout_ms, &include_ops, &limit, &by_ids)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_TopicCollection_t* topics; kafka_common_Error_t* err;
     if (topic_collection_build(names, by_ids, &topics, &err) < 0) return err ? job_or_error(NULL, err) : NULL;
@@ -6955,6 +6972,7 @@ static PyObject* py_Admin_describe_topics(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_create_partitions(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only, retry;
     if (!PyArg_ParseTuple(args, "KOLpp", &h, &spec, &timeout_ms, &validate_only, &retry)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "new_partitions must be a sequence");
     if (fast == NULL) return NULL;
@@ -7010,6 +7028,7 @@ fail:
 static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "records_to_delete must be a sequence");
     if (fast == NULL) return NULL;
@@ -7042,6 +7061,7 @@ static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_cluster(PyObject* self, PyObject* args) {
     unsigned long long h; long long timeout_ms; int include_ops, include_fenced;
     if (!PyArg_ParseTuple(args, "KLpp", &h, &timeout_ms, &include_ops, &include_fenced)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     ADMIN_OPTIONS(DescribeCluster, o, timeout_ms);
     kafka_admin_DescribeClusterOptions_set_include_authorized_operations(o, (int8_t)include_ops);
@@ -7083,6 +7103,7 @@ static int config_resource_list_build(PyObject* seq, obj_list_t* l) {
 static PyObject* py_Admin_describe_configs(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int synonyms, documentation;
     if (!PyArg_ParseTuple(args, "KOLpp", &h, &spec, &timeout_ms, &synonyms, &documentation)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     obj_list_t resources;
     if (config_resource_list_build(spec, &resources) < 0) return NULL;
@@ -7114,6 +7135,7 @@ static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* ar
     (void)self;
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &validate_only)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "configs must be a sequence of rows");
     if (fast == NULL) return NULL;
@@ -7171,6 +7193,7 @@ fail:
 static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* types; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &types, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(types, "resource_types must be a sequence of int");
     if (fast == NULL) return NULL;
@@ -7204,6 +7227,7 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
 static PyObject* py_Admin_describe_log_dirs(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* brokers; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &brokers, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     i32_list_t ids;
     if (i32_list_build(brokers, &ids, "brokers must be a sequence of int") < 0) return NULL;
@@ -7222,6 +7246,7 @@ static PyObject* py_Admin_describe_log_dirs(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_alter_replica_log_dirs(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tpr_list_t replicas; PyObject* fast = NULL; const char** dirs = NULL;
     if (tpr_list_build(spec, &replicas, 1, &fast, &dirs) < 0) return NULL;
@@ -7245,6 +7270,7 @@ static PyObject* py_Admin_alter_replica_log_dirs(PyObject* self, PyObject* args)
 static PyObject* py_Admin_describe_replica_log_dirs(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tpr_list_t replicas;
     if (tpr_list_build(spec, &replicas, 0, NULL, NULL) < 0) return NULL;
@@ -7266,6 +7292,7 @@ static PyObject* py_Admin_describe_replica_log_dirs(PyObject* self, PyObject* ar
 static PyObject* py_Admin_elect_leaders(PyObject* self, PyObject* args) {
     unsigned long long h; int election_type, all_partitions; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KipOL", &h, &election_type, &all_partitions, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     const kafka_common_ElectionType_t* et = NULL;
     kafka_common_Error_t* err = kafka_common_ElectionType_value_of((int8_t)election_type, &et);
@@ -7291,6 +7318,7 @@ static PyObject* py_Admin_elect_leaders(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int allow_rf;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &allow_rf)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "reassignments must be a sequence");
     if (fast == NULL) return NULL;
@@ -7341,6 +7369,7 @@ fail:
 static PyObject* py_Admin_list_partition_reassignments(PyObject* self, PyObject* args) {
     unsigned long long h; int all_partitions; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KpOL", &h, &all_partitions, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tp_list_t tps;
     memset(&tps, 0, sizeof(tps));
@@ -7377,6 +7406,7 @@ static void offset_spec_destroy_if_owned(void* spec) {
 static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int isolation_level;
     if (!PyArg_ParseTuple(args, "KOLi", &h, &spec, &timeout_ms, &isolation_level)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     const kafka_common_IsolationLevel_t* il = NULL;
     kafka_common_Error_t* err = kafka_common_IsolationLevel_for_id((int8_t)isolation_level, &il);
@@ -7452,6 +7482,7 @@ fail:
 static PyObject* py_Admin_list_groups(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject *states, *protocols, *types; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOOOL", &h, &states, &protocols, &types, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t s, pr, ty;
     if (str_list_build_msg(states, &s, "group_states must be a sequence of str") < 0) return NULL;
@@ -7488,6 +7519,7 @@ static PyObject* py_Admin_list_groups(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_consumer_groups(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; long long timeout_ms; int include_ops;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &ids, &timeout_ms, &include_ops)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
@@ -7507,6 +7539,7 @@ static PyObject* py_Admin_describe_consumer_groups(PyObject* self, PyObject* arg
 static PyObject* py_Admin_describe_classic_groups(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; long long timeout_ms; int include_ops;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &ids, &timeout_ms, &include_ops)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
@@ -7529,6 +7562,7 @@ static PyObject* py_Admin_describe_classic_groups(PyObject* self, PyObject* args
 static PyObject* py_Admin_list_consumer_group_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int require_stable;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &require_stable)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "group_specs must be a sequence");
     if (fast == NULL) return NULL;
@@ -7584,6 +7618,7 @@ static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject*
     (void)self;
     unsigned long long h; const char* gid; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KsOL", &h, &gid, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "offsets must be a sequence");
     if (fast == NULL) return NULL;
@@ -7638,6 +7673,7 @@ static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject*
 static PyObject* py_Admin_delete_consumer_group_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; const char* gid; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KsOL", &h, &gid, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tp_list_t tps;
     if (tp_list_build(spec, &tps) < 0) return NULL;
@@ -7664,6 +7700,7 @@ static PyObject* py_Admin_delete_consumer_group_offsets(PyObject* self, PyObject
 static PyObject* py_Admin_delete_consumer_groups(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &ids, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
@@ -7685,6 +7722,7 @@ static PyObject* py_Admin_delete_consumer_groups(PyObject* self, PyObject* args)
 static PyObject* py_Admin_remove_members_from_consumer_group(PyObject* self, PyObject* args) {
     unsigned long long h; const char *gid, *reason; int remove_all; PyObject* ids; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KspOzL", &h, &gid, &remove_all, &ids, &reason, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     obj_list_t members;
     if (remove_all) {
@@ -7782,6 +7820,7 @@ static kafka_common_acl_AclBindingFilter_t* acl_binding_filter_build(PyObject* r
 static PyObject* py_Admin_create_acls(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "acls must be a sequence");
     if (fast == NULL) return NULL;
@@ -7813,6 +7852,7 @@ static PyObject* py_Admin_create_acls(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_acls(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* row; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &row, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_acl_AclBindingFilter_t* filter = acl_binding_filter_build(row);
     if (filter == NULL) return NULL;
@@ -7832,6 +7872,7 @@ static PyObject* py_Admin_describe_acls(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_delete_acls(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "filters must be a sequence");
     if (fast == NULL) return NULL;
@@ -7866,6 +7907,7 @@ enum { QUOTA_MATCH_EXACT = 0, QUOTA_MATCH_DEFAULT = 1, QUOTA_MATCH_ANY = 2 };
 static PyObject* py_Admin_describe_client_quotas(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int strict; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOpL", &h, &spec, &strict, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "components must be a sequence");
     if (fast == NULL) return NULL;
@@ -7917,6 +7959,7 @@ static PyObject* py_Admin_describe_client_quotas(PyObject* self, PyObject* args)
 static PyObject* py_Admin_alter_client_quotas(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &validate_only)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "entries must be a sequence");
     if (fast == NULL) return NULL;
@@ -8029,6 +8072,7 @@ static PyObject* assemble_scram(AdminJob* job) {
 static PyObject* py_Admin_describe_user_scram_credentials(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* users; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &users, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(users, &l, "users must be a sequence of str") < 0) return NULL;
@@ -8052,6 +8096,7 @@ static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject*
     (void)self;
     unsigned long long h; PyObject* spec; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &spec, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "alterations must be a sequence");
     if (fast == NULL) return NULL;
@@ -8128,6 +8173,7 @@ fail:
 static PyObject* py_Admin_create_delegation_token(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* renewers; const char *owner_type, *owner_name; long long max_lifetime_ms, timeout_ms;
     if (!PyArg_ParseTuple(args, "KOzzLL", &h, &renewers, &owner_type, &owner_name, &max_lifetime_ms, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     principal_list_t l;
     if (principal_list_build(renewers, &l) < 0) return NULL;
@@ -8155,6 +8201,7 @@ static PyObject* py_Admin_renew_delegation_token(PyObject* self, PyObject* args)
     (void)self;
     unsigned long long h; const uint8_t* hmac; Py_ssize_t hmac_len; long long period_ms, timeout_ms;
     if (!PyArg_ParseTuple(args, "Ky#LL", &h, &hmac, &hmac_len, &period_ms, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     int32_t hmac_len32;
     if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
@@ -8175,6 +8222,7 @@ static PyObject* py_Admin_expire_delegation_token(PyObject* self, PyObject* args
     (void)self;
     unsigned long long h; const uint8_t* hmac; Py_ssize_t hmac_len; long long period_ms, timeout_ms;
     if (!PyArg_ParseTuple(args, "Ky#LL", &h, &hmac, &hmac_len, &period_ms, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     int32_t hmac_len32;
     if (checked_len_to_int32(hmac_len, "hmac", &hmac_len32) < 0) return NULL;
@@ -8194,6 +8242,7 @@ static PyObject* py_Admin_expire_delegation_token(PyObject* self, PyObject* args
 static PyObject* py_Admin_describe_delegation_token(PyObject* self, PyObject* args) {
     unsigned long long h; int has_owners; PyObject* owners; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KpOL", &h, &has_owners, &owners, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     ADMIN_OPTIONS(DescribeDelegationToken, o, timeout_ms);
     if (has_owners) {
@@ -8217,6 +8266,7 @@ static PyObject* py_Admin_describe_delegation_token(PyObject* self, PyObject* ar
 static PyObject* py_Admin_describe_features(PyObject* self, PyObject* args) {
     unsigned long long h; int has_node_id, node_id; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KpiL", &h, &has_node_id, &node_id, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     ADMIN_OPTIONS(DescribeFeatures, o, timeout_ms);
     if (has_node_id) kafka_admin_DescribeFeaturesOptions_set_node_id(o, (int32_t)node_id);
@@ -8235,6 +8285,7 @@ static PyObject* py_Admin_describe_features(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_update_features(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; long long timeout_ms; int validate_only;
     if (!PyArg_ParseTuple(args, "KOLp", &h, &spec, &timeout_ms, &validate_only)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     PyObject* fast = fast_rows(spec, "feature_updates must be a sequence");
     if (fast == NULL) return NULL;
@@ -8271,6 +8322,7 @@ static PyObject* py_Admin_update_features(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_producers(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int has_broker_id, broker_id; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOpiL", &h, &spec, &has_broker_id, &broker_id, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     tp_list_t tps;
     if (tp_list_build(spec, &tps) < 0) return NULL;
@@ -8297,6 +8349,7 @@ static PyObject* py_Admin_describe_producers(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_describe_transactions(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &ids, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "transactional_ids must be a sequence of str") < 0) return NULL;
@@ -8352,6 +8405,7 @@ static PyObject* assemble_fence_producers(AdminJob* job) {
 static PyObject* py_Admin_fence_producers(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KOL", &h, &ids, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "transactional_ids must be a sequence of str") < 0) return NULL;
@@ -8423,6 +8477,7 @@ static PyObject* assemble_list_transactions(AdminJob* job) {
 static PyObject* py_Admin_list_transactions(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject *states, *pids; long long duration_ms, timeout_ms; const char* pattern;
     if (!PyArg_ParseTuple(args, "KOOLzL", &h, &states, &pids, &duration_ms, &pattern, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     str_list_t s;
     if (str_list_build_msg(states, &s, "states must be a sequence of str") < 0) return NULL;
@@ -8464,6 +8519,7 @@ static PyObject* py_Admin_list_transactions(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; int partition, coordinator_epoch, producer_epoch; long long producer_id, timeout_ms;
     if (!PyArg_ParseTuple(args, "KsiLiiL", &h, &topic, &partition, &producer_id, &producer_epoch, &coordinator_epoch, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(topic, (int32_t)partition);
     kafka_admin_AbortTransactionSpec_t* spec = kafka_admin_AbortTransactionSpec_new(
@@ -8484,6 +8540,7 @@ static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
 static PyObject* py_Admin_force_terminate_transaction(PyObject* self, PyObject* args) {
     unsigned long long h; const char* tid; long long timeout_ms;
     if (!PyArg_ParseTuple(args, "KsL", &h, &tid, &timeout_ms)) return NULL;
+    if (!admin_timeout_fits(timeout_ms)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     ADMIN_OPTIONS(TerminateTransaction, o, timeout_ms);
     kafka_admin_TerminateTransactionResult_t* r = kafka_admin_Admin_force_terminate_transaction_with_options(a->admin, tid, o);
