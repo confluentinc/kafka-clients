@@ -275,9 +275,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     self_: *mut kafka_common_security_token_delegation_TokenInformation_t,
     expiry_timestamp: i64,
 ) {
-    unsafe { &mut *(self_ as *mut TokenInformationInner) }
-        .info
-        .set_expiry_timestamp(expiry_timestamp);
+    unsafe { &mut (*(self_ as *mut TokenInformationInner)).info }.set_expiry_timestamp(expiry_timestamp);
 }
 
 /// `tokenId()`: borrowed from the handle.
