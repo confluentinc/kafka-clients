@@ -2926,7 +2926,7 @@ master merges and the one patch-equivalent commit that `--cherry-pick` drops, ma
 | `10805c9782` | Common | N | KAFKA-20297 | Ported | D2 mirror, P1: `LogContext` → `common::utils::internals` (`5bc7915b`, `ef3f861e`); the other classes moved have no Rust counterpart |
 | `162b3a1bcf` | Common | N | MINOR | No-op | Test typo fixes |
 | `2299a06e31` | Common | N | KAFKA-20297 | No-op | KAFKA-20297 move of iterator utilities with no Rust counterpart |
-| `282eef9d05` | Common | N | MINOR | No-op | Java double-checked-locking idiom |
+| `282eef9d05` | Common | P | MINOR | Ported | Java double-checked locking in `Metrics.sensor(...)`. Not a pure idiom: the Rust `sensor_options` (unchanged from master) created and inserted the sensor with no lock held, so two concurrent creators of one name got different sensors and a duplicate child entry. Fixed in the review fix round (COMMENTS.114 C2) with one `sensors`-guarded critical section; regression test `test_concurrent_sensor_creation_returns_one_sensor` |
 | `2ad4c7a2ef` | Common | N | MINOR | No-op | Java HashMap/`Uuid` micro-refactor |
 | `3b6c8385ca` | Common | N | MINOR | No-op | Test utilities to `testFixtures`; xtask now indexes `clients/src/testFixtures` (P0 `e84c6434`) |
 | `4048aa19fa` | Common | N | MINOR | No-op | Java `Collections` factory idiom |

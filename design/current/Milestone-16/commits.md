@@ -55,7 +55,7 @@ rel: P = port, T = test-only port, D = doc/log only, N = no-op for Rust (Java re
 | 10805c9782 | Common | N | move | 2026-05-02 | KAFKA-20297 Move SecurityUtils, ConfigUtils, LogContext, AppInfoParser into internal (#22110) | 113+/114- / 94+/93- |
 | 162b3a1bcf | Common | N |  | 2026-05-02 | MINOR: Fix various typos and formatting issues across multiple modules (#22177) | +/- / 6+/6- |
 | 2299a06e31 | Common | N | move | 2026-04-15 | KAFKA-20297: Move AbstractIterator, CircularIterator, CloseableIterator... into internal (#22052) | 25+/25- / 7+/7- |
-| 282eef9d05 | Common | N |  | 2026-04-20 | MINOR: Add DCL to improve performance (#22098) | 16+/11- / +/- |
+| 282eef9d05 | Common | P |  | 2026-04-20 | MINOR: Add DCL to improve performance (#22098) — reclassified from N in the review fix round (COMMENTS.114 C2): the Rust `Metrics::sensor_options` lacked the critical section, a pre-existing race | 16+/11- / +/- |
 | 2ad4c7a2ef | Common | N |  | 2026-06-20 | MINOR: avoid redundant HashMap lookups and simplify Uuid conversions (#22122) | 2+/8- / +/- |
 | 3b6c8385ca | Common | N |  | 2026-05-05 | MINOR: Move client test utilities to test fixtures and resolve shadow jar conflicts (#22201) | +/- / 7+/7185- |
 | 4048aa19fa | Common | N |  | 2026-06-06 | MINOR: Replace Collections factory methods with Java 11+ equivalents in clients (#22060) | 72+/130- / +/- |
