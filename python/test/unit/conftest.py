@@ -52,9 +52,13 @@ class HeldCompletion:
 
     ``payloads`` holds the results as the C trampoline passes them, ``raised``
     what the client's callback raised back to the trampoline (which prints it
-    and drops it), and ``delivered`` is set once the callback has returned."""
+    and drops it), and ``delivered`` is set once the callback has returned.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    ``index`` is the position of the completion callback among the entry
+    point's arguments: the last by default, ``-2`` for ``Producer_send_cb``,
+    whose delivery callback comes before its ``resolve``."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, name: str, index: int = -1) -> None:
         self.submitted = threading.Event()
         self.release = threading.Event()
         self.delivered = threading.Event()
@@ -63,7 +67,8 @@ class HeldCompletion:
         real = getattr(_lib, name)
 
         def entry(*args: Any) -> Any:
-            *rest, cb = args
+            arguments = list(args)
+            cb = arguments[index]
 
             def held(*payload: Any) -> None:
                 self.payloads.append(payload)
@@ -76,7 +81,8 @@ class HeldCompletion:
                 finally:
                     self.delivered.set()
 
-            result = real(*rest, held)
+            arguments[index] = held
+            result = real(*arguments)
             self.submitted.set()
             return result
 
@@ -84,10 +90,11 @@ class HeldCompletion:
 
 
 @pytest.fixture
-def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], HeldCompletion]:
-    """``hold_completion(name)`` holds the completions of ``_lib.<name>``, whose
-    last argument is the completion callback (see :class:`HeldCompletion`)."""
-    return lambda name: HeldCompletion(monkeypatch, name)
+def hold_completion(monkeypatch: pytest.MonkeyPatch) -> Callable[..., HeldCompletion]:
+    """``hold_completion(name, index=-1)`` holds the completions of
+    ``_lib.<name>``, whose argument at ``index`` is the completion callback
+    (see :class:`HeldCompletion`)."""
+    return lambda name, index=-1: HeldCompletion(monkeypatch, name, index)
 
 
 @pytest.fixture

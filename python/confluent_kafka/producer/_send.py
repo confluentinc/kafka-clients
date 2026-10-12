@@ -14,12 +14,14 @@
 
 """Send-completion helpers shared by the producers (private).
 
-The C extension's batching engine hands each accepted record to the Rust
-producer (``kafka_producer_Producer_send_batch``) and, when the record
-completes, calls its Python callback ``cb(metadata, error)`` with the raw C
-handles as ints. :func:`completion_to_python` turns them into the public
-objects once per completion; :func:`invoke_callback` runs the user's
-``Callback`` (CLAUDE.md, Python Binding Conventions, Threads and callbacks).
+The C extension hands each record to the C API's queued send
+(``kafka_producer_Producer_send_with_callback_cb``) with a delivery callback,
+which the producer's callback pump (``kafka_producer_Producer__execute_callbacks``)
+runs as ``on_completion(metadata, error)``: the metadata's fields as a tuple
+(``None`` when there is none) and the BORROWED error handle as an int (0 for
+none). :func:`completion_to_python` turns them into the public objects once
+per completion; :func:`invoke_callback` runs the user's ``Callback`` (CLAUDE.md,
+Python Binding Conventions, Threads and callbacks).
 """
 
 from __future__ import annotations
@@ -27,8 +29,6 @@ from __future__ import annotations
 import logging
 import threading
 from typing import TYPE_CHECKING, cast
-
-import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -38,7 +38,7 @@ from .record_metadata import RecordMetadata
 if TYPE_CHECKING:
     from .callback import Callback
 
-__all__ = ["completion_to_python", "failure_metadata", "in_callback", "invoke_callback"]
+__all__ = ["MetadataTuple", "completion_to_python", "failure_metadata", "in_callback", "invoke_callback"]
 
 _LOG = logging.getLogger("confluent_kafka.producer")
 
@@ -57,28 +57,39 @@ def failure_metadata(topic: str, partition: int | None) -> RecordMetadata:
                           serialized_key_size=-1, serialized_value_size=-1)
 
 
-def completion_to_python(result: int, error: int, topic: str,
-                         partition: int | None) -> tuple[RecordMetadata, Exception | None]:
-    """The owned ``(metadata, exception)`` of a completion, from the C handles
-    (both consumed).
+# The delivery callback's metadata as the C extension passes it: (topic,
+# partition, offset, timestamp, serialized key size, serialized value size),
+# offset and timestamp -1 when absent.
+MetadataTuple = tuple[str, int, int, int, int, int]
 
-    Both handles may be non-null: a failure the core raises before the record
-    reaches a batch carries Java's -1 metadata beside the error. A failure with
-    no metadata (a broker-side or delivery failure) gets
-    :func:`failure_metadata`, as Java's ``AppendCallbacks`` replaces the null
-    metadata of ``ProducerBatch.completeFutureAndFireCallbacks``; the FFI does
-    not report the partition a batch had, so it is the record's own, or -1.
+
+def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic: str,
+                         partition: int | None) -> tuple[RecordMetadata, Exception | None]:
+    """The ``(metadata, exception)`` of a completion, from what the delivery
+    callback received: the metadata tuple and the BORROWED error handle, which
+    is read here and never freed (its owner, the C API, frees it once the
+    callback returns).
+
+    Both may be given: a failure the core raises before the record reaches a
+    batch carries Java's -1 metadata beside the error. Its partition is the one
+    Java's ``AppendCallbacks.topicPartition()`` gives: the partition chosen for
+    the record, else the record's own, else -1. The core reports -1 for a
+    failure before the partition is chosen even when the record names one, so
+    the record's own is filled in here. A failure with no metadata (a
+    broker-side or delivery failure) gets :func:`failure_metadata`, as Java's
+    ``AppendCallbacks`` replaces the null metadata of
+    ``ProducerBatch.completeFutureAndFireCallbacks``; the FFI does not report
+    the partition a batch had, so it is the record's own, or -1.
     """
-    metadata: RecordMetadata | None = None
-    if result:
-        (topic_, partition_, offset, timestamp, key_size, value_size) = (
-            _lib.RecordMetadata_copy_full(result))
-        metadata = RecordMetadata._from_ffi(
-            topic=topic_, partition=partition_, offset=offset, timestamp=timestamp,
-            serialized_key_size=key_size, serialized_value_size=value_size)
-    exception = cast("Exception", from_ffi_error(error)) if error else None
-    if metadata is None:
-        metadata = failure_metadata(topic, partition)
+    exception = cast("Exception", from_ffi_error(error, owned=False)) if error else None
+    if metadata_tuple is None:
+        return failure_metadata(topic, partition), exception
+    (topic_, partition_, offset, timestamp, key_size, value_size) = metadata_tuple
+    if exception is not None and partition_ == -1 and partition is not None:
+        partition_ = partition
+    metadata = RecordMetadata._from_ffi(
+        topic=topic_, partition=partition_, offset=offset, timestamp=timestamp,
+        serialized_key_size=key_size, serialized_value_size=value_size)
     return metadata, exception
 
 

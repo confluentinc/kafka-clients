@@ -15,18 +15,35 @@
 """State and helpers shared by the FFI-backed producers (private).
 
 ``Producer`` / ``KafkaProducer`` and ``AsyncProducer`` / ``AsyncKafkaProducer``
-call the C FFI through the C extension (``_confluentkafka``), whose batching
-engine owns two background threads: the send thread hands accepted records to
-the Rust producer (``kafka_producer_Producer_send_batch``) and the poll thread
-waits on their futures and runs each record's completion. Both families reuse
-the same entry points and differ only in the future type a completion resolves
-and where the user's callback runs (CLAUDE.md, Python Binding Conventions,
-Implementation over the FFI).
+call the C FFI through the C extension (``_confluentkafka``). Every operation
+uses the C API's queued ``_cb`` form (CLAUDE.md §4, "Async variants of blocking
+methods"): a send is ``kafka_producer_Producer_send_with_callback_cb``, which
+queues the record on the core's submission task, and a flush, close or
+transaction-control call is its ``_cb`` twin. The completions -- the
+``Callback`` of each record, the handover of each record to the producer and
+the result of each operation -- are queued in the client's callback vector and
+run by whoever calls ``kafka_producer_Producer__execute_callbacks``: the sync
+producer's completion thread, or the event loop of the async producer, which
+the ``__set_callbacks_notify`` hook wakes (the hook only schedules, never runs
+a callback). Both families reuse the same entry points and differ only in the
+future type a completion resolves and where the user's callback runs (CLAUDE.md,
+Python Binding Conventions, Implementation over the FFI and Threads and
+callbacks).
+
+*(deviation)* Backpressure is the core's ``max.block.ms`` wait: ``send()``
+returns once the record is queued on the submission task, which hands records
+to the producer one at a time, in order; there the metadata wait and the wait
+for ``buffer.memory`` space are bounded by ``max.block.ms`` as in Java, and a
+record that times out fails through its callback and future. Java's
+``send()`` blocks its caller for those waits instead; here the caller is not
+blocked, and records queued behind a full buffer are held by the submission
+task meanwhile.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +51,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 from confluent_kafka.common.metric_name import MetricName
 from confluent_kafka.common.node import Node
@@ -79,6 +97,20 @@ LONG_MAX_VALUE = (1 << 63) - 1
 CLOSED_WHILE_SENDING_MESSAGE = "Producer closed while send in progress"
 
 _TRANSACTIONAL_ID = "transactional.id"
+
+# ProducerConfig.MAX_BLOCK_MS_CONFIG and its default (60 s).
+_MAX_BLOCK_MS = "max.block.ms"
+_DEFAULT_MAX_BLOCK_MS = 60000
+
+# The slice a sync wait sleeps in, so Ctrl+C is seen promptly (CLAUDE.md,
+# Python Binding Conventions, Threads and callbacks).
+WAIT_SLICE_S = 0.1
+
+# The message of a wait from a delivery callback that ran out of max.block.ms:
+# the completion it waits for can only run on the thread the callback blocks.
+CALLBACK_WAIT_TIMEOUT_MESSAGE = ("Timeout expired after {ms}ms while awaiting {operation} from "
+                                 "a send() callback, which blocks the producer's completion "
+                                 "thread")
 
 
 class _SnapshotMetric:
@@ -170,87 +202,120 @@ def serialize(serializer: Serializer[Any], topic: str, data: object,
     raise TypeError(f"a serializer must return bytes or None, not {type(out).__name__}")
 
 
-def await_payload(submit: Callable[[Callable[..., None]], None],
-                  partitions: bool = False) -> tuple[Any, ...]:
-    """Submit an ``_async`` FFI operation and wait for its completion payload
-    on a ``threading.Event``, which releases the GIL (so the dispatcher thread
-    can run the completion) and stays interruptible by Ctrl+C. A payload that
-    arrives after the wait was interrupted has its handles freed (see
-    ``free_payload`` for ``partitions``)."""
-    box: dict[str, tuple[Any, ...]] = {}
-    done = threading.Event()
-    lock = threading.Lock()
-    abandoned = False
-
-    def cb(*payload: Any) -> None:
-        with lock:
-            if abandoned:
-                free_payload(payload, partitions)
-                return
-            box["payload"] = payload
-        done.set()
-
-    submit(cb)
-    try:
-        done.wait()
-    except BaseException:
-        with lock:
-            abandoned = True
-            unclaimed = box.pop("payload", None)
-        if unclaimed is not None:
-            free_payload(unclaimed, partitions)
-        raise
-    return box["payload"]
+def raise_if_error(error: int) -> None:
+    """Raise the typed error of an OWNED FFI error handle (0 is success)."""
+    if error:
+        raise from_ffi_error(error)
 
 
-def free_payload(payload: tuple[Any, ...], partitions: bool) -> None:
-    """Free the handles of a completion payload nobody takes any more: a
-    ``(error,)`` one, or a ``partitions_for`` ``(list, error)`` one."""
-    if partitions:
-        list_handle, error = payload
-        if list_handle:
-            _lib.PartitionInfoList_drain(list_handle)
-    else:
-        (error,) = payload
+def free_error(error: int) -> None:
+    """Free an OWNED FFI error handle nobody raises (0 is none)."""
     if error:
         _lib.KafkaError_destroy(error)
 
 
-def run_sync(submit: Callable[[Callable[..., None]], None]) -> None:
-    """A void ``_async`` FFI operation, waited for; raises its typed error."""
-    (error,) = await_payload(submit)
-    if error:
-        raise from_ffi_error(error)
+def wait_sliced(event: threading.Event, deadline: float | None = None,
+                on_interrupt: Callable[[], None] | None = None) -> bool:
+    """Wait for ``event`` in :data:`WAIT_SLICE_S` slices, up to ``deadline``
+    (``time.monotonic()``) when given; whether it was set.
+
+    A Ctrl+C (``KeyboardInterrupt``) does not end the wait: the operation goes
+    on, as the producer lets an operation finish, and the first interrupt is
+    raised once the wait is over (a second one meanwhile is dropped, as Java
+    keeps only the first interrupt). ``on_interrupt`` runs at the first one."""
+    interrupted: KeyboardInterrupt | None = None
+    try:
+        while True:
+            try:
+                while not event.wait(WAIT_SLICE_S):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return False
+                return True
+            except KeyboardInterrupt as exc:
+                if interrupted is None:
+                    interrupted = exc
+                    if on_interrupt is not None:
+                        on_interrupt()
+    finally:
+        if interrupted is not None:
+            raise interrupted
 
 
-def force_close(c_producer: int) -> None:
-    """Java's ``sender.forceClose()`` and the ``ioThread.join()`` after it,
-    for a ``close()`` an interrupt stopped (``KafkaProducer.close(Duration,
-    boolean)``, KafkaProducer.java:1419-1437: the interrupt is kept and the
-    close proceeds to force-close and join). A close with a zero timeout fails
-    the records still pending, which also ends the send thread's metadata
-    waits; a second Ctrl+C meanwhile is dropped, as Java keeps only the first
-    interrupt."""
-    done = threading.Event()
+def wait_futures(futures: list[Any]) -> None:
+    """Wait (as :func:`wait_sliced`) until every future of ``futures`` is done."""
+    if not futures:
+        return
+    all_done = threading.Event()
+    lock = threading.Lock()
+    remaining = len(futures)
 
-    def cb(error: int) -> None:
-        if error:
-            _lib.KafkaError_destroy(error)
-        done.set()
+    def one_done(_future: Any) -> None:
+        nonlocal remaining
+        with lock:
+            remaining -= 1
+            last = remaining == 0
+        if last:
+            all_done.set()
 
-    _lib.Producer_close_with_timeout_async(c_producer, 0, cb)
-    while True:
+    for future in futures:
+        future.add_done_callback(one_done)
+    wait_sliced(all_done)
+
+
+class Completion:
+    """The completion of one queued (``_cb``) operation, waited for on the
+    calling thread: the extension calls it with the operation's payload (one
+    OWNED error handle, or a list and one) from the thread that runs the
+    producer's callbacks, and :meth:`wait` returns that payload.
+
+    ``free`` releases a payload nobody takes: one that arrives after the wait
+    gave up, or that an interrupted wait leaves behind."""
+
+    __slots__ = ("_done", "_lock", "_payload", "_abandoned", "_free")
+
+    def __init__(self, free: Callable[[tuple[Any, ...]], None]) -> None:
+        self._done = threading.Event()
+        self._lock = threading.Lock()
+        self._payload: tuple[Any, ...] | None = None
+        self._abandoned = False
+        self._free = free
+
+    def __call__(self, *payload: Any) -> None:
+        with self._lock:
+            if self._abandoned:
+                abandoned = True
+            else:
+                abandoned = False
+                self._payload = payload
+        if abandoned:
+            self._free(payload)
+        else:
+            self._done.set()
+
+    def wait(self, deadline: float | None = None,
+             on_interrupt: Callable[[], None] | None = None) -> tuple[Any, ...] | None:
+        """The payload, waited for in slices (see :func:`wait_sliced`); ``None``
+        when ``deadline`` passed first, the late payload then being freed. A
+        Ctrl+C is raised once the payload is in, which is then freed."""
         try:
-            done.wait()
-            return
+            arrived = wait_sliced(self._done, deadline, on_interrupt)
         except KeyboardInterrupt:
-            continue
+            with self._lock:
+                payload, self._payload = self._payload, None
+            if payload is not None:
+                self._free(payload)
+            raise
+        with self._lock:
+            if not arrived and self._payload is None:
+                self._abandoned = True
+                return None
+            payload, self._payload = self._payload, None
+        return payload
 
 
-def raise_if_error(error: int) -> None:
-    """Raise the typed error of a plain FFI entry point's result handle."""
-    if error:
-        raise from_ffi_error(error)
+def free_error_payload(payload: tuple[Any, ...]) -> None:
+    """Free the ``(error,)`` payload of a void operation."""
+    free_error(payload[-1])
 
 
 class _Use:
@@ -312,6 +377,23 @@ class _ProducerState:
         self._futures: set[Any] = set()
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
+        # ProducerConfig max.block.ms: what bounds a wait that cannot be
+        # serviced (see CALLBACK_WAIT_TIMEOUT_MESSAGE).
+        self._max_block_ms = _DEFAULT_MAX_BLOCK_MS
+        # Set (under _lifecycle) once Producer_destroy has run: the callback
+        # pump must not touch the handle after that.
+        self._destroyed = False
+
+    def _notify_hook(self) -> Callable[[], None] | None:
+        """The callable the extension calls from the C API's
+        ``__set_callbacks_notify`` hook (on any thread, with the GIL), or
+        ``None`` for a hook that only signals the condition ``Producer_poll``
+        waits on."""
+        return None
+
+    def _after_start(self) -> None:
+        """Run once the native producer is built (the sync producer starts its
+        completion thread here)."""
 
     def _use(self, error: BaseException | None = None) -> _Use:
         """A call into the native producer: ``with self._use() as c:`` gives
@@ -360,7 +442,7 @@ class _ProducerState:
             value = cast("Serializer[Any]", resolve_serde(
                 value_serializer, originals, _VALUE_SERIALIZER, is_key=False,
                 default=bytes_serializer()))
-            handle, error = _lib.KafkaProducer_new(native, self)
+            handle, error = _lib.KafkaProducer_new(native, self._notify_hook())
         except BaseException:
             close_if_defined(key)
             if value is not None:
@@ -374,6 +456,51 @@ class _ProducerState:
         self._value_serializer = value
         self._c_producer = handle
         self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
+        max_block_ms = native.get(_MAX_BLOCK_MS)
+        if max_block_ms is not None:
+            self._max_block_ms = int(max_block_ms)
+        self._after_start()
+
+    def _callback_deadline(self) -> float:
+        """The ``time.monotonic()`` deadline of a wait from a delivery
+        callback: ``max.block.ms`` from now, the bound Java's own wait has
+        there (its completion would need the blocked I/O thread)."""
+        return time.monotonic() + self._max_block_ms / 1000.0
+
+    def _callback_wait_timeout(self, operation: str) -> KafkaTimeoutError:
+        return KafkaTimeoutError(message=CALLBACK_WAIT_TIMEOUT_MESSAGE.format(
+            ms=self._max_block_ms, operation=operation))
+
+    def _destroy(self) -> None:
+        """Wait until no call into the native producer is in flight, then
+        ``Producer_destroy`` it (which runs the callbacks still pending, on
+        this thread), once. ``_destroyed`` is set under ``_lifecycle`` with no
+        use in flight, so a callback pump that has not started by then never
+        will (see :meth:`_pump_use`)."""
+        with self._lifecycle:
+            while self._uses:
+                self._lifecycle.wait()
+            if self._destroyed:
+                return
+            self._destroyed = True
+        _lib.Producer_destroy(self._c_producer)
+
+    def _pump_use(self) -> bool:
+        """Count a run of the callback pump as a use of the handle, unlike
+        :meth:`_use` also once ``close()`` has begun (its completions still
+        need the pump); ``False`` once the handle is destroyed. The caller
+        ends the use with :meth:`_end_use`."""
+        with self._lifecycle:
+            if self._destroyed:
+                return False
+            self._uses += 1
+            return True
+
+    def _end_use(self) -> None:
+        with self._lifecycle:
+            self._uses -= 1
+            if self._uses == 0:
+                self._lifecycle.notify_all()
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""
@@ -399,34 +526,6 @@ class _ProducerState:
     def _track(self, future: Any) -> None:
         self._futures.add(future)
         future.add_done_callback(self._futures.discard)
-
-    def _drain_sync(self, timeout_s: float | None = None, *, closing: bool = False) -> bool:
-        """Wait until every record sent so far is with the Rust producer, so a
-        send that returned belongs to the flush, transaction-control operation
-        or close that follows (producer-transactions.md §13); at most
-        ``timeout_s`` seconds when given. Returns whether they are.
-
-        Only the registration is a use of the handle: the wait is not, so a
-        ``close()`` meanwhile proceeds (its last send round fires the waiter).
-        ``closing`` is passed by ``close()`` alone (see ``_drain_registered``)."""
-        done = threading.Event()
-        if self._drain_registered(done.set, closing=closing):
-            return True
-        return done.wait(timeout_s)
-
-    def _drain_registered(self, ready: Callable[[], None], *, closing: bool = False) -> bool:
-        """``Producer_drain``: True if drained, else ``ready`` is registered.
-
-        Only ``close()`` passes ``closing``: it owns the handle, which it frees
-        only after this returns, so it uses the handle directly although
-        ``_closed`` is set. Every other caller registers as a counted use,
-        which raises Java's closed ``IllegalStateError`` once a ``close()`` has
-        begun, even when the caller passed its own closed check before that
-        (``_closed`` alone cannot tell such a caller from ``close()``)."""
-        if closing:
-            return bool(_lib.Producer_drain(self._c_producer, ready))
-        with self._use() as c_producer:
-            return bool(_lib.Producer_drain(c_producer, ready))
 
     def _close_serializers(self) -> None:
         """Java closes both serializers at producer close; a failing

@@ -16,15 +16,30 @@
 
 By rule 3, the same methods as ``Producer`` (CLAUDE.md, Python Binding
 Conventions, Class family), each ``async def`` iff the entry point it calls has
-an ``_async`` completion form in the FFI header: ``init_transactions``,
-``begin_transaction``, ``send_offsets_to_transaction``, ``commit_transaction``,
-``abort_transaction``, ``send``, ``flush``, ``partitions_for`` and ``close``.
-``metrics`` has none, so it is a plain ``def``. ``send`` returns an
-``asyncio.Future``, so a round trip is ``md = await (await p.send(record=r))``.
+a queued ``_cb`` completion form in the FFI header: ``init_transactions``,
+``send_offsets_to_transaction``, ``commit_transaction``, ``abort_transaction``,
+``send``, ``flush``, ``partitions_for`` and ``close``. ``metrics`` has none, so
+it is a plain ``def``. ``send`` returns an ``asyncio.Future``, so a round trip
+is ``md = await (await p.send(record=r))``.
 
-Every waiting call awaits an ``asyncio.Future`` completed through
-``loop.call_soon_threadsafe``; a ``send()`` callback runs on the event loop
-(Implementation over the FFI, Threads and callbacks).
+*(deviation)* ``begin_transaction`` has no ``_cb`` form either, but it is an
+``async def`` too, as in ``Producer`` it waits: like every transaction-control
+operation it first drains the records already sent (producer-transactions.md
+§13), so its blocking entry point runs in the loop's default executor.
+
+The producer's queued completions -- the ``send()`` callbacks and the results
+of the waiting calls -- are run by ``kafka_producer_Producer__execute_callbacks``
+on an event loop: the C API's notify hook schedules that pump with
+``loop.call_soon_threadsafe`` on the running loops this producer was used
+from, and each async method pumps once on entry. Each result then reaches the
+loop awaiting it through ``call_soon_threadsafe``, and a ``send()`` callback
+runs on its record's loop, before its future completes (Implementation over
+the FFI, Threads and callbacks). When none of those loops is running, the pump
+runs on a short-lived helper thread instead, so a completion whose loop has
+closed is dropped promptly (see :meth:`AsyncProducer.send`).
+
+*(deviation)* Backpressure is the core's ``max.block.ms`` wait on the
+submission task, not a wait in ``send()`` (see ``_base``).
 """
 
 from __future__ import annotations
@@ -32,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import weakref
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -39,6 +55,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._args import UNSET
 from confluent_kafka._async import Undelivered, await_to_end
+from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
@@ -47,15 +64,15 @@ from ._base import (
     _ProducerState,
     check_group_metadata,
     close_timeout_ms,
-    force_close,
-    free_payload,
+    free_error,
+    free_error_payload,
     group_metadata_handle,
     offsets_to_spec,
     raise_if_error,
     to_metrics_map,
     to_partition_info,
 )
-from ._send import completion_to_python, invoke_callback
+from ._send import MetadataTuple, completion_to_python, failure_metadata, invoke_callback
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
@@ -74,9 +91,10 @@ V = TypeVar("V")
 
 _LOG = logging.getLogger("confluent_kafka.producer")
 
-# A completion the C poll thread buffered for the event loop:
-# (future, callback, topic, partition, metadata handle, error handle).
-_Pending = tuple["asyncio.Future[RecordMetadata]", "Callback | None", str, "int | None", int, int]
+# A completion the callback pump buffered for the event loop:
+# (future, callback, metadata, exception).
+_Pending = tuple["asyncio.Future[RecordMetadata]", "Callback | None", RecordMetadata,
+                 "Exception | None"]
 
 
 def _set_result(future: asyncio.Future[None]) -> None:
@@ -84,11 +102,10 @@ def _set_result(future: asyncio.Future[None]) -> None:
         future.set_result(None)
 
 
-def _drop_completion(topic: str, partition: int | None, result: int, error: int) -> None:
+def _drop_completion(metadata: RecordMetadata) -> None:
     """A completion whose event loop has closed: no loop can run its callback
-    (it runs on the event loop) or complete its future any more, so its
-    handles are freed and one warning is logged."""
-    metadata, _ = completion_to_python(result, error, topic, partition)
+    (it runs on the event loop) or complete its future any more, so it is
+    dropped and one warning is logged."""
     _LOG.warning("The completion of a record sent to topic-partition '%s' was dropped: its "
                  "event loop had closed, so its callback did not run and its future does not "
                  "complete", f"{metadata.topic()}-{metadata.partition()}")
@@ -104,29 +121,130 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             raise TypeError("AsyncProducer is a non-instantiable base; use "
                             "AsyncKafkaProducer or AsyncMockProducer")
         _ProducerState.__init__(self)
-        # Completions the C poll thread buffered, per event loop, and resolved
+        # Completions the callback pump buffered, per event loop, and resolved
         # on that loop in one scheduled call.
         self._pending: dict[asyncio.AbstractEventLoop, list[_Pending]] = {}
         self._pending_lock = threading.Lock()
         # The results of the other async operations on their way to their loop.
         self._undelivered = Undelivered()
+        # The event loops this producer was used from: the notify hook
+        # schedules the callback pump on the running ones.
+        self._loops: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+        self._loops_lock = threading.Lock()
+
+    # ---- callback pump -------------------------------------------------------
+
+    def _notify_hook(self) -> Callable[[], None]:
+        # A weak reference: the native producer keeps the hook until it is
+        # destroyed, and must not keep an unclosed producer alive.
+        ref = weakref.ref(self)
+
+        def notify() -> None:
+            producer = ref()
+            if producer is not None:
+                producer._schedule_pump()
+
+        return notify
+
+    def _schedule_pump(self) -> None:
+        """The notify hook (any thread, the GIL held): schedule :meth:`_pump`
+        on every running loop this producer was used from, or, with none
+        running, run it on a helper thread. It only schedules, never runs a
+        callback (CLAUDE.md §4)."""
+        with self._loops_lock:
+            loops = list(self._loops)
+        scheduled = False
+        for loop in loops:
+            if loop.is_closed() or not loop.is_running():
+                continue
+            try:
+                loop.call_soon_threadsafe(self._pump)
+                scheduled = True
+            except RuntimeError:  # the loop closed since the check
+                continue
+        if not scheduled:
+            threading.Thread(target=self._pump, name="confluent-kafka-producer-pump",
+                             daemon=True).start()
+
+    def _pump(self) -> None:
+        """Run the producer's queued callbacks on this thread, once the native
+        producer exists and until it is destroyed; callable from any thread."""
+        if not self._c_producer or not self._pump_use():
+            return
+        try:
+            _lib.Producer__execute_callbacks(self._c_producer)
+        finally:
+            self._end_use()
+
+    def _enter(self) -> asyncio.AbstractEventLoop:
+        """The start of each async method: register the running loop with the
+        notify hook, run what is already queued, and free what is left for a
+        loop that has closed."""
+        loop = asyncio.get_running_loop()
+        with self._loops_lock:
+            self._loops.add(loop)
+        self._pump()
+        self._undelivered.free_closed()
+        return loop
+
+    def _deliver(self, loop: asyncio.AbstractEventLoop, item: _Pending) -> None:
+        """Hand one record's completion to its ``loop`` (called by the pump on
+        any thread): buffered, then resolved on the loop in one scheduled call
+        per batch; dropped with :func:`_drop_completion`'s warning when the
+        loop has closed."""
+        if loop.is_closed():
+            # The completion is dropped, then the future untracked, so a later
+            # flush() does not wait for it (see _completable).
+            self._drop([item])
+            return
+        with self._pending_lock:
+            pending = self._pending.get(loop)
+            schedule = pending is None
+            if pending is None:
+                pending = self._pending[loop] = []
+            pending.append(item)
+        if schedule:
+            try:
+                loop.call_soon_threadsafe(self._complete_pending, loop)
+            except RuntimeError:  # the loop closed since the check
+                with self._pending_lock:
+                    refused = self._pending.pop(loop, [])
+                self._drop(refused)
 
     async def init_transactions(self) -> None:
         """See :meth:`Producer.init_transactions`."""
         self._check_not_closed()
-        await self._drain_async()
-        await self._run_async(
-            lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
+        await self._run_async(_lib.Producer_init_transactions_cb)
 
     async def begin_transaction(self) -> None:
-        """See :meth:`Producer.begin_transaction`. Its entry point has an
-        ``_async`` form, so it is an ``async def`` awaiting it; it does not wait
-        for earlier sends (see :meth:`Producer.begin_transaction` for why it
-        needs no drain)."""
+        """See :meth:`Producer.begin_transaction`. Its entry point has no
+        queued form, so it runs in the loop's default executor, as one use of
+        the handle, and is awaited without blocking the loop (see the module
+        docstring); cancelling the awaiting task lets it end, then raises
+        ``CancelledError``."""
         self._check_not_closed()
-        await self._run_async(
-            lambda cb: self._call(_lib.Producer_begin_transaction_async, cb))
-        self._in_transaction = True
+        loop = self._enter()
+        use = self._use()
+        c_producer = use.__enter__()
+
+        def begin() -> Exception | None:
+            try:
+                error = _lib.Producer_begin_transaction(c_producer)
+            finally:
+                use.__exit__(None, None, None)
+            if error:
+                return from_ffi_error(error)
+            self._in_transaction = True
+            return None
+
+        try:
+            began = loop.run_in_executor(None, begin)
+        except BaseException:
+            use.__exit__(None, None, None)
+            raise
+        exception = await await_to_end(began)
+        if exception is not None:
+            raise exception
 
     async def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -135,10 +253,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         check_group_metadata(group_metadata)
         native = group_metadata_handle(group_metadata)
-        await self._drain_async()
         spec = offsets_to_spec(offsets)
-        await self._run_async(lambda cb: self._call(
-            _lib.Producer_send_offsets_to_transaction_async, spec, native, cb))
+        await self._run_async(_lib.Producer_send_offsets_to_transaction_cb, spec, native)
 
     async def commit_transaction(self) -> None:
         """See :meth:`Producer.commit_transaction`: when it returns, the
@@ -149,9 +265,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         sent = list(self._futures)
         # Sends from now on wait for their handover again (see _ProducerState).
         self._in_transaction = False
-        await self._drain_async()
-        await self._run_async(
-            lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
+        await self._run_async(_lib.Producer_commit_transaction_cb)
         sent = self._completable(sent)
         if sent:
             await asyncio.wait(sent)
@@ -161,16 +275,15 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         # Sends from now on wait for their handover again (see _ProducerState).
         self._in_transaction = False
-        await self._drain_async()
-        await self._run_async(
-            lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
+        await self._run_async(_lib.Producer_abort_transaction_cb)
 
     async def send(self, *, record: ProducerRecord[K, V],
                    callback: Callback | None = UNSET) -> asyncio.Future[RecordMetadata]:
-        """See :meth:`Producer.send`. Awaiting it waits for buffer space (Java's
-        ``send()`` blocks on ``buffer.memory``) and, with a ``transactional.id``
-        and no transaction started, for the record to reach the producer,
-        without blocking the loop; it raises what :meth:`Producer.send` raises. The returned
+        """See :meth:`Producer.send`. With a ``transactional.id`` and no
+        transaction started, awaiting it waits for the record to reach the
+        producer, without blocking the loop, and raises what
+        :meth:`Producer.send` raises; cancelling the awaiting task then lets the
+        wait end, then raises ``CancelledError``. The returned
         ``asyncio.Future`` resolves with the record's metadata. The
         ``callback`` runs on the event loop, before the future completes, and
         must not block it. A record that completes after its event loop has
@@ -182,92 +295,62 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         native = self._native_record(record)
         topic = record.topic()
         partition = record.partition()
-        loop = asyncio.get_running_loop()
+        loop = self._enter()
         future: asyncio.Future[RecordMetadata] = loop.create_future()
 
         # See Producer.send: with no transaction started, a transactional
         # producer's send awaits the handover and raises the error the Rust
         # send() returns.
         waiting = self._transactional and not self._in_transaction
-        rethrown: Exception | None = None
+        handed_over: asyncio.Future[None] = loop.create_future()
         lock = threading.Lock()
+        completed = False
+        rethrown: Exception | None = None
 
-        def cb(result: int, error: int, immediate: bool) -> None:
-            # Runs on the C completion thread. asyncio futures may only be
-            # completed on their loop: buffer, and schedule one drain per batch.
-            nonlocal rethrown
-            if immediate and waiting:
-                with lock:
-                    if waiting:
-                        rethrown = completion_to_python(result, error, topic, partition)[1]
-                        return
-            if loop.is_closed():
-                # The completion is dropped, then the future untracked, so a
-                # later flush() does not wait for it (see _completable).
-                _drop_completion(topic, partition, result, error)
-                self._futures.discard(future)
-                return
-            with self._pending_lock:
-                pending = self._pending.get(loop)
-                schedule = pending is None
-                if pending is None:
-                    pending = self._pending[loop] = []
-                pending.append((future, callback, topic, partition, result, error))
-            if schedule:
-                try:
-                    loop.call_soon_threadsafe(self._complete_pending, loop)
-                except RuntimeError:  # the loop closed since the check
-                    with self._pending_lock:
-                        refused = self._pending.pop(loop, [])
-                    self._drop(refused)
+        def complete(metadata: RecordMetadata, exception: Exception | None) -> None:
+            # Once per record, from the pump (any thread): the callback and the
+            # future are resolved on the record's loop.
+            nonlocal completed
+            with lock:
+                if completed:
+                    return
+                completed = True
+            self._deliver(loop, (future, callback, metadata, exception))
 
-        # A close() that began since the check above (the serializers ran in
-        # between) refuses the record as Java's RecordAccumulator.append does.
-        closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
-        space: asyncio.Future[None] | None = None
-        handed_over: asyncio.Future[None] | None = None
-        with self._use(closed_while_sending) as c_producer:
-            full = _lib.Producer_send(c_producer, native, cb)
-            if full is None:
-                raise closed_while_sending
-            self._track(future)
-            if waiting:
-                handed_over = loop.create_future()
-                handover = handed_over
+        def on_completion(metadata_tuple: MetadataTuple | None, error: int) -> None:
+            # The error handle is borrowed: converted during the call.
+            complete(*completion_to_python(metadata_tuple, error, topic, partition))
 
-                def ready() -> None:
-                    if not loop.is_closed():
-                        loop.call_soon_threadsafe(_set_result, handover)
-
-                if _lib.Producer_drain(c_producer, ready):
-                    handed_over = None
-            if full:
-                waiter: asyncio.Future[None] = loop.create_future()
-
-                def space_cb() -> None:
-                    if not loop.is_closed():
-                        loop.call_soon_threadsafe(_set_result, waiter)
-
-                if not _lib.Producer_on_space_available(c_producer, space_cb):
-                    space = waiter
-        # Both waits clear `waiting` when they end, a cancellation included:
-        # left set, it would keep taking the immediate error from the callback
-        # and the future, and the tracked future would hang a later flush().
-        try:
-            if space is not None:
-                await space
-            if handed_over is not None:
-                await handed_over
-        finally:
-            if waiting:
-                with lock:
-                    waiting = False
-                if rethrown is not None:
+        def resolve(error: int) -> None:
+            # The handover: the error the Rust send() returned, after which the
+            # record's Callback never runs.
+            nonlocal completed, rethrown
+            if error:
+                exception = from_ffi_error(error)
+                if waiting:
+                    with lock:
+                        completed = True
+                    rethrown = exception
                     # The record never reached the producer (Java's doSend
                     # rethrows the error), so flush() has nothing to wait for.
                     self._futures.discard(future)
-        if rethrown is not None:
-            raise rethrown
+                else:
+                    complete(failure_metadata(topic, partition), exception)
+            if waiting and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(_set_result, handed_over)
+                except RuntimeError:  # the loop closed since the check
+                    pass
+
+        # A close() that began since the check above (the serializers ran in
+        # between) refuses the record as Java's RecordAccumulator.append does.
+        with self._use(KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)) as c_producer:
+            raise_if_error(_lib.Producer_send_cb(c_producer, native, on_completion, resolve))
+            self._track(future)
+        if waiting:
+            await await_to_end(handed_over)
+            if rethrown is not None:
+                raise rethrown
         return future
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -275,8 +358,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         completion order: the callback runs, then the future completes."""
         with self._pending_lock:
             items = self._pending.pop(loop, [])
-        for future, callback, topic, partition, result, error in items:
-            metadata, exception = completion_to_python(result, error, topic, partition)
+        for future, callback, metadata, exception in items:
             invoke_callback(self, callback, metadata, exception)
             if future.done():
                 continue  # cancelled by its awaiter
@@ -291,8 +373,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         loop has closed, which are dropped (see :meth:`send`)."""
         self._check_not_closed()
         sent = list(self._futures)
-        await self._drain_async()
-        await self._run_async(lambda cb: self._call(_lib.Producer_flush_async, cb))
+        # The C API drains the submission queue first (see Producer.flush).
+        await self._run_async(_lib.Producer_flush_cb)
         sent = self._completable(sent)
         if sent:
             await asyncio.wait(sent)
@@ -323,8 +405,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     def _drop(self, items: list[_Pending]) -> None:
         """Drop completions whose event loop has closed, untracking their
         futures (see :func:`_drop_completion`)."""
-        for future, _callback, topic, partition, result, error in items:
-            _drop_completion(topic, partition, result, error)
+        for future, _callback, metadata, _exception in items:
+            _drop_completion(metadata)
             self._futures.discard(future)
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
@@ -332,16 +414,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         if topic is None:
             raise NullPointerError(message="topic cannot be null")
-        list_handle, error = await self._await_payload(
-            lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb), True)
-        if error:
-            if list_handle:
-                _lib.PartitionInfoList_drain(list_handle)
-            raise_if_error(error)
-        return [to_partition_info(t) for t in _lib.PartitionInfoList_drain(list_handle)]
+        partitions, error = await self._await_payload(_lib.Producer_partitions_for_cb, topic)
+        raise_if_error(error)
+        return [to_partition_info(t) for t in partitions]
 
     def metrics(self) -> dict[MetricName, Metric]:
-        """See :meth:`Producer.metrics`. Its entry point has no ``_async``
+        """See :meth:`Producer.metrics`. Its entry point has no queued ``_cb``
         form, so it is a plain ``def``."""
         self._check_not_closed()
         return to_metrics_map(self._call(_lib.Producer_metrics))
@@ -355,34 +433,27 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if not self._begin_close():
             return
         c_producer = self._c_producer
-        loop = asyncio.get_running_loop()
-        # Refuse further records and hand the accumulated ones to the Rust
-        # producer, waiting for that within the close timeout (Java's close
-        # timer covers the whole close).
-        start = loop.time()
-        _lib.Producer_shutdown(c_producer)
+        loop = self._enter()
         # Whether the Rust close ran to its end; if the task was cancelled
         # first, the close is forced before the handle is freed (see
-        # force_close).
+        # _teardown).
         closed = False
         try:
+            # close() is Java's close(Duration.ofMillis(Long.MAX_VALUE)). The C
+            # API drains the submission queue first (as flush), so every record
+            # sent before is included.
             if timeout_ms is None:
-                await self._drain_async(closing=True)
-                (error,) = await self._await_payload(
-                    lambda cb: _lib.Producer_close_async(c_producer, cb), False)
+                (error,) = await self._await_payload(_lib.Producer_close_cb, owner=True)
             else:
-                await self._drain_async(timeout_ms / 1000.0, closing=True)
-                remaining_ms = max(0, timeout_ms - int((loop.time() - start) * 1000))
                 (error,) = await self._await_payload(
-                    lambda cb: _lib.Producer_close_with_timeout_async(
-                        c_producer, remaining_ms, cb), False)
+                    _lib.Producer_close_with_timeout_cb, timeout_ms, owner=True)
             closed = True
             raise_if_error(error)
         finally:
             # Forces an unfinished close, waits for the calls still in flight,
-            # then joins the send and poll threads: off the loop, and to its end
-            # even if this task is cancelled again meanwhile, so the serializers
-            # close after it.
+            # then frees the handle (running the callbacks still pending there):
+            # off the loop, and to its end even if this task is cancelled again
+            # meanwhile, so the serializers close after it.
             teardown = loop.run_in_executor(None, self._teardown, c_producer, not closed)
             try:
                 await await_to_end(teardown)
@@ -394,9 +465,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     def _teardown(self, c_producer: int, force: bool) -> None:
         if force:
-            force_close(c_producer)
-        self._wait_for_uses()
-        _lib.Producer_destroy(c_producer)
+            # Java's sender.forceClose() for a close() the cancellation stopped
+            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1419-1437):
+            # a close with a zero timeout fails the records still pending.
+            _lib.Producer_close_with_timeout_cb(c_producer, 0, free_error)
+        self._destroy()
 
     async def __aenter__(self) -> AsyncProducer[K, V]:
         return self
@@ -411,42 +484,20 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     # ---- completion primitives ----------------------------------------------
 
-    async def _drain_async(self, timeout_s: float | None = None, *,
-                           closing: bool = False) -> None:
-        """Await until every record sent so far is with the Rust producer (see
-        ``_ProducerState._drain_sync``), at most ``timeout_s`` seconds when
-        given, without blocking the loop; ``closing`` is passed by ``close()``
-        alone (see ``_ProducerState._drain_registered``)."""
-        loop = asyncio.get_running_loop()
-        drained: asyncio.Future[None] = loop.create_future()
+    async def _await_payload(self, entry: Callable[..., None], *args: Any,
+                             owner: bool = False) -> tuple[Any, ...]:
+        """Submit ``entry(handle, *args, cb)`` (a queued ``_cb`` entry point) and
+        await its completion payload on the loop. The completion runs in the
+        callback pump and hops onto the loop via ``call_soon_threadsafe``; a
+        payload nobody awaits any more (a cancelled task, a closed loop) has its
+        error handle freed (see :class:`~confluent_kafka._async.Undelivered`).
 
-        def ready() -> None:
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(_set_result, drained)
-
-        if self._drain_registered(ready, closing=closing):
-            return
-        if timeout_s is None:
-            await drained
-            return
-        try:
-            await asyncio.wait_for(asyncio.shield(drained), timeout_s)
-        except asyncio.TimeoutError:
-            pass
-
-    async def _await_payload(self, submit: Callable[[Callable[..., None]], None],
-                             partitions: bool) -> tuple[Any, ...]:
-        """Submit an ``_async`` FFI operation and await its completion payload
-        on the loop. The completion runs on the producer's dispatcher thread and
-        hops onto the loop via ``call_soon_threadsafe``; a payload nobody awaits
-        any more (a cancelled task, a closed loop) has its handles freed (see
-        :class:`~confluent_kafka._async.Undelivered`)."""
-        self._undelivered.free_closed()
-        loop = asyncio.get_running_loop()
+        The submission is one use of the handle, which raises Java's closed
+        ``IllegalStateError`` once a ``close()`` has begun; only ``close()``,
+        which owns the handle, passes ``owner``."""
+        loop = self._enter()
         fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
-
-        def free(payload: tuple[Any, ...]) -> None:
-            free_payload(payload, partitions)
+        free = free_error_payload
 
         def deliver(payload: tuple[Any, ...]) -> None:
             if fut.done():
@@ -457,10 +508,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         def cb(*payload: Any) -> None:
             self._undelivered.hand_over(loop, deliver, payload, free)
 
-        submit(cb)
+        if owner:
+            entry(self._c_producer, *args, cb)
+        else:
+            with self._use() as c_producer:
+                entry(c_producer, *args, cb)
         return await fut
 
-    async def _run_async(self, submit: Callable[[Callable[..., None]], None]) -> None:
-        """A void ``_async`` FFI operation, awaited; raises its typed error."""
-        (error,) = await self._await_payload(submit, False)
+    async def _run_async(self, entry: Callable[..., None], *args: Any) -> None:
+        """A void queued FFI operation, awaited; raises its typed error."""
+        (error,) = await self._await_payload(entry, *args)
         raise_if_error(error)
