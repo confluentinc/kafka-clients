@@ -7,12 +7,15 @@
 
 > **Current state (2026-09-29):** Milestone 15 landed secret redaction aligned
 > with Java's `Password` type (`[hidden]`): the `ConfigDef.Type.PASSWORD` fields
-> of `SslConfigs` / `SaslConfigs` are typed `Password`, `ProducerConfig` renders its
-> raw `originals` map as keys only, and `DelegationToken`,
-> `UserScramCredentialUpsertion` and the six SASL / delegation-token wrappers
-> delegate `Debug` to their redacting `Display`; its Phase 2 fixed the
-> `NetworkClient` disconnect log (`{:?}` → `Display`) and the remaining request,
-> builder and admin-config types whose Java `toString()` masks. Milestone 14 added the
+> of `SslConfigs` / `SaslConfigs` and the Rust-only `SaslConfigs` `password` field
+> are typed `Password`; `ProducerConfig` renders its raw `originals` map as keys
+> only; `DelegationToken` and the six SASL / delegation-token wrappers delegate
+> `Debug` to their redacting `Display`; and `UserScramCredentialUpsertion`, which
+> has no `Display` (Java has no `toString()` there), hides its salt and password
+> in a hand-written `Debug`. Its Phase 2 and review rounds fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`), the remaining request,
+> builder and admin-config types whose Java `toString()` masks, and three
+> Rust-only options types. Milestone 14 added the
 > `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
 > ducktape system tests. See `design/history/MILESTONES.md` and
 > `design/history/Milestone-15-password-redaction/PLAN.md`.
