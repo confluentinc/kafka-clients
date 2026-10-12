@@ -66,7 +66,9 @@
 //!   (`kafka_consumer_ConsumerRecord_leader_epoch`,
 //!   `kafka_producer_ProducerRecord_partition`), and keeps -1 when Java gives
 //!   -2 a meaning (`kafka_admin_MemberDescription_member_epoch`, where -2 is a
-//!   static member that left, and the admin options' `timeout_ms`);
+//!   static member that left, and the admin options' `timeout_ms`), or when no
+//!   value is outside its domain (`kafka_common_Error_throttle_time_ms`, which
+//!   holds any `int` Java's constructor was given);
 //! - a `double`: NaN;
 //! - a `kafka_Bytes_t`: a NULL one (Java's `null` array);
 //! - `kafka_common_ErrorCode_e` (`kafka_common_Error_code`):
@@ -306,7 +308,7 @@ mod tests {
             "kafka_common_resource_PatternType_code",
             "kafka_common_resource_ResourceType_code",
         ];
-        const EXPECTED: [(&str, &str); 75] = [
+        const EXPECTED: [(&str, &str); 74] = [
             ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
             (
                 "kafka_admin_ConfigEntry_ConfigSource__enum",
@@ -357,7 +359,6 @@ mod tests {
             ("kafka_common_DuplicateResourceError_source", "null()"),
             ("kafka_common_ElectionType__enum", "kafka_common_ElectionType_PREFERRED"),
             ("kafka_common_Error_source", "null()"),
-            ("kafka_common_Error_throttle_time_ms", "-2"),
             ("kafka_common_GroupAuthorizationError_source", "null()"),
             ("kafka_common_GroupState__enum", "kafka_common_GroupState_UNKNOWN"),
             ("kafka_common_GroupType__enum", "kafka_common_GroupType_UNKNOWN"),

@@ -1627,12 +1627,14 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
 /// (`ThrottlingQuotaExceededException.throttleTimeMs()`), or `-1` when the
 /// error carries none.
 ///
-/// A caught Rust panic returns -2, which is no throttle time: the broker reports 0 or more.
+/// A caught Rust panic returns -1, as for no throttle time: Java's
+/// `ThrottlingQuotaExceededException(int, String)` stores any `int`, and the C
+/// constructors pass it through, so no value is outside its domain.
 ///
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka_common_Error_t) -> i32 {
     if error.is_null() {

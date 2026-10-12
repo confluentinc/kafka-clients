@@ -31,7 +31,9 @@ header = """
  *     (kafka_consumer_ConsumerRecord_leader_epoch,
  *     kafka_producer_ProducerRecord_partition), and keeps -1 when Java gives
  *     -2 a meaning (kafka_admin_MemberDescription_member_epoch, where -2 is a
- *     static member that left, and the admin options' timeout_ms);
+ *     static member that left, and the admin options' timeout_ms), or when no
+ *     value is outside its domain (kafka_common_Error_throttle_time_ms, which
+ *     holds any int Java's constructor was given);
  *   - a double: NaN;
  *   - a kafka_Bytes_t: a NULL one (Java's null array);
  *   - kafka_common_ErrorCode_e (kafka_common_Error_code):
