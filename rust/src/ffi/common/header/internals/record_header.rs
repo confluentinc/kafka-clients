@@ -67,7 +67,14 @@ impl RecordHeaderInner {
     /// into `self`, which therefore must not move afterwards.
     pub(crate) fn as_header_ptr(&self) -> *const kafka_common_header_Header_t {
         self.view
-            .get_or_init(|| unsafe { HeaderInner::new(&self.header as *const RecordHeader as *const dyn Header) })
+            // SAFETY: `&self.header` is a live `RecordHeader` that outlives the view and is not
+            // mutated while it exists, as `HeaderInner::new` requires: the view is cached in
+            // `self.view`, a field of the same `RecordHeaderInner`, so it is dropped with the
+            // header; no code mutates a `RecordHeaderInner`'s `header`; and, per this method's
+            // rustdoc, `self` does not move once the view exists.
+            .get_or_init(|| unsafe {
+                HeaderInner::new(&self.header as *const RecordHeader as *const (dyn Header + Send + Sync))
+            })
             .as_ptr()
     }
 }
@@ -82,10 +89,17 @@ pub(crate) fn box_record_header(header: RecordHeader) -> *mut kafka_common_heade
 ///
 /// # Safety
 ///
-/// `header` must be a valid record-header handle.
+/// `header` must be a valid record-header handle, alive for `'a`.
 pub(crate) unsafe fn record_header_ref<'a>(
     header: *const kafka_common_header_internals_RecordHeader_t,
 ) -> &'a RecordHeader {
+    // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle alive for
+    // `'a`, so it points at a live `RecordHeaderInner`: the `Box::into_raw` of `box_record_header`,
+    // an element of a `HeadersInner`'s `views` (alive until that headers handle's next mutation, as
+    // the module docs of `ffi::common::header` state), or the call-local one
+    // `CHeaders::add_with_header` passes to C; a C `Headers` implementation returns handles of
+    // these kinds. No code mutates a `RecordHeaderInner`'s `header`, so the shared reference is
+    // sound for `'a`.
     unsafe { &*(header as *const RecordHeaderInner) }.header()
 }
 
@@ -97,9 +111,15 @@ pub(crate) unsafe fn record_header_ref<'a>(
 /// `list` must be null or a valid list whose elements are record-header
 /// handles.
 pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<RecordHeader> {
+    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
+    // `list_elements` requires; the slice is used only within this call, which does not mutate the
+    // list.
     unsafe { list_elements(list) }
         .iter()
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a record-header
+            // handle, as `record_header_ref` requires; the header is cloned, so the borrow lasts
+            // for this call only.
             unsafe { record_header_ref(element as *const kafka_common_header_internals_RecordHeader_t) }.clone()
         })
         .collect()
@@ -120,7 +140,14 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
     value: kafka_Bytes_t,
 ) -> *mut kafka_common_header_internals_RecordHeader_t {
     box_record_header(RecordHeader::new(
+        // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // after this call.
         unsafe { c_str_to_string(key) },
+        // SAFETY: Per this function's `# Safety`, `value` is null or a valid buffer, so
+        // `value.data` is null or valid for `value.len` bytes, as `kafka_Bytes_t::as_slice`
+        // requires; the bytes are copied into an owned `Vec`, so nothing borrows them after this
+        // call.
         unsafe { value.as_slice() }.map(<[u8]>::to_vec),
     ))
 }
@@ -135,6 +162,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
     self_: *const kafka_common_header_internals_RecordHeader_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid record-header handle, as
+    // `record_header_ref` requires; the result is copied into an owned value before return, so the
+    // borrow lasts for this call only.
     into_c_string(&unsafe { record_header_ref(self_) }.to_string())
 }
 
@@ -149,6 +179,11 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
     self_: *const kafka_common_header_internals_RecordHeader_t,
 ) -> *const kafka_common_header_Header_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid record-header handle, so it points
+    // at a live `RecordHeaderInner` that does not move while it lives, as `as_header_ptr` requires:
+    // a boxed one, an element of a `HeadersInner`'s `views`, a vector never pushed to after it is
+    // built, or the call-local one `CHeaders::add_with_header` passes to C. The view returned
+    // points into the handle, so it lives as long as the handle, as the rustdoc states.
     unsafe { &*(self_ as *const RecordHeaderInner) }.as_header_ptr()
 }
 
@@ -165,6 +200,10 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_destroy(
     self_: *mut kafka_common_header_internals_RecordHeader_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an owned
+        // record-header handle not yet destroyed, i.e. the `Box::into_raw` of a `RecordHeaderInner`
+        // in `box_record_header` (a borrowed element of a `Headers` getter's list is never passed
+        // here), so `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut RecordHeaderInner) });
     }
 }
@@ -182,6 +221,10 @@ mod tests {
     fn handle_round_trips_key_value_and_display() {
         let key = CString::new("h1").unwrap();
         let bytes = [9_u8, 9];
+        // SAFETY: Test code: `key` and `bytes` outlive the calls reading them; each handle comes
+        // from `kafka_common_header_internals_RecordHeader_new` and is destroyed once, after its
+        // `Header` view, whose key and value are read before then; the string from `to_string` is
+        // destroyed once, after it is read; destroying null is a no-op.
         unsafe {
             let header =
                 kafka_common_header_internals_RecordHeader_new(key.as_ptr(), kafka_Bytes_t::from_slice(&bytes));
@@ -216,6 +259,10 @@ mod tests {
     fn list_reads_handles_in_order() {
         let a = CString::new("a").unwrap();
         let b = CString::new("b").unwrap();
+        // SAFETY: Test code: `a` and `b` outlive the constructors reading them; `first` and
+        // `second` come from `kafka_common_header_internals_RecordHeader_new` and are destroyed
+        // once, after `list_record_headers` clones them and after the list that borrows them is
+        // destroyed; `list_record_headers` reads null as empty.
         unsafe {
             let list = kafka_List_new();
             let first = kafka_common_header_internals_RecordHeader_new(a.as_ptr(), kafka_Bytes_t::NULL);
