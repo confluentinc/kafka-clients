@@ -527,9 +527,131 @@ mod tests {
     };
     use crate::ffi::producer::{
         kafka_producer_Producer__execute_callbacks, kafka_producer_Producer_close_with_timeout,
-        kafka_producer_Producer_close_with_timeout_cb,
+        kafka_producer_Producer_close_with_timeout_cb, kafka_producer_Producer_send_cb,
     };
     use crate::ffi::util::{box_string_map, c_str_to_string, kafka_Map_destroy};
+
+    /// A `KafkaProducer` that can never fetch metadata, so a send waits out
+    /// `max.block.ms` (60 s) for it.
+    fn unreachable_producer() -> *mut kafka_producer_KafkaProducer_t {
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1"), ("max.block.ms", "60000")]);
+        // SAFETY: Test code: `props` and `config` are live from their constructor to their single
+        // destroy below; the producer is handed to the caller, who destroys it.
+        unsafe {
+            let mut config = std::ptr::null_mut();
+            assert!(kafka_producer_ProducerConfig_new(props, &raw mut config).is_null());
+            kafka_Map_destroy(props);
+            let mut producer = std::ptr::null_mut();
+            let error =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut producer);
+            assert!(error.is_null());
+            kafka_producer_ProducerConfig_destroy(config);
+            producer
+        }
+    }
+
+    /// Records a `send_cb` completion: `None` for a future, the error's
+    /// message otherwise.
+    unsafe extern "C" fn record_send(
+        future: *mut kafka_common_KafkaFuture_t,
+        error: *mut kafka_common_Error_t,
+        opaque: *mut c_void,
+    ) {
+        let outcome = if error.is_null() {
+            // SAFETY: the completion owns the future; freed once.
+            unsafe { kafka_common_KafkaFuture_destroy(future) };
+            None
+        } else {
+            // SAFETY: the completion owns `error`; it is read, then freed once.
+            let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+            // SAFETY: as above.
+            unsafe { kafka_common_Error_destroy(error) };
+            Some(message)
+        };
+        // SAFETY: `opaque` is the test's slot, alive until the callbacks ran.
+        unsafe { &*(opaque as *const std::sync::Mutex<Vec<Option<String>>>) }
+            .lock()
+            .unwrap()
+            .push(outcome);
+    }
+
+    /// Records a `void` completion: `None` for success, the error's message
+    /// otherwise.
+    unsafe extern "C" fn record_void(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        let outcome = (!error.is_null()).then(|| {
+            // SAFETY: the completion owns `error`; it is read, then freed once.
+            let message = unsafe { c_str_to_string(kafka_common_Error_message(error)) };
+            // SAFETY: as above.
+            unsafe { kafka_common_Error_destroy(error) };
+            message
+        });
+        // SAFETY: `opaque` is the test's slot, alive until the callbacks ran.
+        unsafe { &*(opaque as *const std::sync::Mutex<Vec<Option<String>>>) }
+            .lock()
+            .unwrap()
+            .push(outcome);
+    }
+
+    /// Java's `close(Duration)` bounds the caller's whole wait
+    /// (`KafkaProducer.java` `close(Duration, boolean)`), so a timed close
+    /// behind a `send_cb` waiting out `max.block.ms` for metadata returns
+    /// within its timeout, drain included: the record being handed over fails
+    /// with the close, and the ones queued behind it as sent after close.
+    /// Both forms.
+    #[test]
+    fn a_timed_close_bounds_the_drain_of_the_queued_sends() {
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        for queued in [false, true] {
+            let sends = std::sync::Mutex::new(Vec::<Option<String>>::new());
+            let sends_opaque = &sends as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void;
+            // SAFETY: Test code: the producer and `record` are live from their constructor to their
+            // single destroy below, `view` is used only before the producer is destroyed, and
+            // `sends` and `closed` outlive the callback runs that write them.
+            unsafe {
+                let producer = unreachable_producer();
+                let view = kafka_producer_KafkaProducer__as_Producer(producer);
+                let record =
+                    kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+                for _ in 0..3 {
+                    kafka_producer_Producer_send_cb(view, record, record_send, sends_opaque);
+                }
+                let start = std::time::Instant::now();
+                if queued {
+                    let closed = std::sync::Mutex::new(Vec::new());
+                    kafka_producer_Producer_close_with_timeout_cb(
+                        view,
+                        500,
+                        record_void,
+                        &closed as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
+                    );
+                    while closed.lock().unwrap().is_empty() {
+                        kafka_producer_Producer__execute_callbacks(view);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    assert_eq!(*closed.lock().unwrap(), [None]);
+                } else {
+                    assert!(kafka_producer_Producer_close_with_timeout(view, 500).is_null());
+                }
+                assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+                while sends.lock().unwrap().len() < 3 {
+                    assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+                    kafka_producer_Producer__execute_callbacks(view);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let sends = sends.lock().unwrap().clone();
+                assert_eq!(sends[0].as_deref(), Some("Producer closed while send in progress"));
+                for later in &sends[1..] {
+                    assert_eq!(
+                        later.as_deref(),
+                        Some("Cannot perform operation after producer has been closed")
+                    );
+                }
+                kafka_producer_KafkaProducer_destroy(producer);
+                kafka_producer_ProducerRecord_destroy(record);
+            }
+        }
+    }
 
     #[test]
     fn passthrough_reads_bytes_and_null_means_null() {

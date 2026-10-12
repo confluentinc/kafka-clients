@@ -441,7 +441,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         try:
             # close() is Java's close(Duration.ofMillis(Long.MAX_VALUE)). The C
             # API drains the submission queue first (as flush), so every record
-            # sent before is included.
+            # sent before is included; a timed close spends at most its timeout on
+            # that drain and the close together, failing what it did not reach.
             if timeout_ms is None:
                 (error,) = await self._await_payload(_lib.Producer_close_cb, owner=True)
             else:

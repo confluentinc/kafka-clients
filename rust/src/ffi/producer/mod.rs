@@ -69,6 +69,15 @@
 //! key and value `void *` (and, without serializers, the bytes they point
 //! at) borrowed until its completion callback fires.
 //!
+//! A timed `close(Duration)` spends at most its timeout in total, the drain
+//! included, as Java's timeout bounds the caller's whole wait: it drains for at
+//! most the timeout and then closes with the time left. A record still queued
+//! when the drain gives up reaches a closed producer and fails through its
+//! completion, as a Java `send` after `close` does, and the one being handed
+//! over when the producer closes fails with "Producer closed while send in
+//! progress". A plain `close()` (`Long.MAX_VALUE`) and `flush` drain without a
+//! bound.
+//!
 //! # Destroy
 //!
 //! `_destroy` on a class handle stops the submission task, waits for the
@@ -96,7 +105,7 @@ use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -559,17 +568,49 @@ fn with_txn_control_cb<F, Fut>(
     });
 }
 
+/// How long a [`with_drain`] operation may wait for the submission queue.
+#[derive(Clone, Copy)]
+enum DrainBound {
+    /// Until every queued `send_cb` was handed over (`flush`, `close()`).
+    Unbounded,
+    /// At most this long; the operation gets the time left (`close(Duration)`).
+    Within(Duration),
+}
+
+impl Client {
+    /// Drains the submission queue within `bound` and returns the time left
+    /// of it (`Duration::MAX` when unbounded).
+    ///
+    /// Giving up on the drain is cancel-safe: the drain has only queued a
+    /// `Barrier` and awaits its oneshot, so a late ack is discarded, and the
+    /// records still queued are handed over afterwards, to a producer that by
+    /// then refuses them.
+    async fn drain_within(&self, bound: DrainBound) -> Result<Duration, Error> {
+        match bound {
+            DrainBound::Unbounded => self.drain_submitted_sends().await.map(|()| Duration::MAX),
+            DrainBound::Within(timeout) => {
+                let start = Instant::now();
+                if let Ok(result) = tokio::time::timeout(timeout, self.drain_submitted_sends()).await {
+                    result?;
+                }
+                Ok(timeout.saturating_sub(start.elapsed()))
+            },
+        }
+    }
+}
+
 /// Runs a non-transactional `void` operation after draining the submission
-/// queue, on the calling thread.
-fn with_drain<F, Fut>(client: &Arc<Client>, op: F) -> *mut kafka_common_Error_t
+/// queue within `bound`, on the calling thread; `op` gets the time left of
+/// `bound`.
+fn with_drain<F, Fut>(client: &Arc<Client>, bound: DrainBound, op: F) -> *mut kafka_common_Error_t
 where
-    F: FnOnce(Arc<DynProducerGv>) -> Fut,
+    F: FnOnce(Arc<DynProducerGv>, Duration) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
 {
     let producer = Arc::clone(&client.producer);
     error_slot(block_on(&client.runtime, async {
-        client.drain_submitted_sends().await?;
-        op(producer).await
+        let left = client.drain_within(bound).await?;
+        op(producer, left).await
     }))
 }
 
@@ -579,11 +620,12 @@ where
 fn with_drain_cb<F, Fut>(
     fn_name: &'static str,
     client: &Arc<Client>,
+    bound: DrainBound,
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
     op: F,
 ) where
-    F: FnOnce(Arc<DynProducerGv>) -> Fut + Send + 'static,
+    F: FnOnce(Arc<DynProducerGv>, Duration) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), Error>> + Send,
 {
     #[cfg(test)]
@@ -592,8 +634,8 @@ fn with_drain_cb<F, Fut>(
     let task_client = Arc::clone(client);
     client.spawn(async move {
         let result = catch_task_panic(fn_name, async {
-            task_client.drain_submitted_sends().await?;
-            op(Arc::clone(&task_client.producer)).await
+            let left = task_client.drain_within(bound).await?;
+            op(Arc::clone(&task_client.producer), left).await
         })
         .await;
         task_client.deliver(cb, opaque, result);
@@ -1102,7 +1144,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_drain(unsafe { client_ref(self_) }, |p| async move { p.flush().await })
+    with_drain(unsafe { client_ref(self_) }, DrainBound::Unbounded, |p, _| async move {
+        p.flush().await
+    })
 }
 
 /// `Producer.flush()`, completion queued.
@@ -1129,9 +1173,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
         // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
         // it spawns.
         unsafe { client_ref(self_) },
+        DrainBound::Unbounded,
         cb,
         opaque,
-        |p| async move { p.flush().await },
+        |p, _| async move { p.flush().await },
     );
 }
 
@@ -1306,7 +1351,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
 ) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call.
-    with_drain(unsafe { client_ref(self_) }, |p| async move { p.close().await })
+    with_drain(unsafe { client_ref(self_) }, DrainBound::Unbounded, |p, _| async move {
+        p.close().await
+    })
 }
 
 /// `Producer.close()`, completion queued.
@@ -1333,13 +1380,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
         // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task
         // it spawns.
         unsafe { client_ref(self_) },
+        DrainBound::Unbounded,
         cb,
         opaque,
-        |p| async move { p.close().await },
+        |p, _| async move { p.close().await },
     );
 }
 
 /// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds.
+///
+/// The timeout bounds the whole call, as in Java: the queued `send_cb`s are
+/// drained for at most `timeout`, and the producer is closed with the time
+/// left. A record the drain did not reach fails through its `send_cb`
+/// completion, as a Java `send` after `close` does.
 ///
 /// A negative `timeout` is rejected with
 /// `kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
@@ -1362,12 +1415,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
         Ok(timeout) => timeout,
         Err(error) => return box_error(error),
     };
-    with_drain(client, move |p| async move { p.close_with_timeout(timeout).await })
+    with_drain(client, DrainBound::Within(timeout), |p, left| async move {
+        p.close_with_timeout(left).await
+    })
 }
 
-/// `Producer.close(Duration timeout)`, completion queued; a negative
-/// `timeout` is handled as by [`kafka_producer_Producer_close_with_timeout`],
-/// its rejection delivered through `cb`.
+/// `Producer.close(Duration timeout)`, completion queued; the bounded drain
+/// and a negative `timeout` are handled as by
+/// [`kafka_producer_Producer_close_with_timeout`], a rejected timeout
+/// delivered through `cb`.
 ///
 /// # Safety
 ///
@@ -1396,9 +1452,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
             with_drain_cb(
                 "kafka_producer_Producer_close_with_timeout_cb",
                 client,
+                DrainBound::Within(timeout),
                 cb,
                 opaque,
-                move |p| async move { p.close_with_timeout(timeout).await },
+                |p, left| async move { p.close_with_timeout(left).await },
             );
         },
         Err(error) => client.deliver(cb, SendPtr(opaque), Err(error)),

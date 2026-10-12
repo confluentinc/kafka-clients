@@ -827,15 +827,6 @@ def test_close_waits_for_in_flight_sends_and_does_not_cancel_them() -> None:
         assert isinstance(f.exception(), KafkaTimeoutError)
 
 
-_FFI_CLOSE_DRAIN = (
-    "Blocked by the branch C API: kafka_producer_Producer_close_cb and "
-    "close_with_timeout_cb (rust/src/ffi/producer/mod.rs, with_drain_cb) drain "
-    "the submission queue, unbounded, before closing, so no close, forced or "
-    "timed, ends while a queued send waits out max.block.ms for metadata. Not "
-    "fixable in Python without a Rust FFI change.")
-
-
-@pytest.mark.xfail(run=False, strict=True, reason=_FFI_CLOSE_DRAIN)
 def test_timed_close_is_bounded_and_fails_what_it_could_not_send() -> None:
     # Updated for the branch C API: it has no test pause; the 60 s max.block.ms
     # alone keeps the first record waiting for metadata.
@@ -1140,7 +1131,6 @@ def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
     assert str(error) == "Producer closed while send in progress"
 
 
-@pytest.mark.xfail(run=False, strict=True, reason=_FFI_CLOSE_DRAIN)
 def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
     # Critic 75 F1, the async analog of KafkaProducerTest's
     # shouldCloseProperlyAndThrowIfInterrupted (see test_kafka_producer.py):

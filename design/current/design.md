@@ -1127,7 +1127,9 @@ The producer keeps a submission outbox for `send_cb` /
 `send_with_callback_cb`: `flush`, `close` and every transaction-control
 operation, blocking or `_cb`, drain it first (`producer-transactions.md` §13),
 so a send that has returned is always included in the next commit, abort or
-flush.
+flush. A timed `close(Duration)` bounds that drain by its timeout and closes
+with the time left, as Java's timeout bounds the whole call; a record the drain
+did not reach then fails as a send after close.
 
 The admin surface is Java-faithful (admin-client.md §1, §5): each RPC is a
 sync call returning a `<Rpc>Result_t` whose `_values()` map holds one
