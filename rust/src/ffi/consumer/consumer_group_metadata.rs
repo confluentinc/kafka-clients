@@ -28,7 +28,9 @@
 //! the handle caches NUL-terminated copies; for a C implementation they are
 //! whatever the C function returned, so a C implementation keeps its
 //! strings alive for as long as the Java getter's return value would be
-//! referenced — until the handle is destroyed is the safe rule.
+//! referenced. The safe rule is the one
+//! [`kafka_consumer_ConsumerGroupMetadata_new`] states: until the handle is
+//! destroyed and every operation it was passed to has completed.
 
 #![expect(non_camel_case_types)]
 
@@ -91,14 +93,27 @@ pub(crate) fn box_group_metadata(meta: Arc<dyn ConsumerGroupMetadata>) -> *mut k
 ///
 /// # Safety
 ///
-/// `meta` must be a valid group-metadata handle.
+/// `meta` must be a valid group-metadata handle, kept alive for `'a`.
 pub(crate) unsafe fn group_metadata_ref<'a>(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> &'a Arc<dyn ConsumerGroupMetadata> {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid handle, i.e. a
+    // `ConsumerGroupMetadataInner` from `box_group_metadata`, kept alive for `'a`; nothing takes a
+    // `&mut` to it before `kafka_consumer_ConsumerGroupMetadata_destroy`, so the shared reborrow is
+    // valid for `'a`.
     &unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.meta
 }
 
+/// The handle's contents, for the getters.
+///
+/// # Safety
+///
+/// `meta` must be a valid group-metadata handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(meta: *const kafka_consumer_ConsumerGroupMetadata_t) -> &'a ConsumerGroupMetadataInner {
+    // SAFETY: Per this function's `# Safety`, `meta` is a valid handle, i.e. a
+    // `ConsumerGroupMetadataInner` from `box_group_metadata`, kept alive for `'a`; nothing takes a
+    // `&mut` to it before `kafka_consumer_ConsumerGroupMetadata_destroy`, so the shared reborrow is
+    // valid for `'a`.
     unsafe { &*(meta as *const ConsumerGroupMetadataInner) }
 }
 
@@ -116,10 +131,17 @@ impl CGroupMetadata {
     /// The string a C getter returned, borrowed for as long as the
     /// implementation keeps it (see the module docs); a null or non-UTF-8
     /// result reads as `None`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be null or a NUL-terminated string, alive and unmodified
+    /// for `'a`.
     unsafe fn string<'a>(ptr: *const c_char) -> Option<&'a str> {
         if ptr.is_null() {
             return None;
         }
+        // SAFETY: `ptr` is non-null (checked above) and, per this function's `# Safety`, a
+        // NUL-terminated string alive and unmodified for `'a`, as `CStr::from_ptr` requires.
         unsafe { CStr::from_ptr(ptr) }.to_str().ok()
     }
 }
@@ -134,29 +156,61 @@ impl fmt::Debug for CGroupMetadata {
 
 impl ConsumerGroupMetadata for CGroupMetadata {
     fn group_id(&self) -> &str {
+        // SAFETY: `self.group_id` and `self.self_` are the pair the C caller registered together
+        // through `kafka_consumer_ConsumerGroupMetadata_new`, whose `# Safety` keeps both valid,
+        // and each string the function returns alive and unmodified, until the handle is destroyed
+        // and every operation it was passed to has completed, and allows the call from any thread,
+        // concurrently with others. `self` is reached only through the handle or such an operation,
+        // so that outlasts this borrow of `self`, which the result is tied to: `string`'s
+        // requirement holds.
         unsafe { Self::string((self.group_id)(self.self_.get())) }.unwrap_or("")
     }
 
     fn generation_id(&self) -> i32 {
+        // SAFETY: `self.generation_id` and `self.self_` are the pair the C caller registered
+        // together through `kafka_consumer_ConsumerGroupMetadata_new`, whose `# Safety` keeps both
+        // valid until the handle is destroyed and every operation it was passed to has completed,
+        // and allows the call from any thread, concurrently with others. `self` is reached only
+        // through the handle or such an operation, so this `&self` call comes before that.
         unsafe { (self.generation_id)(self.self_.get()) }
     }
 
     fn member_id(&self) -> &str {
+        // SAFETY: `self.member_id` and `self.self_` are the pair the C caller registered together
+        // through `kafka_consumer_ConsumerGroupMetadata_new`, whose `# Safety` keeps both valid,
+        // and each string the function returns alive and unmodified, until the handle is destroyed
+        // and every operation it was passed to has completed, and allows the call from any thread,
+        // concurrently with others. `self` is reached only through the handle or such an operation,
+        // so that outlasts this borrow of `self`, which the result is tied to: `string`'s
+        // requirement holds.
         unsafe { Self::string((self.member_id)(self.self_.get())) }.unwrap_or("")
     }
 
     fn group_instance_id(&self) -> Option<&str> {
+        // SAFETY: `self.group_instance_id` and `self.self_` are the pair the C caller registered
+        // together through `kafka_consumer_ConsumerGroupMetadata_new`, whose `# Safety` keeps both
+        // valid, and each string the function returns alive and unmodified, until the handle is
+        // destroyed and every operation it was passed to has completed, and allows the call from
+        // any thread, concurrently with others. `self` is reached only through the handle or such
+        // an operation, so that outlasts this borrow of `self`, which the result is tied to:
+        // `string`'s requirement holds.
         unsafe { Self::string((self.group_instance_id)(self.self_.get())) }
     }
 }
 
 /// Registers a C implementation (CLAUDE.md §4 rule 3): the caller owns
-/// `self_` and keeps it alive until the handle is destroyed. All four
-/// methods are abstract in Java, so none of the pointers may be `NULL`.
+/// `self_` and keeps it alive until the handle is destroyed and every
+/// operation the handle was passed to has completed: an operation may keep
+/// the implementation after it returns, as a `_cb` one does until its
+/// callback has fired. All four methods are abstract in Java, so none of the
+/// pointers may be `NULL`. They may be called from any thread, concurrently.
 ///
 /// # Safety
 ///
-/// The function pointers must be valid for the lifetime of the handle.
+/// The function pointers and `self_` must stay valid, and each string a
+/// function returns alive and unmodified, until the handle is destroyed and
+/// every operation it was passed to has completed; the functions must be
+/// safe to call from any thread, concurrently.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
@@ -185,6 +239,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires; the reference does not outlive the call, and the returned pointer
+    // borrows a `CString` the handle keeps until it is destroyed.
     let inner = unsafe { inner_ref(self_) };
     inner.group_id_c.get_or_init(|| owned_c_string(inner.meta.group_id())).as_ptr()
 }
@@ -199,6 +256,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `inner_ref` requires.
     unsafe { inner_ref(self_) }.meta.generation_id()
 }
 
@@ -212,6 +271,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires; the reference does not outlive the call, and the returned pointer
+    // borrows a `CString` the handle keeps until it is destroyed.
     let inner = unsafe { inner_ref(self_) };
     inner
         .member_id_c
@@ -230,6 +292,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
     self_: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
+    // `inner_ref` requires; the reference does not outlive the call, and the returned pointer
+    // borrows a `CString` the handle keeps until it is destroyed.
     let inner = unsafe { inner_ref(self_) };
     inner
         .group_instance_id_c
@@ -238,18 +303,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
         .map_or(std::ptr::null(), |c| c.as_ptr())
 }
 
-/// Frees a handle; a null pointer is a no-op. A C implementation's `self_`
-/// stays the caller's.
+/// Frees an owned handle; a null pointer is a no-op. A C implementation's
+/// `self_` stays the caller's.
 ///
 /// # Safety
 ///
-/// `self_` must be null or a valid handle not used afterwards.
+/// `self_` must be null or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_destroy(
     self_: *mut kafka_consumer_ConsumerGroupMetadata_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is an owned
+        // handle not yet destroyed, i.e. a `Box<ConsumerGroupMetadataInner>` from
+        // `box_group_metadata`, so taking it back and dropping it frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut ConsumerGroupMetadataInner)) };
     }
 }
@@ -266,15 +334,23 @@ mod tests {
     }
 
     unsafe extern "C" fn group_id(self_: *mut c_void) -> *const c_char {
+        // SAFETY: Test code: `self_` is the `&mut fixture` the test registered, alive and not
+        // modified while a handle built on it exists.
         unsafe { &*(self_ as *const Fixture) }.group.as_ptr()
     }
     unsafe extern "C" fn generation_id(self_: *mut c_void) -> i32 {
+        // SAFETY: Test code: `self_` is the `&mut fixture` the test registered, alive and not
+        // modified while a handle built on it exists.
         unsafe { &*(self_ as *const Fixture) }.generation
     }
     unsafe extern "C" fn member_id(self_: *mut c_void) -> *const c_char {
+        // SAFETY: Test code: `self_` is the `&mut fixture` the test registered, alive and not
+        // modified while a handle built on it exists.
         unsafe { &*(self_ as *const Fixture) }.member.as_ptr()
     }
     unsafe extern "C" fn group_instance_id(self_: *mut c_void) -> *const c_char {
+        // SAFETY: Test code: `self_` is the `&mut fixture` the test registered, alive and not
+        // modified while a handle built on it exists.
         unsafe { &*(self_ as *const Fixture) }
             .instance
             .as_ref()
@@ -284,6 +360,9 @@ mod tests {
     #[test]
     fn c_implementation_is_read_through_the_trait_and_the_getters() {
         let mut fixture = Fixture { group: c"g".to_owned(), member: c"m".to_owned(), instance: None, generation: 7 };
+        // SAFETY: Test code: `fixture` outlives the handle, which is destroyed before `fixture` is
+        // next modified, and its strings stay alive with it; the four functions match the pointer
+        // types.
         let handle = unsafe {
             kafka_consumer_ConsumerGroupMetadata_new(
                 &mut fixture as *mut Fixture as *mut c_void,
@@ -293,6 +372,8 @@ mod tests {
                 group_instance_id,
             )
         };
+        // SAFETY: Test code: `handle` is an owned handle from `_new`, used here and destroyed once,
+        // last; the returned strings are read before that.
         unsafe {
             let meta = group_metadata_ref(handle);
             assert_eq!(meta.group_id(), "g");
@@ -311,6 +392,9 @@ mod tests {
         }
 
         fixture.instance = Some(c"i".to_owned());
+        // SAFETY: Test code: `fixture` outlives the handle, which is destroyed before `fixture`
+        // goes out of scope, and its strings stay alive with it; the four functions match the
+        // pointer types.
         let handle = unsafe {
             kafka_consumer_ConsumerGroupMetadata_new(
                 &mut fixture as *mut Fixture as *mut c_void,
@@ -320,6 +404,8 @@ mod tests {
                 group_instance_id,
             )
         };
+        // SAFETY: Test code: `handle` is an owned handle from `_new`, used here and destroyed once,
+        // last; the returned string is read before that.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_group_instance_id(handle))

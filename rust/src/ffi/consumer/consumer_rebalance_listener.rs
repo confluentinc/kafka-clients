@@ -97,6 +97,18 @@ impl ListenerRegistration {
     fn fire(self, method: Method, partitions: &[TopicPartition], sink: Box<dyn FnOnce(Result<(), Error>) + Send>) {
         let list = sorted_topic_partition_list(partitions.iter());
         let callback_id = register_callback_result(sink);
+        // SAFETY: `method` is one of the method pointers registered with `self.self_` through
+        // `kafka_consumer_ConsumerRebalanceListener_new` (every caller passes a field of `self` or
+        // `lost_or_revoked`), whose rustdoc has the caller keep `self_` alive until the handle is
+        // destroyed and, once passed to a `subscribe_*`, until the next `subscribe_*`,
+        // `unsubscribe` or the consumer's destruction releases it. A registration is copied only
+        // out of a live handle: by an invoker, which fires it within its own call, or into a
+        // consumer's adapter, whose invocations run inside the operation that triggered them
+        // (inline, from the callbacks vector while that operation waits for the report, or as
+        // `_destroy` drains the vector), which another operation cannot overlap to release the
+        // listener; so this call falls within that window. `list` is the owned list
+        // `sorted_topic_partition_list` just built, borrowed by the C method for the call, as the
+        // `_fn_t` rustdoc states, then freed here exactly once.
         unsafe {
             method(self.self_.get(), list, callback_id);
             kafka_List_destroy(list);
@@ -155,6 +167,10 @@ impl ConsumerRebalanceListener for CRebalanceListener {
 pub(crate) unsafe fn listener_registration(
     listener: *const kafka_consumer_ConsumerRebalanceListener_t,
 ) -> ListenerRegistration {
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, i.e. the
+    // `Box<ListenerRegistration>` of `kafka_consumer_ConsumerRebalanceListener_new`, not yet
+    // destroyed; the reference is used only to copy the `Copy` registration out, within this
+    // expression.
     *unsafe { &*(listener as *const ListenerRegistration) }
 }
 
@@ -168,6 +184,8 @@ pub(crate) unsafe fn listener_adapter(
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
     delivery: Arc<Delivery>,
 ) -> Arc<dyn ConsumerRebalanceListener> {
+    // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
+    // `listener_registration` requires.
     Arc::new(CRebalanceListener { registration: unsafe { listener_registration(listener) }, delivery })
 }
 
@@ -196,12 +214,15 @@ pub extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
 ///
 /// # Safety
 ///
-/// `partitions` must be a valid list of topic partitions.
+/// `partitions` must be null or a valid list whose elements are
+/// topic-partition handles.
 unsafe fn invoke_blocking(
     registration: ListenerRegistration,
     method: Method,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
+    // are topic-partition handles, as `list_topic_partitions` requires.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let (tx, rx) = std::sync::mpsc::channel();
     registration.fire(
@@ -222,7 +243,9 @@ unsafe fn invoke_blocking(
 ///
 /// # Safety
 ///
-/// `partitions` must be a valid list of topic partitions.
+/// `partitions` must be null or a valid list whose elements are
+/// topic-partition handles, and `cb` and `opaque` the pair the C caller
+/// passed to the `_cb` entry point, which has not fired `cb`.
 unsafe fn invoke_cb(
     registration: ListenerRegistration,
     method: Method,
@@ -230,6 +253,8 @@ unsafe fn invoke_cb(
     cb: kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
+    // are topic-partition handles, as `list_topic_partitions` requires.
     let partitions = unsafe { list_topic_partitions(partitions) };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
@@ -237,6 +262,11 @@ unsafe fn invoke_cb(
     registration.fire(
         method,
         &partitions,
+        // SAFETY: Per this function's `# Safety`, `cb` and `opaque` are the pair the C caller
+        // passed to the `_cb` entry point, which has not fired `cb`; `cb` fires only from this
+        // sink, which `register_callback_result` holds under a fresh id and runs at most once, as a
+        // `FnOnce`, when the report for that id arrives. `error_slot` returns null or a fresh owned
+        // error, handed over to `cb`.
         Box::new(move |result| unsafe { cb(error_slot(result), opaque.get()) }),
     );
 }
@@ -247,14 +277,20 @@ unsafe fn invoke_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live listener handle and `partitions` a valid list.
+/// `self_` must be a live listener handle and `partitions` a valid list of
+/// `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // `self_`, and the method is one of its own pointers.
     unsafe { invoke_blocking(registration, registration.on_partitions_revoked, partitions) }
 }
 
@@ -271,7 +307,14 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+    // as the last step, in `invoke_cb`, to the sink `fire` registers right before calling the C
+    // method; nothing after that can panic, as the C method cannot unwind into Rust and
+    // `kafka_List_destroy` is guarded. So `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires; `run_inline` fires it on this thread.
+    unsafe { deliver_panic(run_inline, cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -279,7 +322,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
     cb: kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles; `cb` and `opaque` are this call's own arguments, so `cb` has not fired yet. Both are
+    // what `invoke_cb` requires. `registration` was just copied out of the live handle `self_`, and
+    // the method is one of its own pointers.
     unsafe { invoke_cb(registration, registration.on_partitions_revoked, partitions, cb, opaque) }
 }
 
@@ -288,14 +337,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 ///
 /// # Safety
 ///
-/// `self_` must be a live listener handle and `partitions` a valid list.
+/// `self_` must be a live listener handle and `partitions` a valid list of
+/// `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // `self_`, and the method is one of its own pointers.
     unsafe { invoke_blocking(registration, registration.on_partitions_assigned, partitions) }
 }
 
@@ -309,7 +364,14 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+    // as the last step, in `invoke_cb`, to the sink `fire` registers right before calling the C
+    // method; nothing after that can panic, as the C method cannot unwind into Rust and
+    // `kafka_List_destroy` is guarded. So `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires; `run_inline` fires it on this thread.
+    unsafe { deliver_panic(run_inline, cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -317,7 +379,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
     cb: kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles; `cb` and `opaque` are this call's own arguments, so `cb` has not fired yet. Both are
+    // what `invoke_cb` requires. `registration` was just copied out of the live handle `self_`, and
+    // the method is one of its own pointers.
     unsafe { invoke_cb(registration, registration.on_partitions_assigned, partitions, cb, opaque) }
 }
 
@@ -327,14 +395,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 ///
 /// # Safety
 ///
-/// `self_` must be a live listener handle and `partitions` a valid list.
+/// `self_` must be a live listener handle and `partitions` a valid list of
+/// `kafka_common_TopicPartition_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles, as `invoke_blocking` requires; `registration` was just copied out of the live handle
+    // `self_`, and the method is one of its own pointers.
     unsafe { invoke_blocking(registration, registration.lost_or_revoked(), partitions) }
 }
 
@@ -348,7 +422,14 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb_t =
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic(run_inline, cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+    // as the last step, in `invoke_cb`, to the sink `fire` registers right before calling the C
+    // method; nothing after that can panic, as the C method cannot unwind into Rust and
+    // `kafka_List_destroy` is guarded. So `cb` has not fired for this `opaque`, as `deliver_panic`
+    // requires; `run_inline` fires it on this thread.
+    unsafe { deliver_panic(run_inline, cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb(
     self_: *const kafka_consumer_ConsumerRebalanceListener_t,
@@ -356,7 +437,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
     cb: kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live listener handle, as
+    // `listener_registration` requires.
     let registration = unsafe { listener_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of topic-partition
+    // handles; `cb` and `opaque` are this call's own arguments, so `cb` has not fired yet. Both are
+    // what `invoke_cb` requires. `registration` was just copied out of the live handle `self_`, and
+    // the method is one of its own pointers.
     unsafe { invoke_cb(registration, registration.lost_or_revoked(), partitions, cb, opaque) }
 }
 
@@ -372,6 +459,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_destroy(
     self_: *mut kafka_consumer_ConsumerRebalanceListener_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a live
+        // handle not used afterwards, i.e. the `Box<ListenerRegistration>` of
+        // `kafka_consumer_ConsumerRebalanceListener_new`, so taking it back and dropping it frees
+        // it exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut ListenerRegistration) });
     }
 }
@@ -406,11 +497,17 @@ mod tests {
     }
 
     unsafe fn record(self_: *mut c_void, name: &'static str, partitions: *const kafka_List_t, callback_id: i64) {
+        // SAFETY: Test code: `self_` is the `&imp` the test registered, alive for the whole test.
         let imp = unsafe { &*(self_ as *const Impl) };
+        // SAFETY: Test code: `partitions` is the list `fire` passes, live for the call.
         let n = unsafe { kafka_List_size(partitions) };
         let tps = (0..n)
             .map(|i| {
+                // SAFETY: Test code: `partitions` is the list `fire` passes, live for the call, and
+                // `i` is in range.
                 let tp = unsafe { kafka_List_get(partitions, i) } as *const _;
+                // SAFETY: Test code: `tp` is an element of that list, a topic-partition handle, and
+                // its topic is a NUL-terminated string it owns.
                 unsafe {
                     (
                         c_str_to_string(kafka_common_TopicPartition_topic(tp)),
@@ -430,10 +527,14 @@ mod tests {
     }
 
     unsafe extern "C" fn revoked(self_: *mut c_void, partitions: *const kafka_List_t, callback_id: i64) {
+        // SAFETY: Test code: forwards the arguments the C contract gives this method, which
+        // `record` requires.
         unsafe { record(self_, "revoked", partitions, callback_id) }
     }
 
     unsafe extern "C" fn assigned(self_: *mut c_void, partitions: *const kafka_List_t, callback_id: i64) {
+        // SAFETY: Test code: forwards the arguments the C contract gives this method, which
+        // `record` requires.
         unsafe { record(self_, "assigned", partitions, callback_id) }
     }
 
@@ -446,6 +547,8 @@ mod tests {
         let imp = Impl::default();
         let listener = handle(&imp);
         let partitions = sorted_topic_partition_list([TopicPartition::new("t", 1), TopicPartition::new("a", 0)].iter());
+        // SAFETY: Test code: `listener` and `partitions` are live handles this test made, and the
+        // returned error is owned; each is destroyed once, after its last use.
         unsafe {
             assert!(kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned(listener, partitions).is_null());
             assert!(kafka_consumer_ConsumerRebalanceListener_on_partitions_lost(listener, partitions).is_null());
@@ -474,11 +577,17 @@ mod tests {
         let listener = handle(&imp);
         let fired: Mutex<Option<bool>> = Mutex::new(None);
         unsafe extern "C" fn cb(error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+            // SAFETY: Test code: `opaque` is `&fired`, alive until the test ends.
             let fired = unsafe { &*(opaque as *const Mutex<Option<bool>>) };
             *fired.lock().unwrap() = Some(error.is_null());
+            // SAFETY: Test code: `error` is null or the owned error the completion hands over,
+            // destroyed once here.
             unsafe { kafka_common_Error_destroy(error) };
         }
         let partitions = sorted_topic_partition_list([TopicPartition::new("t", 0)].iter());
+        // SAFETY: Test code: `listener` and `partitions` are live handles this test made, `cb`
+        // matches the completion type and `&fired` outlives the call; `partitions` is destroyed
+        // once, after its use.
         unsafe {
             kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb(
                 listener,
@@ -491,6 +600,8 @@ mod tests {
         assert_eq!(*fired.lock().unwrap(), None, "not reported yet");
         let id = imp.deferred.lock().unwrap().take().unwrap();
         let error = box_error(Error::timeout("late"));
+        // SAFETY: Test code: `id` is the pending id the deferred method stored and `error` an owned
+        // error, handed over; the function ignores its consumer handle, so null is fine.
         unsafe {
             crate::ffi::consumer::kafka_consumer_Consumer__set_callback_result(
                 std::ptr::null(),
@@ -499,6 +610,7 @@ mod tests {
             )
         };
         assert_eq!(*fired.lock().unwrap(), Some(false));
+        // SAFETY: Test code: `listener` is a live handle this test made, destroyed once here.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(listener) };
     }
 
@@ -507,7 +619,11 @@ mod tests {
         let imp = Impl::default();
         let listener = handle(&imp);
         let delivery = Arc::new(Delivery::for_tests(CallbackQueue::new()));
+        // SAFETY: Test code: `listener` is a live handle this test made; the adapter copies the
+        // registration, and `imp` outlives the adapter.
         let adapter = unsafe { listener_adapter(listener, Arc::clone(&delivery)) };
+        // SAFETY: Test code: `listener` is a live handle, destroyed once here; the adapter keeps
+        // its own copy.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(listener) };
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let partitions = [TopicPartition::new("t", 0)];
@@ -553,10 +669,14 @@ mod tests {
         ] {
             let probe = Probe::default();
             fail_point::arm();
+            // SAFETY: Test code: `listener` and `partitions` are live handles this test made,
+            // `on_error` matches the completion type and the probe outlives the call.
             unsafe { invoke(listener, partitions, on_error, probe.as_opaque()) };
             probe.assert_one_panic(export, fail_point::MESSAGE);
         }
         assert!(imp.calls.lock().unwrap().is_empty(), "no method ran");
+        // SAFETY: Test code: `partitions` and `listener` are live handles this test made, destroyed
+        // once here.
         unsafe {
             kafka_List_destroy(partitions);
             kafka_consumer_ConsumerRebalanceListener_destroy(listener);

@@ -37,10 +37,14 @@ struct SubscriptionPatternInner {
 ///
 /// # Safety
 ///
-/// `pattern` must be a valid subscription-pattern handle.
+/// `pattern` must be a valid subscription-pattern handle, kept alive for `'a`.
 pub(crate) unsafe fn subscription_pattern_ref<'a>(
     pattern: *const kafka_consumer_SubscriptionPattern_t,
 ) -> &'a SubscriptionPattern {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle kept
+    // alive for `'a`: a `Box<SubscriptionPatternInner>` from `Box::into_raw` in
+    // `kafka_consumer_SubscriptionPattern_new`, the only constructor, and never mutated after it,
+    // so the shared reference is to a live value.
     &unsafe { &*(pattern as *const SubscriptionPatternInner) }.pattern
 }
 
@@ -56,6 +60,8 @@ pub(crate) unsafe fn subscription_pattern_ref<'a>(
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
     pattern: *const c_char,
 ) -> *mut kafka_consumer_SubscriptionPattern_t {
+    // SAFETY: Per this function's `# Safety`, `pattern` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let pattern = unsafe { c_str_to_string(pattern) };
     let pattern_c = owned_c_string(&pattern);
     Box::into_raw(Box::new(SubscriptionPatternInner {
@@ -74,6 +80,10 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
     self_: *const kafka_consumer_SubscriptionPattern_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a
+    // `Box<SubscriptionPatternInner>` from `kafka_consumer_SubscriptionPattern_new`, never mutated;
+    // the pointer returned borrows its `pattern_c`, valid until the handle is destroyed, as the
+    // rustdoc states.
     unsafe { &*(self_ as *const SubscriptionPatternInner) }.pattern_c.as_ptr()
 }
 
@@ -87,6 +97,8 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(
     self_: *const kafka_consumer_SubscriptionPattern_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
+    // the only use of the reference, as `subscription_pattern_ref` requires.
     into_c_string(&unsafe { subscription_pattern_ref(self_) }.to_string())
 }
 
@@ -99,6 +111,11 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_destroy(self_: *mut kafka_consumer_SubscriptionPattern_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a valid
+        // handle not used afterwards. Every subscription-pattern handle is a
+        // `Box<SubscriptionPatternInner>` from `Box::into_raw` in
+        // `kafka_consumer_SubscriptionPattern_new`, owned by the caller, so taking it back and
+        // dropping it frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut SubscriptionPatternInner)) };
     }
 }
@@ -112,7 +129,11 @@ mod tests {
 
     #[test]
     fn round_trip() {
+        // SAFETY: Test code: the argument is a C string literal.
         let p = unsafe { kafka_consumer_SubscriptionPattern_new(c"topic-.*".as_ptr()) };
+        // SAFETY: Test code: `p` is the handle just built, destroyed once at the end, after every
+        // use of it and of the borrowed pattern string; the string from `to_string` is destroyed
+        // once, after it is read.
         unsafe {
             assert_eq!(
                 CStr::from_ptr(kafka_consumer_SubscriptionPattern_pattern(p)).to_str().unwrap(),

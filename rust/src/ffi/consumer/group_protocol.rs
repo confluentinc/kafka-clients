@@ -67,6 +67,9 @@ pub(crate) fn singleton(protocol: GroupProtocol) -> *const kafka_consumer_GroupP
 ///
 /// `protocol` must be a singleton returned by this module.
 pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t) -> GroupProtocol {
+    // SAFETY: Per this function's `# Safety`, `protocol` is a singleton returned by this module,
+    // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
+    // a live, initialised `GroupProtocol`, which is `Copy` and read out here.
     unsafe { *(protocol as *const GroupProtocol) }
 }
 
@@ -98,6 +101,8 @@ pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consum
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
     self_: *const kafka_consumer_GroupProtocol_t,
 ) -> kafka_consumer_GroupProtocol_e {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out.
     enum_of(unsafe { value_of(self_) })
 }
 
@@ -111,6 +116,9 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
     self_: *const kafka_consumer_GroupProtocol_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out, and the pointer returned is into the `static`
+    // `NAMES`, never freed.
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
@@ -127,8 +135,13 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
     name: *const c_char,
     out_of: *mut *const kafka_consumer_GroupProtocol_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     match GroupProtocol::of(&unsafe { c_str_to_string(name) }) {
         Ok(protocol) => {
+            // SAFETY: Per this function's `# Safety`, `out_of` is a valid pointer, so the write is
+            // sound; the singleton written points into the static `VARIANTS` array and is never
+            // freed.
             unsafe { *out_of = singleton(protocol) };
             std::ptr::null_mut()
         },
@@ -147,6 +160,8 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_to_string(
     self_: *const kafka_consumer_GroupProtocol_t,
 ) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `value_of` requires; the value is copied out and its text copied into an owned string.
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
@@ -164,6 +179,8 @@ mod tests {
         let consumer = kafka_consumer_GroupProtocol_consumer();
         assert_ne!(classic, consumer);
         assert_eq!(classic, kafka_consumer_GroupProtocol_classic());
+        // SAFETY: Test code: `classic` and `consumer` are singletons of this module, never freed,
+        // and the string from `to_string` is destroyed once, after it is read.
         unsafe {
             assert_eq!(
                 kafka_consumer_GroupProtocol__enum(classic),
@@ -186,16 +203,21 @@ mod tests {
     #[test]
     fn of_is_case_insensitive_and_fails_like_java() {
         let mut out = std::ptr::null();
+        // SAFETY: Test code: the name is a C string literal and `out` a valid out pointer.
         assert!(unsafe { kafka_consumer_GroupProtocol_of(c"Consumer".as_ptr(), &mut out) }.is_null());
         assert_eq!(out, kafka_consumer_GroupProtocol_consumer());
+        // SAFETY: Test code: the name is a C string literal and `out` a valid out pointer.
         let error = unsafe { kafka_consumer_GroupProtocol_of(c"share".as_ptr(), &mut out) };
         assert!(!error.is_null());
+        // SAFETY: Test code: `error` is the owned error just returned (non-null, asserted above),
+        // destroyed only after `inner`'s last use.
         let inner = unsafe { error_ref(error) };
         assert!(inner.error.is_local_illegal_argument_error());
         assert_eq!(
             inner.error.message(),
             "No enum constant org.apache.kafka.clients.consumer.GroupProtocol.share"
         );
+        // SAFETY: Test code: `error` is the owned error returned above, destroyed once.
         unsafe { kafka_common_Error_destroy(error) };
     }
 }

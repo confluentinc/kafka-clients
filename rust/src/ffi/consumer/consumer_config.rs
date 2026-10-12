@@ -79,14 +79,28 @@ impl ConsumerConfigInner {
 ///
 /// # Safety
 ///
-/// `config` must be a live handle.
+/// `config` must be a live handle, kept alive for `'a`, during which no
+/// setter runs on it.
 pub(crate) unsafe fn consumer_config_ref<'a>(
     config: *const kafka_consumer_ConsumerConfig_t,
 ) -> &'a ConsumerConfigInner {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, during
+    // which no setter runs on it: a `Box<ConsumerConfigInner>` from `Box::into_raw` in
+    // `kafka_consumer_ConsumerConfig_new`, the only constructor, so the shared reference is to a
+    // live value no `&mut` aliases.
     unsafe { &*(config as *const ConsumerConfigInner) }
 }
 
+/// The configuration behind a handle, for a setter.
+///
+/// # Safety
+///
+/// `config` must be a live handle, kept alive for `'a`, that no other call
+/// uses during `'a`.
 unsafe fn inner_mut<'a>(config: *mut kafka_consumer_ConsumerConfig_t) -> &'a mut ConsumerConfigInner {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, a
+    // `Box<ConsumerConfigInner>` from `kafka_consumer_ConsumerConfig_new`, and no other call uses
+    // it during `'a`, so the exclusive reference aliases nothing.
     unsafe { &mut *(config as *mut ConsumerConfigInner) }
 }
 
@@ -105,10 +119,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     props: *const kafka_Map_t,
     out_new: *mut *mut kafka_consumer_ConsumerConfig_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
+    // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
     match ConsumerConfig::new(&props) {
         Ok(config) => {
             let inner = ConsumerConfigInner { config: Some(config), strings: Mutex::new(HashMap::new()) };
+            // SAFETY: Per this function's `# Safety`, `out_new` is a valid pointer, so the write is
+            // sound; the handle written is the fresh box the caller owns, freed with
+            // `kafka_consumer_ConsumerConfig_destroy`.
             unsafe { *out_new = Box::into_raw(Box::new(inner)) as *mut kafka_consumer_ConsumerConfig_t };
             std::ptr::null_mut()
         },
@@ -125,6 +144,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_destroy(self_: *mut kafka_consumer_ConsumerConfig_t) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a valid
+        // handle not used afterwards. Every config handle is a `Box<ConsumerConfigInner>` from
+        // `Box::into_raw` in `kafka_consumer_ConsumerConfig_new`, owned by the caller, so taking it
+        // back and dropping it frees it exactly once.
         unsafe { drop(Box::from_raw(self_ as *mut ConsumerConfigInner)) };
     }
 }
@@ -143,6 +166,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_destroy(self_: *mut kafka
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_commit_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().auto_commit_interval_ms()
 }
 
@@ -156,6 +183,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_commit_interval_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_enable_auto_commit(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     i8::from(unsafe { consumer_config_ref(self_) }.config().enable_auto_commit())
 }
 
@@ -169,6 +200,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_enable_auto_commit(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_heartbeat_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().heartbeat_interval_ms()
 }
 
@@ -182,6 +217,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_heartbeat_interval_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_interval_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().max_poll_interval_ms()
 }
 
@@ -195,6 +234,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_interval_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_records(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().max_poll_records()
 }
 
@@ -208,6 +251,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_max_poll_records(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_request_timeout_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().request_timeout_ms()
 }
 
@@ -221,6 +268,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_request_timeout_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_max_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().retry_backoff_max_ms()
 }
 
@@ -234,6 +285,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_max_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i64 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().retry_backoff_ms()
 }
 
@@ -247,6 +302,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_retry_backoff_ms(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_session_timeout_ms(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i32 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     unsafe { consumer_config_ref(self_) }.config().session_timeout_ms()
 }
 
@@ -261,6 +320,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_throw_on_fetch_stable_off
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> i8 {
     i8::from(
+        // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on
+        // it meanwhile, since the setters' `# Safety` excludes any other call using the handle at
+        // the same time, so `consumer_config_ref`'s requirement holds for this call, the only use
+        // of the reference.
         unsafe { consumer_config_ref(self_) }
             .config()
             .throw_on_fetch_stable_offset_unsupported(),
@@ -277,6 +340,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_throw_on_fetch_stable_off
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_offset_reset(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().auto_offset_reset();
     inner.cached("auto_offset_reset", Some(value))
@@ -292,6 +359,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_auto_offset_reset(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_client_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().client_id();
     inner.cached("client_id", Some(value))
@@ -307,6 +378,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_client_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().group_id();
     inner.cached("group_id", value)
@@ -322,6 +397,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_instance_id(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().group_instance_id();
     inner.cached("group_instance_id", value)
@@ -337,6 +416,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_instance_id(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_protocol(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().group_protocol();
     inner.cached("group_protocol", Some(value))
@@ -352,6 +435,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_protocol(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_remote_assignor(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().group_remote_assignor();
     inner.cached("group_remote_assignor", value)
@@ -367,6 +454,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_group_remote_assignor(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_metadata_recovery_strategy(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().metadata_recovery_strategy();
     inner.cached("metadata_recovery_strategy", Some(value))
@@ -382,6 +473,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_metadata_recovery_strateg
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_security_protocol(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *const c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     let inner = unsafe { consumer_config_ref(self_) };
     let value = inner.config().security_protocol();
     inner.cached("security_protocol", Some(value))
@@ -397,6 +492,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_security_protocol(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_bootstrap_servers(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     box_string_list(unsafe { consumer_config_ref(self_) }.config().bootstrap_servers())
 }
 
@@ -410,6 +509,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_bootstrap_servers(
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_partition_assignment_strategy(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *mut kafka_List_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this call, the only use of the
+    // reference.
     box_string_list(unsafe { consumer_config_ref(self_) }.config().partition_assignment_strategy())
 }
 
@@ -421,14 +524,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_partition_assignment_stra
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `value` a valid NUL-terminated string.
+/// `self_` must be a valid handle that no other call uses at the same time,
+/// and `value` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_auto_offset_reset(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     value: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `value` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let value = unsafe { c_str_to_string(value) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_auto_offset_reset(value));
 }
 
@@ -436,15 +546,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_auto_offset_reset(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `bootstrap_servers` null or a valid
-/// list of strings.
+/// `self_` must be a valid handle that no other call uses at the same time,
+/// and `bootstrap_servers` null or a valid list of strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_bootstrap_servers(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     bootstrap_servers: *const kafka_List_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `bootstrap_servers` is null or a valid list of
+    // strings, as `list_strings` requires; they are copied into owned strings.
     let servers = unsafe { list_strings(bootstrap_servers) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_bootstrap_servers(servers));
 }
 
@@ -452,15 +568,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_bootstrap_servers(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `client_id` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid handle that no other call uses at the same time,
+/// and `client_id` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_client_id(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     client_id: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `client_id` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let client_id = unsafe { c_str_to_string(client_id) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_client_id(client_id));
 }
 
@@ -468,13 +590,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_client_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle.
+/// `self_` must be a valid handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_enable_auto_commit(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     value: i8,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_enable_auto_commit(value != 0));
 }
 
@@ -482,15 +608,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_enable_auto_commit(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `group_id` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid handle that no other call uses at the same time,
+/// and `group_id` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_id(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     group_id: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let group_id = unsafe { c_str_to_string(group_id) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_group_id(group_id));
 }
 
@@ -498,15 +630,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `protocol` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid handle that no other call uses at the same time,
+/// and `protocol` a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_protocol(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     protocol: *const c_char,
 ) {
+    // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`.
     let protocol = unsafe { c_str_to_string(protocol) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_group_protocol(protocol));
 }
 
@@ -514,13 +652,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_group_protocol(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle.
+/// `self_` must be a valid handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_request_timeout_ms(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     value: i32,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_request_timeout_ms(value));
 }
 
@@ -528,13 +670,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_request_timeout_ms(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle.
+/// `self_` must be a valid handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_set_retry_backoff_ms(
     self_: *mut kafka_consumer_ConsumerConfig_t,
     value: i64,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle that no other call uses at
+    // the same time, as `inner_mut` requires; the reference is used only within this statement. The
+    // setter clears the cached getter strings, which the module docs say stay valid only until the
+    // next setter.
     unsafe { inner_mut(self_) }.set(|c| c.set_retry_backoff_ms(value));
 }
 
@@ -549,9 +695,14 @@ mod tests {
         let props = kafka_Map_new();
         let key = c"bootstrap.servers";
         let value = c"localhost:9092";
+        // SAFETY: Test code: `props` is the live map just built, and the key and value are C string
+        // literals that outlive it; the map does not own them.
         unsafe { kafka_Map_put(props, key.as_ptr() as *mut _, value.as_ptr() as *mut _) };
         let mut config = std::ptr::null_mut();
+        // SAFETY: Test code: `props` is a live map of `char *` keys and values and `config` a valid
+        // out pointer.
         assert!(unsafe { kafka_consumer_ConsumerConfig_new(props, &mut config) }.is_null());
+        // SAFETY: Test code: `props` is the map built above, destroyed once.
         unsafe { kafka_Map_destroy(props) };
         config
     }
@@ -559,6 +710,9 @@ mod tests {
     #[test]
     fn getters_and_in_place_setters() {
         let config = config();
+        // SAFETY: Test code: `config` is the live handle `config()` built, used by one thread and
+        // destroyed once at the end; the list from `bootstrap_servers` is destroyed once, and each
+        // borrowed `group_id` string is read before the next setter.
         unsafe {
             assert!(kafka_consumer_ConsumerConfig_group_id(config).is_null());
             assert_eq!(kafka_consumer_ConsumerConfig_enable_auto_commit(config), 1);

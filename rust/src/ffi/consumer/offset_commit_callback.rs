@@ -88,6 +88,16 @@ impl CommitCallbackRegistration {
         let offsets = offset_and_metadata_map(offsets);
         let error = error.map_or(std::ptr::null_mut(), |e| box_error(e.clone()));
         let callback_id = register_callback_result(sink);
+        // SAFETY: `self.on_complete` and `self.self_` are the pair the C caller registered together
+        // through `kafka_consumer_OffsetCommitCallback_new`, whose rustdoc has the caller keep
+        // `self_` alive until the handle is destroyed and, once passed to a `commit_async_*`, until
+        // `onComplete` fired or the consumer was destroyed. A registration is copied only out of a
+        // live handle: by an invoker, which fires it within its own call, or into the adapter of
+        // one `commit_async_*`, which fires it as that commit's `onComplete`; so this call falls
+        // within that window. `offsets` is the owned map `offset_and_metadata_map` just built and
+        // `error` null or the fresh `box_error` handle above, both borrowed by the C method for the
+        // call, as the `_fn_t` rustdoc states, then freed here exactly once;
+        // `kafka_common_Error_destroy` accepts null.
         unsafe {
             (self.on_complete)(self.self_.get(), offsets, error, callback_id);
             kafka_Map_destroy(offsets);
@@ -131,6 +141,10 @@ impl OffsetCommitCallback for CCommitCallback {
 pub(crate) unsafe fn commit_callback_registration(
     callback: *const kafka_consumer_OffsetCommitCallback_t,
 ) -> CommitCallbackRegistration {
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, i.e. the
+    // `Box<CommitCallbackRegistration>` of `kafka_consumer_OffsetCommitCallback_new`, not yet
+    // destroyed; the reference is used only to copy the `Copy` registration out, within this
+    // expression.
     *unsafe { &*(callback as *const CommitCallbackRegistration) }
 }
 
@@ -144,6 +158,8 @@ pub(crate) unsafe fn commit_callback_adapter(
     callback: *mut kafka_consumer_OffsetCommitCallback_t,
     delivery: Arc<Delivery>,
 ) -> Arc<dyn OffsetCommitCallback> {
+    // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
+    // `commit_callback_registration` requires.
     Arc::new(CCommitCallback { registration: unsafe { commit_callback_registration(callback) }, delivery })
 }
 
@@ -168,8 +184,10 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 ///
 /// # Safety
 ///
-/// `self_` must be a live callback handle, `offsets` a valid map and
-/// `error` null or a live error.
+/// `self_` must be a live callback handle, `offsets` a valid map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
+/// that no other call mutates during this one, and `error` null or a live
+/// error.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
@@ -177,8 +195,16 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     offsets: *const kafka_Map_t,
     error: *const kafka_common_Error_t,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live callback handle, as
+    // `commit_callback_registration` requires.
     let registration = unsafe { commit_callback_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
+    // offset-and-metadata handles that no other call mutates during this one, as
+    // `map_offset_and_metadata` requires.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
+    // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
+    // within this expression.
     let error = (!error.is_null()).then(|| unsafe { error_ref(error) }.error.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     registration.fire(
@@ -202,7 +228,14 @@ pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t = unsafe extern "C
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
-#[ffi_guard(on_panic = |err| unsafe { deliver_panic_opaque(run_inline, cb, opaque, err) })]
+#[ffi_guard(on_panic = |err| {
+    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+    // as the last step, to the sink `fire` registers right before calling the C method; nothing
+    // after that can panic, as the C method cannot unwind into Rust and the two destroys are
+    // guarded. So `cb` has not fired for this `opaque`, as `deliver_panic_opaque` requires;
+    // `run_inline` fires it on this thread.
+    unsafe { deliver_panic_opaque(run_inline, cb, opaque, err) }
+})]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     self_: *const kafka_consumer_OffsetCommitCallback_t,
@@ -211,12 +244,24 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     cb: kafka_consumer_OffsetCommitCallback_on_complete_cb_t,
     opaque: *mut c_void,
 ) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live callback handle, as
+    // `commit_callback_registration` requires.
     let registration = unsafe { commit_callback_registration(self_) };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
+    // offset-and-metadata handles that no other call mutates during this one, as
+    // `map_offset_and_metadata` requires.
     let offsets = unsafe { map_offset_and_metadata(offsets) };
+    // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
+    // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
+    // within this expression.
     let error = (!error.is_null()).then(|| unsafe { error_ref(error) }.error.clone());
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
+    // SAFETY: `cb` and `opaque` are the pair the C caller passed to this function, per its
+    // `# Safety` a valid completion; `cb` fires only from this sink, which
+    // `register_callback_result` holds under a fresh id and runs at most once, as a `FnOnce`, when
+    // the report for that id arrives.
     registration.fire(&offsets, error.as_ref(), Box::new(move |_| unsafe { cb(opaque.get()) }));
 }
 
@@ -232,6 +277,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_destroy(
     self_: *mut kafka_consumer_OffsetCommitCallback_t,
 ) {
     if !self_.is_null() {
+        // SAFETY: Per this function's `# Safety`, `self_` (non-null, checked above) is a live
+        // handle not used afterwards, i.e. the `Box<CommitCallbackRegistration>` of
+        // `kafka_consumer_OffsetCommitCallback_new`, so taking it back and dropping it frees it
+        // exactly once.
         drop(unsafe { Box::from_raw(self_ as *mut CommitCallbackRegistration) });
     }
 }
@@ -257,11 +306,17 @@ mod tests {
         error: *const kafka_common_Error_t,
         callback_id: i64,
     ) {
+        // SAFETY: Test code: `self_` is the `&log` the test registered, alive for the whole test.
         let log = unsafe { &*(self_ as *const Log) };
+        // SAFETY: Test code: `offsets` is the map `fire` passes, live for the call.
         let n = unsafe { kafka_Map_size(offsets) };
         let values = (0..n)
+            // SAFETY: Test code: `offsets` is the map `fire` passes, live for the call, and `i` is
+            // in range, so its value is an offset-and-metadata handle.
             .map(|i| unsafe { kafka_consumer_OffsetAndMetadata_offset(kafka_Map_value(offsets, i) as *const _) })
             .collect();
+        // SAFETY: Test code: `error` is non-null (checked in this expression) and borrowed for the
+        // call, and its message is a NUL-terminated string owned by it.
         let error = (!error.is_null()).then(|| unsafe { c_str_to_string(kafka_common_Error_message(error)) });
         log.0.lock().unwrap().push((values, error));
         // Reporting an error is allowed and ignored: `onComplete` is void.
@@ -275,6 +330,8 @@ mod tests {
         let offsets = HashMap::from([(TopicPartition::new("t", 0), OffsetAndMetadata::new(7).unwrap())]);
         let c_offsets = offset_and_metadata_map(&offsets);
         let error = box_error(Error::timeout("late"));
+        // SAFETY: Test code: `handle`, `c_offsets` and `error` are live handles this test made,
+        // each destroyed once, after its last use.
         unsafe {
             kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null());
             kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error);
@@ -289,9 +346,13 @@ mod tests {
 
         let fired = Mutex::new(0);
         unsafe extern "C" fn cb(opaque: *mut c_void) {
+            // SAFETY: Test code: `opaque` is `&fired`, alive until the test ends.
             *unsafe { &*(opaque as *const Mutex<i32>) }.lock().unwrap() += 1;
         }
         let c_offsets = offset_and_metadata_map(&offsets);
+        // SAFETY: Test code: `handle` and `c_offsets` are live handles this test made, each
+        // destroyed once, after its last use; `cb` matches the completion type and `&fired`
+        // outlives the call.
         unsafe {
             kafka_consumer_OffsetCommitCallback_on_complete_cb(
                 handle,
@@ -317,6 +378,8 @@ mod tests {
         let c_offsets = offset_and_metadata_map(&HashMap::new());
         let probe = Probe::default();
         fail_point::arm();
+        // SAFETY: Test code: `handle` and `c_offsets` are live handles this test made, each
+        // destroyed once, after its last use; the probe outlives the call.
         unsafe {
             kafka_consumer_OffsetCommitCallback_on_complete_cb(
                 handle,

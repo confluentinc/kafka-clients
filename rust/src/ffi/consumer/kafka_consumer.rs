@@ -124,6 +124,9 @@ unsafe fn deserializer_from(
     if deserializer.is_null() {
         (Box::new(BytesPassthroughDeserializer), true)
     } else {
+        // SAFETY: Per this function's `# Safety`, `deserializer` is (non-null, checked above) a
+        // live handle not used again by the caller, which is stricter than what `take_deserializer`
+        // requires.
         (Box::new(ArcDeserializer(unsafe { take_deserializer(deserializer) })), false)
     }
 }
@@ -148,12 +151,23 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     value_deserializer: *mut kafka_common_serialization_Deserializer_t,
     out_new: *mut *mut kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `config` is a live handle; no setter can run on it
+    // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
+    // time, so `consumer_config_ref`'s requirement holds for this statement, the only use of the
+    // reference.
     let config = unsafe { consumer_config_ref(config) }.config().clone();
+    // SAFETY: Per this function's `# Safety`, `key_deserializer` is null or a live handle not used
+    // afterwards, as `deserializer_from` requires.
     let (key, owns_key) = unsafe { deserializer_from(key_deserializer) };
+    // SAFETY: Per this function's `# Safety`, `value_deserializer` is null or a live handle not
+    // used afterwards, as `deserializer_from` requires.
     let (value, owns_value) = unsafe { deserializer_from(value_deserializer) };
     let result = ConsumerClassHandle::new(Owns { key: owns_key, value: owns_value }, || {
         KafkaConsumer::new(config, key, value).map(ConsumerKind::Async)
     });
+    // SAFETY: Per this function's `# Safety`, `out_new` is a valid slot, as `out_slot` requires;
+    // the handle written is the fresh box the caller owns, freed with
+    // `kafka_consumer_Consumer_destroy`.
     unsafe {
         out_slot(result, out_new, |handle| {
             Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
@@ -175,14 +189,21 @@ mod tests {
             .deserialize_from_shared("t", &source, &source[6..])
             .unwrap();
         let bytes = value.as_ptr() as *mut kafka_Bytes_t;
+        // SAFETY: Test code: `bytes` is the `kafka_Bytes_t` `deserialize_from_shared` just boxed
+        // over `source`, which outlives this read.
         let slice = unsafe { (*bytes).as_slice() }.unwrap();
         assert_eq!(slice, b"world");
         assert_eq!(slice.as_ptr(), source[6..].as_ptr(), "zero-copy: the same memory");
+        // SAFETY: Test code: `bytes` is the box built above, destroyed once, after `slice`'s last
+        // use.
         unsafe { kafka_Bytes_destroy(bytes) };
 
         let value = BytesPassthroughDeserializer.deserialize("t", b"copy").unwrap();
         let bytes = value.as_ptr() as *mut kafka_Bytes_t;
+        // SAFETY: Test code: `bytes` is the `kafka_Bytes_t` `deserialize` just boxed over its own
+        // copy.
         assert_eq!(unsafe { (*bytes).as_slice() }.unwrap(), b"copy");
+        // SAFETY: Test code: `bytes` is the box built above, destroyed once.
         unsafe { kafka_Bytes_destroy(bytes) };
     }
 
