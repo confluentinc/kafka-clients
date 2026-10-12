@@ -200,6 +200,10 @@ pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Er
     if error.is_null() {{
         return 0;
     }}
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // live handle from a function that returned an error, so it was made by `box_error`
+    // as `error_ref` requires. The borrow lasts only for this call, while the caller keeps
+    // the handle alive.
     i8::from(unsafe {{ error_ref(error) }}.error.{name}())
 }}
 "#,
