@@ -34,7 +34,7 @@ use std::sync::Arc;
 use log::warn;
 
 use crate::common::Error;
-use crate::consumer::MockConsumer;
+use crate::consumer::{ConsumerHandle, MockConsumer};
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::common::partition_info::list_partition_infos;
 use crate::ffi::common::topic_partition::{list_topic_partitions, map_topic_partition_i64};
@@ -426,7 +426,24 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     }
 }
 
-/// `closed()`: `1` once `close` ran, `-1` while an operation is in flight.
+/// The mock's reentrancy handle, which reads `closed`, `shouldRebalance`
+/// and `lastPollTimeout` without the single-owner flag.
+///
+/// # Safety
+///
+/// `self_` must be a live mock handle, kept alive for `'a`.
+unsafe fn mock_handle<'a>(self_: *const kafka_consumer_MockConsumer_t) -> &'a ConsumerHandle {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for `'a`;
+    // the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the same
+    // one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
+    // requires. The handle is shared state, never the mock an operation may be borrowing.
+    unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) }.handle()
+}
+
+/// `closed()`: `1` once `close` ran, else `0`. Read through the mock's
+/// handle, not the single-owner flag, so it answers while another call
+/// holds the mock: Java's `MockConsumer.closed()` waits on the monitor and
+/// never throws.
 ///
 /// # Safety
 ///
@@ -434,12 +451,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_consumer_MockConsumer_t) -> i8 {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
-    // requires.
-    unsafe { with_mock(self_, |mock| i8::from(mock.closed())) }.unwrap_or(-1)
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
+    // expression, as `mock_handle` requires.
+    let handle = unsafe { mock_handle(self_) };
+    // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
+    handle.mock_closed().map_or(-1, i8::from)
 }
 
-/// `shouldRebalance()`: `-1` while an operation is in flight.
+/// `shouldRebalance()`: `1` while an `enforceRebalance` is pending, else
+/// `0`. Read through the mock's handle, not the single-owner flag, so it
+/// answers while another call holds the mock, as Java's unsynchronized
+/// `MockConsumer.shouldRebalance()` does.
 ///
 /// # Safety
 ///
@@ -449,9 +471,11 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
     self_: *const kafka_consumer_MockConsumer_t,
 ) -> i8 {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
-    // requires.
-    unsafe { with_mock(self_, |mock| i8::from(mock.should_rebalance())) }.unwrap_or(-1)
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
+    // expression, as `mock_handle` requires.
+    let handle = unsafe { mock_handle(self_) };
+    // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
+    handle.mock_should_rebalance().map_or(-1, i8::from)
 }
 
 /// `resetShouldRebalance()`.
@@ -482,7 +506,9 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 }
 
 /// `lastPollTimeout()`: the last `poll` timeout in milliseconds, `-1` when
-/// `poll` never ran (and while an operation is in flight).
+/// `poll` never ran (Java's `null`). Read through the mock's handle, not the
+/// single-owner flag, so it answers while another call holds the mock, as
+/// Java's unsynchronized `MockConsumer.lastPollTimeout()` does.
 ///
 /// A caught Rust panic returns -2, which is no poll timeout: `Consumer.poll` rejects a negative one.
 ///
@@ -494,15 +520,14 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     self_: *const kafka_consumer_MockConsumer_t,
 ) -> i64 {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
-    // requires.
-    unsafe {
-        with_mock(self_, |mock| {
-            mock.last_poll_timeout()
-                .map_or(-1, |timeout| i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX))
-        })
-    }
-    .unwrap_or(-1)
+    // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
+    // expression, as `mock_handle` requires.
+    let handle = unsafe { mock_handle(self_) };
+    // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the outer `None` is unreachable.
+    handle
+        .mock_last_poll_timeout()
+        .flatten()
+        .map_or(-1, |timeout| i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -897,8 +922,8 @@ mod tests {
         assert_eq!(
             // SAFETY: Test code: `mock` is a live handle.
             unsafe { kafka_consumer_MockConsumer_closed(mock) },
-            -1,
-            "getters answer -1 meanwhile"
+            0,
+            "the mock's own getters still answer"
         );
         // The reads Java guards with `acquire()` fail the same way, so a caller
         // can tell "busy" from an empty answer.
@@ -953,6 +978,82 @@ mod tests {
             assert_eq!(kafka_List_size(list), 1);
             kafka_List_destroy(list);
         }
+
+        // SAFETY: Test code: each handle is live and destroyed once, after its last use.
+        unsafe {
+            kafka_List_destroy(assignment);
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
+    /// Java's `MockConsumer.closed()`, `shouldRebalance()` and
+    /// `lastPollTimeout()` never throw, so their C forms answer the real value
+    /// while another call holds the mock, not the old `-1` "busy" answer.
+    #[test]
+    fn mock_getters_answer_their_value_while_an_operation_is_in_flight() {
+        let (mock, consumer) = new_mock();
+        let probe = ListenerProbe::new(false);
+        // SAFETY: Test code: `consumer` is live and `probe` outlives the consumer.
+        unsafe { subscribe(consumer, &probe) };
+        // A non-default value for each field, so no fallback can pass for it: a 250 ms poll,
+        // a pending rebalance and a closed mock. `rebalance` checks no closed state, as Java's
+        // does not, so it can still run after `close`.
+        let mut records = ptr::null_mut();
+        // SAFETY: Test code: `consumer` is a live handle, `records` a valid out-pointer, and each
+        // returned handle or error is owned and released once.
+        unsafe {
+            assert!(kafka_consumer_Consumer_poll(consumer, 250, &mut records).is_null());
+            kafka_consumer_ConsumerRecords_destroy(records);
+            assert!(crate::ffi::consumer::kafka_consumer_Consumer_enforce_rebalance(consumer).is_null());
+            assert!(crate::ffi::consumer::kafka_consumer_Consumer_close(consumer).is_null());
+        }
+
+        let completed = AtomicI32::new(0);
+        let (assignment, tp) = partition_list(c"topic", 0);
+        // SAFETY: Test code: `mock` and `assignment` are live handles and `completed` outlives the
+        // completion.
+        unsafe {
+            kafka_consumer_MockConsumer_rebalance_cb(
+                mock,
+                assignment,
+                count_completion,
+                &completed as *const AtomicI32 as *mut c_void,
+            )
+        };
+        // In flight until the listener invocation is pumped and reported: a guarded call is refused.
+        // SAFETY: Test code: `consumer` is a live handle and the returned error is owned.
+        let error = unsafe { take_error(kafka_consumer_Consumer_commit_sync(consumer)) }.expect("rejected");
+        assert!(error.is_local_concurrent_modification_error());
+        // SAFETY: Test code: `mock` is a live handle.
+        unsafe {
+            assert_eq!(kafka_consumer_MockConsumer_closed(mock), 1, "closed() while busy");
+            assert_eq!(
+                kafka_consumer_MockConsumer_should_rebalance(mock),
+                1,
+                "shouldRebalance() while busy"
+            );
+            assert_eq!(
+                kafka_consumer_MockConsumer_last_poll_timeout(mock),
+                250,
+                "lastPollTimeout() while busy"
+            );
+        }
+
+        wait_until("the listener invocation to run", || {
+            // SAFETY: Test code: `consumer` is a live handle.
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
+            probe.pending_id.load(SeqCst) != 0
+        });
+        let id = probe.pending_id.load(SeqCst);
+        // SAFETY: Test code: the null error is a success report for an id Rust issued; `self_` is
+        // unused.
+        unsafe { kafka_consumer_Consumer__set_callback_result(ptr::null(), id, ptr::null_mut()) };
+        wait_until("the completion to run", || {
+            // SAFETY: Test code: `consumer` is a live handle.
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
+            completed.load(SeqCst) == 1
+        });
 
         // SAFETY: Test code: each handle is live and destroyed once, after its last use.
         unsafe {

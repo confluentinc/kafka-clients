@@ -407,9 +407,11 @@ static void test_mock_consumer_poll_cb(void) {
 // flight deterministically. Meanwhile a blocking call is rejected with
 // LocalConcurrentModification, a `_cb` call delivers the same rejection
 // through its completion, the state reads (assignment, subscription, paused,
-// current_lag, group_metadata) are rejected the same way, metrics() and the
-// always-allowed functions still work. Once the listener reports and the
-// completion is pumped the consumer is free again.
+// current_lag, group_metadata) are rejected the same way, metrics(), the
+// mock's own getters (closed, should_rebalance, last_poll_timeout, which
+// Java's MockConsumer never refuses) and the always-allowed functions still
+// work. Once the listener reports and the completion is pumped the consumer is
+// free again.
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_concurrency_guard(void) {
@@ -420,6 +422,9 @@ static void test_mock_consumer_concurrency_guard(void) {
     completion_t completion;
     kafka_List_t *assignment = NULL;
     kafka_common_TopicPartition_t *tp = NULL;
+    /* A non-default value for the mock's getters to answer while busy. */
+    kafka_consumer_ConsumerRecords_destroy(poll_ok(f.consumer, 250));
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_enforce_rebalance(f.consumer));
     start_held_rebalance(&f, "test", &listener, &completion, &assignment, &tp);
 
     /* In flight from the submission on (the flag is taken before anything is
@@ -453,9 +458,11 @@ static void test_mock_consumer_concurrency_guard(void) {
     kafka_Map_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
     TEST_ASSERT_NOT_NULL(metrics);
     kafka_Map_destroy(metrics);
-    TEST_ASSERT_EQUAL_INT8(-1, kafka_consumer_MockConsumer_closed(f.mock));
-    TEST_ASSERT_EQUAL_INT8(-1, kafka_consumer_MockConsumer_should_rebalance(f.mock));
-    TEST_ASSERT_EQUAL_INT64(-1, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
+    /* Neither do the mock's own getters: Java's closed() waits on the
+     * monitor, shouldRebalance() and lastPollTimeout() take no lock. */
+    TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_closed(f.mock));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_consumer_MockConsumer_should_rebalance(f.mock));
+    TEST_ASSERT_EQUAL_INT64(250, kafka_consumer_MockConsumer_last_poll_timeout(f.mock));
 
     /* Always allowed. */
     TEST_ASSERT_NOT_NULL(kafka_consumer_Consumer_client_id(f.consumer));

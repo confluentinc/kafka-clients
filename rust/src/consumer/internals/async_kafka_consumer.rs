@@ -224,8 +224,15 @@ enum ConsumerHandleInner {
     /// wakeup flag observed by the next `poll()`. The mock has no bg task
     /// / event pipeline, so the async ops are not wired (they return an
     /// `unsupported_version` error — the mock test surface drives the
-    /// concrete `MockConsumer` directly).
-    Mock { flag: Arc<AtomicBool> },
+    /// concrete `MockConsumer` directly). The other three fields are the
+    /// mock's own `closed`, `should_rebalance` and `last_poll_timeout`,
+    /// read by the C binding while an operation borrows the mock.
+    Mock {
+        flag: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+        should_rebalance: Arc<AtomicBool>,
+        last_poll_timeout: Arc<Mutex<Option<Duration>>>,
+    },
 }
 
 impl ConsumerHandle {
@@ -238,7 +245,7 @@ impl ConsumerHandle {
                 state.wakeup_trigger.wakeup();
                 (state.bg_wakeup)();
             },
-            ConsumerHandleInner::Mock { flag } => {
+            ConsumerHandleInner::Mock { flag, .. } => {
                 flag.store(true, Ordering::SeqCst);
             },
         }
@@ -280,6 +287,41 @@ impl ConsumerHandle {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.metrics.metrics(),
             ConsumerHandleInner::Mock { .. } => HashMap::new(),
+        }
+    }
+
+    /// `MockConsumer::closed` through the mock's shared flag, `None` for an
+    /// `AsyncKafkaConsumer` handle.
+    ///
+    /// Crate-private, like the two below: `kafka_consumer_MockConsumer_closed`,
+    /// `_should_rebalance` and `_last_poll_timeout` read through them so they
+    /// answer while another call holds the mock. Java's `MockConsumer` never
+    /// throws for them: `closed()` is `synchronized` and waits, the other two
+    /// take no lock at all.
+    pub(crate) fn mock_closed(&self) -> Option<bool> {
+        match &self.inner {
+            ConsumerHandleInner::Async(_) => None,
+            ConsumerHandleInner::Mock { closed, .. } => Some(closed.load(Ordering::SeqCst)),
+        }
+    }
+
+    /// `MockConsumer::should_rebalance` through the mock's shared flag,
+    /// `None` for an `AsyncKafkaConsumer` handle.
+    pub(crate) fn mock_should_rebalance(&self) -> Option<bool> {
+        match &self.inner {
+            ConsumerHandleInner::Async(_) => None,
+            ConsumerHandleInner::Mock { should_rebalance, .. } => Some(should_rebalance.load(Ordering::SeqCst)),
+        }
+    }
+
+    /// `MockConsumer::last_poll_timeout` through the mock's shared slot,
+    /// `None` for an `AsyncKafkaConsumer` handle.
+    pub(crate) fn mock_last_poll_timeout(&self) -> Option<Option<Duration>> {
+        match &self.inner {
+            ConsumerHandleInner::Async(_) => None,
+            ConsumerHandleInner::Mock { last_poll_timeout, .. } => {
+                Some(*last_poll_timeout.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+            },
         }
     }
 
@@ -430,9 +472,17 @@ impl ConsumerHandle {
         Self { inner: ConsumerHandleInner::Async(state) }
     }
 
-    /// Builds a mock-consumer handle from its shared wakeup flag.
-    pub(crate) fn for_mock(flag: Arc<AtomicBool>) -> Self {
-        Self { inner: ConsumerHandleInner::Mock { flag } }
+    /// Builds a mock-consumer handle from its shared wakeup flag and the
+    /// mock's shared `closed`, `should_rebalance` and `last_poll_timeout`.
+    pub(crate) fn for_mock(
+        flag: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+        should_rebalance: Arc<AtomicBool>,
+        last_poll_timeout: Arc<Mutex<Option<Duration>>>,
+    ) -> Self {
+        Self {
+            inner: ConsumerHandleInner::Mock { flag, closed, should_rebalance, last_poll_timeout },
+        }
     }
 }
 
